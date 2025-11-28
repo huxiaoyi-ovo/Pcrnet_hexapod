@@ -4,7 +4,7 @@
 <!-- |    EDITING THIS FILE BY HAND IS NOT RECOMMENDED                                 | -->
 <!-- =================================================================================== -->
 <robot name="hex_v4">
-  <!--电机力矩拟合有速度输入项，已经包括了damping部分的扭矩，这里设置为0-->
+  <!--电机力矩拟合有速度输入项，已经包括了damping部分的扭矩，这里设置为0000-->
   <link name="body">
     <inertial>
       <origin rpy="0 0 0" xyz="0.0014417 0.043319 0.0041358"/>
@@ -34,7 +34,7 @@
       <mass value="0.496689688064039"/>
       <inertia ixx="0.000182622242033892" ixy="-4.71275560332557E-08" ixz="-1.17122592682552E-07" iyy="0.000200032761867879" iyz="6.67247112884031E-12" izz="0.000167907382163042"/>
     </inertial>
-    <visual>
+    <visual>  
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="../two_set_meshes/visual/l_r_thigh.dae"/>
