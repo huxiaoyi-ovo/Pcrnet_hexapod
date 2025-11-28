@@ -267,7 +267,6 @@ class HexTerrain(LeggedRobot):
                 dtype=torch.float32,
                 device=self.device
             )
-
         try:
             self.gym.fetch_results(self.sim, True)
             self.gym.step_graphics(self.sim)
