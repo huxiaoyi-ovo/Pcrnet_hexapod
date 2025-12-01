@@ -529,7 +529,7 @@ class HexTerrain(LeggedRobot):
     
     def get_observations_dict(self):
         """
-        获取当前的观测字典（不执行step）
+        获取当前的观测字典
         用于训练时获取观测
         """
         obs_dict = {
@@ -885,7 +885,6 @@ class HexTerrain(LeggedRobot):
         # print("xy_dist=",xy_dist[0])
         # rew=(torch.exp(-xy_dist/0.12)*(~contact_filt))/(torch.sum(~contact_filt,dim=1)+1e-6)
         
-
             
             
         return torch.exp(-xy_dist/(0.4*0.5))
