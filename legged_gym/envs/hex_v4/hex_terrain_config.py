@@ -27,7 +27,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             far_clip = 5.0    # 最远5m
             #坐标系：x前，y左，z上（body link坐标系）
             # 机身尺寸：长0.2m×宽0.44m×高0.05m
-            position = [0.00, 0.18, 0.20]  # 机身前方8cm，中心位置，上方20cm
+            position = [0.00, 0.22, 0.15]  # 机身前方8cm，中心位置，上方20cm
             # 相机朝向（度）
             pitch_deg = 0.0    # 向下倾斜45度（从20cm高度向下看地面）
             roll_deg = 45.0  # 保持水平
