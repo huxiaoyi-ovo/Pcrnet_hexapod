@@ -25,12 +25,11 @@ class HexTerrainCfg(LeggedRobotCfg):
             # 垂直FOV会根据分辨率自动计算
             near_clip = 0.05   # 最近5cm（原来0.1太大）
             far_clip = 5.0    # 最远5m
-            #坐标系：x前，y左，z上（body link坐标系）
+            #坐标系：x左右，y前后，z上（body link坐标系）
             # 机身尺寸：长0.2m×宽0.44m×高0.05m
-            position = [0.00, 0.22, 0.15]  # 机身前方8cm，中心位置，上方20cm
-            # 相机朝向（度）
-            pitch_deg = 0.0    # 向下倾斜45度（从20cm高度向下看地面）
-            roll_deg = 45.0  # 保持水平
+            position = [0.00, 0.22, 0.15]  # 
+            pitch_deg = 0.0    # 
+            roll_deg = 45.0  # 向下倾斜45度
             yaw_deg = 0.0      
             capture_interval = 10  # 每10步采集一次
             # 50Hz控制频率 / 10 = 5Hz深度图更新
