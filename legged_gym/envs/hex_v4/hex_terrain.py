@@ -163,23 +163,23 @@ class HexTerrain(LeggedRobot):
             robot_handle = self.actor_handles[env_idx]
             
             # 设置相机位置（相对机器人base）
-            # 安装在机器人前方，稍微向上倾斜
+            # 
             local_transform = gymapi.Transform()
             
             # 位置：机器人前方0.25m，高度0.10m
             local_transform.p = gymapi.Vec3(
-                self.camera_cfg.position[0],  # x: 前方
-                self.camera_cfg.position[1],  # y: 左右
+                self.camera_cfg.position[0],  # x: 左右
+                self.camera_cfg.position[1],  # y: 前后
                 self.camera_cfg.position[2]   # z: 高度
             )
             
-            # 朝向：Isaac Gym相机默认朝+X方向（机器人坐标系的前方）
+            
             # 使用from_axis_angle直接指定向下旋转
             # 绕Y轴旋转pitch角度，正值向下
-            pitch_angle = np.deg2rad(self.camera_cfg.pitch_deg)  # 正值向下
+            pitch_angle = np.deg2rad(self.camera_cfg.roll_deg)  # 正值向下
             # 创建绕Y轴的旋转四元数
             local_transform.r = gymapi.Quat.from_axis_angle(
-                gymapi.Vec3(0, 1, 0),  # 绕Y轴
+                gymapi.Vec3(1, 0, 0),  # 绕X轴
                 pitch_angle             # 正角度向下倾斜
             )
             
