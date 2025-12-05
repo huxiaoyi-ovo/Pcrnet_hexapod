@@ -163,7 +163,7 @@ class HexTerrain(LeggedRobot):
             robot_handle = self.actor_handles[env_idx]
             
             # 设置相机位置（相对机器人base）
-            # 
+            
             local_transform = gymapi.Transform()
             
             # 位置：机器人前方0.25m，高度0.10m
@@ -172,16 +172,21 @@ class HexTerrain(LeggedRobot):
                 self.camera_cfg.position[1],  # y: 前后
                 self.camera_cfg.position[2]   # z: 高度
             )
-            
-            
-            # 使用from_axis_angle直接指定向下旋转
-            # 绕Y轴旋转pitch角度，正值向下
-            pitch_angle = np.deg2rad(self.camera_cfg.roll_deg)  # 正值向下
-            # 创建绕Y轴的旋转四元数
-            local_transform.r = gymapi.Quat.from_axis_angle(
-                gymapi.Vec3(1, 0, 0),  # 绕X轴
-                pitch_angle             # 正角度向下倾斜
-            )
+
+            # 方向：根据pitch, yaw, roll角度设置四元数
+            pitch_rad = np.deg2rad(self.camera_cfg.pitch_deg)  
+            yaw_rad   = np.deg2rad(self.camera_cfg.yaw_deg)
+            roll_rad  = np.deg2rad(self.camera_cfg.roll_deg)
+
+            # 
+            pitch_q = gymapi.Quat.from_axis_angle(gymapi.Vec3(1,0,0), pitch_rad)
+            # 
+            yaw_q   = gymapi.Quat.from_axis_angle(gymapi.Vec3(0,0,1), yaw_rad)
+            #
+            roll_q  = gymapi.Quat.from_axis_angle(gymapi.Vec3(0,1,0), roll_rad)
+
+            # 组合（注意乘法次序，右乘后者）
+            local_transform.r = pitch_q * yaw_q * roll_q
             
             # 附加相机到机器人base link
             body_handle = self.gym.find_actor_rigid_body_handle(
@@ -222,6 +227,8 @@ class HexTerrain(LeggedRobot):
         # 归一化的深度图（用于网络输入）
         # Shape: (num_envs, 1, height, width)
         self.depth_normalized = None
+        # RGB 图像缓存 (num_envs, 3, H, W) 或 (num_envs, H, W, 3)
+        self.rgb_images = None
 
     def _get_depth_images(self):
         """
@@ -330,6 +337,97 @@ class HexTerrain(LeggedRobot):
 
         self.depth_images = torch.stack(depth_images_list, dim=0)
         return self.depth_images
+
+    def _get_rgb_images(self, normalize: bool = True, channels_last: bool = False):
+        """获取所有环境的 RGB 图像。
+
+        参数:
+            normalize: 是否将图像归一化到 [0,1] 浮点。
+            channels_last: 若为 True, 返回形状 (num_envs, H, W, 3)，否则 (num_envs, 3, H, W)。
+
+        返回:
+            rgb_images: torch.Tensor
+                形状 (num_envs, 3, H, W) 或 (num_envs, H, W, 3)
+                dtype float32 (normalize=True) 或 uint8 (normalize=False)
+        """
+        # 延迟创建相机（与深度逻辑一致）
+        if self.enable_camera and not self.cameras_created:
+            print("[Camera] Creating cameras on first RGB request...")
+            self._create_depth_cameras()
+            self.cameras_created = True
+            try:
+                self.gym.fetch_results(self.sim, True)
+                self.gym.step_graphics(self.sim)
+                self.gym.render_all_camera_sensors(self.sim)
+            except Exception as e:
+                print(f"[Camera Warning] Initial RGB render failed: {e}")
+                return torch.zeros(
+                    self.num_envs,
+                    3,
+                    self.camera_cfg.height,
+                    self.camera_cfg.width,
+                    dtype=torch.float32 if normalize else torch.uint8,
+                    device=self.device,
+                )
+
+        if not self.enable_camera or len(self.camera_handles) == 0:
+            return torch.zeros(
+                self.num_envs,
+                3 if not channels_last else self.camera_cfg.height,
+                self.camera_cfg.height if not channels_last else self.camera_cfg.width,
+                self.camera_cfg.width if not channels_last else 3,
+                dtype=torch.float32 if normalize else torch.uint8,
+                device=self.device,
+            )
+
+        try:
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+        except Exception as e:
+            print(f"[Camera Error] RGB rendering failed: {e}")
+            return torch.zeros(
+                self.num_envs,
+                3 if not channels_last else self.camera_cfg.height,
+                self.camera_cfg.height if not channels_last else self.camera_cfg.width,
+                self.camera_cfg.width if not channels_last else 3,
+                dtype=torch.float32 if normalize else torch.uint8,
+                device=self.device,
+            )
+
+        self.gym.start_access_image_tensors(self.sim)
+        rgb_list = []
+        H = self.camera_cfg.height
+        W = self.camera_cfg.width
+        for env_idx in range(self.num_envs):
+            if env_idx >= len(self.camera_handles):
+                # 填充空白图 (黑色)
+                blank = torch.zeros(H, W, 3, dtype=torch.float32 if normalize else torch.uint8, device=self.device)
+                rgb_list.append(blank)
+                continue
+            color_tensor = self.gym.get_camera_image_gpu_tensor(
+                self.sim,
+                self.envs[env_idx],
+                self.camera_handles[env_idx],
+                gymapi.IMAGE_COLOR,
+            )
+            color_image = gymtorch.wrap_tensor(color_tensor)  # (H, W, 4) RGBA uint8
+            # 去除 alpha 通道
+            rgb = color_image[..., :3]
+            if normalize:
+                # 转为 float32 并归一化
+                rgb = rgb.to(torch.float32) / 255.0
+            if not channels_last:
+                # 转换为 (3, H, W)
+                rgb = rgb.permute(2, 0, 1).contiguous()
+            rgb_list.append(rgb)
+        self.gym.end_access_image_tensors(self.sim)
+
+        if channels_last:
+            self.rgb_images = torch.stack(rgb_list, dim=0)  # (N, H, W, 3)
+        else:
+            self.rgb_images = torch.stack(rgb_list, dim=0)  # (N, 3, H, W)
+        return self.rgb_images
     
     def _process_depth_for_network(self, depth_images):
         """

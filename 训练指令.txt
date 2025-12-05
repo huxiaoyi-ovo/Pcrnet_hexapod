@@ -1,0 +1,5 @@
+conda activate hexapod_rl_env
+python ~/RL_hexapod_gym/legged_gym/scripts/train.py --task=
+
+python ~/RL_GYM_PROJECTS/RL_hexapod_gym/legged_gym/scripts/train.py --task=hex_terrain --num_envs=6
+

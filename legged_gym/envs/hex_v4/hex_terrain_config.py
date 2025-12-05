@@ -27,10 +27,10 @@ class HexTerrainCfg(LeggedRobotCfg):
             far_clip = 5.0    # 最远5m
             #坐标系：x左右，y前后，z上（body link坐标系）
             # 机身尺寸：长0.2m×宽0.44m×高0.05m
-            position = [0.00, 0.22, 0.15]  # 
-            pitch_deg = 0.0    # 
-            roll_deg = 45.0  # 向下倾斜45度
-            yaw_deg = 0.0      
+            position = [0.00, 0.22, 0.08]  
+            pitch_deg = 0.0    # 滚转（验证正确）    
+            roll_deg = 20.0   # 俯仰
+            yaw_deg = 90.0      # 偏航（0.0默认朝向机器人正右）
             capture_interval = 10  # 每10步采集一次
             # 50Hz控制频率 / 10 = 5Hz深度图更新
             #输出分辨率

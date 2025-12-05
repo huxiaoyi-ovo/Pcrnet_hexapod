@@ -58,7 +58,7 @@ class EGPOEncoderRunner(OnPolicyRunner):
         self.current_learning_iteration = 0
 
         # print("reset env")
-        _, _,_ = self.env.reset_separate() #观测是分离的时候使用
+        obs_dict = self.env.reset_separate()  # 返回观测字典
     
     def learn(self,num_learning_iterations, init_at_random_ep_len=False):
         #因为要使用expert_actions的进行插值，所以重写learn函数, 并且alg返回中多了一项bc_loss
@@ -67,9 +67,11 @@ class EGPOEncoderRunner(OnPolicyRunner):
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
 
-        # obs=self.env.get_observations()
-        # privileged_obs=self.env.get_privileged_observations()
-        obs,obs_vgf,obs_terrain = self.env.get_observations_separated()
+        # 从观测字典获取分离的观测
+        obs_dict = self.env.reset_separate()
+        obs = obs_dict['proprioception']
+        obs_vgf = obs_dict['privileged']
+        obs_terrain = obs_dict['terrain']
 
         expert_actions=self.env.get_expert_actions() #从环境提供的获取专家动作
         # expert_actions = self.expert.act_inference(obs) #从自身初始化获取的专家动作
@@ -98,7 +100,10 @@ class EGPOEncoderRunner(OnPolicyRunner):
                     obs_splice,obs_terrain_latent = self.alg.encode_obs(obs,obs_vgf,obs_terrain)
                     actions = self.alg.act(obs_splice,obs_terrain_latent,expert_actions,it)
 
-                    obs,obs_vgf,obs_terrain,rewards,dones,infos = self.env.step_separate(actions) #这是obs分开传回时的函数
+                    obs_dict, rewards, dones, infos = self.env.step_separate(actions)  # 返回观测字典
+                    obs = obs_dict['proprioception']
+                    obs_vgf = obs_dict['privileged']
+                    obs_terrain = obs_dict['terrain']
 
                     obs, obs_vgf, obs_terrain = obs.to(self.device), obs_vgf.to(self.device), obs_terrain.to(self.device)
                     rewards, dones = rewards.to(self.device), dones.to(self.device)
