@@ -479,7 +479,7 @@ class LeggedRobot(BaseTask):
             noise_vec[48:191] = noise_scales.height_measurements* noise_level * self.obs_scales.height_measurements
         return noise_vec
 
-    #----------------------------------------
+    #------------- Initialization functions --------------
     def _init_buffers(self):
         """ Initialize torch tensors which will contain simulation states and processed quantities
         """

@@ -1,0 +1,2 @@
+[Train] Done! Total time: 23.0 min.
+[Train] Best Val Loss: 0.1508

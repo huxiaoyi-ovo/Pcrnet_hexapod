@@ -1,0 +1,610 @@
+"""
+V3.6 地形自适应高层规划器
+变更摘要:
+1. 状态空间优化: 默认 state_dim=9 (匹配 V2 方案的高层抽象)，移除底层冗余关节信息。
+2. 数学严谨性: 保持 TanhSquashedGaussian (Subgoal) 和 Beta (Intensity) 分布。
+3. 物理安全性: 保持 Slew Rate Limiting 保护真机电机。
+
+注意: 
+训练脚本 (train_highlevel.py) 中的环境包装器必须构造对应的 9 维向量：
+State = [Pos(3), LinVel(3), Heading(1), AngVel(1), Intensity(1)]
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Normal, Beta
+from typing import Tuple, Dict, Optional, NamedTuple
+import numpy as np
+
+
+class PlannerOutput(NamedTuple):
+    """
+    规划器前向传播输出结构
+    """
+    subgoal_mean: torch.Tensor      # (B, 3) Pre-tanh Gaussian Mean
+    subgoal_std: torch.Tensor       # (B, 3) Gaussian Std
+    intensity_alpha: torch.Tensor   # (B, 1) Beta Alpha (>0)
+    intensity_beta: torch.Tensor    # (B, 1) Beta Beta (>0)
+    value: torch.Tensor             # (B, 1) Value Estimate
+
+
+class AffordanceCNNEncoder(nn.Module):
+    """
+    Affordance 地图编码器 (CNN)
+    Input: (B, 2, 16, 16) [Occupancy, Traversability]
+    Output: (B, 128)
+    """
+    def __init__(self, in_channels: int = 2, out_features: int = 128):
+        super().__init__()
+        
+        self.cnn = nn.Sequential(
+            # 16x16 -> 8x8
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.ELU(inplace=True),
+            
+            # 8x8 -> 4x4
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ELU(inplace=True),
+            
+            # 4x4 -> 2x2
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ELU(inplace=True),
+            
+            # Global Pooling: 2x2 -> 1x1
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        
+        self.fc = nn.Linear(128, out_features)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, affordance_map: torch.Tensor) -> torch.Tensor:
+        x = self.cnn(affordance_map)
+        return self.fc(x)
+
+
+class StateEncoder(nn.Module):
+    """
+    机器人状态编码器 (MLP)
+    处理高层抽象状态 (e.g., Velocity, Orientation)
+    """
+    def __init__(self, state_dim: int, out_features: int = 64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(state_dim, 64),
+            nn.ELU(inplace=True),
+            nn.Linear(64, 64),
+            nn.ELU(inplace=True),
+            nn.Linear(64, out_features),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.mlp(state)
+
+
+class GoalEncoder(nn.Module):
+    """目标编码器 (MLP)"""
+    def __init__(self, goal_dim: int = 2, out_features: int = 32):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(goal_dim, 32),
+            nn.ELU(inplace=True),
+            nn.Linear(32, out_features),
+        )
+
+    def forward(self, goal: torch.Tensor) -> torch.Tensor:
+        return self.mlp(goal)
+
+
+class TerrainAdaptivePlanner(nn.Module):
+    """
+    V3.6 地形自适应规划器 (Actor-Critic)
+    """
+    def __init__(
+        self,
+        affordance_channels: int = 2,
+        state_dim: int = 9,     # ✅ 修正: 默认为 9 (High-Level Abstract State)
+        goal_dim: int = 2,
+        subgoal_dim: int = 3,
+        hidden_dim: int = 256,
+        min_std: float = 0.01,
+        max_std: float = 1.0,
+    ):
+        super().__init__()
+        self.subgoal_dim = subgoal_dim
+        self.min_std = min_std
+        self.max_std = max_std
+
+        # --- Encoders ---
+        self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
+        self.state_encoder = StateEncoder(state_dim, 64)
+        self.goal_encoder = GoalEncoder(goal_dim, 32)
+
+        # Fusion: CNN(128) + State(64) + Goal(32) + Diff(1) = 225
+        fusion_dim = 128 + 64 + 32 + 1 
+
+        # --- Backbone ---
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+
+        # --- Actor Heads ---
+        
+        # A. Subgoal (Squashed Gaussian parameters)
+        self.subgoal_mean_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, subgoal_dim) 
+        )
+        self.subgoal_std_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, subgoal_dim),
+            nn.Softplus()
+        )
+
+        # B. Intensity (Beta parameters)
+        # Alpha, Beta 必须 > 0，加 1.0 偏移保证分布稳定
+        self.intensity_alpha_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1),
+            nn.Softplus()
+        )
+        self.intensity_beta_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1),
+            nn.Softplus()
+        )
+
+        # --- Critic Head ---
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1)
+        )
+
+        # 物理量缩放 (m, m, rad)
+        self.register_buffer('subgoal_scale', torch.tensor([0.5, 0.5, 0.5]))
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        # 缩小策略输出层的初始权重，增加初始熵
+        nn.init.orthogonal_(self.subgoal_mean_head[-1].weight, gain=0.01)
+        nn.init.orthogonal_(self.intensity_alpha_head[-2].weight, gain=0.01)
+        nn.init.orthogonal_(self.intensity_beta_head[-2].weight, gain=0.01)
+
+    def forward(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+    ) -> PlannerOutput:
+        
+        # 1. 编码与融合
+        aff_feat = self.affordance_encoder(affordance_map)
+        state_feat = self.state_encoder(robot_state)
+        goal_feat = self.goal_encoder(goal)
+        
+        if terrain_difficulty.dim() == 1:
+            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
+        
+        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
+        hidden = self.fusion(fused)
+
+        # 2. 计算分布参数
+        # Subgoal
+        subgoal_mean = self.subgoal_mean_head(hidden)
+        subgoal_std = self.subgoal_std_head(hidden)
+        subgoal_std = torch.clamp(subgoal_std, self.min_std, self.max_std)
+
+        # Intensity (Add 1.0 offset for stability)
+        intensity_alpha = self.intensity_alpha_head(hidden) + 1.0
+        intensity_beta = self.intensity_beta_head(hidden) + 1.0
+
+        # Value
+        value = self.value_head(hidden)
+
+        return PlannerOutput(
+            subgoal_mean=subgoal_mean,
+            subgoal_std=subgoal_std,
+            intensity_alpha=intensity_alpha,
+            intensity_beta=intensity_beta,
+            value=value
+        )
+
+    def get_action(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        采样动作 (Rollout 阶段)
+        """
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+
+        if deterministic:
+            # 1. Subgoal (Mean -> Tanh)
+            subgoal_raw = out.subgoal_mean
+            subgoal = torch.tanh(subgoal_raw) * self.subgoal_scale
+            
+            # 2. Intensity (Beta Mean)
+            intensity = out.intensity_alpha / (out.intensity_alpha + out.intensity_beta)
+            intensity = intensity.squeeze(-1)
+        else:
+            # 1. Subgoal (Sample Normal -> Tanh)
+            subgoal_dist = Normal(out.subgoal_mean, out.subgoal_std)
+            subgoal_raw = subgoal_dist.rsample() # rsample 保留梯度
+            subgoal = torch.tanh(subgoal_raw) * self.subgoal_scale
+            
+            # 2. Intensity (Sample Beta)
+            intensity_dist = Beta(out.intensity_alpha, out.intensity_beta)
+            intensity = intensity_dist.sample().squeeze(-1)
+
+        info = {
+            'value': out.value,
+            'subgoal_mean': out.subgoal_mean,
+            'subgoal_std': out.subgoal_std,
+            'intensity_alpha': out.intensity_alpha,
+            'intensity_beta': out.intensity_beta
+        }
+
+        return subgoal, intensity, info
+
+    def evaluate_actions(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        subgoal_action: torch.Tensor,
+        intensity_action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        评估动作 (PPO Update 阶段)
+        包含严格的 Tanh Jacobian 修正
+        """
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+
+        # -----------------------------------------------------------
+        # 1. Subgoal LogProb (Squashed Gaussian Correction)
+        # -----------------------------------------------------------
+        # 反推原始的高斯分布值 (Pre-tanh action)
+        subgoal_norm = subgoal_action / self.subgoal_scale
+        subgoal_norm = torch.clamp(subgoal_norm, -0.999999, 0.999999)
+        subgoal_raw = torch.atanh(subgoal_norm)
+        
+        subgoal_dist = Normal(out.subgoal_mean, out.subgoal_std)
+        log_prob_raw = subgoal_dist.log_prob(subgoal_raw)
+        
+        # Jacobian Correction
+        log_det_jacobian = 2.0 * (np.log(2.0) - subgoal_raw - F.softplus(-2.0 * subgoal_raw))
+        
+        subgoal_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
+        subgoal_entropy = subgoal_dist.entropy().sum(dim=-1)
+
+        # -----------------------------------------------------------
+        # 2. Intensity LogProb (Beta)
+        # -----------------------------------------------------------
+        intensity_dist = Beta(out.intensity_alpha, out.intensity_beta)
+        
+        eps = 1e-6
+        intensity_clamped = torch.clamp(intensity_action, eps, 1.0 - eps)
+        
+        if intensity_clamped.dim() == 1:
+            intensity_clamped = intensity_clamped.unsqueeze(-1)
+            
+        intensity_log_prob = intensity_dist.log_prob(intensity_clamped).sum(dim=-1)
+        intensity_entropy = intensity_dist.entropy().sum(dim=-1)
+
+        # 3. 合并
+        total_log_prob = subgoal_log_prob + intensity_log_prob
+        total_entropy = subgoal_entropy + intensity_entropy
+
+        return total_log_prob, out.value, total_entropy, None
+
+
+class LocomotionAdapter:
+    """
+    V3.6 运动适配器 (Expert Enhanced)
+    职责: 将高层指令映射为底层控制指令
+    特性: Slew Rate Limiting & Exponential Mapping
+    """
+    
+    def __init__(
+        self,
+        max_linear_vel: float = 0.5,
+        max_angular_vel: float = 0.8,
+        min_speed_factor: float = 0.4,
+        min_turn_factor: float = 0.5,
+        max_intensity_change: float = 0.1, # 建议: 每0.1秒变化不超过10%
+    ):
+        self.max_linear_vel = max_linear_vel
+        self.max_angular_vel = max_angular_vel
+        self.min_speed_factor = min_speed_factor
+        self.min_turn_factor = min_turn_factor
+        
+        self.max_intensity_change = max_intensity_change
+        self.last_intensity = None 
+
+    def reset(self, num_envs, device):
+        """Episode重置时调用"""
+        self.last_intensity = torch.zeros(num_envs, 1, device=device)
+
+    def convert(
+        self,
+        subgoal: torch.Tensor,
+        intensity: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict]:
+        """
+        执行映射与滤波
+        """
+        if intensity.dim() == 0: intensity = intensity.unsqueeze(0)
+        if intensity.dim() == 1: intensity = intensity.unsqueeze(-1)
+
+        # 1. 初始化
+        if self.last_intensity is None or self.last_intensity.shape[0] != intensity.shape[0]:
+            self.last_intensity = torch.zeros_like(intensity)
+
+        # 2. 变化率限制 (Slew Rate Limiting)
+        delta = self.max_intensity_change
+        intensity_filtered = torch.clamp(
+            intensity,
+            self.last_intensity - delta,
+            self.last_intensity + delta
+        )
+        intensity_filtered = torch.clamp(intensity_filtered, 0.0, 1.0)
+        
+        # 更新记忆
+        self.last_intensity = intensity_filtered.detach()
+
+        # 3. 非线性指数映射
+        intensity_sq = torch.square(intensity_filtered)
+        
+        speed_f = self.min_speed_factor + (1.0 - self.min_speed_factor) * intensity_sq
+        turn_f = self.min_turn_factor + (1.0 - self.min_turn_factor) * intensity_sq
+
+        # 4. 指令生成
+        cmd_vx = subgoal[:, 0:1]
+        cmd_vy = subgoal[:, 1:2]
+        cmd_omega = subgoal[:, 2:3]
+
+        vx = torch.clamp(cmd_vx * speed_f, -self.max_linear_vel, self.max_linear_vel)
+        vy = torch.clamp(cmd_vy * speed_f, -self.max_linear_vel, self.max_linear_vel)
+        omega = torch.clamp(cmd_omega * turn_f * 1.5, -self.max_angular_vel, self.max_angular_vel)
+
+        velocity_cmd = torch.cat([vx, vy, omega], dim=-1)
+
+        info = {
+            'speed_factor': speed_f,
+            'raw_intensity': intensity,
+            'filtered_intensity': intensity_filtered
+        }
+        
+        return velocity_cmd, info
+
+    def convert_numpy(
+        self,
+        subgoal: np.ndarray,
+        intensity: float,
+    ) -> Tuple[np.ndarray, Dict]:
+        """
+        NumPy版本，用于真机部署
+        
+        Args:
+            subgoal: (3,) 子目标 [dx, dy, dyaw]
+            intensity: float 运动强度 ∈ [0, 1]
+        
+        Returns:
+            velocity_cmd: (3,) [vx, vy, omega]
+            info: 调试信息
+        """
+        # 变化率限制
+        if not hasattr(self, '_last_intensity_np'):
+            self._last_intensity_np = 0.0
+        
+        delta = self.max_intensity_change
+        intensity_filtered = np.clip(
+            intensity,
+            self._last_intensity_np - delta,
+            self._last_intensity_np + delta
+        )
+        intensity_filtered = np.clip(intensity_filtered, 0.0, 1.0)
+        self._last_intensity_np = intensity_filtered
+        
+        # 非线性映射
+        intensity_sq = intensity_filtered ** 2
+        speed_f = self.min_speed_factor + (1.0 - self.min_speed_factor) * intensity_sq
+        turn_f = self.min_turn_factor + (1.0 - self.min_turn_factor) * intensity_sq
+        
+        # 速度命令
+        vx = np.clip(subgoal[0] * speed_f, -self.max_linear_vel, self.max_linear_vel)
+        vy = np.clip(subgoal[1] * speed_f, -self.max_linear_vel, self.max_linear_vel)
+        omega = np.clip(subgoal[2] * turn_f * 1.5, -self.max_angular_vel, self.max_angular_vel)
+        
+        velocity_cmd = np.array([vx, vy, omega])
+        
+        # 运动风格判定
+        if intensity_filtered < 0.33:
+            style = 'Conservative'
+        elif intensity_filtered < 0.67:
+            style = 'Balanced'
+        else:
+            style = 'Aggressive'
+        
+        info = {
+            'speed_factor': speed_f,
+            'filtered_intensity': intensity_filtered,
+            'style': style
+        }
+        
+        return velocity_cmd, info
+
+    def reset_numpy(self):
+        """重置NumPy状态（真机部署时每个Episode开始调用）"""
+        self._last_intensity_np = 0.0
+
+
+def test_planner_v36():
+    """
+    V3.6 高层规划器完整测试函数
+    验证前向传播、动作采样、动作评估、适配器的正确性
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n{'='*60}")
+    print(f"Testing TerrainAdaptivePlanner V3.6 on {device}")
+    print(f"{'='*60}")
+
+    # 创建模型
+    planner = TerrainAdaptivePlanner(
+        affordance_channels=2,
+        state_dim=9,
+        goal_dim=2,
+        subgoal_dim=3,
+        hidden_dim=256
+    ).to(device)
+
+    # 测试输入
+    batch_size = 32
+    affordance_map = torch.rand(batch_size, 2, 16, 16, device=device)
+    robot_state = torch.randn(batch_size, 9, device=device)
+    goal = torch.randn(batch_size, 2, device=device)
+    terrain_difficulty = torch.rand(batch_size, device=device)
+
+    print("\n[1] Input Shapes:")
+    print(f"    Affordance map: {affordance_map.shape}")
+    print(f"    Robot state:    {robot_state.shape}")
+    print(f"    Goal:           {goal.shape}")
+    print(f"    Terrain diff:   {terrain_difficulty.shape}")
+
+    # 前向传播
+    output = planner(affordance_map, robot_state, goal, terrain_difficulty)
+    print("\n[2] Forward Output Shapes:")
+    print(f"    Subgoal mean:    {output.subgoal_mean.shape}")
+    print(f"    Subgoal std:     {output.subgoal_std.shape}")
+    print(f"    Intensity alpha: {output.intensity_alpha.shape}")
+    print(f"    Intensity beta:  {output.intensity_beta.shape}")
+    print(f"    Value:           {output.value.shape}")
+
+    # 动作采样 (随机)
+    subgoal, intensity, info = planner.get_action(
+        affordance_map, robot_state, goal, terrain_difficulty, deterministic=False
+    )
+    print("\n[3] Sampled Actions (Stochastic):")
+    print(f"    Subgoal sample:   {subgoal[0].detach().cpu().numpy()}")
+    print(f"    Intensity sample: {intensity[:5].detach().cpu().numpy()}")
+    print(f"    Intensity range:  [{intensity.min():.3f}, {intensity.max():.3f}]")
+
+    # 动作采样 (确定性)
+    subgoal_det, intensity_det, _ = planner.get_action(
+        affordance_map, robot_state, goal, terrain_difficulty, deterministic=True
+    )
+    print("\n[4] Sampled Actions (Deterministic):")
+    print(f"    Subgoal mean:     {subgoal_det[0].detach().cpu().numpy()}")
+    print(f"    Intensity mean:   {intensity_det[:5].detach().cpu().numpy()}")
+
+    # 动作评估
+    log_prob, value, entropy, _ = planner.evaluate_actions(
+        affordance_map, robot_state, goal, terrain_difficulty,
+        subgoal, intensity
+    )
+    print("\n[5] Action Evaluation:")
+    print(f"    Log prob mean:    {log_prob.mean().item():.4f}")
+    print(f"    Log prob std:     {log_prob.std().item():.4f}")
+    print(f"    Entropy mean:     {entropy.mean().item():.4f}")
+    print(f"    Value mean:       {value.mean().item():.4f}")
+
+    # 检查数值稳定性
+    assert not torch.isnan(log_prob).any(), "NaN in log_prob!"
+    assert not torch.isnan(entropy).any(), "NaN in entropy!"
+    assert not torch.isinf(log_prob).any(), "Inf in log_prob!"
+    print("\n[6] Numerical Stability: PASSED")
+
+    # LocomotionAdapter 测试
+    adapter = LocomotionAdapter()
+    adapter.reset(batch_size, device)
+    
+    velocity_cmd, adapt_info = adapter.convert(subgoal, intensity)
+    print("\n[7] LocomotionAdapter (Torch):")
+    print(f"    Velocity cmd shape: {velocity_cmd.shape}")
+    print(f"    Speed factors:      {adapt_info['speed_factor'][:3].squeeze().cpu().numpy()}")
+    print(f"    Filtered intensity: {adapt_info['filtered_intensity'][:3].squeeze().cpu().numpy()}")
+
+    # 测试变化率限制
+    print("\n[8] Slew Rate Limiting Test:")
+    sudden_intensity = torch.ones(batch_size, device=device)
+    _, info2 = adapter.convert(subgoal, sudden_intensity)
+    max_change = (info2['filtered_intensity'] - adapt_info['filtered_intensity']).abs().max().item()
+    print(f"    Max intensity change: {max_change:.4f} (limit: {adapter.max_intensity_change})")
+    assert max_change <= adapter.max_intensity_change + 1e-6, "Rate limiting failed!"
+    print("    Rate limiting: PASSED")
+
+    # NumPy版本测试 (真机部署)
+    print("\n[9] NumPy Deployment Test:")
+    adapter.reset_numpy()
+    subgoal_np = np.array([0.3, -0.1, 0.2])
+    intensity_np = 0.7
+    vel_np, info_np = adapter.convert_numpy(subgoal_np, intensity_np)
+    print(f"    Velocity cmd: {vel_np}")
+    print(f"    Style:        {info_np['style']}")
+    
+    # 测试NumPy变化率限制
+    vel_np2, info_np2 = adapter.convert_numpy(subgoal_np, 0.0)  # 突然变为0
+    intensity_change = abs(info_np2['filtered_intensity'] - info_np['filtered_intensity'])
+    print(f"    NumPy rate limit test: change={intensity_change:.3f} (limit={adapter.max_intensity_change})")
+    assert intensity_change <= adapter.max_intensity_change + 1e-6, "NumPy rate limiting failed!"
+    print("    NumPy rate limiting: PASSED")
+
+    # 参数统计
+    num_params = sum(p.numel() for p in planner.parameters())
+    trainable_params = sum(p.numel() for p in planner.parameters() if p.requires_grad)
+    print(f"\n[10] Model Statistics:")
+    print(f"    Total parameters:     {num_params:,}")
+    print(f"    Trainable parameters: {trainable_params:,}")
+
+    # 模型保存/加载测试
+    print("\n[11] Save/Load Test:")
+    state_dict = planner.state_dict()
+    planner2 = TerrainAdaptivePlanner(state_dim=9).to(device)
+    planner2.load_state_dict(state_dict)
+    
+    # 验证加载后输出一致
+    with torch.no_grad():
+        out1 = planner(affordance_map, robot_state, goal, terrain_difficulty)
+        out2 = planner2(affordance_map, robot_state, goal, terrain_difficulty)
+        diff = (out1.value - out2.value).abs().max().item()
+    print(f"    Value diff after reload: {diff:.6f}")
+    assert diff < 1e-5, "Save/Load failed!"
+    print("    Save/Load: PASSED")
+
+    print(f"\n{'='*60}")
+    print("All V3.6 Tests PASSED!")
+    print(f"{'='*60}\n")
+    
+    return planner
+
+
+if __name__ == "__main__":
+    test_planner_v36()
