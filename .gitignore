@@ -7,3 +7,26 @@ legged_gym/outputs/*
 legged_gym/data/processed/*.pt
 **/__pycache__/
 *.pyc
+# 1. Python 运行时垃圾
+__pycache__/
+*.py[cod]
+
+# 2. 训练产物 (核心！防止传几个G的大文件)
+logs/
+runs/
+experiments/
+videos/
+*.pt
+*.pth
+*.onnx
+
+# 3. 编译文件 (Isaac Gym 的 C++ 扩展)
+build/
+*.so
+
+# 4. 个人配置 (VS Code / PyCharm)
+.vscode/
+.idea/
+
+# 5. 系统垃圾
+.DS_Store

@@ -21,6 +21,8 @@ rsl_rl/__init__.py
 rsl_rl/algorithms/EGPO.py
 rsl_rl/algorithms/EGPO_encoder.py
 rsl_rl/algorithms/__init__.py
+rsl_rl/algorithms/hierarchical_ppo.py
+rsl_rl/algorithms/high_level_planner.py
 rsl_rl/algorithms/ppo.py
 rsl_rl/env/__init__.py
 rsl_rl/env/vec_env.py

@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader,TensorDataset
 from pathlib import Path
-import rosbag
+# import rosbag
 import copy
 class Actuator(nn.Module):
     def __init__(self, cfg:HexGroundCfg,device):
@@ -77,7 +77,8 @@ class Actuator(nn.Module):
         print(f"--------------->load motor net from {self.cfg.control.actuator_net_file}<---------------------")
         self.motor_net.eval()
         # self.motor_net.load_state_dict(torch.load(self.cfg.control.actuator_net_file,weights_only=True))
-        state_dict=torch.load(self.cfg.control.actuator_net_file,weights_only=True)
+        # state_dict=torch.load(self.cfg.control.actuator_net_file,weights_only=True)
+        state_dict=torch.load(self.cfg.control.actuator_net_file)
         self.thigh_net.load_state_dict(state_dict['thigh'])
         self.knee_net.load_state_dict(state_dict['knee'])
         self.ankle_net.load_state_dict(state_dict['ankle'])
@@ -362,6 +363,7 @@ def plot_raw_data():
         plt.show()
 
 def process_bag_data(bag_path:str,index:int,device):
+    import rosbag
     bag_names=list(Path(bag_path).rglob('*.bag'))
     print(bag_names)
     leg_names=['RF','RM','RB','LF','LM','LB']
