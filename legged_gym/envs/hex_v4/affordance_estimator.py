@@ -1,5 +1,5 @@
 """
-Affordance 感知网络 (V3 Production )
+Affordance 感知网络 (V3 版本)
 
 功能:
 1. Depth Encoder: ResNet-18 风格的共享特征提取器。

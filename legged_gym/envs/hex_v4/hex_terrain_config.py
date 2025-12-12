@@ -21,7 +21,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             enable = True  # 是否启用深度相机
             width = 128    #    图像宽度
             height = 128   #
-            horizontal_fov = 60.0  # 水平视场角（度）
+            horizontal_fov = 87.0  # 水平视场角（度）
             # 垂直FOV会根据分辨率自动计算
             near_clip = 0.05   # 最近5cm（原来0.1太大）
             far_clip = 5.0    # 最远5m
@@ -31,8 +31,8 @@ class HexTerrainCfg(LeggedRobotCfg):
             pitch_deg = 0.0    # 滚转（验证正确）    
             roll_deg = 20.0   # 俯仰
             yaw_deg = 90.0      # 偏航（0.0默认朝向机器人正右）
-            capture_interval = 10  # 每10步采集一次
-            # 50Hz控制频率 / 10 = 5Hz深度图更新
+            capture_interval = 5  # 每5步采集一次
+            # 50Hz控制频率 / 5 = 10Hz深度图更新
             #输出分辨率
             #如果网络需要不同尺寸，设置output_size
             output_size = 128  # 与width/height一致
