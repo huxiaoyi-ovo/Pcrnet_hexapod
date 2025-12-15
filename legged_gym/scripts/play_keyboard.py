@@ -75,13 +75,27 @@ def play(args):
         policy.actor.load_state_dict(checkpoint['actor_state_dict'])
     else:
         # checkpoint直接是state_dict，需要判断是完整模型还是只有actor
-        # 检查是否包含critic相关的键
-        if any('critic' in key for key in checkpoint.keys()):
-            # 包含critic，加载完整模型
-            policy.load_state_dict(checkpoint)
+        # 检查键名格式
+        sample_key = list(checkpoint.keys())[0]
+        
+        if 'actor.' in sample_key and not any('critic' in key for key in checkpoint.keys()):
+            # 键名带有 "actor." 前缀，但没有critic权重
+            # 需要提取actor部分并去掉前缀
+            print("[Info] Extracting actor weights from checkpoint")
+            actor_state_dict = {}
+            for key, value in checkpoint.items():
+                if key.startswith('actor.'):
+                    # 去掉 "actor." 前缀
+                    new_key = key.replace('actor.', '')
+                    actor_state_dict[new_key] = value
+            policy.actor.load_state_dict(actor_state_dict)
+        elif any('critic' in key for key in checkpoint.keys()):
+            # 包含critic，使用strict=False加载完整模型（忽略缺失的critic键）
+            print("[Info] Loading model with strict=False (critic weights may be missing)")
+            policy.load_state_dict(checkpoint, strict=False)
         else:
-            # 只包含actor，仅加载actor部分
-            print("[Info] Checkpoint contains only actor weights, loading actor only")
+            # 直接是actor的权重，不带前缀
+            print("[Info] Loading actor weights directly")
             policy.actor.load_state_dict(checkpoint)
     
     policy.eval()
