@@ -178,13 +178,12 @@ def play(args):
         controller.vel_yaw = np.clip(controller.vel_yaw, -2.0, 2.0)
 
         # 手动覆盖环境的 commands
-        # commands: [lin_vel_x, lin_vel_y, ang_vel_yaw, heading]
+        # commands: [lin_vel_x, lin_vel_y, ang_vel_yaw]
         # 注意：需要将物理单位转换为环境使用的归一化单位(如果有缩放)，
         # 但通常 legged_gym 的 commands 直接就是物理量 (m/s, rad/s)
         env.commands[:, 0] = controller.vel_x
         env.commands[:, 1] = controller.vel_y
         env.commands[:, 2] = controller.vel_yaw
-        env.commands[:, 3] = 0.0 # Heading 不用
 
         # 处理重置
         if controller.reset_flag:
