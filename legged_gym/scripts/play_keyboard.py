@@ -124,7 +124,7 @@ def play(args):
     gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "RESET")
 
     # 4. 主循环
-    obs = env.reset()[0]
+    obs, _ = env.reset()  # 返回 (obs, privileged_obs)
     
     while not gym.query_viewer_has_closed(viewer):
         # 处理键盘事件
@@ -149,10 +149,10 @@ def play(args):
             elif evt.action == "RESET" and evt.value > 0:
                 controller.reset_flag = True
 
-        # 限制速度范围
+        # 限制速度范围 (根据 hex_ground_config.py 中的 commands.ranges)
         controller.vel_x = np.clip(controller.vel_x, -1.0, 1.0)
-        controller.vel_y = np.clip(controller.vel_y, -1.0, 1.0)
-        controller.vel_yaw = np.clip(controller.vel_yaw, -1.0, 1.0)
+        controller.vel_y = np.clip(controller.vel_y, -1.5, 1.5)
+        controller.vel_yaw = np.clip(controller.vel_yaw, -2.0, 2.0)
 
         # 手动覆盖环境的 commands
         # commands: [lin_vel_x, lin_vel_y, ang_vel_yaw, heading]
@@ -165,10 +165,9 @@ def play(args):
 
         # 处理重置
         if controller.reset_flag:
-            env.reset()
+            obs, _ = env.reset()
             controller.reset_flag = False
             controller.vel_x = 0; controller.vel_y = 0; controller.vel_yaw = 0
-            obs = env.get_observations() # 获取新观测
         
         # 推理
         with torch.no_grad():
@@ -186,7 +185,9 @@ if __name__ == '__main__':
     args = get_args()
     
     # 默认值覆盖 (如果没有在命令行提供)
-    if not args.task: args.task = "hex_ground"
-    if not args.load_run: args.load_run = "agents/fast_2000.pt" # 默认路径
+    if not hasattr(args, 'task') or not args.task:
+        args.task = "hex_ground"
+    if not hasattr(args, 'load_run') or not args.load_run:
+        args.load_run = "agents/fast_2000.pt" # 默认路径
     
     play(args)
