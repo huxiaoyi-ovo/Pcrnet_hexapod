@@ -66,14 +66,23 @@ def play(args):
 
     # 加载权重
     checkpoint = torch.load(load_path, map_location=device)
-    # 兼容处理
+    # 兼容处理 - 根据checkpoint内容判断加载方式
     if 'model_state_dict' in checkpoint:
+        # 完整的模型state_dict (包含actor和critic)
         policy.load_state_dict(checkpoint['model_state_dict'])
     elif 'actor_state_dict' in checkpoint:
+        # 只有actor的state_dict
         policy.actor.load_state_dict(checkpoint['actor_state_dict'])
     else:
-        # 尝试直接加载 (如果 checkpoint 本身就是 state_dict)
-        policy.load_state_dict(checkpoint)
+        # checkpoint直接是state_dict，需要判断是完整模型还是只有actor
+        # 检查是否包含critic相关的键
+        if any('critic' in key for key in checkpoint.keys()):
+            # 包含critic，加载完整模型
+            policy.load_state_dict(checkpoint)
+        else:
+            # 只包含actor，仅加载actor部分
+            print("[Info] Checkpoint contains only actor weights, loading actor only")
+            policy.actor.load_state_dict(checkpoint)
     
     policy.eval()
 
