@@ -220,11 +220,19 @@ class OnPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        if load_optimizer:
-            self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
-        self.current_learning_iteration = loaded_dict['iter']
-        return loaded_dict['infos']
+        
+        # Handle both wrapped dict format and direct state_dict format
+        if 'model_state_dict' in loaded_dict:
+            self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+            if load_optimizer and 'optimizer_state_dict' in loaded_dict:
+                self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
+            self.current_learning_iteration = loaded_dict.get('iter', 0)
+            return loaded_dict.get('infos', {})
+        else:
+            # Direct state_dict format
+            self.alg.actor_critic.load_state_dict(loaded_dict)
+            self.current_learning_iteration = 0
+            return {}
 
     def get_inference_policy(self, device=None):
         self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
