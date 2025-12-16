@@ -81,6 +81,9 @@ class HexTerrainCfg(LeggedRobotCfg):
         #  Affordance相关
         affordance_grid_size = 16  # 16×16网格
         affordance_cell_size = 0.3125  # 每格0.3125m（5m/16）
+        
+        # Intensity计算相关 (Step A-P1: 修复作弊)
+        max_speed_for_intensity = 0.7  # 用于将速度归一化到[0,1]，适配机器人最大速度
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"

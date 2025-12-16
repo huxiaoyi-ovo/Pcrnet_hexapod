@@ -664,8 +664,11 @@ class HexTerrain(LeggedRobot):
             robot_pos_local = self.root_states[:, :3] - self.env_origins  # (N,3)
             goal_local = self.nav_task.goal_positions                     # (N,2) 约定：存 local goal
 
-            # 临时：先设置 intensity 为最优值，避免训练被强度惩罚主导
-            self.intensity_buf = 1.0 - terrain_difficulty
+            # Step A-P1: 修复 Intensity 作弊 - 基于真实速度计算
+            # 计算xy平面速度（body frame）
+            speed_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)  # (N,)
+            max_speed = getattr(self.nav_cfg, 'max_speed_for_intensity', 0.7)
+            self.intensity_buf = torch.clamp(speed_xy / max_speed, 0.0, 1.0)
 
             # compute nav reward (使用 local 坐标)
             rew_dict = self.nav_reward_fn.compute_reward(
@@ -698,6 +701,10 @@ class HexTerrain(LeggedRobot):
             # logging
             self.extras["nav_rew"] = {k: v.mean().item() for k, v in rew_dict.items() if k != "total"}
             self.extras["nav_success_rate"] = successes.float().mean().item()
+            # Step A-P1: 添加intensity监控日志
+            self.extras["intensity_mean"] = self.intensity_buf.mean().item()
+            self.extras["speed_xy_mean"] = speed_xy.mean().item()
+            self.extras["terrain_difficulty_mean"] = terrain_difficulty.mean().item()
 
             # goal_buf 已经在 compute_observations_separated() -> _update_goal_buffer() 中更新
             # 无需重复更新
