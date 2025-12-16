@@ -85,9 +85,8 @@ class Terrain:
     def curiculum(self):
         for j in range(self.cfg.num_cols):
             for i in range(self.cfg.num_rows):
-                difficulty = i / self.cfg.num_rows
+                difficulty = i / max(1, (self.cfg.num_rows - 1))
                 choice = j / self.cfg.num_cols + 0.001
-
                 terrain = self.make_terrain(choice, difficulty)
                 self.add_terrain_to_map(terrain, i, j)
 
@@ -99,7 +98,7 @@ class Terrain:
 
             terrain = terrain_utils.SubTerrain("terrain",
                               width=self.width_per_env_pixels,
-                              length=self.width_per_env_pixels,
+                              length=self.length_per_env_pixels,
                               vertical_scale=self.cfg.vertical_scale,
                               horizontal_scale=self.cfg.horizontal_scale)
 
@@ -109,9 +108,10 @@ class Terrain:
     def make_terrain(self, choice, difficulty):
         terrain = terrain_utils.SubTerrain(   "terrain",
                                 width=self.width_per_env_pixels,
-                                length=self.width_per_env_pixels,
+                                length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        #核心参数
         slope = difficulty * 0.6
         # step_height = 0.05 + 0.18 * difficulty #这个递增对六足来说太快了
         step_height = 0.05 + 0.125 * difficulty
@@ -122,30 +122,96 @@ class Terrain:
         stone_distance = 0.05 if difficulty==0 else 0.1
         gap_size = 1. * difficulty
         pit_depth = 1. * difficulty
+        #cfg参数
+        w_env = getattr(self.cfg, "robot_envelope_width", 0.55)
+        l_body = getattr(self.cfg, "robot_body_length", 0.40)
+        v_nom = getattr(self.cfg, "nominal_speed", 0.5)
+        t_react = getattr(self.cfg, "reaction_time", 0.4)
+
+        gate_margin_max = getattr(self.cfg, "gate_margin_max", 0.50)
+        gate_margin_min = getattr(self.cfg, "gate_margin_min", 0.05)
+        gate_wall_height = getattr(self.cfg, "gate_wall_height", 0.60)
+        gate_wall_thickness = getattr(self.cfg, "gate_wall_thickness", 0.20)
+        gate_x_frac = getattr(self.cfg, "gate_x_frac", 0.65)
+        gate_door_offset_max = getattr(self.cfg, "gate_door_offset_max", 0.60)
+
+        slalom_wall_height = getattr(self.cfg, "slalom_wall_height", 0.60)
+        slalom_wall_thickness = getattr(self.cfg, "slalom_wall_thickness", 0.20)
+        slalom_corridor_width_scale = getattr(self.cfg, "slalom_corridor_width_scale", 2.8)
+        slalom_pillar_size_x = getattr(self.cfg, "slalom_pillar_size_x", 0.45)
+        slalom_pillar_size_y = getattr(self.cfg, "slalom_pillar_size_y", 0.35)
+        slalom_num_pillars = getattr(self.cfg, "slalom_num_pillars", 6)
+        gos_angle = getattr(self.cfg, "gate_on_slope_angle_deg", 20.0)
+        # 根据 choice 选择地形类型
         if choice < self.proportions[0]:
-            if choice < self.proportions[0]/ 2:
+            if choice < self.proportions[0] / 2:
                 slope *= -1
             terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=3)
+
         elif choice < self.proportions[1]:
             terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=3)
             terrain_utils.random_uniform_terrain(terrain, min_height=-0.05, max_height=0.05, step=0.005, downsampled_scale=0.2)
+
         elif choice < self.proportions[3]:
-            if choice<self.proportions[2]:
+            if choice < self.proportions[2]:
                 step_height *= -1
             terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3)
+
         elif choice < self.proportions[4]:
-            num_rectangles = 20
-            rectangle_min_size = 1.
-            rectangle_max_size = 2.
-            terrain_utils.discrete_obstacles_terrain(terrain, discrete_obstacles_height, rectangle_min_size, rectangle_max_size, num_rectangles, platform_size=2)
+            terrain_utils.discrete_obstacles_terrain(terrain, discrete_obstacles_height, 1., 2., 20, platform_size=2)
+
         elif choice < self.proportions[5]:
             terrain_utils.stepping_stones_terrain(terrain, stone_size=stepping_stones_size, stone_distance=stone_distance, max_height=0., platform_size=3.)
+
         elif choice < self.proportions[6]:
             gap_terrain(terrain, gap_size=gap_size, platform_size=2.)
-        else:
+
+        elif choice < self.proportions[7]:
             pit_terrain(terrain, depth=pit_depth, platform_size=2.)
-        
+
+        elif choice < self.proportions[8]:
+            gate_terrain(
+                terrain, difficulty=difficulty, w_env=w_env,
+                margin_max=gate_margin_max, margin_min=gate_margin_min,
+                wall_height=gate_wall_height, wall_thickness=gate_wall_thickness,
+                gate_x_frac=gate_x_frac, door_offset_max=gate_door_offset_max,
+                add_roughness=(difficulty > 0.7),
+            )
+
+        elif choice < self.proportions[9]:
+            slalom_terrain(
+                terrain, difficulty=difficulty, w_env=w_env,
+                l_body=l_body, v_nom=v_nom, t_react=t_react,
+                wall_height=slalom_wall_height, wall_thickness=slalom_wall_thickness,
+                corridor_width_scale=slalom_corridor_width_scale,
+                pillar_size_x=slalom_pillar_size_x, pillar_size_y=slalom_pillar_size_y,
+                num_pillars=slalom_num_pillars,
+                add_roughness=(difficulty > 0.7),
+            )
+
+        else:
+            # 只在高难度引入 Gate-on-Slope（Stage-2）
+            if difficulty < 0.7:
+                # 低/中难度时，把这部分概率回退给 gate 或 slalom
+                gate_terrain(
+                    terrain, difficulty=difficulty, w_env=w_env,
+                    margin_max=gate_margin_max, margin_min=gate_margin_min,
+                    wall_height=gate_wall_height, wall_thickness=gate_wall_thickness,
+                    gate_x_frac=gate_x_frac, door_offset_max=gate_door_offset_max,
+                    add_roughness=False,
+                )
+            else:
+                gate_on_slope_terrain(
+                    terrain, difficulty=difficulty, w_env=w_env,
+                    slope_angle_deg=gos_angle, platform_size=3.0,
+                    margin_max=gate_margin_max, margin_min=gate_margin_min,
+                    wall_height=gate_wall_height, wall_thickness=gate_wall_thickness,
+                    gate_x_frac=gate_x_frac, door_offset_max=gate_door_offset_max,
+                )
+
+
         return terrain
+        
 
     def add_terrain_to_map(self, terrain, row, col):
         i = row
@@ -188,6 +254,164 @@ def pit_terrain(terrain, depth, platform_size=1.):
     y1 = terrain.width // 2 - platform_size
     y2 = terrain.width // 2 + platform_size
     terrain.height_field_raw[x1:x2, y1:y2] = -depth
+
+
+# Navigation-Oriented Terrains 
+def _m_to_px(terrain, m: float) -> int:
+    return max(1, int(m / terrain.horizontal_scale))
+
+def _m_to_h(terrain, m: float) -> int:
+    return int(m / terrain.vertical_scale)
+
+def gate_terrain(
+    terrain,
+    difficulty: float,
+    w_env: float,
+    margin_max: float = 0.50,
+    margin_min: float = 0.05,
+    wall_height: float = 0.60,
+    wall_thickness: float = 0.20,
+    gate_x_frac: float = 0.65,
+    door_offset_max: float = 0.60,
+    add_roughness: bool = False,
+    rough_min: float = -0.02,
+    rough_max: float = 0.02,
+):
+    """Gate = 横向栅栏 + 中央缺口（门洞），强制通过缺口而不是绕行。"""
+    d = float(np.clip(difficulty, 0.0, 1.0))
+
+    if add_roughness:
+        terrain_utils.random_uniform_terrain(
+            terrain, min_height=rough_min, max_height=rough_max,
+            step=0.005, downsampled_scale=0.2
+        )
+
+    margin = margin_min + (margin_max - margin_min) * (1.0 - d)
+    w_gap = w_env + margin
+
+    wall_h = _m_to_h(terrain, wall_height)
+    t_x = _m_to_px(terrain, wall_thickness)
+    gap_y = _m_to_px(terrain, w_gap)
+
+    x_center = int(terrain.length * gate_x_frac)
+    x1 = max(0, x_center - t_x // 2)
+    x2 = min(terrain.length, x_center + t_x // 2)
+
+    max_offset = min(door_offset_max, 0.5 * terrain.width * terrain.horizontal_scale - 0.6 * w_env)
+    y_offset = (2.0 * np.random.rand() - 1.0) * max_offset * d
+    y_center_m = 0.5 * terrain.width * terrain.horizontal_scale + y_offset
+    y_center = int(y_center_m / terrain.horizontal_scale)
+
+    y1 = max(0, y_center - gap_y // 2)
+    y2 = min(terrain.width, y_center + gap_y // 2)
+
+    # 保存基底高度（在加墙之前）
+    base_slice = terrain.height_field_raw[x1:x2, :].copy()
+
+    # 栅栏抬高
+    terrain.height_field_raw[x1:x2, :] = np.maximum(terrain.height_field_raw[x1:x2, :], wall_h)
+
+    # 门洞缺口：恢复为基底高度（保持坡/粗糙连续）
+    terrain.height_field_raw[x1:x2, y1:y2] = base_slice[:, y1:y2]
+
+
+
+def slalom_terrain(
+    terrain,
+    difficulty: float,
+    w_env: float,
+    l_body: float,
+    v_nom: float,
+    t_react: float,
+    wall_height: float = 0.60,
+    wall_thickness: float = 0.20,
+    corridor_width_scale: float = 2.8,
+    pillar_size_x: float = 0.45,
+    pillar_size_y: float = 0.35,
+    num_pillars: int = 6,
+    add_roughness: bool = False,
+    rough_min: float = -0.02,
+    rough_max: float = 0.02,
+):
+    """Slalom = 走廊 + 交替障碍柱。走廊两侧加墙避免绕边直走。"""
+    d = float(np.clip(difficulty, 0.0, 1.0))
+    d_react = float(v_nom) * float(t_react)
+
+    if add_roughness:
+        terrain_utils.random_uniform_terrain(
+            terrain, min_height=rough_min, max_height=rough_max,
+            step=0.005, downsampled_scale=0.2
+        )
+
+    wall_h = _m_to_h(terrain, wall_height)
+    wall_t = _m_to_px(terrain, wall_thickness)
+
+    corridor_width = max(corridor_width_scale * w_env, w_env + 0.30)
+    corridor_px = _m_to_px(terrain, corridor_width)
+
+    y_center = terrain.width // 2
+    y_left = max(0, y_center - corridor_px // 2)
+    y_right = min(terrain.width, y_center + corridor_px // 2)
+
+    # 走廊侧墙（把走廊外全抬高）
+    terrain.height_field_raw[:, :max(0, y_left - wall_t)] = np.maximum(
+        terrain.height_field_raw[:, :max(0, y_left - wall_t)], wall_h
+    )
+    terrain.height_field_raw[:, min(terrain.width, y_right + wall_t):] = np.maximum(
+        terrain.height_field_raw[:, min(terrain.width, y_right + wall_t):], wall_h
+    )
+
+    p_x = _m_to_px(terrain, pillar_size_x)
+    p_y = _m_to_px(terrain, pillar_size_y)
+
+    s_min = max(1.2 * l_body + 0.8 * d_react, 1.4 * l_body)
+    s_max = 2.4 * l_body + 2.0 * d_react
+    spacing_m = s_max - (s_max - s_min) * d
+    spacing_px = _m_to_px(terrain, spacing_m)
+
+    safety = 0.5 * w_env + 0.05
+    max_offset_m = max(0.05, 0.5 * corridor_width - safety)
+    offset_m = max_offset_m * (0.3 + 0.7 * d)
+    offset_px = _m_to_px(terrain, offset_m)
+
+    x_start = _m_to_px(terrain, 1.0)
+    x_end = terrain.length - _m_to_px(terrain, 1.0)
+    xs = list(range(x_start, x_end, spacing_px))[:num_pillars]
+
+    for k, xc in enumerate(xs):
+        sign = -1 if (k % 2 == 0) else 1
+        yc = y_center + sign * offset_px
+
+        x1 = max(0, xc - p_x // 2)
+        x2 = min(terrain.length, xc + p_x // 2)
+        y1 = max(y_left, yc - p_y // 2)
+        y2 = min(y_right, yc + p_y // 2)
+
+        terrain.height_field_raw[x1:x2, y1:y2] = np.maximum(
+            terrain.height_field_raw[x1:x2, y1:y2], wall_h
+        )
+
+
+def gate_on_slope_terrain(
+    terrain,
+    difficulty: float,
+    w_env: float,
+    slope_angle_deg: float = 20.0,
+    platform_size: float = 3.0,
+    **gate_kwargs,
+):
+    """Gate-on-Slope = 在坡面上叠加 Gate（复合难例）。"""
+    d = float(np.clip(difficulty, 0.0, 1.0))
+    slope = np.tan(np.deg2rad(slope_angle_deg)) * (0.7 + 0.3 * d)
+    terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=platform_size)
+
+    gate_terrain(
+        terrain,
+        difficulty=d,
+        w_env=w_env,
+        add_roughness=(d > 0.7),
+        **gate_kwargs,
+    )
 
 if __name__=='__main__':
     terrain_kwargs = {

@@ -82,27 +82,67 @@ class HexTerrainCfg(LeggedRobotCfg):
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
-        # mesh_type = 'plane'
-        border_size=1.0
-        terrain_length=8.0
-        terrain_width=8.0
-        max_init_terrain_level=1 #这个必须比num_rows小，否则会超出索引边界
-        num_rows=5 #等级
-        num_cols=10 #不同地形种类的总数量，比例按照 terrain_proportions来
+        border_size = 1.0
+        terrain_length = 8.0
+        terrain_width = 8.0
+
+        # 训练默认：课程学习开启，selected 关闭
+        curriculum = True
+        selected = False
+        terrain_kwargs = None
+
+        # Curriculum grid
+        num_rows = 10
+        num_cols = 20
+        max_init_terrain_level = 1
+
         measure_heights = True
-        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
-        measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
-        # terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
-        #开启了地形选择，就按照参数中的地形生成
-        selected=True
-        num_sub_terrains=1
-        terrain_kwargs={"type":"terrain_utils.pyramid_stairs_terrain",
-                        "step_width":0.31,
-                        "step_height":-0.07,
-                        "platform_size":3}
-        slope_treshold=0.4
+        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
+        measured_points_y = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+        slope_treshold = 0.4
+
+        #  robot envelope 
+        robot_body_width = 0.25
+        robot_body_length = 0.40
+        robot_swing_abduction = 0.15
+        robot_envelope_width = robot_body_width + 2.0 * robot_swing_abduction
+
+        nominal_speed = 0.5
+        reaction_time = 0.4
+
+        #  Gate 
+        gate_margin_max = 0.50
+        gate_margin_min = 0.05
+        gate_wall_height = 0.60
+        gate_wall_thickness = 0.20
+        gate_x_frac = 0.65
+        gate_door_offset_max = 0.60
+
+        #  Slalom 
+        slalom_wall_height = 0.60
+        slalom_wall_thickness = 0.20
+        slalom_corridor_width_scale = 2.8
+        slalom_pillar_size_x = 0.45
+        slalom_pillar_size_y = 0.35
+        slalom_num_pillars = 6
+
+        #  Gate-on-Slope 
+        gate_on_slope_angle_deg = 20.0
+
+        # 10 items: up to slalom; remaining prob -> gate_on_slope (make_terrain else)
+        terrain_proportions = [
+            0.10,  # smooth slope
+            0.10,  # rough slope
+            0.10,  # stairs A
+            0.10,  # stairs B
+            0.20,  # discrete obstacles
+            0.00,  # stepping stones
+            0.00,  # gap
+            0.00,  # pit
+            0.20,  # gate
+            0.10,  # slalom
+        ]
+
 
 
     class commands(LeggedRobotCfg.commands):
