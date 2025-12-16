@@ -229,8 +229,16 @@ class OnPolicyRunner:
             self.current_learning_iteration = loaded_dict.get('iter', 0)
             return loaded_dict.get('infos', {})
         else:
-            # Direct state_dict format
-            self.alg.actor_critic.load_state_dict(loaded_dict)
+            # Direct state_dict format - try loading full model, then actor only
+            try:
+                self.alg.actor_critic.load_state_dict(loaded_dict, strict=True)
+            except RuntimeError as e:
+                if 'Missing key(s) in state_dict' in str(e) and 'critic' in str(e):
+                    # Only actor weights present - load actor only
+                    print("[INFO] Loading actor-only model (critic weights missing)")
+                    self.alg.actor_critic.load_state_dict(loaded_dict, strict=False)
+                else:
+                    raise e
             self.current_learning_iteration = 0
             return {}
 
