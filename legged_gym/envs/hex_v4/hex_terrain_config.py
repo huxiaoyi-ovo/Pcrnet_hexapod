@@ -294,9 +294,19 @@ class HexTerrainCfg(LeggedRobotCfg):
 
         
     class rewards(LeggedRobotCfg.rewards):
+        # ==================== 奖励安全参数 ====================
         # 奖励截断（防止梯度爆炸）
         min_reward_clip = -10.0
         max_reward_clip = 10.0
+        
+        # ==================== 相机稳定性细分权重 ====================
+        # 这些参数被 _reward_camera_stability() 使用
+        camera_jitter_weight = 0.05   # 抖动权重（角加速度）
+        camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
+        camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
+        
+        # Phase 2/3: 导航时的稳定性保持权重
+        nav_stability_weight = 0.3  # 导航时额外添加 camera_stability 的权重
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
@@ -307,16 +317,6 @@ class HexTerrainCfg(LeggedRobotCfg):
             camera_stability = 2.5      # 新增：惩罚机身抖动以提升视觉质量
             lin_vel_z = -2.0            # 惩罚垂直颠簸
             ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
-            
-            # 相机稳定性细分权重
-            camera_jitter_weight = 0.05   # 抖动权重（角加速度）
-            camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
-            camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
-            
-            # === Phase 2/3: 导航时的稳定性保持 ===
-            # 如果 enable_nav_reward=True 且 preserve_camera_stability=True，
-            # 会在导航奖励基础上额外添加 camera_stability 奖励
-            nav_stability_weight = 0.3  # 导航时的稳定性权重（相对 Phase 1 降低）
             
             # === 姿态与步态 ===
             base_height = 0.5           # 保持目标高度
