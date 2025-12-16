@@ -246,8 +246,11 @@ class NavigationRewardFunction:
         return torch.clamp(vel_towards / 0.7, -1, 1)  # 归一化
 
     def _quat_to_heading(self, quat: torch.Tensor) -> torch.Tensor:
-        """四元数转航向角"""
-        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        """四元数转航向角
+        
+        格式约定: quat = [x, y, z, w] (Isaac Gym 标准)
+        """
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         return torch.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
 
     @staticmethod
@@ -311,10 +314,10 @@ class NavigationTaskManager:
         # 随机方向
         angles = torch.rand(num_reset, device=self.device) * 2 * np.pi
 
-        # 计算目标位置
+        # 计算目标位置 (注意: robot_positions 已经是子集，形状为 (num_reset, 2 或 3))
         new_goals = torch.zeros(num_reset, 2, device=self.device)
-        new_goals[:, 0] = robot_positions[env_ids, 0] + distances * torch.cos(angles)
-        new_goals[:, 1] = robot_positions[env_ids, 1] + distances * torch.sin(angles)
+        new_goals[:, 0] = robot_positions[:, 0] + distances * torch.cos(angles)
+        new_goals[:, 1] = robot_positions[:, 1] + distances * torch.sin(angles)
 
         # 限制在地图范围内
         new_goals[:, 0] = torch.clamp(new_goals[:, 0], -self.map_size[0]/2, self.map_size[0]/2)
@@ -352,11 +355,14 @@ class NavigationTaskManager:
         return dones, successes, info
 
     def update_curriculum(self, env_ids: torch.Tensor, successes: torch.Tensor):
-        """更新curriculum难度"""
+        """更新curriculum难度
+        
+        注意: successes 参数是全量buffer (num_envs,)，需要用 env_ids 索引
+        """
         if not self.curriculum_enabled:
             return
 
-        # 更新成功历史
+        # 更新成功历史 (successes 是全量buffer，需要索引)
         idx = self.success_idx[env_ids] % 10
         self.success_history[env_ids, idx] = successes[env_ids].float()
         self.success_idx[env_ids] += 1
@@ -376,11 +382,28 @@ class NavigationTaskManager:
     def get_relative_goal(
         self, 
         robot_positions: torch.Tensor, 
-        robot_headings: torch.Tensor
+        robot_headings: torch.Tensor,
+        env_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """获取机器人坐标系下的相对目标位置"""
+        """获取机器人坐标系下的相对目标位置
+        
+        Args:
+            robot_positions: 机器人位置 (N, 2/3) 或 (len(env_ids), 2/3)
+            robot_headings: 机器人朝向 (N,) 或 (len(env_ids),)
+            env_ids: 可选。如果为None，认为robot_positions是全量；否则是子集
+        
+        Returns:
+            relative_goal: 相对目标 (N, 2) 或 (len(env_ids), 2)
+        """
         # 世界坐标系下的目标偏移
-        delta = self.goal_positions - robot_positions[:, :2]
+        if env_ids is not None:
+            # 子集模式：仅计算指定 env_ids 的目标
+            goal_pos = self.goal_positions[env_ids]
+        else:
+            # 全量模式
+            goal_pos = self.goal_positions
+        
+        delta = goal_pos - robot_positions[:, :2]
 
         # 旋转到机器人坐标系
         cos_h = torch.cos(-robot_headings)

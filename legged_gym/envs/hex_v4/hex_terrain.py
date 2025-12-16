@@ -14,6 +14,8 @@ from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
 import time
+from legged_gym.scripts.navigation_env import NavigationRewardFunction, NavigationRewardConfig, NavigationTaskManager
+
 class HexTerrain(LeggedRobot):
     def __init__(self,cfg:HexTerrainCfg,sim_params,physics_engine,sim_device,headless):
         # 相机配置（在调用父类初始化前设置）
@@ -56,7 +58,63 @@ class HexTerrain(LeggedRobot):
         # 创建相机后处理buffer
         self._init_camera_buffers()
         self._init_navigation_buffers()#新增初始化额外的observation buffer
+        
+        # Navigation reward modules
+        self.nav_reward_fn = NavigationRewardFunction(NavigationRewardConfig())
+        self.nav_task = NavigationTaskManager(
+            num_envs=self.num_envs,
+            device=self.device,
+            map_size=(self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width),
+            goal_reach_threshold=self.nav_cfg.goal_reached_threshold if hasattr(self.nav_cfg, "goal_reached_threshold") else 0.3,
+            max_episode_length=int(self.max_episode_length),
+            curriculum_enabled=True,
+        )
 
+        # buffers for nav reward
+        self.prev_robot_pos_buf = torch.zeros(self.num_envs, 3, device=self.device)
+        self.prev_intensity_buf = torch.zeros(self.num_envs, device=self.device)
+        self.intensity_buf = torch.ones(self.num_envs, device=self.device)  # 先占位：后面接高层λ输出
+
+        # 确保 root_states 有有效数据（防御性编程）
+        self.gym.refresh_actor_root_state_tensor(self.sim)
+
+        # init nav goals & prev buffers (local frame)
+        env_ids_all = torch.arange(self.num_envs, device=self.device)
+        robot_pos_local = self.root_states[:, :3] - self.env_origins
+
+        self.nav_task.reset_goals(env_ids_all, robot_pos_local, min_distance=2.0, max_distance=8.0)
+        self.prev_robot_pos_buf[:] = robot_pos_local
+        self.prev_intensity_buf[:] = self.intensity_buf
+
+        # init goal_buf for observations
+        headings = self._yaw_from_quat(self.root_states[:, 3:7])
+        self.goal_buf = self.nav_task.get_relative_goal(robot_pos_local, headings)
+
+
+
+    def _yaw_from_quat(self, quat: torch.Tensor) -> torch.Tensor:
+        """从四元数提取yaw角度
+        
+        【格式约定 - CRITICAL】:
+        - 输入: quat 格式 [x, y, z, w] (Isaac Gym 标准)
+        - 输出: yaw 弧度，绕 z 轴旋转角
+        - 公式: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
+        
+        【全链路一致性】:
+        - self.root_states[:, 3:7] → [x,y,z,w]
+        - self.base_quat → [x,y,z,w]
+        - quat_rotate_inverse(self.base_quat, ...) → 接受 [x,y,z,w]
+        - 所有 euler 转换必须使用相同顺序
+        
+        Args:
+            quat: (N,4) [x,y,z,w] - Isaac Gym标准格式
+        
+        Returns:
+            yaw: (N,) yaw角度（弧度）
+        """
+        # 格式断言建议: assert quat.shape[-1] == 4, "quat must be [x,y,z,w]"
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        return torch.atan2(2.0 * (w*z + x*y), 1.0 - 2.0 * (y*y + z*z))
 
     def reset_separate(self):
         """重置环境并返回观测字典"""
@@ -105,17 +163,16 @@ class HexTerrain(LeggedRobot):
             requires_grad=False
         )
         
-        # 为了兼容性，创建深度图的默认buffer（如果相机被禁用）
-        if not self.enable_camera:
-            self.depth_images = torch.zeros(
-                self.num_envs,
-                1,
-                self.camera_cfg.height,
-                self.camera_cfg.width,
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=False
-            )
+        # 深度图buffer（无论是否启用相机，都初始化为零张量，避免None导致训练崩溃）
+        self.depth_images = torch.zeros(
+            self.num_envs,
+            1,
+            self.camera_cfg.height,
+            self.camera_cfg.width,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
         
         print(f"[Nav] Buffers initialized:")
         print(f"  - robot_state: {self.robot_state_buf.shape}")
@@ -568,15 +625,86 @@ class HexTerrain(LeggedRobot):
 
         self._post_physics_step_callback()
 
-        # compute observations, rewards, resets, ...
+        # compute observations first (we need robot_state/goal for nav)
+        self.compute_observations_separated()
+
+        # base termination (fall/illegal contacts etc.)
         self.check_termination()
-        self.compute_reward()
+
+        if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # build collision mask for navigation 
+            # 用 penalised_contact_indices 作为撞击判据
+            rb_force = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1)
+            collision_mask = (rb_force > 1.0).any(dim=1)
+
+            # terrain difficulty: use terrain level normalized to [0,1]
+            # terrain_levels 在 LeggedRobot 里一般存在（课程学习用）
+            if hasattr(self, "terrain_levels"):
+                denom = max(1, int(self.max_terrain_level - 1))
+                terrain_difficulty = torch.clamp(self.terrain_levels.float() / denom, 0.0, 1.0)
+            else:
+                terrain_difficulty = torch.zeros(self.num_envs, device=self.device)
+
+            # --- local robot pos for navigation ---
+            robot_pos_local = self.root_states[:, :3] - self.env_origins  # (N,3)
+            goal_local = self.nav_task.goal_positions                     # (N,2) 约定：存 local goal
+
+            # 临时：先设置 intensity 为最优值，避免训练被强度惩罚主导
+            self.intensity_buf = 1.0 - terrain_difficulty
+
+            # compute nav reward (使用 local 坐标)
+            rew_dict = self.nav_reward_fn.compute_reward(
+                robot_pos=robot_pos_local,
+                prev_robot_pos=self.prev_robot_pos_buf,   # 也存 local
+                goal_pos=goal_local,
+                robot_vel=self.root_states[:, 7:10],      # 速度不受平移影响
+                robot_quat=self.base_quat,                # [x,y,z,w] 格式
+                intensity=self.intensity_buf,
+                prev_intensity=self.prev_intensity_buf,
+                terrain_difficulty=terrain_difficulty,
+                collision_mask=collision_mask,
+            )
+
+            # override reward
+            self.rew_buf = rew_dict["total"]
+
+            # nav termination: reached goal / timeout / collision (使用 local 坐标)
+            dones_nav, successes, info_nav = self.nav_task.check_termination(
+                robot_positions=robot_pos_local,
+                collision_mask=collision_mask,
+            )
+            self.reset_buf |= dones_nav
+
+            # update curriculum for completed episodes
+            env_ids_nav = dones_nav.nonzero(as_tuple=False).flatten()
+            if env_ids_nav.numel() > 0:
+                self.nav_task.update_curriculum(env_ids_nav, successes)
+
+            # logging
+            self.extras["nav_rew"] = {k: v.mean().item() for k, v in rew_dict.items() if k != "total"}
+            self.extras["nav_success_rate"] = successes.float().mean().item()
+
+            # goal_buf 已经在 compute_observations_separated() -> _update_goal_buffer() 中更新
+            # 无需重复更新
+
+            # update prev buffers (local) - 在reward计算之后更新
+            self.prev_robot_pos_buf[:] = robot_pos_local
+            self.prev_intensity_buf[:] = self.intensity_buf
+
+        else:
+            # default locomotion reward
+            self.compute_reward()
+
+        # reset environments
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
 
-        #原来的观测计算方式
-        #新的观测计算方式
-        self.compute_observations_separated()
+        # Auto-reset后刷新观测，确保返回的obs与环境state一致
+        if env_ids.numel() > 0:
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.refresh_net_contact_force_tensor(self.sim)
+            self.compute_observations_separated()
 
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
@@ -592,6 +720,18 @@ class HexTerrain(LeggedRobot):
 
 
     def reset_idx(self, env_ids:torch.Tensor):
+        """重置指定环境
+        
+        【重要 - Auto-reset 语义】:
+        - 此函数在 post_physics_step_separate() 中被调用
+        - 重置后必须刷新观测（由 post_physics_step_separate 负责）
+        - 保证返回 s0 观测与重置后状态一致
+        - 避免 obs/state 时序错位导致训练不稳定
+        
+        【四元数格式】:
+        - self.root_states[:, 3:7] 为 [x,y,z,w]
+        - 所有 euler 转换使用一致格式
+        """
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
@@ -614,8 +754,19 @@ class HexTerrain(LeggedRobot):
         if hasattr(self, 'depth_images') and self.depth_images is not None:
             self.depth_images[env_ids] = 0.0
         
-        # 重置目标位置
-        self._update_goal_buffer()  # 重新采样目标
+        # 重置目标位置（使用 local 坐标，传递子集）
+        robot_pos_local = self.root_states[env_ids, :3] - self.env_origins[env_ids]
+        self.nav_task.reset_goals(env_ids, robot_pos_local, min_distance=2.0, max_distance=8.0)
+
+        # 同步 goal_buf（local -> robot frame）- 只更新 env_ids
+        headings = self._yaw_from_quat(self.root_states[env_ids, 3:7])
+        self.goal_buf[env_ids] = self.nav_task.get_relative_goal(robot_pos_local, headings, env_ids)
+
+        # 同步 prev buffer（local）
+        # 注意: robot_pos_local 已经是子集，直接赋值，不要再加 [env_ids]
+        self.prev_robot_pos_buf[env_ids] = robot_pos_local
+        self.prev_intensity_buf[env_ids] = self.intensity_buf[env_ids]
+
         
     def get_expert_actions(self):
         #这个是专家参与动作交互，所以很多状态不需要再次判断
@@ -652,9 +803,20 @@ class HexTerrain(LeggedRobot):
 
 
     def compute_observations_separated(self):
+        """计算观测（本体+特权+地形）
+        
+        【格式约定】:
+        - self.base_quat: [x,y,z,w] 格式直接输出到观测
+        - 策略网络需知晓四元数顺序以正确解析方向
+        
+        【Auto-reset 保证】:
+        - reset_idx() 后必须调用此函数刷新 obs_buf
+        - 确保返回的观测对应当前环境状态（特别是 s0）
+        """
         #返回分为 obs(机器人本体可以获取的观测), obs_vgf(特权信息， 基座线速度，重力加速度，足端z方向力), obs_terrain(地形高度信息)
         height=torch.clip((self.root_states[:,2].unsqueeze(1)-0.025-self.measured_heights),min=-1.0,max=1.0)
 
+        # 四元数观测: [x,y,z,w] 格式
         self.obs_buf = torch.cat([self.base_quat*self.obs_scales.quat,
                                   self.base_ang_vel*self.obs_scales.ang_vel,
                                   self.base_lin_acc*self.obs_scales.lin_acc,
@@ -696,26 +858,37 @@ class HexTerrain(LeggedRobot):
     def _extract_robot_state(self):
         """
         从完整观测中提取高层需要的机器人状态
+        
+        【格式约定 - CRITICAL】:
+        - 四元数格式: [x, y, z, w] (Isaac Gym 标准)
+        - 与 _yaw_from_quat() 保持完全一致
+        - 与 quat_rotate_inverse() 输入格式一致
+        
+        【输出状态】:
+        - [x, y, z, vx, vy, yaw, roll, pitch, yaw_rate]
+        - 所有欧拉角从相同四元数格式派生
+        
         Shape: (num_envs, 9)
         """
         # 提取yaw角（从quaternion）
-        # quaternion: [w, x, y, z]
+        # quaternion: [x, y, z, w] - Isaac Gym标准格式
         quat = self.base_quat
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        
         # yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
         yaw = torch.atan2(
-            2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
-            1.0 - 2.0 * (quat[:, 2]**2 + quat[:, 3]**2)
-                            )
+            2.0 * (w*z + x*y),
+            1.0 - 2.0 * (y*y + z*z)
+        )
         
-        # 提取roll和pitch
         # roll = atan2(2*(w*x + y*z), 1 - 2*(x^2 + y^2))
         roll = torch.atan2(
-            2.0 * (quat[:, 0] * quat[:, 1] + quat[:, 2] * quat[:, 3]),
-            1.0 - 2.0 * (quat[:, 1]**2 + quat[:, 2]**2)
-                            )
+            2.0 * (w*x + y*z),
+            1.0 - 2.0 * (x*x + y*y)
+        )
         
         # pitch = asin(2*(w*y - z*x))
-        pitch = torch.asin(2.0 * (quat[:, 0] * quat[:, 2] - quat[:, 3] * quat[:, 1]))
+        pitch = torch.asin(torch.clamp(2.0 * (w*y - z*x), -1.0, 1.0))
         
         # 机器人相对起点的位置
         pos_x = self.root_states[:, 0] - self.env_origins[:, 0]
@@ -741,36 +914,52 @@ class HexTerrain(LeggedRobot):
 
     def _update_goal_buffer(self):
         """
-        更新目标位置buffer
-        这里设置为沿当前速度指令方向的固定距离目标
-        
-        实际使用时可以根据导航任务修改
+        更新目标位置 buffer
+
+        约定：
+        - self.goal_buf 始终表示 “机器人坐标系下的相对 goal (x,y)”
+        - 当启用导航奖励时：goal 由 NavigationTaskManager 维护（world-goal），这里仅做坐标变换同步
+        - 当未启用导航奖励时：使用旧的 goal_mode 生成逻辑（但修正 random 为相对坐标）
         """
+        # 启用导航奖励：以 nav_task 为准
+        if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # nav_task 维护的是 local 坐标系 goal_positions: (N,2)
+            if not hasattr(self, "nav_task"):
+                return
+
+            # 需要机器人heading（yaw）。
+            # 确保 robot_state_buf 是最新的：调用顺序上 compute_observations_separated 会先 _extract_robot_state()
+            headings = self.robot_state_buf[:, 2]
+
+            # local -> robot frame relative goal
+            robot_pos_local = self.root_states[:, :3] - self.env_origins
+            self.goal_buf = self.nav_task.get_relative_goal(robot_pos_local, headings)
+            return
+
+        # 未启用导航奖励：沿用旧逻辑（但统一为相对坐标）
         if self.nav_cfg.goal_mode == 'velocity_based':
-            # 使用velocity_based模式
             goal_distance = self.nav_cfg.goal_distance
             vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
             vel_norm = torch.clamp(vel_norm, min=0.1)
             goal_direction = self.commands[:, :2] / vel_norm
-            self.goal_buf = goal_direction * goal_distance
-            
+            self.goal_buf = goal_direction * goal_distance  # 相对坐标（机器人坐标系近似/或世界系相对偏移）
+
         elif self.nav_cfg.goal_mode == 'fixed':
-            # 使用固定目标
-            fixed_goal = torch.tensor(
-                self.nav_cfg.fixed_goal, 
-                device=self.device
-            )
-            # 转换为相对坐标
+            fixed_goal = torch.tensor(self.nav_cfg.fixed_goal, device=self.device)  # world
+            # 转成“世界系相对位移”
             self.goal_buf = fixed_goal.unsqueeze(0).expand(self.num_envs, -1) - self.root_states[:, :2]
-            
+
         elif self.nav_cfg.goal_mode == 'random':
-            # 随机采样目标
-            self.goal_buf[:, 0] = torch.rand(self.num_envs, device=self.device) * \
-                (self.nav_cfg.goal_range_x[1] - self.nav_cfg.goal_range_x[0]) + \
-                self.nav_cfg.goal_range_x[0]
-            self.goal_buf[:, 1] = torch.rand(self.num_envs, device=self.device) * \
-                (self.nav_cfg.goal_range_y[1] - self.nav_cfg.goal_range_y[0]) + \
-                self.nav_cfg.goal_range_y[0]
+            # 先采样 world goal
+            goal_world = torch.zeros(self.num_envs, 2, device=self.device)
+            goal_world[:, 0] = torch.rand(self.num_envs, device=self.device) * \
+                (self.nav_cfg.goal_range_x[1] - self.nav_cfg.goal_range_x[0]) + self.nav_cfg.goal_range_x[0]
+            goal_world[:, 1] = torch.rand(self.num_envs, device=self.device) * \
+                (self.nav_cfg.goal_range_y[1] - self.nav_cfg.goal_range_y[0]) + self.nav_cfg.goal_range_y[0]
+
+            # 再转成相对坐标（世界系相对位移）
+            self.goal_buf = goal_world - self.root_states[:, :2]
+
 
     def get_observations_separated(self):
         return self.obs_buf, self.obs_vgf_buf, self.obs_terrain_buf

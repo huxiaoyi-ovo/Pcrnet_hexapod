@@ -261,7 +261,23 @@ def _m_to_px(terrain, m: float) -> int:
     return max(1, int(m / terrain.horizontal_scale))
 
 def _m_to_h(terrain, m: float) -> int:
-    return int(m / terrain.vertical_scale)
+    return max(1, int(np.ceil(m / terrain.vertical_scale)))
+
+
+def _center_slice(center: int, size: int, limit: int):
+    """Return [start, end) with guaranteed end > start."""
+    size = max(1, int(size))
+    half = size // 2
+    start = max(0, center - half)
+    end = start + size
+    if end > limit:
+        end = limit
+        start = max(0, end - size)
+    # 兜底，保证非空
+    if end <= start:
+        end = min(limit, start + 1)
+    return start, end
+
 
 def gate_terrain(
     terrain,
@@ -294,8 +310,8 @@ def gate_terrain(
     gap_y = _m_to_px(terrain, w_gap)
 
     x_center = int(terrain.length * gate_x_frac)
-    x1 = max(0, x_center - t_x // 2)
-    x2 = min(terrain.length, x_center + t_x // 2)
+    x1, x2 = _center_slice(x_center, t_x, terrain.length)
+
 
     max_offset = min(door_offset_max, 0.5 * terrain.width * terrain.horizontal_scale - 0.6 * w_env)
     y_offset = (2.0 * np.random.rand() - 1.0) * max_offset * d
@@ -382,10 +398,15 @@ def slalom_terrain(
         sign = -1 if (k % 2 == 0) else 1
         yc = y_center + sign * offset_px
 
-        x1 = max(0, xc - p_x // 2)
-        x2 = min(terrain.length, xc + p_x // 2)
-        y1 = max(y_left, yc - p_y // 2)
-        y2 = min(y_right, yc + p_y // 2)
+        x1, x2 = _center_slice(xc, p_x, terrain.length)
+        y1, y2 = _center_slice(yc, p_y, terrain.width)
+        # 夹紧到走廊边界内
+        y1 = max(y_left, y1)
+        y2 = min(y_right, y2)
+        # 兜底，保证非空
+        if x2 <= x1 or y2 <= y1:
+            continue
+
 
         terrain.height_field_raw[x1:x2, y1:y2] = np.maximum(
             terrain.height_field_raw[x1:x2, y1:y2], wall_h

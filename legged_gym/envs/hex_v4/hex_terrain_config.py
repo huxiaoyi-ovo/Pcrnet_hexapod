@@ -50,6 +50,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         # 目标生成模式 
         goal_mode = 'velocity_based'  
         #  'velocity_based', 'fixed', 'random', 'waypoints'
+        # 是否启用导航奖励（启用后会覆盖底层 locomotion reward）
+        enable_nav_reward = False
         
         # velocity_based模式：基于速度指令设置目标
         goal_distance = 5.0  # 目标在速度方向5米处
@@ -82,9 +84,12 @@ class HexTerrainCfg(LeggedRobotCfg):
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
-        border_size = 1.0
+        border_size = 4.0
         terrain_length = 8.0
         terrain_width = 8.0
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+
 
         # 训练默认：课程学习开启，selected 关闭
         curriculum = True
@@ -99,7 +104,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         measure_heights = True
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         measured_points_y = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-        slope_treshold = 0.4
+        slope_treshold = 0.6#0.4会让更多的斜坡地形变成墙面
 
         #  robot envelope 
         robot_body_width = 0.25
@@ -112,7 +117,7 @@ class HexTerrainCfg(LeggedRobotCfg):
 
         #  Gate 
         gate_margin_max = 0.50
-        gate_margin_min = 0.05
+        gate_margin_min = 0.10# warm-start; later anneal to 0.05 for final eval
         gate_wall_height = 0.60
         gate_wall_thickness = 0.20
         gate_x_frac = 0.65
