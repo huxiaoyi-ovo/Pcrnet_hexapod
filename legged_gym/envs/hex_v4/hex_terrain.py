@@ -16,6 +16,76 @@ import math
 import time
 from legged_gym.scripts.navigation_env import NavigationRewardFunction, NavigationRewardConfig, NavigationTaskManager
 
+
+# ==================== LocomotionAdapter ====================
+# 解耦高层导航策略（subgoal, intensity）与底层运动策略（velocity commands）
+# 在 Phase 2/3 中使用，将 Teacher/Student 输出转换为底层可执行的速度指令
+class LocomotionAdapter:
+    """
+    将高层导航指令 (subgoal_local, intensity) 转换为底层速度指令 (vx, vy, omega)
+    
+    设计理念：
+    - subgoal_local: [dx, dy] 机器人局部坐标系下的子目标位置
+    - intensity: [0, 1] 期望的运动强度（影响速度大小）
+    - 输出: [vx, vy, omega] 前向速度、侧向速度、角速度
+    
+    转换逻辑：
+    1. 计算朝向误差 theta = atan2(dy, dx)
+    2. 计算目标距离 dist = sqrt(dx^2 + dy^2)
+    3. 根据距离和强度计算速度：
+       - vx = intensity * max_speed * cos(theta) * distance_factor
+       - vy = intensity * max_speed * sin(theta) * distance_factor
+       - omega = heading_gain * theta (朝向修正)
+    """
+    
+    @staticmethod
+    def convert(subgoal_local: torch.Tensor, 
+                intensity: torch.Tensor, 
+                max_lin_vel: float = 0.7,
+                max_ang_vel: float = 1.0,
+                distance_scale: float = 2.0,
+                heading_gain: float = 2.0,
+                device='cuda:0') -> torch.Tensor:
+        """
+        将 (subgoal, intensity) 转换为 (vx, vy, omega)
+        
+        Args:
+            subgoal_local: [num_envs, 2] 局部坐标系下的子目标 (dx, dy)
+            intensity: [num_envs] 运动强度 [0, 1]
+            max_lin_vel: 最大线速度 (m/s)
+            max_ang_vel: 最大角速度 (rad/s)
+            distance_scale: 距离缩放因子（调节速度与距离的关系）
+            heading_gain: 朝向修正增益
+            device: 计算设备
+            
+        Returns:
+            commands: [num_envs, 3] 速度指令 (vx, vy, omega)
+        """
+        dx = subgoal_local[:, 0]  # x方向距离
+        dy = subgoal_local[:, 1]  # y方向距离
+        
+        # 计算极坐标
+        dist = torch.sqrt(dx**2 + dy**2 + 1e-6)  # 避免除零
+        theta = torch.atan2(dy, dx)  # 朝向角
+        
+        # 距离因子：远距离时加速，近距离时减速
+        # 使用 tanh 实现平滑过渡
+        distance_factor = torch.tanh(dist / distance_scale)
+        
+        # 速度大小 = intensity * max_speed * distance_factor
+        speed = intensity * max_lin_vel * distance_factor
+        
+        # 分解为前向和侧向速度
+        vx = speed * torch.cos(theta)
+        vy = speed * torch.sin(theta)
+        
+        # 角速度：朝向修正（限幅到 max_ang_vel）
+        omega = torch.clamp(heading_gain * theta, -max_ang_vel, max_ang_vel)
+        
+        # 组装输出
+        commands = torch.stack([vx, vy, omega], dim=1)
+        return commands
+
 class HexTerrain(LeggedRobot):
     def __init__(self,cfg:HexTerrainCfg,sim_params,physics_engine,sim_device,headless):
         # 相机配置（在调用父类初始化前设置）
@@ -647,6 +717,12 @@ class HexTerrain(LeggedRobot):
         self.check_termination()
 
         if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # [Fix] Real Intensity Calculation - Prevent Reward Hacking
+            # Use actual physics speed (body frame), not terrain difficulty
+            speed_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)  # (N,)
+            max_speed = getattr(self.nav_cfg, 'max_speed_for_intensity', 1.0)
+            self.intensity_buf = torch.clamp(speed_xy / max_speed, 0.0, 1.0)
+            
             # build collision mask for navigation 
             # 用 penalised_contact_indices 作为撞击判据
             rb_force = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1)
@@ -664,12 +740,6 @@ class HexTerrain(LeggedRobot):
             robot_pos_local = self.root_states[:, :3] - self.env_origins  # (N,3)
             goal_local = self.nav_task.goal_positions                     # (N,2) 约定：存 local goal
 
-            # Step A-P1: 修复 Intensity 作弊 - 基于真实速度计算
-            # 计算xy平面速度（body frame）
-            speed_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)  # (N,)
-            max_speed = getattr(self.nav_cfg, 'max_speed_for_intensity', 0.7)
-            self.intensity_buf = torch.clamp(speed_xy / max_speed, 0.0, 1.0)
-
             # compute nav reward (使用 local 坐标)
             rew_dict = self.nav_reward_fn.compute_reward(
                 robot_pos=robot_pos_local,
@@ -685,6 +755,18 @@ class HexTerrain(LeggedRobot):
 
             # override reward
             self.rew_buf = rew_dict["total"]
+            
+            # Phase 2/3: 可选的稳定性保持（避免导航时相机质量退化）
+            # 如果配置中启用了 nav_stability_weight，额外添加 camera_stability 奖励
+            if hasattr(self.cfg.rewards.scales, 'nav_stability_weight'):
+                nav_stability_weight = self.cfg.rewards.scales.nav_stability_weight
+                if nav_stability_weight > 0:
+                    # 复用 Phase 1 的 camera_stability 奖励函数
+                    camera_rew = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
+                    self.rew_buf += nav_stability_weight * camera_rew
+                    
+                    # 记录日志
+                    self.extras["nav_rew"]["camera_stability"] = camera_rew.mean().item()
 
             # nav termination: reached goal / timeout / collision (使用 local 坐标)
             dones_nav, successes, info_nav = self.nav_task.check_termination(
@@ -705,6 +787,13 @@ class HexTerrain(LeggedRobot):
             self.extras["intensity_mean"] = self.intensity_buf.mean().item()
             self.extras["speed_xy_mean"] = speed_xy.mean().item()
             self.extras["terrain_difficulty_mean"] = terrain_difficulty.mean().item()
+            
+            # 导航指标监控
+            self.extras["goal_distance_mean"] = torch.norm(self.goal_buf, dim=1).mean().item()
+            effective_cmd = self._get_effective_commands()
+            self.extras["command_vx_mean"] = effective_cmd[:, 0].mean().item()
+            self.extras["command_vy_mean"] = effective_cmd[:, 1].mean().item()
+            self.extras["command_omega_mean"] = effective_cmd[:, 2].mean().item()
 
             # goal_buf 已经在 compute_observations_separated() -> _update_goal_buffer() 中更新
             # 无需重复更新
@@ -716,6 +805,22 @@ class HexTerrain(LeggedRobot):
         else:
             # default locomotion reward
             self.compute_reward()
+            
+            # 奖励截断（防止梯度爆炸）
+            if hasattr(self.cfg.rewards, 'min_reward_clip'):
+                self.rew_buf = torch.clamp(
+                    self.rew_buf,
+                    min=self.cfg.rewards.min_reward_clip,
+                    max=self.cfg.rewards.max_reward_clip
+                )
+            
+            # Phase 1 相机稳定性监控
+            self.extras["camera_pitch_std"] = self.base_ang_vel[:, 0].std().item()
+            self.extras["camera_roll_std"] = self.base_ang_vel[:, 1].std().item()
+            self.extras["camera_ang_acc_rms"] = torch.sqrt(
+                torch.mean(self.base_ang_acc[:, :2]**2)
+            ).item()
+            self.extras["camera_z_acc_std"] = self.base_lin_acc[:, 2].std().item()
 
         # reset environments
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -743,6 +848,81 @@ class HexTerrain(LeggedRobot):
 
 
 
+    def _get_effective_commands(self):
+        """
+        Get effective commands (random in Phase 1, goal-directed in Phase 2/3)
+        
+        【EGPO Critical】:
+        - Both policy and expert MUST see the same commands
+        - Phase 1 (enable_nav_reward=False): Random locomotion commands
+        - Phase 2/3 (enable_nav_reward=True): Goal-derived navigation commands
+          - 如果 use_adapter=True，使用 LocomotionAdapter 转换高层指令
+          - 如果 use_adapter=False，直接从 goal_buf 推导速度指令（原逻辑）
+        
+        Returns:
+            commands: (N, 3) [vx, vy, omega_z]
+        """
+        if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # Phase 2/3: Derive commands from goal
+            if getattr(self.nav_cfg, "use_adapter", False):
+                # 使用 LocomotionAdapter：需要高层策略提供 (subgoal, intensity)
+                # 这里假设 self.goal_buf 是 subgoal_local (局部坐标系)
+                # self.intensity_buf 是高层策略输出的强度
+                
+                # 如果 intensity_buf 未初始化，使用距离推导的默认值
+                if not hasattr(self, 'intensity_buf'):
+                    goal_dist = torch.norm(self.goal_buf, dim=1)
+                    self.intensity_buf = torch.clamp(goal_dist / 5.0, 0.0, 1.0)
+                
+                obs_commands = LocomotionAdapter.convert(
+                    subgoal_local=self.goal_buf,
+                    intensity=self.intensity_buf,
+                    max_lin_vel=0.7,
+                    max_ang_vel=getattr(self.nav_cfg, "adapter_max_ang_vel", 1.0),
+                    distance_scale=getattr(self.nav_cfg, "adapter_distance_scale", 2.0),
+                    heading_gain=getattr(self.nav_cfg, "adapter_heading_gain", 2.0),
+                    device=self.device
+                )
+            else:
+                # 原逻辑：直接从 goal_buf 推导速度指令
+                goal_vec = self.goal_buf
+                dist = torch.norm(goal_vec, dim=1, keepdim=True)
+                
+                # 安全处理：防止极小距离导致数值尖峰
+                min_dist = getattr(self.nav_cfg, 'min_command_distance', 0.1)
+                dist_safe = torch.clamp(dist, min=min_dist)
+                
+                # Distance-based speed scaling: prevent jitter at goal
+                slowdown_dist = getattr(self.nav_cfg, 'goal_slowdown_distance', 1.0)
+                min_speed = getattr(self.nav_cfg, 'goal_min_speed_ratio', 0.2)
+                speed_scale = torch.clamp(dist / slowdown_dist, min_speed, 1.0)
+                
+                target_dir = goal_vec / dist_safe
+                
+                obs_commands = torch.zeros_like(self.commands)
+                # Linear velocity towards goal with clamp
+                max_lin_vel = getattr(self.nav_cfg, 'max_lin_vel_command', 0.8)
+                obs_commands[:, 0] = torch.clamp(
+                    target_dir[:, 0] * max_lin_vel * speed_scale.squeeze(-1),
+                    -max_lin_vel, max_lin_vel
+                )
+                obs_commands[:, 1] = torch.clamp(
+                    target_dir[:, 1] * max_lin_vel * speed_scale.squeeze(-1),
+                    -max_lin_vel, max_lin_vel
+                )
+                # Angular velocity to correct heading
+                heading_error = torch.atan2(target_dir[:, 1], target_dir[:, 0])
+                max_ang_vel = getattr(self.nav_cfg, 'max_ang_vel_command', 1.5)
+                obs_commands[:, 2] = torch.clamp(
+                    heading_error * 1.5, -max_ang_vel, max_ang_vel
+                )
+            
+            # Safety: replace NaN with zeros
+            return torch.nan_to_num(obs_commands, nan=0.0)
+        else:
+            # Phase 1: Random commands from base class
+            return self.commands
+    
     def reset_idx(self, env_ids:torch.Tensor):
         """重置指定环境
         
@@ -794,11 +974,33 @@ class HexTerrain(LeggedRobot):
 
         
     def get_expert_actions(self):
-        #这个是专家参与动作交互，所以很多状态不需要再次判断
-        #计算专家动作,输给专家的指令是[reset,vx,vy,vz,omega_z]
-        command = torch.stack([self.reset_buf.clone(),self.commands[:,0],self.commands[:,1],torch.zeros_like(self.reset_buf),self.commands[:,2]],dim=1)
-        expert_dofs = self.expert.ProcessCommand(command,self.dof_pos,self.dof_vel) #此时的actions还是关节角度的绝对位置，要进行转化
-        self.expert_actions = ((expert_dofs-self.default_dof_pos)/self.cfg.control.action_scale).detach()  
+        """
+        Get expert actions for BC loss calculation
+        
+        【EGPO Architecture Critical】:
+        - Expert actions are used for Behavior Cloning loss
+        - Expert MUST see the SAME commands as the policy
+        - Otherwise BC loss will pull policy in wrong direction
+        
+        【Implementation】:
+        - Phase 1: Expert uses random commands (same as policy)
+        - Phase 2: Expert uses goal-derived commands (same as policy)
+        """
+        # Sync expert with policy commands (CRITICAL for EGPO)
+        cmd_to_use = self._get_effective_commands()
+        
+        # Build expert command: [reset, vx, vy, vz, omega_z]
+        command = torch.stack([
+            self.reset_buf.clone(),
+            cmd_to_use[:, 0],
+            cmd_to_use[:, 1],
+            torch.zeros_like(self.reset_buf),
+            cmd_to_use[:, 2]
+        ], dim=1)
+        
+        expert_dofs = self.expert.ProcessCommand(command, self.dof_pos, self.dof_vel)
+        self.expert_actions = ((expert_dofs - self.default_dof_pos) / 
+                               self.cfg.control.action_scale).detach()
         return self.expert_actions
     
     def get_observations_dict(self):
@@ -841,14 +1043,32 @@ class HexTerrain(LeggedRobot):
         #返回分为 obs(机器人本体可以获取的观测), obs_vgf(特权信息， 基座线速度，重力加速度，足端z方向力), obs_terrain(地形高度信息)
         height=torch.clip((self.root_states[:,2].unsqueeze(1)-0.025-self.measured_heights),min=-1.0,max=1.0)
 
+        # Step A-P2: 智能指令切换（解决Phase 2冲突）
+        if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # Phase 2: 使用从goal_buf派生的伪指令
+            goal_vec = self.goal_buf  # (N, 2) 机器人坐标系下的相对目标
+            dist = torch.norm(goal_vec, dim=1, keepdim=True)
+            target_dir = goal_vec / (dist + 1e-5)
+            
+            obs_commands = torch.zeros_like(self.commands)
+            # 覆写指令：让网络以为现在的任务就是"向目标方向走"
+            obs_commands[:, 0] = target_dir[:, 0] * 0.6  # 限制最大速度
+            obs_commands[:, 1] = target_dir[:, 1] * 0.6
+            heading_error = torch.atan2(target_dir[:, 1], target_dir[:, 0])
+            obs_commands[:, 2] = torch.clamp(heading_error * 1.5, -1.0, 1.0)
+        else:
+            # Phase 1: 使用随机指令
+            obs_commands = self.commands
+
         # 四元数观测: [x,y,z,w] 格式
+        # 关键：使用 obs_commands 而非 self.commands
         self.obs_buf = torch.cat([self.base_quat*self.obs_scales.quat,
                                   self.base_ang_vel*self.obs_scales.ang_vel,
                                   self.base_lin_acc*self.obs_scales.lin_acc,
                                   (self.dof_pos-self.default_dof_pos)*self.obs_scales.dof_pos,
                                   self.dof_vel*self.obs_scales.dof_vel,
                                   self.torques*self.obs_scales.dof_torque,
-                                  self.commands*self.commands_scale],dim=-1)
+                                  obs_commands*self.commands_scale],dim=-1)
         # self.obs_buf = torch.cat([(self.last_actions*self.obs_scales.actions,
         #                           self.dof_pos-self.default_dof_pos)*self.obs_scales.dof_pos,
         #                           self.dof_vel*self.obs_scales.dof_vel,
@@ -1320,6 +1540,40 @@ class HexTerrain(LeggedRobot):
         pos_err *= pos_err>0.15
 
         return torch.square(pos_err).sum(dim=1)
+    
+    def _reward_camera_stability(self):
+        """相机稳定性奖励 - 通过惩罚机身抖动提升视觉质量
+        
+        【Sim-to-Real关键】:
+        - Motion Blur根源: 角加速度（高频抖动）
+        - 画面倾斜根源: pitch/roll角速度（持续晃动）
+        - 垂直颠簸: z轴线加速度（深度估计误差）
+        
+        【实现逻辑】:
+        - Jitter (抖动): 惩罚 base_ang_acc (尤其xy分量)
+        - Wobble (晃动): 惩罚 base_ang_vel (pitch/roll)
+        - Bobbing (颠簸): 惩罚 base_lin_acc (z分量)
+        
+        Returns:
+            reward: (N,) 稳定性奖励，使用exp函数确保平滑梯度
+        """
+        # 1. 高频抖动（Motion Blur的直接原因）- 只关心pitch/roll加速度
+        ang_jitter = torch.sum(torch.square(self.base_ang_acc[:, :2]), dim=1)
+        
+        # 2. 持续晃动（画面倾斜）- pitch/roll角速度
+        ang_wobble = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        
+        # 3. 垂直颠簸（影响深度估计）- z轴线加速度
+        z_bobbing = torch.square(self.base_lin_acc[:, 2])
+        
+        # 组合惩罚（使用可配置权重）
+        jitter_w = getattr(self.cfg.rewards.scales, 'camera_jitter_weight', 0.05)
+        wobble_w = getattr(self.cfg.rewards.scales, 'camera_wobble_weight', 0.5)
+        bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
+        penalty = ang_jitter * jitter_w + ang_wobble * wobble_w + z_bobbing * bobbing_w
+        
+        # 使用exp确保平滑梯度和正向奖励
+        return torch.exp(-penalty)
         
 
 if __name__ == '__main__':

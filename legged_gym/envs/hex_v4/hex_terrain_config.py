@@ -7,7 +7,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         num_envs = 8 #环境数量(降低以减少GPU内存占用)
         #[quat(4), ang_vel(3), lin_acc(3), dof_pos(18), dof_vel(18), dof_torque(18), command(3)] 67
         num_observations = 67
-        #[lin_vel(3), gravity(3), contact_force(6) ,measured_heights(143)] 199 + above_obs 199+67=266 #contact_force noly contains the z axis
+        #[lin_vel(3), gravity(3), contact_force(24)] = 30维 obs_vgf_buf
         num_privileged_obs = 240
         # num_privileged_obs = None
         num_actions = 18
@@ -47,11 +47,41 @@ class HexTerrainCfg(LeggedRobotCfg):
     class navigation:
         """导航任务配置"""
         
+        # ==================== Phase 控制 ====================
+        # Phase 1: EGPO 运动训练 (enable_nav_reward=False)
+        # Phase 2: Teacher 导航训练 (use_gt_affordance=True, freeze_student_policy=True)
+        # Phase 3: Student 蒸馏训练 (use_gt_affordance=False, freeze_student_policy=True)
+        
+        # 是否启用导航奖励（启用后会覆盖底层 locomotion reward）
+        enable_nav_reward = False
+        
+        # Phase 2/3: 是否冻结底层运动策略（或使用极小学习率微调）
+        freeze_student_policy = False  # Phase 1 设为 False，Phase 2/3 设为 True
+        student_fine_tune_lr = 1e-6    # 如果不完全冻结，使用极小学习率
+        
+        # Phase 2: 使用 GT affordance，Phase 3: 使用估计 affordance
+        use_gt_affordance = True       # Phase 2=True, Phase 3=False
+        
+        # ==================== LocomotionAdapter ====================
+        # 是否使用 LocomotionAdapter 解耦高层导航与底层运动
+        use_adapter = False            # Phase 1=False, Phase 2/3=True
+        
+        # Adapter 参数：将 (subgoal, intensity) 转换为 (vx, vy, omega)
+        adapter_distance_scale = 2.0   # 距离缩放因子
+        adapter_max_ang_vel = 1.0      # 最大角速度（rad/s）
+        adapter_heading_gain = 2.0     # 朝向增益
+        
+        # ==================== 指令计算安全参数 ====================
+        min_command_distance = 0.1     # 最小指令计算距离（防止除零）
+        max_lin_vel_command = 0.8      # 最大线速度指令 (m/s)
+        max_ang_vel_command = 1.5      # 最大角速度指令 (rad/s)
+        goal_slowdown_distance = 1.0   # 开始减速的距离 (m)
+        goal_min_speed_ratio = 0.2     # 最小速度比例
+        
+        # ==================== 目标生成 ====================
         # 目标生成模式 
         goal_mode = 'velocity_based'  
         #  'velocity_based', 'fixed', 'random', 'waypoints'
-        # 是否启用导航奖励（启用后会覆盖底层 locomotion reward）
-        enable_nav_reward = False
         
         # velocity_based模式：基于速度指令设置目标
         goal_distance = 5.0  # 目标在速度方向5米处
@@ -249,59 +279,47 @@ class HexTerrainCfg(LeggedRobotCfg):
 
         
     class rewards(LeggedRobotCfg.rewards):
+        # 奖励截断（防止梯度爆炸）
+        min_reward_clip = -10.0
+        max_reward_clip = 10.0
+        
         class scales(LeggedRobotCfg.rewards.scales):
-            action_rate = -0.05
-            tracking_ang_vel = 1.5
-            tracking_lin_vel = 2.0
-            lin_vel_z = -3.0
-            ang_vel_xy = -0.1
-            base_height = 0.5
-            orientation = -2.0
-            feet_air_time = 2.0
-            collision = -1.0
-
-            dof_acc=-3.0e-7
-            # dof_vel = -2.0e-5
-
-            stand_still = -2.0
-            # feet_contact_forces = -0.004
-
-            CoT = -0.001
-            pass
-            #针对六足添加的奖励：
-            # footend_pos_xy = 3.0 #距离swing_init_point的xy值越近，奖励越高
-            tracking_dof = -0.1 #pos_des和dof_vel距离越大，惩罚越大
-            #足端力的增加变化，增加的越快，惩罚越大
-            # feet_contact_forces_increase = -0.0005 
-            #
-            # swing=1.0 #摆动时距离swing_init_point越近，奖励越高，靠近到一定阈值后，距离越远，奖励越高[并不好用]
-
-            # 设计RF与RB；LF和LB的对角奖励
-            # mirror=1.0
-
-            action_rate = -0.05
-            tracking_ang_vel = 1.5
-            tracking_lin_vel = 2.0
-            lin_vel_z = 0.0
-            ang_vel_xy = 0.0
-            base_height = 0.5
-            orientation = 0.0
-            feet_air_time = 0.5
-            collision = -1.0
-
-            dof_acc=-3.0e-7
-            # dof_vel = -2.0e-5
-            CoT=0.0
-
-            stand_still = -2.0
-            # feet_contact_forces = -0.004
-
-
-            # CoT = -0.001
-            pass
-            #针对六足添加的奖励：
-            # footend_pos_xy = 3.0 #距离swing_init_point的xy值越近，奖励越高
-            # tracking_dof = -0.1 #pos_des和dof_vel距离越大，惩罚越大            
+            # === 核心运动奖励 ===
+            tracking_lin_vel = 2.0      # 跟踪线速度指令
+            tracking_ang_vel = 1.5      # 跟踪角速度指令
+            
+            # === 相机稳定性（Sim-to-Real关键）===
+            camera_stability = 2.5      # 新增：惩罚机身抖动以提升视觉质量
+            lin_vel_z = -2.0            # 惩罚垂直颠簸
+            ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
+            
+            # 相机稳定性细分权重
+            camera_jitter_weight = 0.05   # 抖动权重（角加速度）
+            camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
+            camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
+            
+            # === Phase 2/3: 导航时的稳定性保持 ===
+            # 如果 enable_nav_reward=True 且 preserve_camera_stability=True，
+            # 会在导航奖励基础上额外添加 camera_stability 奖励
+            nav_stability_weight = 0.3  # 导航时的稳定性权重（相对 Phase 1 降低）
+            
+            # === 姿态与步态 ===
+            base_height = 0.5           # 保持目标高度
+            orientation = 0.0           # 保持水平（由camera_stability覆盖）
+            feet_air_time = 0.5         # 鼓励合理的摆动相位
+            
+            # === 惩罚项 ===
+            collision = -1.0            # 非足端接触
+            action_rate = -0.05         # 平滑动作变化
+            dof_acc = -3.0e-7           # 关节加速度惩罚
+            stand_still = -2.0          # 零指令时保持静止
+            
+            # === 能耗（可选）===
+            CoT = 0.0                   # 运输成本（已禁用）
+            
+            # === 六足特定（实验性）===
+            # tracking_dof = -0.1       # 关节位置跟踪
+            # footend_pos_xy = 3.0      # 足端位置奖励            
 
 
         only_positive_rewards = False
