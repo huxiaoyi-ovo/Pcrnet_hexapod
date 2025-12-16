@@ -277,11 +277,35 @@ class HexTerrain(LeggedRobot):
         self.depth_debug_count = 0
 
     def _init_camera_buffers(self):
-        """初始化相机图像接收buffer"""
-        # Shape: (num_envs, height, width)
-        self.depth_images = None
+        """初始化相机图像接收buffer
         
-        # 归一化的深度图（用于网络输入）
+        【P1-Depth管线语义稳定】:
+        - depth_raw: 永远 (N, H, W) - 传感器原始深度
+        - depth_images: 永远 (N, 1, H, W) - 网络输入深度
+        - 两者shape固定，禁止None或shape漂移
+        """
+        # 传感器原始深度 (N, H, W)
+        self.depth_raw = torch.zeros(
+            self.num_envs,
+            self.camera_cfg.height,
+            self.camera_cfg.width,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+        
+        # 网络输入深度 (N, 1, H, W)
+        self.depth_images = torch.zeros(
+            self.num_envs,
+            1,
+            self.camera_cfg.height,
+            self.camera_cfg.width,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+        
+        # 归一化的深度图（用于网络输入，暂未使用）
         # Shape: (num_envs, 1, height, width)
         self.depth_normalized = None
         # RGB 图像缓存 (num_envs, 3, H, W) 或 (num_envs, H, W, 3)
@@ -315,35 +339,23 @@ class HexTerrain(LeggedRobot):
                 except Exception as e:
                     print(f"[Camera Warning] Initial render failed: {e}")
                     self.enable_camera = False
-                    return torch.zeros(
-                        self.num_envs,
-                        self.camera_cfg.height,
-                        self.camera_cfg.width,
-                        dtype=torch.float32,
-                        device=self.device
-                    )
+                    # P1-Depth: 填充depth_raw并返回，保持语义一致
+                    self.depth_raw.fill_(self.camera_cfg.far_clip)
+                    return self.depth_raw
 
         if not self.enable_camera or len(self.camera_handles) == 0:
-            return torch.zeros(
-                self.num_envs,
-                self.camera_cfg.height,
-                self.camera_cfg.width,
-                dtype=torch.float32,
-                device=self.device
-            )
+            # P1-Depth: 填充depth_raw并返回，保持语义一致
+            self.depth_raw.fill_(self.camera_cfg.far_clip)
+            return self.depth_raw
         try:
             self.gym.fetch_results(self.sim, True)
             self.gym.step_graphics(self.sim)
             self.gym.render_all_camera_sensors(self.sim)
         except Exception as e:
             print(f"[Camera Error] Rendering failed: {e}")
-            return torch.zeros(
-                self.num_envs,
-                self.camera_cfg.height,
-                self.camera_cfg.width,
-                dtype=torch.float32,
-                device=self.device
-            )
+            # P1-Depth: 填充depth_raw并返回，保持语义一致
+            self.depth_raw.fill_(self.camera_cfg.far_clip)
+            return self.depth_raw
 
         self.gym.start_access_image_tensors(self.sim)
 
@@ -392,8 +404,9 @@ class HexTerrain(LeggedRobot):
 
         self.gym.end_access_image_tensors(self.sim)
 
-        self.depth_images = torch.stack(depth_images_list, dim=0)
-        return self.depth_images
+        # 写入原始深度buffer (N, H, W)
+        self.depth_raw[:] = torch.stack(depth_images_list, dim=0)
+        return self.depth_raw
 
     def _get_rgb_images(self, normalize: bool = True, channels_last: bool = False):
         """获取所有环境的 RGB 图像。
@@ -549,12 +562,14 @@ class HexTerrain(LeggedRobot):
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
 
-        #  更新深度图
+        #  更新深度图 (P1-Depth: 拆分管线，固定shape)
         if self.enable_camera and (self.common_step_counter % self.camera_cfg.capture_interval == 0):
-            # 获取深度图
+            # 获取原始深度 -> depth_raw (N, H, W)
             depth_raw = self._get_depth_images()
-            # 预处理用于网络
-            self.depth_images = self._process_depth_for_network(depth_raw)
+            # 预处理为网络输入 -> depth_images (N, 1, H, W)
+            processed = self._process_depth_for_network(depth_raw)
+            # 就地写入，保持buffer身份稳定
+            self.depth_images[:] = processed
         
         # 构造观测字典 (原来是tuple，现在是字典)
         obs_dict = {
@@ -697,7 +712,9 @@ class HexTerrain(LeggedRobot):
 
         # reset environments
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-        self.reset_idx(env_ids)
+        # P2-Guard: 防御性检查，虽然基类有guard但此处显式添加
+        if env_ids.numel() > 0:
+            self.reset_idx(env_ids)
 
         # Auto-reset后刷新观测，确保返回的obs与环境state一致
         if env_ids.numel() > 0:
@@ -751,8 +768,9 @@ class HexTerrain(LeggedRobot):
         #TODO 基类环境中，没有重置上一次碰撞，原因？
 
         # 重置深度图为零（避免使用旧数据）
-        if hasattr(self, 'depth_images') and self.depth_images is not None:
-            self.depth_images[env_ids] = 0.0
+        # P1-Depth: 清零两个buffer，shape固定无需None检查
+        self.depth_raw[env_ids] = self.camera_cfg.far_clip  # 原始深度用far_clip表示无效
+        self.depth_images[env_ids] = 0.0  # 网络输入用0
         
         # 重置目标位置（使用 local 坐标，传递子集）
         robot_pos_local = self.root_states[env_ids, :3] - self.env_origins[env_ids]
@@ -933,7 +951,9 @@ class HexTerrain(LeggedRobot):
 
             # local -> robot frame relative goal
             robot_pos_local = self.root_states[:, :3] - self.env_origins
-            self.goal_buf = self.nav_task.get_relative_goal(robot_pos_local, headings)
+            # P1-GoalBuf: 就地写入，禁止重新绑定
+            rel_goal = self.nav_task.get_relative_goal(robot_pos_local, headings)
+            self.goal_buf[:] = rel_goal
             return
 
         # 未启用导航奖励：沿用旧逻辑（但统一为相对坐标）
@@ -942,12 +962,13 @@ class HexTerrain(LeggedRobot):
             vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
             vel_norm = torch.clamp(vel_norm, min=0.1)
             goal_direction = self.commands[:, :2] / vel_norm
-            self.goal_buf = goal_direction * goal_distance  # 相对坐标（机器人坐标系近似/或世界系相对偏移）
+            # P1-GoalBuf: 就地写入
+            self.goal_buf[:] = goal_direction * goal_distance  # 相对坐标（机器人坐标系近似/或世界系相对偏移）
 
         elif self.nav_cfg.goal_mode == 'fixed':
             fixed_goal = torch.tensor(self.nav_cfg.fixed_goal, device=self.device)  # world
             # 转成“世界系相对位移”
-            self.goal_buf = fixed_goal.unsqueeze(0).expand(self.num_envs, -1) - self.root_states[:, :2]
+            self.goal_buf[:] = fixed_goal.unsqueeze(0).expand(self.num_envs, -1) - self.root_states[:, :2]
 
         elif self.nav_cfg.goal_mode == 'random':
             # 先采样 world goal
@@ -957,8 +978,8 @@ class HexTerrain(LeggedRobot):
             goal_world[:, 1] = torch.rand(self.num_envs, device=self.device) * \
                 (self.nav_cfg.goal_range_y[1] - self.nav_cfg.goal_range_y[0]) + self.nav_cfg.goal_range_y[0]
 
-            # 再转成相对坐标（世界系相对位移）
-            self.goal_buf = goal_world - self.root_states[:, :2]
+            # 再转成相对坐标（世界系相对位移）(P1-GoalBuf: 就地写入)
+            self.goal_buf[:] = goal_world - self.root_states[:, :2]
 
 
     def get_observations_separated(self):
