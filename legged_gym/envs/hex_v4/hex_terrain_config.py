@@ -5,23 +5,32 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 class HexTerrainCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 8 #环境数量(降低以减少GPU内存占用)
-        #[quat(4), ang_vel(3), lin_acc(3), dof_pos(18), dof_vel(18), dof_torque(18), command(3)] 67
-        num_observations = 67
+        
         # ============================================================
-        # 【EGPO 特权观测维度说明】
-        # EGPO Runner (expert_guided_encoder_runner.py) 硬编码了维度:
-        #   - actor_obs_shape = [num_obs + 30] = [97]
-        #   - critic_obs_shape = [11*13] = [143] (高度图)
+        # 【EGPO Encoder 观测空间架构】
+        # ============================================================
+        # 本体观测 (可部署，无需特权信息)
+        num_observations = 67  # [quat(4), ang_vel(3), lin_acc(3), dof_pos(18), dof_vel(18), torque(18), cmd(3)]
+        
+        # 特权观测 (训练时可用，部署时需估计)
+        # EGPO中特权观测 = obs_vgf(30) + obs_terrain(143) = 173维
+        # 但这个值在Runner中未使用，Runner硬编码了实际维度
+        num_privileged_obs = 173  # obs_vgf(30) + obs_terrain(143)
+        
+        # 观测处理流程:
+        # 1. obs_buf (67)      → Actor/Critic MLP输入的一部分
+        # 2. obs_vgf_buf (30)  → 拼接到obs_buf: [obs + vgf] = 97维
+        #    [base_lin_vel(3) + projected_gravity(3) + rb_contact_force(24)]
+        # 3. obs_terrain_buf (143) → CNN Encoder: 143 → 32维latent
+        #    [Raycast高度图: 11×13点]
         # 
-        # 特权观测结构:
-        #   obs_vgf_buf = [lin_vel(3) + gravity(3) + contact_force(24)] = 30维
-        #   obs_terrain_buf = [11×13 Raycast高度图] = 143维
-        #
-        # 注意: 此值在 EGPO Runner 中实际未被使用（已被硬编码覆盖）
-        #       设为30是为了与 obs_vgf_buf 维度保持一致，便于理解
+        # 最终网络输入: [obs(67) + vgf(30) + terrain_latent(32)] = 129维
+        # 
+        # Runner硬编码维度 (expert_guided_encoder_runner.py L51):
+        #   actor_obs_shape = [num_obs + 30] = [97]  # obs拼接层
+        #   critic_obs_shape = [11*13] = [143]       # terrain编码器输入
         # ============================================================
-        num_privileged_obs = 30  # obs_vgf_buf 维度 (EGPO Runner中未直接使用)
-        # num_privileged_obs = None
+        
         num_actions = 18
         episode_length_s=10
         env_spacing=2.0

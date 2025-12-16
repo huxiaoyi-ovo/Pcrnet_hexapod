@@ -69,18 +69,63 @@ class EGPOEncoder:
         self.actor_critic.train()
 
     def encode_obs(self,obs,obs_vgf,obs_terrain):
+        """EGPO Encoder核心: 观测编码与特权信息处理
+        
+        ============================================================
+        Phase 1: 训练阶段 (当前实现)
+        ============================================================
+        
+        输入:
+        - obs (N, 67): 本体观测，可部署
+        - obs_vgf (N, 30): 特权物理观测，仿真器真值
+        - obs_terrain (N, 143): 特权地形观测，Raycast真值
+        
+        处理流程:
+        1. obs_splice = concat([obs, obs_vgf]) → (N, 97)
+           - 拼接本体和物理特权观测
+           
+        2. obs_terrain_latent = CNN_encoder(obs_terrain) → (N, 32)
+           - 地形高度图编码为latent
+           
+        3. network_input = concat([obs_splice, obs_terrain_latent]) → (N, 129)
+           - 最终输入到Actor/Critic
+        
+        ============================================================
+        Phase 2/3: 部署阶段 (未来实现)
+        ============================================================
+        
+        1. obs_vgf_estimates = Estimator(obs) → (N, 30)
+           - MLP估计器: 67 → 30
+           - 从本体观测估计物理特权信息
+           
+        2. obs_terrain_lstm_latent = LSTM_encode(obs_hist, mask) → (N, 32)
+           - 从历史观测(67+30)×20步估计地形latent
+           - 替代CNN编码的地形特征
+        
+        当前TODO:
+        - 保持真值拼接，验证Phase 1训练
+        - Phase 2再切换到估计器模式
+        ============================================================
+        """
         self.transition.obs_terrain = obs_terrain.detach()
 
-
+        # ============================================================
+        # Phase 1: 真值拼接 (训练阶段)
+        # ============================================================
         #TODO 先采用真值拼接，等estimator完成训练后再修改
         # obs_vgf_estimates = self.actor_critic.actor_obs_priv_estimator(obs)
-        obs_splice = torch.cat([obs,obs_vgf],dim=-1)
+        obs_splice = torch.cat([obs,obs_vgf],dim=-1)  # (N, 67+30=97)
+        
+        # 更新历史观测buffer (为Phase 2的LSTM准备)
         self.storage.update_obs_hist(obs_splice)
         # obs_hist, mask = self.storage.get_current_obs_hist()
         # obs_terrain_lstm_latent = self.actor_critic.LSTM_encode(obs_hist, mask)
-        #对观测部分进行编码或者估算
-        obs_terrain_latent = self.actor_critic.encode_terrain(obs_terrain)
-        #TODO 这里先使真值，等lstm encoder训练完后再替代
+        
+        # ============================================================
+        # 地形编码: CNN Encoder
+        # ============================================================
+        obs_terrain_latent = self.actor_critic.encode_terrain(obs_terrain)  # (N, 143) → (N, 32)
+        #TODO 这里先使用CNN真值编码，等lstm encoder训练完后再替代
 
         #测试，观察历史观测的划分正确与否
         #针对
@@ -91,16 +136,49 @@ class EGPOEncoder:
         return obs_splice, obs_terrain_latent
 
     def act(self, obs_splice,obs_terrain_latent, expert_actions, it):
+        """EGPO动作选择: 专家引导线性衰减
         
+        ============================================================
+        专家引导策略 (Expert Guidance)
+        ============================================================
+        
+        混合公式:
+        action = α_t × expert_action + (1-α_t) × agent_action
+        
+        衰减调度:
+        α_t = max(0, 1 - it / expert_interface_iter)
+        - it=0: α=1.0 (纯专家控制)
+        - it=200: α=0.0 (纯学习策略)
+        - 线性过渡，平滑交接
+        
+        作用:
+        1. 引导探索: 前期专家提供高质量轨迹
+        2. BC Loss: 行为克隆损失拉近策略和专家
+        3. 稳定训练: 避免初期随机策略失控
+        
+        输入:
+        - obs_splice (N, 97): 本体+物理特权观测
+        - obs_terrain_latent (N, 32): 地形编码特征
+        - expert_actions (N, 18): 专家动作 (MPC/IK)
+        - it: 当前训练迭代数
+        
+        输出:
+        - self.transition.actions (N, 18): 混合动作
+        ============================================================
+        """
         self.transition.obs = obs_splice.detach()
         self.transition.expert_actions = expert_actions.detach()
-        agent_actions = self.actor_critic.act(obs_splice,obs_terrain_latent).detach() #
+        
+        # Agent策略输出
+        agent_actions = self.actor_critic.act(obs_splice,obs_terrain_latent).detach()
 
         # self.transition.obs_terrain_latent = obs_terrain_latent.detach()
-        #TODO 需要使用专家混合插值计算动作
-
-        alpha_t=1.0-min(float(it)/self.expert_interface_iter,1.0)
-        self.transition.actions = alpha_t*expert_actions.detach() + (1-alpha_t)*agent_actions.detach()
+        
+        # ============================================================
+        # 专家引导混合: 线性衰减
+        # ============================================================
+        alpha_t = 1.0 - min(float(it) / self.expert_interface_iter, 1.0)
+        self.transition.actions = alpha_t * expert_actions.detach() + (1 - alpha_t) * agent_actions.detach()
 
 
 

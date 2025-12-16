@@ -1,4 +1,31 @@
-#与on policy runner 类似，不过env会提供额外的expert cation作为初期训练的引导
+"""
+================================================================================
+EGPO Encoder Runner - 专家引导编码器强化学习训练器
+================================================================================
+
+核心功能:
+1. 专家引导: 前200次迭代使用专家动作线性衰减混合
+2. 观测编码: 处理分离的obs(67), vgf(30), terrain(143)观测结构
+3. 特权训练: CNN编码地形，为Phase 2的Estimator/LSTM准备
+
+与OnPolicyRunner的区别:
+- 支持分离观测结构(obs_dict)
+- 集成专家动作混合(alpha_t衰减)
+- 使用EGPOEncoder算法(BC loss + PPO loss)
+- 初始化存储时硬编码维度: actor_obs=[97], critic_obs=[143]
+
+训练流程:
+1. env.reset_separate() → {obs, vgf, terrain}
+2. encode_obs() → obs_splice(97), terrain_latent(32)
+3. act() → mixed_action = α×expert + (1-α)×agent
+4. env.step() → reward, next_obs
+5. update() → PPO + BC Loss
+
+适用场景:
+- Phase 1: EGPO训练，深度相机关闭，Raycast启用
+- 后续Phase 2/3需要切换到Estimator/LSTM模式
+================================================================================
+"""
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
 from rsl_rl.modules import ActorCritic, ActorCriticEncoder
 from rsl_rl.algorithms import EGPO, EGPOEncoder
@@ -46,7 +73,16 @@ class EGPOEncoderRunner(OnPolicyRunner):
         # self.expert.eval()
         # expert的干预时间
 
-        # init storage and model
+        # ============================================================
+        # 初始化存储: 硬编码维度 (EGPO Encoder架构)
+        # ============================================================
+        # actor_obs_shape = [67+30] = [97]  - obs + vgf拼接
+        # critic_obs_shape = [11×13] = [143] - Raycast地形高度图
+        # 
+        # 注意: 这里硬编码了维度，不使用env.num_privileged_obs
+        # 因为EGPO架构对actor和critic输入有特殊要求:
+        # - Actor: 需要obs_splice(97) + terrain_latent(32) = 129
+        # - Critic: CNN直接处理11×13地形图 → 32维latent
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs+30], [11*13], [self.env.num_actions])
         # self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions])
 

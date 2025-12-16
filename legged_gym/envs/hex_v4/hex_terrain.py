@@ -212,8 +212,69 @@ class HexTerrain(LeggedRobot):
         # 相机创建移到create_sim中
 
     def _init_navigation_buffers(self):
-        """初始化导航相关的观测buffers"""
-        print("[Nav] Initializing navigation observation buffers...")
+        """初始化导航和EGPO观测buffers
+        
+        ============================================================
+        EGPO Encoder 观测架构 (完整说明)
+        ============================================================
+        
+        观测空间组成:
+        1. obs_buf (67维) - 本体观测，可部署
+           [quat(4), ang_vel(3), lin_acc(3), dof_pos(18), 
+            dof_vel(18), torque(18), command(3)]
+        
+        2. obs_vgf_buf (30维) - 特权物理观测
+           [base_lin_vel(3), projected_gravity(3), rb_contact_force(24)]
+           训练: 真值，部署: Estimator估计 (MLP: 67→30)
+        
+        3. obs_terrain_buf (143维) - 特权地形观测
+           [Raycast高度图: 11×13=143点]
+           训练: Raycast采样，部署: LSTM估计 (历史obs→32)
+        
+        数据流向:
+        ┌─────────────────────────────────────────────────────────┐
+        │ 训练阶段 (Training)                                      │
+        ├─────────────────────────────────────────────────────────┤
+        │ obs(67) + obs_vgf(30) → [97] ──→ Storage → Actor/Critic│
+        │ obs_terrain(143) → CNN Encoder → [32 latent] ──→ Concat │
+        │ 最终输入: [67+30+32] = 129维                             │
+        └─────────────────────────────────────────────────────────┘
+        
+        ┌─────────────────────────────────────────────────────────┐
+        │ 部署阶段 (Deployment)                                    │
+        ├─────────────────────────────────────────────────────────┤
+        │ obs(67) → Estimator → obs_vgf_est(30)                   │
+        │ obs_history(67+30)×20 → LSTM → terrain_latent_est(32)  │
+        │ 最终输入: [67+30+32] = 129维 (无需Raycast)              │
+        └─────────────────────────────────────────────────────────┘
+        
+        Runner硬编码 (expert_guided_encoder_runner.py:51):
+          actor_obs_shape = [97]   # obs + vgf 拼接层
+          critic_obs_shape = [143] # terrain for CNN encoder
+        """
+        print("[EGPO] Initializing observation buffers...")
+        
+        # ============================================================
+        # 特权观测 Buffer 1: VGF (Velocity-Gravity-Force)
+        # ============================================================
+        self.obs_vgf_buf = torch.zeros(
+            self.num_envs,
+            30,  # [lin_vel(3) + gravity(3) + contact_force(24)]
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+        
+        # ============================================================
+        # 特权观测 Buffer 2: Terrain (Raycast Height Map)
+        # ============================================================
+        self.obs_terrain_buf = torch.zeros(
+            self.num_envs,
+            143,  # [11×13 height map]
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
         
         # 机器人状态buffer（高层用的精简版）
         self.robot_state_buf = torch.zeros(
@@ -629,8 +690,9 @@ class HexTerrain(LeggedRobot):
         # return clipped obs, clipped states (None), rewards, dones and infos
         clip_obs = self.cfg.normalization.clip_observations
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
-        if self.privileged_obs_buf is not None:
-            self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+        # EGPO: 分离观测结构，clip各自的buffer而不是privileged_obs_buf
+        self.obs_vgf_buf = torch.clip(self.obs_vgf_buf, -clip_obs, clip_obs)
+        self.obs_terrain_buf = torch.clip(self.obs_terrain_buf, -clip_obs, clip_obs)
 
         #  更新深度图 (P1-Depth: 拆分管线，固定shape)
         if self.enable_camera and (self.common_step_counter % self.camera_cfg.capture_interval == 0):
@@ -1030,17 +1092,54 @@ class HexTerrain(LeggedRobot):
 
 
     def compute_observations_separated(self):
-        """计算观测（本体+特权+地形）
+        """计算EGPO Encoder的分离式观测
+        
+        ============================================================
+        EGPO观测计算 - 核心函数
+        ============================================================
+        
+        输出三个独立的观测buffer:
+        
+        1. self.obs_buf (67维) - 本体观测
+           [quat(4), ang_vel(3), lin_acc(3), dof_pos(18), 
+            dof_vel(18), torque(18), command(3)]
+           - 可在实际机器人上获取
+           - 用于: Actor/Critic输入的一部分
+        
+        2. self.obs_vgf_buf (30维) - 特权物理观测
+           [base_lin_vel(3), projected_gravity(3), rb_contact_force(24)]
+           - 训练: 仿真器提供真值
+           - 部署: Estimator从obs_buf估计
+           - 用于: 拼接到obs_buf形成97维输入
+        
+        3. self.obs_terrain_buf (143维) - 特权地形观测
+           [Raycast高度图: 11×13点]
+           - 训练: Raycast直接采样地形
+           - 部署: LSTM从历史观测估计
+           - 用于: CNN Encoder提取32维terrain_latent
+        
+        数据流向Runner:
+        obs_dict = {
+            'proprioception': obs_buf (67),
+            'privileged': obs_vgf_buf (30),
+            'terrain': obs_terrain_buf (143)
+        }
+        
+        Runner处理:
+        obs_splice = concat([obs, obs_vgf]) = 97维
+        terrain_latent = CNN_encoder(obs_terrain) = 32维
+        network_input = concat([obs_splice, terrain_latent]) = 129维
         
         【格式约定】:
-        - self.base_quat: [x,y,z,w] 格式直接输出到观测
-        - 策略网络需知晓四元数顺序以正确解析方向
+        - self.base_quat: [x,y,z,w] 格式（Isaac Gym标准）
         
-        【Auto-reset 保证】:
-        - reset_idx() 后必须调用此函数刷新 obs_buf
-        - 确保返回的观测对应当前环境状态（特别是 s0）
+        【Auto-reset保证】:
+        - reset_idx()后必须调用此函数刷新观测
+        ============================================================
         """
-        #返回分为 obs(机器人本体可以获取的观测), obs_vgf(特权信息， 基座线速度，重力加速度，足端z方向力), obs_terrain(地形高度信息)
+        # ============================================================
+        # 计算地形相对高度 (143维)
+        # ============================================================
         height=torch.clip((self.root_states[:,2].unsqueeze(1)-0.025-self.measured_heights),min=-1.0,max=1.0)
 
         # Step A-P2: 智能指令切换（解决Phase 2冲突）
@@ -1254,14 +1353,40 @@ class HexTerrain(LeggedRobot):
 
 
     def _get_noise_scale_vec(self, cfg):
+        """生成EGPO Encoder的噪声向量
+        
+        ============================================================
+        EGPO噪声配置 - 分离结构
+        ============================================================
+        
+        噪声向量维度: 240 = obs(67) + vgf(30) + terrain(143)
+        
+        结构:
+        [0:67]   - obs_buf噪声: [quat(4), ang_vel(3), lin_acc(3), 
+                                  dof_pos(18), dof_vel(18), torque(18), 
+                                  command(3)]
+        [67:97]  - obs_vgf_buf噪声: [lin_vel(3), gravity(3), 
+                                      contact_force(24)]
+        [97:240] - obs_terrain_buf噪声: [height_measurements(143)]
+        
+        Domain Randomization:
+        - obs: 传感器噪声模拟（IMU、编码器）
+        - vgf: 物理量估计误差（速度、接触力）
+        - terrain: 地形感知噪声（高度图误差）
+        
+        训练效果:
+        - 提高策略鲁棒性
+        - 帮助Estimator和LSTM学习噪声抑制
+        - 平滑sim-to-real转换
+        ============================================================
+        """
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
         
-        if self.privileged_obs_buf is None:
-            noise_vec = torch.zeros_like(self.obs_buf[0])
-        else:
-            noise_vec = torch.zeros_like(self.privileged_obs_buf[0])
+        # EGPO使用分离的观测结构: obs(67) + vgf(30) + terrain(143) = 240
+        # 创建完整的噪声向量，而不是依赖 privileged_obs_buf 的大小
+        noise_vec = torch.zeros(67 + 30 + 143, dtype=torch.float, device=self.device, requires_grad=False)
 
         print("---------->noise_vec.shape=",noise_vec.shape)
 
@@ -1273,7 +1398,6 @@ class HexTerrain(LeggedRobot):
         noise_vec[28:46] = noise_level * noise_scales.dof_vel * self.obs_scales.dof_vel
         noise_vec[46:64] = noise_level * noise_scales.dof_torque * self.obs_scales.dof_torque
         noise_vec[64:67] = 0.0 #command
- 
         #地形信息actor也可以拿到
         # noise_vec[75:] = noise_level * noise_scales.height_measurements * self.obs_scales.height_measurements
         
