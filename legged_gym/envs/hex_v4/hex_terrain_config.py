@@ -7,8 +7,20 @@ class HexTerrainCfg(LeggedRobotCfg):
         num_envs = 8 #环境数量(降低以减少GPU内存占用)
         #[quat(4), ang_vel(3), lin_acc(3), dof_pos(18), dof_vel(18), dof_torque(18), command(3)] 67
         num_observations = 67
-        #[lin_vel(3), gravity(3), contact_force(24)] = 30维 obs_vgf_buf
-        num_privileged_obs = 240
+        # ============================================================
+        # 【EGPO 特权观测维度说明】
+        # EGPO Runner (expert_guided_encoder_runner.py) 硬编码了维度:
+        #   - actor_obs_shape = [num_obs + 30] = [97]
+        #   - critic_obs_shape = [11*13] = [143] (高度图)
+        # 
+        # 特权观测结构:
+        #   obs_vgf_buf = [lin_vel(3) + gravity(3) + contact_force(24)] = 30维
+        #   obs_terrain_buf = [11×13 Raycast高度图] = 143维
+        #
+        # 注意: 此值在 EGPO Runner 中实际未被使用（已被硬编码覆盖）
+        #       设为30是为了与 obs_vgf_buf 维度保持一致，便于理解
+        # ============================================================
+        num_privileged_obs = 30  # obs_vgf_buf 维度 (EGPO Runner中未直接使用)
         # num_privileged_obs = None
         num_actions = 18
         episode_length_s=10
@@ -17,8 +29,11 @@ class HexTerrainCfg(LeggedRobotCfg):
     class sensor:
         '''传感器相关配置'''
         class depth_camera:
-            """深度相机配置"""
-            enable = True  # 是否启用深度相机
+            """深度相机配置
+            Phase 1 (EGPO): 使用Raycast高度图，不需要深度相机
+            Phase 2/3 (Teacher-Student): 需要深度相机用于导航决策
+            """
+            enable = False  # Phase 1: 关闭深度相机以节省GPU资源
             width = 128    #    图像宽度
             height = 128   #
             horizontal_fov = 87.0  # 水平视场角（度）
