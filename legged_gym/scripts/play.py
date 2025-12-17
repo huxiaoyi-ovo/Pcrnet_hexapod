@@ -41,6 +41,21 @@ import torch
 
 
 def play(args):
+    # 使用全局变量，如果未定义则使用默认值
+    global EXPORT_POLICY, RECORD_FRAMES, MOVE_CAMERA
+    try:
+        EXPORT_POLICY
+    except NameError:
+        EXPORT_POLICY = False
+    try:
+        RECORD_FRAMES
+    except NameError:
+        RECORD_FRAMES = False
+    try:
+        MOVE_CAMERA
+    except NameError:
+        MOVE_CAMERA = False
+    
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
@@ -55,8 +70,14 @@ def play(args):
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     
     # 检查是否是EGPO架构（需要分离观测）
-    use_separated_obs = hasattr(env, 'get_observations_separated') and \
-                        train_cfg["runner"].get("algorithm_class_name", "") == "EGPOEncoder"
+    has_separated_method = hasattr(env, 'get_observations_separated')
+    algorithm_name = getattr(train_cfg.runner, "algorithm_class_name", "")
+    use_separated_obs = has_separated_method and algorithm_name == "EGPOEncoder"
+    
+    print(f"[Play] Architecture detection:")
+    print(f"  - has_separated_method: {has_separated_method}")
+    print(f"  - algorithm_class_name: {algorithm_name}")
+    print(f"  - use_separated_obs: {use_separated_obs}")
     
     if use_separated_obs:
         obs, obs_vgf, obs_terrain = env.reset_separate()
@@ -69,12 +90,14 @@ def play(args):
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     
     # 根据架构类型获取不同的inference方法
+    policy = None  # 初始化为None，避免未定义错误
     if use_separated_obs:
         # EGPO架构: 需要encode_obs获取terrain_latent
         ppo_runner.alg.actor_critic.eval()
-        print("[Play] Using EGPO Encoder architecture with separated observations")
+        print("[Play] ✓ Using EGPO Encoder architecture with separated observations")
     else:
         policy = ppo_runner.get_inference_policy(device=env.device)
+        print("[Play] ✓ Using standard policy inference")
     
     
     # export policy as a jit module (used to run it from C++)
