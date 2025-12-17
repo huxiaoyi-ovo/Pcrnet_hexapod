@@ -53,14 +53,28 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    # _,_,_ = env.reset_separate()
-    _,_ = env.reset()
-    obs = env.get_observations()
-    # obs,obs_vgf,obs_terrain = env.get_observations_separated()
+    
+    # 检查是否是EGPO架构（需要分离观测）
+    use_separated_obs = hasattr(env, 'get_observations_separated') and \
+                        train_cfg["runner"].get("algorithm_class_name", "") == "EGPOEncoder"
+    
+    if use_separated_obs:
+        obs, obs_vgf, obs_terrain = env.reset_separate()
+    else:
+        _, _ = env.reset()
+        obs = env.get_observations()
+    
     # load policy
     train_cfg.runner.resume = True
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg) #其中包含env.reset()
-    policy = ppo_runner.get_inference_policy(device=env.device)
+    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+    
+    # 根据架构类型获取不同的inference方法
+    if use_separated_obs:
+        # EGPO架构: 需要encode_obs获取terrain_latent
+        ppo_runner.alg.actor_critic.eval()
+        print("[Play] Using EGPO Encoder architecture with separated observations")
+    else:
+        policy = ppo_runner.get_inference_policy(device=env.device)
     
     
     # export policy as a jit module (used to run it from C++)
@@ -86,7 +100,12 @@ def play(args):
 
     for i in range(10*int(env.max_episode_length)):
         with torch.inference_mode():
-            actions = policy(obs)
+            if use_separated_obs:
+                # EGPO架构: 使用encode_obs获取terrain_latent，然后调用act_inference
+                obs_splice, obs_terrain_latent = ppo_runner.alg.encode_obs(obs, obs_vgf, obs_terrain)
+                actions = ppo_runner.alg.actor_critic.act_inference(obs_splice, obs_terrain_latent)
+            else:
+                actions = policy(obs)
             # actions,obs_vgf_estimate,obs_terrain_lstm_estimates,obs_terrain_lstm = ppo_runner.alg.act_inference(obs,obs_terrain)
             #计算估计误差
             # v_err = torch.norm( (obs_vgf_estimate[:,:3]-obs_vgf[:,:3])/env.obs_scales.lin_vel, dim=1 ).mean()
@@ -107,7 +126,10 @@ def play(args):
             # obs,obs_vgf,obs_terrain,rew,dones,infos=env.step_separate(actions)
             # ppo_runner.alg.process_inference_env_step(dones)
 
-            obs, _, rews, dones, infos = env.step(actions.detach())
+            if use_separated_obs:
+                obs, obs_vgf, obs_terrain, rews, dones, infos = env.step_separate(actions.detach())
+            else:
+                obs, _, rews, dones, infos = env.step(actions.detach())
 
 
             if RECORD_FRAMES:

@@ -809,9 +809,11 @@ class HexTerrain(LeggedRobot):
 
         if getattr(self.nav_cfg, "enable_nav_reward", False):
             # === [P0.2 数据一致性] Phase 2: Navigation Reward 分支 ===
-            # 注意：self.commands在此分支中仅用于日志对比诊断(raw vs effective)
-            # 所有实际逻辑必须使用 _get_effective_commands() 获取统一指令！
-            # 禁止在reward/obs/expert之外的地方直接使用 self.commands[:,:3]
+            # 【GPT澄清】P0.2的真正含义：
+            # - 目标：确保 policy/expert 对齐路径使用同源指令
+            # - 必须统一：obs command、expert command、BC对齐用的command
+            # - 无需统一：Phase 2的reward已被override，不依赖commands
+            # - 当前设计：self.commands仅用于日志诊断(raw vs effective对比)
             
             # [Fix] Real Intensity Calculation - Prevent Reward Hacking
             # Use actual physics speed (body frame), not terrain difficulty
@@ -909,8 +911,9 @@ class HexTerrain(LeggedRobot):
             self.extras["command_omega_mean"] = effective_cmd[:, 2].mean().item()
             
             # [P0.2 数据一致性] 诊断日志：记录raw commands vs effective commands
-            # 作用：监控Phase 2中导航指令与基础指令的差异（用于调试）
-            # 注意：这是self.commands在Phase 2中的**唯一**合法用途
+            # 【GPT澄清】这是合理的诊断功能，用于监控Phase 2中goal指引的效果
+            # self.commands = 基础随机指令，effective_cmd = goal导出的导航指令
+            # 对比两者差异有助于理解导航策略是否正常工作
             self.extras["raw_cmd_vx_mean"] = self.commands[:, 0].mean().item()
             self.extras["raw_cmd_vy_mean"] = self.commands[:, 1].mean().item()
             self.extras["raw_cmd_omega_mean"] = self.commands[:, 2].mean().item()
@@ -1088,8 +1091,11 @@ class HexTerrain(LeggedRobot):
                 self.gym.clear_lines(self.viewer)            
         
             # ========== 关键重置 (修复遗漏的buffer重置) ==========
-            # 1. 重置速度历史 - 避免 base_ang_acc 异常尖峰导致 camera_stability 崩溃
-            self.last_root_vel[env_ids] = 0.
+            # 1. 【GPT-Fix】重置速度历史 - 同步到当前速度避免差分尖峰
+            # 修复前: last_root_vel[env_ids] = 0. → 导致episode第一步产生巨大加速度尖峰
+            # 修复后: 同步到reset后的实际速度，避免假尖峰污染camera_quality
+            self.last_root_vel[env_ids, :3] = self.root_states[env_ids, 7:10]   # lin_vel
+            self.last_root_vel[env_ids, 3:] = self.root_states[env_ids, 10:13]  # ang_vel
             
             # 2. 重置接触历史 - 避免 contact_filt 使用旧环境数据
             self.last_contacts[env_ids] = 0.
@@ -1362,8 +1368,10 @@ class HexTerrain(LeggedRobot):
             return
 
         # === Phase 1: 未启用导航奖励，沿用旧逻辑（但统一为相对坐标） ===
-        # [P0.2 数据一致性] 此分支中self.commands是Single Source of Truth
-        # Phase 1不需要goal指引，直接使用随机采样的commands作为速度目标
+        # [P0.2 数据一致性] 【GPT澄清】此分支中self.commands是正确的指令来源
+        # - Phase 1: self.commands = 真实指令（基类随机采样+curriculum）
+        # - tracking reward应该跟踪self.commands（不是effective_commands）
+        # - obs/expert使用effective_commands只是为了Phase 2一致性（Phase 1中两者相同）
         if self.nav_cfg.goal_mode == 'velocity_based':
             goal_distance = self.nav_cfg.goal_distance
             vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
@@ -1831,6 +1839,10 @@ class HexTerrain(LeggedRobot):
         - Wobble (晃动): 惩罚 base_ang_vel (pitch/roll)
         - Bobbing (颠簸): 惩罚 base_lin_acc (z分量)
         
+        【GPT-Fix】:
+        - 对各项penalty加clamp，防止偶发尖峰污染整个episode的mean
+        - 添加诊断日志，用于排查数值问题
+        
         Returns:
             reward: (N,) 稳定性奖励，使用exp函数确保平滑梯度
         """
@@ -1843,14 +1855,41 @@ class HexTerrain(LeggedRobot):
         # 3. 垂直颠簸（影响深度估计）- z轴线加速度
         z_bobbing = torch.square(self.base_lin_acc[:, 2])
         
+        # 【GPT-Fix】对尖峰做鲁棒化：clamp到99%分位数附近
+        # 这些cap值基于正常六足运动的物理约束，防止偶发尖峰污染curriculum
+        jitter_cap = 50.0   # (rad/s²)² 上限
+        wobble_cap = 4.0    # (rad/s)² 上限
+        bobbing_cap = 100.0 # (m/s²)² 上限（~10g加速度）
+        
+        ang_jitter = torch.clamp(ang_jitter, 0, jitter_cap)
+        ang_wobble = torch.clamp(ang_wobble, 0, wobble_cap)
+        z_bobbing = torch.clamp(z_bobbing, 0, bobbing_cap)
+        
         # 组合惩罚（使用可配置权重）
         jitter_w = getattr(self.cfg.rewards.scales, 'camera_jitter_weight', 0.05)
         wobble_w = getattr(self.cfg.rewards.scales, 'camera_wobble_weight', 0.5)
         bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
         penalty = ang_jitter * jitter_w + ang_wobble * wobble_w + z_bobbing * bobbing_w
         
+        # 【诊断日志】每500步打印一次env0的诊断信息
+        if self.common_step_counter % 500 == 0 and hasattr(self, 'extras'):
+            self.extras['debug_ang_jitter_mean'] = ang_jitter.mean().item()
+            self.extras['debug_ang_wobble_mean'] = ang_wobble.mean().item()
+            self.extras['debug_z_bobbing_mean'] = z_bobbing.mean().item()
+            self.extras['debug_penalty_mean'] = penalty.mean().item()
+            self.extras['debug_base_ang_acc_xy_std'] = self.base_ang_acc[:, :2].std().item()
+            self.extras['debug_base_lin_acc_z_std'] = self.base_lin_acc[:, 2].std().item()
+        
         # 使用exp确保平滑梯度和正向奖励
-        return torch.exp(-penalty)
+        camera_quality = torch.exp(-penalty)
+        
+        # 【诊断日志】记录最终quality分布
+        if self.common_step_counter % 500 == 0 and hasattr(self, 'extras'):
+            self.extras['debug_camera_quality_mean'] = camera_quality.mean().item()
+            self.extras['debug_camera_quality_min'] = camera_quality.min().item()
+            self.extras['debug_camera_quality_max'] = camera_quality.max().item()
+        
+        return camera_quality
         
 
 if __name__ == '__main__':
