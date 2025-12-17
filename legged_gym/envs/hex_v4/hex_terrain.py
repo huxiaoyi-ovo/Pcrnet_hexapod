@@ -1006,15 +1006,20 @@ class HexTerrain(LeggedRobot):
             if self.viewer and self.foot_traj_viz:
                 self.gym.clear_lines(self.viewer)            
         
-            # print("reset ids=",env_ids)
-            # print("resample commands\n",self.commands)
-        # if len(env_ids) !=0:
-            # print("------------------->reset env_ids=",env_ids)
-
-        #需要额外重设上一次的基座线速度，设置为0，设置上一次碰撞，设置为0
-        # self.last_root_vel[env_ids] = 0.
-        # self.last_contacts[env_ids] = 0.
-        #TODO 基类环境中，没有重置上一次碰撞，原因？
+            # ========== 关键重置 (修复遗漏的buffer重置) ==========
+            # 1. 重置速度历史 - 避免 base_ang_acc 异常尖峰导致 camera_stability 崩溃
+            self.last_root_vel[env_ids] = 0.
+            
+            # 2. 重置接触历史 - 避免 contact_filt 使用旧环境数据
+            self.last_contacts[env_ids] = 0.
+            
+            # 3. 重置角加速度 - 确保 camera_stability 奖励正常
+            self.base_ang_acc[env_ids] = 0.
+            
+            # 4. 重置摆动相位状态 - 确保 swing 奖励正常
+            self.reach_swing_init[env_ids] = False
+            self.reach_rew_time[env_ids] = 0.0
+            # =====================================================
 
         # 重置深度图为零（避免使用旧数据）
         # P1-Depth: 清零两个buffer，shape固定无需None检查
@@ -1607,12 +1612,22 @@ class HexTerrain(LeggedRobot):
 
     
     def _reward_stand_still(self):
-        # print("default_dof_pos\n",self.default_dof_pos)
-        # print("self.dof_pos\n",self.dof_pos[0])
-        # print("err=",torch.abs(self.dof_pos-self.default_dof_pos)[0])
-        # print("err sum=",torch.sum(torch.abs(self.dof_pos-self.default_dof_pos),dim=1)[0])
-        return torch.sum(torch.abs(self.dof_pos-self.default_dof_pos),dim=1)\
-            *(torch.norm(self.commands[:,:3],dim=1)<0.2)
+        """零指令时惩罚基座移动（修复版）
+        
+        问题诊断 (2025-12-17):
+        原实现惩罚关节偏离 → 策略学会"永远移动"避免关节误差
+        导致 stand_still: -0.76，Mean Reward崩溃到0.0
+        
+        正确实现: 直接惩罚基座速度
+        """
+        # 基座水平速度 (x, y)
+        base_speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
+        
+        # 零指令判断（更严格的阈值）
+        is_zero_command = (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        
+        # 返回速度惩罚（零指令时生效）
+        return base_speed * is_zero_command
 
     def _reward_base_height(self):
         #修改成正的奖励，越靠近目标值，奖励越高

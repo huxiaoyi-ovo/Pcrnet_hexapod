@@ -336,7 +336,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             collision = -1.0            # 非足端接触
             action_rate = -0.05         # 平滑动作变化
             dof_acc = -3.0e-7           # 关节加速度惩罚
-            stand_still = -2.0          # 零指令时保持静止
+            stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚, 2025-12-17)
             
             # === 能耗（可选）===
             CoT = 0.0                   # 运输成本（已禁用）
@@ -424,5 +424,10 @@ class HexTerrainCfgPPO(LeggedRobotCfgPPO):
         max_iterations = 2000
         run_name=''
         experiment_name="hex_terrain"
+        
+        # [Optimization] Lower learning rate for complex EGPO+Encoder architecture
+        # Reduced from default 1e-3 to 5e-4 for improved training stability
+        learning_rate = 5e-4
+        
         load_run=-1
         expert_path = f"{LEGGED_GYM_ROOT_DIR}/resources/expert_data/bc_actor2.pth"

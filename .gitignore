@@ -27,6 +27,8 @@ build/
 # 4. 个人配置 (VS Code / PyCharm)
 .vscode/
 .idea/
+*.md 
+*.pdf
 
 # 5. 系统垃圾
 .DS_Store
