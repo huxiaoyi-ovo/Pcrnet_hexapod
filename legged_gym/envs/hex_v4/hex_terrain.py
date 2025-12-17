@@ -162,6 +162,25 @@ class HexTerrain(LeggedRobot):
 
 
 
+    def _compute_collision_mask(self) -> torch.Tensor:
+        """统一的collision事件判定
+        
+        【P0.4封装】:
+        - 使用统一阈值 cfg.terrain.collision_force_threshold
+        - 只检测非足端碰撞 (penalised_contact_indices)
+        - 足端大力不触发collision事件（这是正常运动）
+        
+        Returns:
+            collision_mask: (N,) bool - 发生碰撞为True
+        """
+        threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
+        # 只检测非足端刚体的碰撞力
+        rb_force = torch.norm(
+            self.contact_forces[:, self.penalised_contact_indices, :], 
+            dim=-1
+        )
+        return (rb_force > threshold).any(dim=1)
+    
     def _yaw_from_quat(self, quat: torch.Tensor) -> torch.Tensor:
         """从四元数提取yaw角度
         
@@ -289,6 +308,16 @@ class HexTerrain(LeggedRobot):
         self.goal_buf = torch.zeros(
             self.num_envs,
             2,  # [goal_x, goal_y] 相对位置
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+        
+        # === P0.3: Raw统计buffer (不受scale/dt影响的原始质量指标) ===
+        # [camera_stability_sum, base_height_sum, collision_count, distance_traveled]
+        self.episode_raw_stats = torch.zeros(
+            self.num_envs,
+            4,
             dtype=torch.float32,
             device=self.device,
             requires_grad=False
@@ -779,16 +808,19 @@ class HexTerrain(LeggedRobot):
         self.check_termination()
 
         if getattr(self.nav_cfg, "enable_nav_reward", False):
+            # === [P0.2 数据一致性] Phase 2: Navigation Reward 分支 ===
+            # 注意：self.commands在此分支中仅用于日志对比诊断(raw vs effective)
+            # 所有实际逻辑必须使用 _get_effective_commands() 获取统一指令！
+            # 禁止在reward/obs/expert之外的地方直接使用 self.commands[:,:3]
+            
             # [Fix] Real Intensity Calculation - Prevent Reward Hacking
             # Use actual physics speed (body frame), not terrain difficulty
             speed_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)  # (N,)
             max_speed = getattr(self.nav_cfg, 'max_speed_for_intensity', 1.0)
             self.intensity_buf = torch.clamp(speed_xy / max_speed, 0.0, 1.0)
             
-            # build collision mask for navigation 
-            # 用 penalised_contact_indices 作为撞击判据
-            rb_force = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1)
-            collision_mask = (rb_force > 1.0).any(dim=1)
+            # === P0.4: Collision mask (使用封装函数) ===
+            collision_mask = self._compute_collision_mask()
 
             # terrain difficulty: use terrain level normalized to [0,1]
             # terrain_levels 在 LeggedRobot 里一般存在（课程学习用）
@@ -818,17 +850,36 @@ class HexTerrain(LeggedRobot):
             # override reward
             self.rew_buf = rew_dict["total"]
             
+            # === P0.3: 维护 Phase 2/3 raw统计（保证curriculum正常工作） ===
+            # 【GPT审查修正】raw统计不乘scale/dt，直接累加质量指标
+            with torch.no_grad():
+                # 1. camera_stability: [0,1]质量指标，每步累加
+                camera_quality = self._reward_camera_stability()  # 返回[0,1]
+                self.episode_raw_stats[:, 0] += camera_quality
+                
+                # 2. base_height: [0,1]质量指标，每步累加
+                height_quality = self._reward_base_height()  # 返回[0,1]
+                self.episode_raw_stats[:, 1] += height_quality
+                
+                # 3. collision_count: 事件计数，每次碰撞+1
+                collision_events = collision_mask.float()
+                self.episode_raw_stats[:, 2] += collision_events
+                
+                # 4. distance_traveled: 增量距离累加(米)
+                step_distance = torch.norm(robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2], dim=1)
+                self.episode_raw_stats[:, 3] += step_distance
+            
             # Phase 2/3: 可选的稳定性保持（避免导航时相机质量退化）
             # 如果配置中启用了 nav_stability_weight，额外添加 camera_stability 奖励
             if hasattr(self.cfg.rewards.scales, 'nav_stability_weight'):
                 nav_stability_weight = self.cfg.rewards.scales.nav_stability_weight
                 if nav_stability_weight > 0:
-                    # 复用 Phase 1 的 camera_stability 奖励函数
-                    camera_rew = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
-                    self.rew_buf += nav_stability_weight * camera_rew
+                    # 复用 Phase 1 的 camera_stability 奖励函数 (这里是reward shaping，可以乘scale*dt)
+                    camera_rew_shaped = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
+                    self.rew_buf += nav_stability_weight * camera_rew_shaped
                     
-                    # 记录日志
-                    self.extras["nav_rew"]["camera_stability"] = camera_rew.mean().item()
+                    # 【GPT审查修正】日志字段改名避免与raw混淆
+                    self.extras["nav_rew"]["camera_stability_shaped"] = camera_rew_shaped.mean().item()
 
             # nav termination: reached goal / timeout / collision (使用 local 坐标)
             dones_nav, successes, info_nav = self.nav_task.check_termination(
@@ -856,6 +907,13 @@ class HexTerrain(LeggedRobot):
             self.extras["command_vx_mean"] = effective_cmd[:, 0].mean().item()
             self.extras["command_vy_mean"] = effective_cmd[:, 1].mean().item()
             self.extras["command_omega_mean"] = effective_cmd[:, 2].mean().item()
+            
+            # [P0.2 数据一致性] 诊断日志：记录raw commands vs effective commands
+            # 作用：监控Phase 2中导航指令与基础指令的差异（用于调试）
+            # 注意：这是self.commands在Phase 2中的**唯一**合法用途
+            self.extras["raw_cmd_vx_mean"] = self.commands[:, 0].mean().item()
+            self.extras["raw_cmd_vy_mean"] = self.commands[:, 1].mean().item()
+            self.extras["raw_cmd_omega_mean"] = self.commands[:, 2].mean().item()
 
             # goal_buf 已经在 compute_observations_separated() -> _update_goal_buffer() 中更新
             # 无需重复更新
@@ -867,6 +925,29 @@ class HexTerrain(LeggedRobot):
         else:
             # default locomotion reward
             self.compute_reward()
+            
+            # === Phase 1: 维护 raw 统计（保证curriculum正常工作）===
+            # 注意：基类compute_reward()不维护episode_raw_stats，需要在这里补充
+            with torch.no_grad():
+                # 1. camera_stability: [0,1]质量指标
+                camera_quality = self._reward_camera_stability()
+                self.episode_raw_stats[:, 0] += camera_quality
+                
+                # 2. base_height: [0,1]质量指标
+                height_quality = self._reward_base_height()
+                self.episode_raw_stats[:, 1] += height_quality
+                
+                # 3. collision_count: 使用封装函数
+                collision_mask = self._compute_collision_mask()
+                self.episode_raw_stats[:, 2] += collision_mask.float()
+                
+                # 4. distance_traveled: 增量距离累加
+                robot_pos_local = self.root_states[:, :3] - self.env_origins
+                step_distance = torch.norm(robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2], dim=1)
+                self.episode_raw_stats[:, 3] += step_distance
+                
+                # 更新prev_robot_pos_buf用于下一步距离计算
+                self.prev_robot_pos_buf[:] = robot_pos_local
             
             # 奖励截断（防止梯度爆炸）
             if hasattr(self.cfg.rewards, 'min_reward_clip'):
@@ -1019,6 +1100,9 @@ class HexTerrain(LeggedRobot):
             # 4. 重置摆动相位状态 - 确保 swing 奖励正常
             self.reach_swing_init[env_ids] = False
             self.reach_rew_time[env_ids] = 0.0
+            
+            # 5. 【P0.3】重置 raw 统计 - 确保 curriculum 正常工作
+            self.episode_raw_stats[env_ids] = 0.0
             # =====================================================
 
         # 重置深度图为零（避免使用旧数据）
@@ -1147,25 +1231,12 @@ class HexTerrain(LeggedRobot):
         # ============================================================
         height=torch.clip((self.root_states[:,2].unsqueeze(1)-0.025-self.measured_heights),min=-1.0,max=1.0)
 
-        # Step A-P2: 智能指令切换（解决Phase 2冲突）
-        if getattr(self.nav_cfg, "enable_nav_reward", False):
-            # Phase 2: 使用从goal_buf派生的伪指令
-            goal_vec = self.goal_buf  # (N, 2) 机器人坐标系下的相对目标
-            dist = torch.norm(goal_vec, dim=1, keepdim=True)
-            target_dir = goal_vec / (dist + 1e-5)
-            
-            obs_commands = torch.zeros_like(self.commands)
-            # 覆写指令：让网络以为现在的任务就是"向目标方向走"
-            obs_commands[:, 0] = target_dir[:, 0] * 0.6  # 限制最大速度
-            obs_commands[:, 1] = target_dir[:, 1] * 0.6
-            heading_error = torch.atan2(target_dir[:, 1], target_dir[:, 0])
-            obs_commands[:, 2] = torch.clamp(heading_error * 1.5, -1.0, 1.0)
-        else:
-            # Phase 1: 使用随机指令
-            obs_commands = self.commands
+        # === P0.2: Commands\u5355\u4e00\u4e8b\u5b9e\u6e90 ===
+        # \u5f3a\u5236\u4f7f\u7528 _get_effective_commands() \u907f\u514dBC loss\u6f02\u79fb
+        obs_commands = self._get_effective_commands()
 
-        # 四元数观测: [x,y,z,w] 格式
-        # 关键：使用 obs_commands 而非 self.commands
+        # \u56db\u5143\u6570\u89c2\u6d4b: [x,y,z,w] \u683c\u5f0f
+        # \u5173\u952e\uff1a\u4f7f\u7528 obs_commands \u800c\u975e self.commands
         self.obs_buf = torch.cat([self.base_quat*self.obs_scales.quat,
                                   self.base_ang_vel*self.obs_scales.ang_vel,
                                   self.base_lin_acc*self.obs_scales.lin_acc,
@@ -1179,7 +1250,10 @@ class HexTerrain(LeggedRobot):
         #                           self.torques*self.obs_scales.dof_torque,
         #                           self.commands*self.commands_scale],dim=-1)
         #为了对collision相关损失进行更加精准的预测，将刚体碰撞力放入观测中
-        # collision=torch.sum(1.*(torch.norm(self.contact_forces[:,self.penalised_contact_indices,:],dim=-1)>0.1),dim=1).unsqueeze(1)
+        # 【P0.4维度说明】:
+        # - obs看到的contact: penalised(3) + feet(6) = 9个刚体的force norm
+        # - collision事件只检测penalised（非足端碰撞），见_compute_collision_mask()
+        # - 这是设计意图：足端大力是正常运动，不触发collision事件
         rb_force_norm = torch.norm(self.contact_forces[:,torch.cat([self.penalised_contact_indices,self.feet_indices]),:], dim=-1)
         self.obs_vgf_buf = torch.cat([self.base_lin_vel*self.obs_scales.lin_vel,
                                       self.projected_gravity*self.obs_scales.gravity,
@@ -1287,7 +1361,9 @@ class HexTerrain(LeggedRobot):
             self.goal_buf[:] = rel_goal
             return
 
-        # 未启用导航奖励：沿用旧逻辑（但统一为相对坐标）
+        # === Phase 1: 未启用导航奖励，沿用旧逻辑（但统一为相对坐标） ===
+        # [P0.2 数据一致性] 此分支中self.commands是Single Source of Truth
+        # Phase 1不需要goal指引，直接使用随机采样的commands作为速度目标
         if self.nav_cfg.goal_mode == 'velocity_based':
             goal_distance = self.nav_cfg.goal_distance
             vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
@@ -1403,17 +1479,16 @@ class HexTerrain(LeggedRobot):
         noise_vec[28:46] = noise_level * noise_scales.dof_vel * self.obs_scales.dof_vel
         noise_vec[46:64] = noise_level * noise_scales.dof_torque * self.obs_scales.dof_torque
         noise_vec[64:67] = 0.0 #command
-        #地形信息actor也可以拿到
-        # noise_vec[75:] = noise_level * noise_scales.height_measurements * self.obs_scales.height_measurements
         
-        if self.privileged_obs_buf is not None:
-            #[lin_vel(3), gravity(3), contact_force(6) ,measured_heights(187)]
-            noise_vec[67:70] = noise_level * noise_scales.lin_vel * self.obs_scales.lin_vel
-            noise_vec[70:73] = noise_level * noise_scales.gravity * self.obs_scales.gravity
-            noise_vec[73:97] = noise_level * noise_scales.contact_force * self.obs_scales.contact_force
-            noise_vec[97:] = noise_level * noise_scales.height_measurements * self.obs_scales.height_measurements
-
-            # noise_vec[75:] = noise_level * noise_scales.height_measurements * self.obs_scales.height_measurements
+        # === P2.2: 移除条件门控，分离结构下vgf/terrain必然存在 ===
+        # 【GPT审查强化】此处假设分离结构已确保vgf和terrain可用
+        # [lin_vel(3), gravity(3), contact_force(24), measured_heights(143)]
+        # 注: obs_vgf_buf总维度30，contact_force实际计算见Line 1189
+        noise_vec[67:70] = noise_level * noise_scales.lin_vel * self.obs_scales.lin_vel
+        noise_vec[70:73] = noise_level * noise_scales.gravity * self.obs_scales.gravity
+        noise_vec[73:97] = noise_level * noise_scales.contact_force * self.obs_scales.contact_force
+        noise_vec[97:] = noise_level * noise_scales.height_measurements * self.obs_scales.height_measurements
+        
         return noise_vec
     
     def _resample_commands(self, env_ids):
@@ -1428,20 +1503,83 @@ class HexTerrain(LeggedRobot):
         self.commands[env_ids, :3] *= (torch.norm(self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
 
     def _update_terrain_curriculum(self, env_ids):
-        #重新设计地形更新的规则
+        """=== P1.1: Curriculum重构 - 基于raw统计的稳定升级 ===
+        
+        【问题诊断】:
+        原实现依赖 episode_sums (= raw * scale * dt)
+        → 改变scale或dt会破坏阈值稳定性
+        → 单次成功立即升级，导致抖动
+        
+        【解决方案】:
+        1. 使用 episode_raw_stats (物理量，不受scale影响)
+        2. 多指标质量评分 (4项中至少3项达标)
+        3. 软升级机制 (连续2次通过才升级)
+        4. 配置参数化 (阈值可调)
+        """
         if not self.init_done:
-            # don't change on initial reset
             return
+        
+        # 初始化升级计数器 (首次调用时)
+        if not hasattr(self, 'terrain_pass_count'):
+            self.terrain_pass_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        
+        # 获取配置阈值
+        cfg_t = self.cfg.terrain
+        stability_th = getattr(cfg_t, 'curriculum_stability_threshold', 0.7)
+        height_th = getattr(cfg_t, 'curriculum_height_threshold', 0.7)
+        collision_th = getattr(cfg_t, 'curriculum_collision_threshold', 5.0)
+        quality_score = getattr(cfg_t, 'curriculum_quality_score', 3.0)
+        consecutive_passes = getattr(cfg_t, 'curriculum_consecutive_passes', 2)
+        
+        # 从 episode_raw_stats 提取指标 [camera_stability, base_height, collision_count, distance]
+        # 【GPT审查修正】用实际步数而非max_episode_length求均值
+        episode_length = self.episode_length_buf[env_ids].float()
+        camera_stability = self.episode_raw_stats[env_ids, 0] / (episode_length + 1e-6)
+        base_height = self.episode_raw_stats[env_ids, 1] / (episode_length + 1e-6)
+        collision_count = self.episode_raw_stats[env_ids, 2]  # 总事件数
+        
+        # 质量评分 (4项布尔指标)
+        pass_stability = camera_stability > stability_th
+        pass_height = base_height > height_th
+        pass_collision = collision_count < collision_th
+        
+        # 距离指标 (基于实际移动距离)
         distance = torch.norm(self.root_states[env_ids, :3] - self.env_origins[env_ids, :3], dim=1)
-        # robots that walked far enough progress to harder terains
-        move_up = distance > self.terrain.env_length / 2
-        # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.3) * ~move_up
+        pass_distance = distance > self.terrain.env_length / 2
+        
+        # 计算质量分数 (4项中满足几项)
+        score = pass_stability.float() + pass_height.float() + pass_collision.float() + pass_distance.float()
+        
+        # 软升级: 连续通过计数
+        current_pass = score >= quality_score
+        self.terrain_pass_count[env_ids] = torch.where(
+            current_pass,
+            self.terrain_pass_count[env_ids] + 1,
+            torch.zeros_like(self.terrain_pass_count[env_ids])  # 失败则清零
+        )
+        
+        # 升级条件: 连续N次通过
+        move_up = self.terrain_pass_count[env_ids] >= consecutive_passes
+        
+        # 降级条件: 分数低于2分
+        move_down = (score < 2.0) & ~move_up
+        
+        # 执行升降级
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
-        # Robots that solve the last level are sent to a random one
-        self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
-                                                   torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-                                                   torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0)
+        )
+        
+        # 重置升级计数器 (升级后清零，避免连续跳级)
+        self.terrain_pass_count[env_ids] = torch.where(
+            move_up,
+            torch.zeros_like(self.terrain_pass_count[env_ids]),
+            self.terrain_pass_count[env_ids]
+        )
+        
+        # 更新环境原点
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]        
     def update_command_curriculum(self, env_ids):
         #对 vx vy omega都进行阶段性更新

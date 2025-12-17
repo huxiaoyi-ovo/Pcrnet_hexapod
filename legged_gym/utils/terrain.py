@@ -117,7 +117,9 @@ class Terrain:
         step_height = 0.05 + 0.125 * difficulty
         # print("step_height=",step_height)
         # discrete_obstacles_height = 0.05 + difficulty * 0.2
-        discrete_obstacles_height = 0.05 + difficulty * 0.125
+        # discrete_obstacles_height = 0.05 + difficulty * 0.125  # 原值: 5cm→17.5cm 太高
+        # 六足实际尺寸: 腿长20.2cm, 身高10cm, 合理障碍物应 <= 6cm
+        discrete_obstacles_height = 0.02 + difficulty * 0.04  # 优化: 2cm→6cm
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1
         gap_size = 1. * difficulty
@@ -158,7 +160,23 @@ class Terrain:
             terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3)
 
         elif choice < self.proportions[4]:
+            # === P2.1: 添加渐进式底噪 ===
             terrain_utils.discrete_obstacles_terrain(terrain, discrete_obstacles_height, 1., 2., 20, platform_size=2)
+            
+            # 获取底噪参数 (从cfg读取)
+            noise_min = getattr(self.cfg, 'noise_amplitude_min', 0.005)  # 0.5cm
+            noise_max = getattr(self.cfg, 'noise_amplitude_max', 0.020)  # 2cm
+            noise_scale = getattr(self.cfg, 'noise_downsampled_scale', 0.3)
+            
+            # 渐进式底噪 (随难度增加)
+            noise_amplitude = noise_min + (noise_max - noise_min) * difficulty
+            terrain_utils.random_uniform_terrain(
+                terrain,
+                min_height=-noise_amplitude,
+                max_height=noise_amplitude,
+                step=0.005,
+                downsampled_scale=noise_scale
+            )
 
         elif choice < self.proportions[5]:
             terrain_utils.stepping_stones_terrain(terrain, stone_size=stepping_stones_size, stone_distance=stone_distance, max_height=0., platform_size=3.)

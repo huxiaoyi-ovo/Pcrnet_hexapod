@@ -157,6 +157,26 @@ class HexTerrainCfg(LeggedRobotCfg):
         num_rows = 10
         num_cols = 20
         max_init_terrain_level = 1
+        
+        # === P0.4: 统一collision阈值 ===
+        # 【GPT审查强化】语义说明：
+        # - 此阈值定义"严重碰撞事件"（force > 1.0 N）
+        # - 用于：reward惩罚、nav termination、curriculum计数
+        # - 若未来需"轻微接触惩罚"，应使用不同名字
+        #   例如: contact_force_soft_threshold = 0.1
+        collision_force_threshold = 1.0  # Newton（严重碰撞统一判据）
+        
+        # === P1.2: Curriculum质量门槛（基于raw统计） ===
+        curriculum_stability_threshold = 0.7   # camera_stability范围[0,1]
+        curriculum_height_threshold = 0.7      # base_height范围[0,1]
+        curriculum_collision_threshold = 5.0   # 碰撞事件数（使用统一阈值）
+        curriculum_quality_score = 3.0         # 4项中至少3项达标
+        curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
+        
+        # === 底噪渐进参数 ===
+        noise_amplitude_min = 0.005  # 0.5cm
+        noise_amplitude_max = 0.020  # 2cm
+        noise_downsampled_scale = 0.3  # 低频
 
         measure_heights = True
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
@@ -192,17 +212,19 @@ class HexTerrainCfg(LeggedRobotCfg):
         gate_on_slope_angle_deg = 20.0
 
         # 10 items: up to slalom; remaining prob -> gate_on_slope (make_terrain else)
+        # Phase 1: Focus on basic locomotion (slopes, stairs, obstacles)
+        # Phase 2/3: Add navigation terrains (gate, slalom)
         terrain_proportions = [
-            0.10,  # smooth slope
-            0.10,  # rough slope
-            0.10,  # stairs A
-            0.10,  # stairs B
-            0.20,  # discrete obstacles
-            0.00,  # stepping stones
-            0.00,  # gap
-            0.00,  # pit
-            0.20,  # gate
-            0.10,  # slalom
+            0.20,  # smooth slope        - 增加基础地形比例
+            0.20,  # rough slope         - 增加基础地形比例
+            0.15,  # stairs A            - 增加台阶训练
+            0.15,  # stairs B            - 增加台阶训练
+            0.30,  # discrete obstacles  - 增加障碍物训练
+            0.00,  # stepping stones     - Phase 2/3 启用
+            0.00,  # gap                 - Phase 2/3 启用
+            0.00,  # pit                 - Phase 2/3 启用
+            0.00,  # gate                - Phase 2/3 启用（需要导航能力）
+            0.00,  # slalom              - Phase 2/3 启用（需要路径规划）
         ]
 
 

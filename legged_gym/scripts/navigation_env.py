@@ -208,10 +208,20 @@ class NavigationRewardFunction:
         }
 
     def _compute_stability_reward(self, robot_quat: torch.Tensor) -> torch.Tensor:
-        """计算姿态稳定性奖励"""
-        w, x, y, z = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
+        """计算姿态稳定性奖励
+        
+        【P0.1修复】格式约定: robot_quat = [x, y, z, w] (Isaac Gym标准)
+        
+        【全链路一致性 - CRITICAL】:
+        - HexTerrain.base_quat → [x,y,z,w]
+        - HexTerrain._yaw_from_quat() → 接受 [x,y,z,w]
+        - 此函数也必须使用 [x,y,z,w]
+        - 禁止改回 [w,x,y,z]，否则会导致silent bug
+        """
+        # === P0.1: 修正四元数格式 [x,y,z,w] ===
+        x, y, z, w = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
 
-        # 计算roll和pitch
+        # 计算roll和pitch (使用正确的公式)
         roll = torch.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
         pitch = torch.asin(torch.clamp(2*(w*y - z*x), -1, 1))
 
@@ -248,7 +258,11 @@ class NavigationRewardFunction:
     def _quat_to_heading(self, quat: torch.Tensor) -> torch.Tensor:
         """四元数转航向角
         
-        格式约定: quat = [x, y, z, w] (Isaac Gym 标准)
+        【格式约定 - CRITICAL】: quat = [x, y, z, w] (Isaac Gym 标准)
+        
+        【禁止修改】:
+        - 不要改回 [w,x,y,z]，否则会导致silent bug
+        - HexTerrain._yaw_from_quat() 使用相同格式
         """
         x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         return torch.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
