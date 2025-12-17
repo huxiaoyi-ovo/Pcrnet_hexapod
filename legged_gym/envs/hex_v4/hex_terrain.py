@@ -924,6 +924,15 @@ class HexTerrain(LeggedRobot):
             # update prev buffers (local) - 在reward计算之后更新
             self.prev_robot_pos_buf[:] = robot_pos_local
             self.prev_intensity_buf[:] = self.intensity_buf
+            
+            # 【GPT建议】Phase 2数据链完整性断言（debug模式）
+            if getattr(self.cfg.env, 'debug_mode', False):
+                assert torch.isfinite(self.goal_buf).all(), \
+                    f"[Phase2-Debug] goal_buf has NaN/Inf! mean={self.goal_buf.mean()}, max={self.goal_buf.max()}"
+                assert torch.isfinite(effective_cmd).all(), \
+                    f"[Phase2-Debug] effective_cmd has NaN/Inf! mean={effective_cmd.mean()}, max={effective_cmd.max()}"
+                assert torch.isfinite(self.rew_buf).all(), \
+                    f"[Phase2-Debug] rew_buf has NaN/Inf! mean={self.rew_buf.mean()}, min={self.rew_buf.min()}, max={self.rew_buf.max()}"
 
         else:
             # default locomotion reward
@@ -952,6 +961,11 @@ class HexTerrain(LeggedRobot):
                 # 更新prev_robot_pos_buf用于下一步距离计算
                 self.prev_robot_pos_buf[:] = robot_pos_local
             
+            # 【GPT建议】Phase 1数据链完整性断言（debug模式）
+            if getattr(self.cfg.env, 'debug_mode', False):
+                assert torch.isfinite(self.rew_buf).all(), \
+                    f"[Phase1-Debug] rew_buf has NaN/Inf! mean={self.rew_buf.mean()}, min={self.rew_buf.min()}, max={self.rew_buf.max()}"
+            
             # 奖励截断（防止梯度爆炸）
             if hasattr(self.cfg.rewards, 'min_reward_clip'):
                 self.rew_buf = torch.clamp(
@@ -959,6 +973,19 @@ class HexTerrain(LeggedRobot):
                     min=self.cfg.rewards.min_reward_clip,
                     max=self.cfg.rewards.max_reward_clip
                 )
+        
+        # 【GPT建议】Curriculum统计有效性断言（每500步检查一次，避免性能影响）
+        if getattr(self.cfg.env, 'debug_mode', False) and self.common_step_counter % 500 == 0:
+            # 确保raw统计链没有断掉（episode至少有一个非零变化）
+            # episode_raw_stats[:, 0-3]应该在递增（camera/height质量、collision次数、距离）
+            assert (self.episode_raw_stats[:, 3] > 0).any() or self.common_step_counter < 100, \
+                f"[Curriculum-Debug] distance_traveled统计全为0! 可能统计链断裂。raw_stats mean={self.episode_raw_stats.mean(0)}"
+            assert (self.episode_raw_stats[:, 2] >= 0).all(), \
+                f"[Curriculum-Debug] collision_count出现负值! 统计损坏。raw_stats min={self.episode_raw_stats.min(0)[0]}"
+            # camera/height质量应在合理范围[0, max_episode_length]
+            max_expected = self.max_episode_length_s / self.cfg.sim.dt
+            assert (self.episode_raw_stats[:, 0] <= max_expected * 2).all(), \
+                f"[Curriculum-Debug] camera_stability统计异常大! max={self.episode_raw_stats[:, 0].max()}, expected<{max_expected}"
             
             # Phase 1 相机稳定性监控
             self.extras["camera_pitch_std"] = self.base_ang_vel[:, 0].std().item()
@@ -1097,7 +1124,10 @@ class HexTerrain(LeggedRobot):
             self.last_root_vel[env_ids, :3] = self.root_states[env_ids, 7:10]   # lin_vel
             self.last_root_vel[env_ids, 3:] = self.root_states[env_ids, 10:13]  # ang_vel
             
-            # 2. 重置接触历史 - 避免 contact_filt 使用旧环境数据
+            # 2. 【GPT建议】重置接触历史 - 同步到当前接触力，防止差分尖峰（原理同上）
+            self.last_contact_forces[env_ids] = self.contact_forces[env_ids]
+            
+            # 3. 重置其他状态历史
             self.last_contacts[env_ids] = 0.
             
             # 3. 重置角加速度 - 确保 camera_stability 奖励正常
@@ -1835,31 +1865,40 @@ class HexTerrain(LeggedRobot):
         - 垂直颠簸: z轴线加速度（深度估计误差）
         
         【实现逻辑】:
-        - Jitter (抖动): 惩罚 base_ang_acc (尤其xy分量)
-        - Wobble (晃动): 惩罚 base_ang_vel (pitch/roll)
-        - Bobbing (颠簸): 惩罚 base_lin_acc (z分量)
+        - Jitter (抖动): 惩罚 base_ang_acc (rad/s²), 尤其xy分量
+        - Wobble (晃动): 惩罚 base_ang_vel (rad/s), pitch/roll
+        - Bobbing (颠簸): 惩罚 base_lin_acc (g), z分量
         
         【GPT-Fix】:
         - 对各项penalty加clamp，防止偶发尖峰污染整个episode的mean
-        - 添加诊断日志，用于排查数值问题
+        - 从config读取cap阈值，保证可复现可调试
+        - 添加层级式诊断日志
+        
+        【GPT-Warning】:
+        - base_lin_acc单位是g（见Line 794: /9.81），不是m/s²
+        - 因此z_bobbing的量纲是g²，与角加速度(rad/s²)²量纲不同
+        - clamp值需基于此单位设置（bobbing_cap=100对应~10g）
         
         Returns:
             reward: (N,) 稳定性奖励，使用exp函数确保平滑梯度
         """
         # 1. 高频抖动（Motion Blur的直接原因）- 只关心pitch/roll加速度
+        # 单位: (rad/s²)²
         ang_jitter = torch.sum(torch.square(self.base_ang_acc[:, :2]), dim=1)
         
-        # 2. 持续晃动（画面倾斜）- pitch/roll角速度
+        # 2. 持续晃动（画面倾斜）- pitch/roll角速度  
+        # 单位: (rad/s)²
         ang_wobble = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
         
         # 3. 垂直颠簸（影响深度估计）- z轴线加速度
+        # 单位: g² （base_lin_acc已除以9.81，见Line 794）
         z_bobbing = torch.square(self.base_lin_acc[:, 2])
         
-        # 【GPT-Fix】对尖峰做鲁棒化：clamp到99%分位数附近
-        # 这些cap值基于正常六足运动的物理约束，防止偶发尖峰污染curriculum
-        jitter_cap = 50.0   # (rad/s²)² 上限
-        wobble_cap = 4.0    # (rad/s)² 上限
-        bobbing_cap = 100.0 # (m/s²)² 上限（~10g加速度）
+        # 【GPT建议】从config读取cap阈值，避免硬编码暗参
+        # 使得调参可复现、可追溯（cfg文件记录所有超参）
+        jitter_cap = getattr(self.cfg.rewards.scales, 'camera_jitter_cap', 50.0)
+        wobble_cap = getattr(self.cfg.rewards.scales, 'camera_wobble_cap', 4.0)
+        bobbing_cap = getattr(self.cfg.rewards.scales, 'camera_bobbing_cap', 100.0)
         
         ang_jitter = torch.clamp(ang_jitter, 0, jitter_cap)
         ang_wobble = torch.clamp(ang_wobble, 0, wobble_cap)
@@ -1871,23 +1910,23 @@ class HexTerrain(LeggedRobot):
         bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
         penalty = ang_jitter * jitter_w + ang_wobble * wobble_w + z_bobbing * bobbing_w
         
-        # 【诊断日志】每500步打印一次env0的诊断信息
+        # 【GPT建议】层级式日志键名，提升logger兼容性（很多logger对 '/' 分层有更好支持）
         if self.common_step_counter % 500 == 0 and hasattr(self, 'extras'):
-            self.extras['debug_ang_jitter_mean'] = ang_jitter.mean().item()
-            self.extras['debug_ang_wobble_mean'] = ang_wobble.mean().item()
-            self.extras['debug_z_bobbing_mean'] = z_bobbing.mean().item()
-            self.extras['debug_penalty_mean'] = penalty.mean().item()
-            self.extras['debug_base_ang_acc_xy_std'] = self.base_ang_acc[:, :2].std().item()
-            self.extras['debug_base_lin_acc_z_std'] = self.base_lin_acc[:, 2].std().item()
+            self.extras['debug/camera/ang_jitter_mean'] = ang_jitter.mean().item()
+            self.extras['debug/camera/ang_wobble_mean'] = ang_wobble.mean().item()
+            self.extras['debug/camera/z_bobbing_mean'] = z_bobbing.mean().item()
+            self.extras['debug/camera/penalty_mean'] = penalty.mean().item()
+            self.extras['debug/camera/base_ang_acc_xy_std'] = self.base_ang_acc[:, :2].std().item()
+            self.extras['debug/camera/base_lin_acc_z_std'] = self.base_lin_acc[:, 2].std().item()
         
         # 使用exp确保平滑梯度和正向奖励
         camera_quality = torch.exp(-penalty)
         
-        # 【诊断日志】记录最终quality分布
+        # 【诊断日志】记录最终quality分布（层级式键名提升可见性）
         if self.common_step_counter % 500 == 0 and hasattr(self, 'extras'):
-            self.extras['debug_camera_quality_mean'] = camera_quality.mean().item()
-            self.extras['debug_camera_quality_min'] = camera_quality.min().item()
-            self.extras['debug_camera_quality_max'] = camera_quality.max().item()
+            self.extras['debug/camera/quality_mean'] = camera_quality.mean().item()
+            self.extras['debug/camera/quality_min'] = camera_quality.min().item()
+            self.extras['debug/camera/quality_max'] = camera_quality.max().item()
         
         return camera_quality
         

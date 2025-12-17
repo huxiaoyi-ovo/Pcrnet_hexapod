@@ -6,6 +6,9 @@ class HexTerrainCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 8 #环境数量(降低以减少GPU内存占用)
         
+        # 【GPT建议】Debug模式开关：启用Phase 2数据链和curriculum统计的断言检查
+        debug_mode = True  # 开发阶段建议开启，生产训练可关闭（提升性能）
+        
         # ============================================================
         # 【EGPO Encoder 观测空间架构】
         # ============================================================
@@ -335,6 +338,12 @@ class HexTerrainCfg(LeggedRobotCfg):
         camera_jitter_weight = 0.05   # 抖动权重（角加速度）
         camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
         camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
+        
+        # 【GPT建议】防止偶发尖峰污染curriculum的鲁棒性阈值
+        # 这些cap基于正常六足运动的物理约束（不同dt/动力学参数需调整）
+        camera_jitter_cap = 50.0     # (rad/s²)² 上限，对应~7rad/s² 角加速度
+        camera_wobble_cap = 4.0      # (rad/s)² 上限，对应~2rad/s 角速度
+        camera_bobbing_cap = 100.0   # (m/s²)² 上限，对应~10m/s² (1g) 垂直加速度
         
         # Phase 2/3: 导航时的稳定性保持权重
         nav_stability_weight = 0.3  # 导航时额外添加 camera_stability 的权重
