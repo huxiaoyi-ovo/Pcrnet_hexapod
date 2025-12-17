@@ -80,7 +80,10 @@ def play(args):
     print(f"  - use_separated_obs: {use_separated_obs}")
     
     if use_separated_obs:
-        obs, obs_vgf, obs_terrain = env.reset_separate()
+        obs_dict = env.reset_separate()
+        obs = obs_dict['proprioception']
+        obs_vgf = obs_dict['privileged']
+        obs_terrain = obs_dict['terrain']
     else:
         _, _ = env.reset()
         obs = env.get_observations()
@@ -94,6 +97,17 @@ def play(args):
     if use_separated_obs:
         # EGPO架构: 需要encode_obs获取terrain_latent
         ppo_runner.alg.actor_critic.eval()
+        
+        # 【关键】初始化storage的obs_hist（encode_obs内部会调用storage.update_obs_hist）
+        if hasattr(ppo_runner.alg, 'storage') and hasattr(ppo_runner.alg.storage, 'reset_obs_hist'):
+            ppo_runner.alg.storage.reset_obs_hist()
+            print("[Play] ✓ Initialized storage observation history")
+        
+        # EGPO架构不支持JIT导出（需要encode_obs流程）
+        if EXPORT_POLICY:
+            print("[Play] ⚠ EXPORT_POLICY disabled for EGPO architecture (requires encode_obs flow)")
+            EXPORT_POLICY = False
+        
         print("[Play] ✓ Using EGPO Encoder architecture with separated observations")
     else:
         policy = ppo_runner.get_inference_policy(device=env.device)
@@ -125,7 +139,14 @@ def play(args):
         with torch.inference_mode():
             if use_separated_obs:
                 # EGPO架构: 使用encode_obs获取terrain_latent，然后调用act_inference
-                obs_splice, obs_terrain_latent = ppo_runner.alg.encode_obs(obs, obs_vgf, obs_terrain)
+                try:
+                    obs_splice, obs_terrain_latent = ppo_runner.alg.encode_obs(obs, obs_vgf, obs_terrain)
+                except Exception as e:
+                    # 备用方案：直接拼接和编码（跳过storage更新）
+                    if i == 0:
+                        print(f"[Play] ⚠ encode_obs failed: {e}, using fallback")
+                    obs_splice = torch.cat([obs, obs_vgf], dim=-1)
+                    obs_terrain_latent = ppo_runner.alg.actor_critic.encode_terrain(obs_terrain)
                 actions = ppo_runner.alg.actor_critic.act_inference(obs_splice, obs_terrain_latent)
             else:
                 actions = policy(obs)
@@ -150,7 +171,10 @@ def play(args):
             # ppo_runner.alg.process_inference_env_step(dones)
 
             if use_separated_obs:
-                obs, obs_vgf, obs_terrain, rews, dones, infos = env.step_separate(actions.detach())
+                obs_dict, rews, dones, infos = env.step_separate(actions.detach())
+                obs = obs_dict['proprioception']
+                obs_vgf = obs_dict['privileged']
+                obs_terrain = obs_dict['terrain']
             else:
                 obs, _, rews, dones, infos = env.step(actions.detach())
 
