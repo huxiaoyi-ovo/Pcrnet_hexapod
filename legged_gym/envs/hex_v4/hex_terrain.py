@@ -1109,6 +1109,13 @@ class HexTerrain(LeggedRobot):
         - self.root_states[:, 3:7] 为 [x,y,z,w]
         - 所有 euler 转换使用一致格式
         """
+        if len(env_ids) != 0:
+            ep_len = self.episode_length_buf[env_ids].float().clamp_min(1.0)
+            self.extras["ep_camera_quality"] = (self.episode_raw_stats[env_ids, 0] / ep_len).mean().item()
+            self.extras["ep_height_quality"] = (self.episode_raw_stats[env_ids, 1] / ep_len).mean().item()
+            self.extras["ep_collision_count"] = self.episode_raw_stats[env_ids, 2].mean().item()
+            self.extras["ep_distance_traveled"] = self.episode_raw_stats[env_ids, 3].mean().item()
+
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
@@ -1566,6 +1573,7 @@ class HexTerrain(LeggedRobot):
         stability_th = getattr(cfg_t, 'curriculum_stability_threshold', 0.7)
         height_th = getattr(cfg_t, 'curriculum_height_threshold', 0.7)
         collision_th = getattr(cfg_t, 'curriculum_collision_threshold', 5.0)
+        distance_th = getattr(cfg_t, 'curriculum_distance_threshold', 1.0)
         quality_score = getattr(cfg_t, 'curriculum_quality_score', 3.0)
         consecutive_passes = getattr(cfg_t, 'curriculum_consecutive_passes', 2)
         
@@ -1581,9 +1589,9 @@ class HexTerrain(LeggedRobot):
         pass_height = base_height > height_th
         pass_collision = collision_count < collision_th
         
-        # 距离指标 (基于实际移动距离)
-        distance = torch.norm(self.root_states[env_ids, :3] - self.env_origins[env_ids, :3], dim=1)
-        pass_distance = distance > self.terrain.env_length / 2
+        # 距离指标 (基于episode累计距离)
+        distance_traveled = self.episode_raw_stats[env_ids, 3]
+        pass_distance = distance_traveled > distance_th
         
         # 计算质量分数 (4项中满足几项)
         score = pass_stability.float() + pass_height.float() + pass_collision.float() + pass_distance.float()
@@ -1616,6 +1624,15 @@ class HexTerrain(LeggedRobot):
             torch.zeros_like(self.terrain_pass_count[env_ids]),
             self.terrain_pass_count[env_ids]
         )
+
+        # TB日志：curriculum质量与通过率
+        self.extras["curr_camera_quality_mean"] = camera_stability.mean().item()
+        self.extras["curr_height_quality_mean"] = base_height.mean().item()
+        self.extras["curr_collision_mean"] = collision_count.mean().item()
+        self.extras["curr_distance_mean"] = distance_traveled.mean().item()
+        self.extras["curr_score_mean"] = score.mean().item()
+        self.extras["curr_pass_rate"] = current_pass.float().mean().item()
+        self.extras["curr_move_up_rate"] = move_up.float().mean().item()
         
         # 更新环境原点
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]        

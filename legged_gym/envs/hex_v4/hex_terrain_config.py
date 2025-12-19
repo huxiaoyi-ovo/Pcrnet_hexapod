@@ -170,11 +170,12 @@ class HexTerrainCfg(LeggedRobotCfg):
         collision_force_threshold = 1.0  # Newton（严重碰撞统一判据）
         
         # === P1.2: Curriculum质量门槛（基于raw统计） ===
-        curriculum_stability_threshold = 0.7   # camera_stability范围[0,1]
-        curriculum_height_threshold = 0.7      # base_height范围[0,1]
-        curriculum_collision_threshold = 5.0   # 碰撞事件数（使用统一阈值）
-        curriculum_quality_score = 3.0         # 4项中至少3项达标
+        curriculum_stability_threshold = 0.10  # camera_stability范围[0,1]
+        curriculum_height_threshold = 0.15     # base_height范围[0,1]
+        curriculum_collision_threshold = 20.0  # 碰撞事件数（使用统一阈值）
+        curriculum_quality_score = 2.0         # 4项中至少2项达标
         curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
+        curriculum_distance_threshold = 1.0   # episode累计距离阈值(米)
         
         # === 底噪渐进参数 ===
         noise_amplitude_min = 0.005  # 0.5cm
@@ -293,8 +294,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         damping={}
         for t in _tao:
             for qn in _q_name:
-                stiffness['j_'+t+'_' + qn]=100.0
-                damping['j_'+t+'_'+qn] = 0.8
+                stiffness['j_'+t+'_' + qn]=70.0
+                damping['j_'+t+'_'+qn] = 2.0
         action_scale=0.5
         decimation = 4
 
