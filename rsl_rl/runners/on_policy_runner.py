@@ -140,6 +140,36 @@ class OnPolicyRunner:
         
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        self._save_training_summary()
+
+    def _save_training_summary(self):
+        if not self.log_dir:
+            return
+        from rsl_rl.utils.plot_summary import generate_training_summary
+        tags = [
+            ("Train/mean_reward", "Train/mean_reward"),
+            ("Train/mean_episode_length", "Train/mean_episode_length"),
+            ("Episode/terrain_level", "Episode/terrain_level"),
+            ("Episode/rew_camera_stability", "Episode/rew_camera_stability"),
+            ("Episode/rew_dof_acc", "Episode/rew_dof_acc"),
+            ("Episode/rew_action_rate", "Episode/rew_action_rate"),
+            ("Episode/rew_tracking_lin_vel", "Episode/rew_tracking_lin_vel"),
+            ("Episode/rew_tracking_ang_vel", "Episode/rew_tracking_ang_vel"),
+            ("Episode/camera_penalty_mean", "Episode/camera_penalty_mean"),
+            ("Episode/camera_jitter_mean", "Episode/camera_jitter_mean"),
+            ("Episode/camera_wobble_mean", "Episode/camera_wobble_mean"),
+            ("Episode/camera_bobbing_mean", "Episode/camera_bobbing_mean"),
+        ]
+        output_path = os.path.join(
+            self.log_dir,
+            f"training_summary_iter_{self.current_learning_iteration}.png"
+        )
+        generate_training_summary(
+            self.log_dir,
+            tags,
+            output_path=output_path,
+            title=f"Training Summary (iter {self.current_learning_iteration})"
+        )
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs

@@ -314,10 +314,28 @@ class HexTerrain(LeggedRobot):
         )
         
         # === P0.3: Raw统计buffer (不受scale/dt影响的原始质量指标) ===
-        # [camera_stability_sum, base_height_sum, collision_count, distance_traveled]
+        # [camera_stability_sum, base_height_sum, collision_count, distance_traveled,
+        #  camera_jitter_sum, camera_wobble_sum, camera_bobbing_sum]
         self.episode_raw_stats = torch.zeros(
             self.num_envs,
-            4,
+            7,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+
+        # === Command/Expert诊断统计 ===
+        # [cmd_norm_sum, cmd_nonzero_count, base_speed_sum, expert_action_norm_sum, expert_action_update_count]
+        self.episode_cmd_stats = torch.zeros(
+            self.num_envs,
+            5,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+        self._expert_action_updated = False
+        self._expert_action_norm_buf = torch.zeros(
+            self.num_envs,
             dtype=torch.float32,
             device=self.device,
             requires_grad=False
@@ -807,6 +825,22 @@ class HexTerrain(LeggedRobot):
         # base termination (fall/illegal contacts etc.)
         self.check_termination()
 
+        # === Command/Expert诊断统计（每步累加） ===
+        with torch.no_grad():
+            cmd = self._get_effective_commands()
+            cmd_norm = torch.norm(cmd, dim=1)
+            cmd_nonzero_th = getattr(self.cfg.commands, 'nonzero_threshold', 0.05)
+            cmd_nonzero = cmd_norm > cmd_nonzero_th
+            base_speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
+
+            self.episode_cmd_stats[:, 0] += cmd_norm
+            self.episode_cmd_stats[:, 1] += cmd_nonzero.float()
+            self.episode_cmd_stats[:, 2] += base_speed
+            if self._expert_action_updated:
+                self.episode_cmd_stats[:, 3] += self._expert_action_norm_buf
+                self.episode_cmd_stats[:, 4] += 1.0
+                self._expert_action_updated = False
+
         if getattr(self.nav_cfg, "enable_nav_reward", False):
             # === [P0.2 数据一致性] Phase 2: Navigation Reward 分支 ===
             # 【GPT澄清】P0.2的真正含义：
@@ -856,8 +890,13 @@ class HexTerrain(LeggedRobot):
             # 【GPT审查修正】raw统计不乘scale/dt，直接累加质量指标
             with torch.no_grad():
                 # 1. camera_stability: [0,1]质量指标，每步累加
-                camera_quality = self._reward_camera_stability()  # 返回[0,1]
+                camera_quality, ang_jitter, ang_wobble, z_bobbing, penalty = self._reward_camera_stability(
+                    return_terms=True
+                )
                 self.episode_raw_stats[:, 0] += camera_quality
+                self.episode_raw_stats[:, 4] += ang_jitter
+                self.episode_raw_stats[:, 5] += ang_wobble
+                self.episode_raw_stats[:, 6] += z_bobbing
                 
                 # 2. base_height: [0,1]质量指标，每步累加
                 height_quality = self._reward_base_height()  # 返回[0,1]
@@ -942,8 +981,13 @@ class HexTerrain(LeggedRobot):
             # 注意：基类compute_reward()不维护episode_raw_stats，需要在这里补充
             with torch.no_grad():
                 # 1. camera_stability: [0,1]质量指标
-                camera_quality = self._reward_camera_stability()
+                camera_quality, ang_jitter, ang_wobble, z_bobbing, penalty = self._reward_camera_stability(
+                    return_terms=True
+                )
                 self.episode_raw_stats[:, 0] += camera_quality
+                self.episode_raw_stats[:, 4] += ang_jitter
+                self.episode_raw_stats[:, 5] += ang_wobble
+                self.episode_raw_stats[:, 6] += z_bobbing
                 
                 # 2. base_height: [0,1]质量指标
                 height_quality = self._reward_base_height()
@@ -1111,14 +1155,67 @@ class HexTerrain(LeggedRobot):
         """
         if len(env_ids) != 0:
             ep_len = self.episode_length_buf[env_ids].float().clamp_min(1.0)
-            self.extras["ep_camera_quality"] = (self.episode_raw_stats[env_ids, 0] / ep_len).mean().item()
-            self.extras["ep_height_quality"] = (self.episode_raw_stats[env_ids, 1] / ep_len).mean().item()
-            self.extras["ep_collision_count"] = self.episode_raw_stats[env_ids, 2].mean().item()
-            self.extras["ep_distance_traveled"] = self.episode_raw_stats[env_ids, 3].mean().item()
+            ep_camera_quality = (self.episode_raw_stats[env_ids, 0] / ep_len).mean().item()
+            ep_height_quality = (self.episode_raw_stats[env_ids, 1] / ep_len).mean().item()
+            ep_collision_count = self.episode_raw_stats[env_ids, 2].mean().item()
+            ep_distance_traveled = self.episode_raw_stats[env_ids, 3].mean().item()
+            ep_camera_jitter = (self.episode_raw_stats[env_ids, 4] / ep_len).mean().item()
+            ep_camera_wobble = (self.episode_raw_stats[env_ids, 5] / ep_len).mean().item()
+            ep_camera_bobbing = (self.episode_raw_stats[env_ids, 6] / ep_len).mean().item()
+            ep_cmd_norm_mean = (self.episode_cmd_stats[env_ids, 0] / ep_len).mean().item()
+            ep_cmd_nonzero_frac = (self.episode_cmd_stats[env_ids, 1] / ep_len).mean().item()
+            ep_base_speed_mean = (self.episode_cmd_stats[env_ids, 2] / ep_len).mean().item()
+            expert_update_count = self.episode_cmd_stats[env_ids, 4]
+            expert_denom = torch.clamp(expert_update_count, min=1.0)
+            ep_expert_action_norm_mean = (self.episode_cmd_stats[env_ids, 3] / expert_denom).mean().item()
+            ep_expert_update_frac = (expert_update_count / ep_len).mean().item()
+
+            jitter_w = getattr(self.cfg.rewards.scales, 'camera_jitter_weight', 0.05)
+            wobble_w = getattr(self.cfg.rewards.scales, 'camera_wobble_weight', 0.5)
+            bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
+            ep_camera_penalty = ep_camera_jitter * jitter_w + ep_camera_wobble * wobble_w + ep_camera_bobbing * bobbing_w
+
+            base_ang_acc_xy_rms = torch.sqrt(torch.mean(self.base_ang_acc[env_ids, :2] ** 2)).item()
+            base_ang_vel_xy_rms = torch.sqrt(torch.mean(self.base_ang_vel[env_ids, :2] ** 2)).item()
+            base_lin_acc_z_rms = torch.sqrt(torch.mean(self.base_lin_acc[env_ids, 2] ** 2)).item()
+
+            self.extras["ep_camera_quality"] = ep_camera_quality
+            self.extras["ep_height_quality"] = ep_height_quality
+            self.extras["ep_collision_count"] = ep_collision_count
+            self.extras["ep_distance_traveled"] = ep_distance_traveled
+            self.extras["ep_camera_jitter"] = ep_camera_jitter
+            self.extras["ep_camera_wobble"] = ep_camera_wobble
+            self.extras["ep_camera_bobbing"] = ep_camera_bobbing
+            self.extras["ep_camera_penalty"] = ep_camera_penalty
+            self.extras["ep_base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
+            self.extras["ep_base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
+            self.extras["ep_base_lin_acc_z_rms"] = base_lin_acc_z_rms
+            self.extras["ep_cmd_norm_mean"] = ep_cmd_norm_mean
+            self.extras["ep_cmd_nonzero_frac"] = ep_cmd_nonzero_frac
+            self.extras["ep_base_speed_mean"] = ep_base_speed_mean
+            self.extras["ep_expert_action_norm_mean"] = ep_expert_action_norm_mean
+            self.extras["ep_expert_update_frac"] = ep_expert_update_frac
 
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
+            if "episode" in self.extras:
+                self.extras["episode"]["camera_jitter_mean"] = ep_camera_jitter
+                self.extras["episode"]["camera_wobble_mean"] = ep_camera_wobble
+                self.extras["episode"]["camera_bobbing_mean"] = ep_camera_bobbing
+                self.extras["episode"]["camera_penalty_mean"] = ep_camera_penalty
+                self.extras["episode"]["base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
+                self.extras["episode"]["base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
+                self.extras["episode"]["base_lin_acc_z_rms"] = base_lin_acc_z_rms
+                self.extras["episode"]["ep_camera_quality"] = ep_camera_quality
+                self.extras["episode"]["ep_height_quality"] = ep_height_quality
+                self.extras["episode"]["ep_collision_count"] = ep_collision_count
+                self.extras["episode"]["ep_distance_traveled"] = ep_distance_traveled
+                self.extras["episode"]["ep_cmd_norm_mean"] = ep_cmd_norm_mean
+                self.extras["episode"]["ep_cmd_nonzero_frac"] = ep_cmd_nonzero_frac
+                self.extras["episode"]["ep_base_speed_mean"] = ep_base_speed_mean
+                self.extras["episode"]["ep_expert_action_norm_mean"] = ep_expert_action_norm_mean
+                self.extras["episode"]["ep_expert_update_frac"] = ep_expert_update_frac
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:
@@ -1146,6 +1243,7 @@ class HexTerrain(LeggedRobot):
             
             # 5. 【P0.3】重置 raw 统计 - 确保 curriculum 正常工作
             self.episode_raw_stats[env_ids] = 0.0
+            self.episode_cmd_stats[env_ids] = 0.0
             # =====================================================
 
         # 重置深度图为零（避免使用旧数据）
@@ -1195,6 +1293,8 @@ class HexTerrain(LeggedRobot):
         expert_dofs = self.expert.ProcessCommand(command, self.dof_pos, self.dof_vel)
         self.expert_actions = ((expert_dofs - self.default_dof_pos) / 
                                self.cfg.control.action_scale).detach()
+        self._expert_action_norm_buf = torch.norm(self.expert_actions, dim=1)
+        self._expert_action_updated = True
         return self.expert_actions
     
     def get_observations_dict(self):
@@ -1873,7 +1973,7 @@ class HexTerrain(LeggedRobot):
 
         return torch.square(pos_err).sum(dim=1)
     
-    def _reward_camera_stability(self):
+    def _reward_camera_stability(self, return_terms=False):
         """相机稳定性奖励 - 通过惩罚机身抖动提升视觉质量
         
         【Sim-to-Real关键】:
@@ -1945,6 +2045,8 @@ class HexTerrain(LeggedRobot):
             self.extras['debug/camera/quality_min'] = camera_quality.min().item()
             self.extras['debug/camera/quality_max'] = camera_quality.max().item()
         
+        if return_terms:
+            return camera_quality, ang_jitter, ang_wobble, z_bobbing, penalty
         return camera_quality
         
 

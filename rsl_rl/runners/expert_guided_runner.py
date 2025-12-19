@@ -156,6 +156,7 @@ class EGPORunner(OnPolicyRunner):
         
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        self._save_training_summary()
 
 
     def log(self, locs, width=80, pad=35):
@@ -235,5 +236,4 @@ class EGPORunner(OnPolicyRunner):
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
-
 
