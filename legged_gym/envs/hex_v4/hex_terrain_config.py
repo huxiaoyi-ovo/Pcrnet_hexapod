@@ -37,6 +37,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         num_actions = 18
         episode_length_s=10
         env_spacing=2.0
+        termination_height_threshold = 0.035
+        termination_max_tilt_deg = 60.0
 
     class sensor:
         '''传感器相关配置'''
@@ -161,13 +163,11 @@ class HexTerrainCfg(LeggedRobotCfg):
         num_cols = 20
         max_init_terrain_level = 1
         
-        # === P0.4: 统一collision阈值 ===
-        # 【GPT审查强化】语义说明：
-        # - 此阈值定义"严重碰撞事件"（force > 1.0 N）
-        # - 用于：reward惩罚、nav termination、curriculum计数
-        # - 若未来需"轻微接触惩罚"，应使用不同名字
-        #   例如: contact_force_soft_threshold = 0.1
-        collision_force_threshold = 1.0  # Newton（严重碰撞统一判据）
+        # === P0.4: collision阈值拆分 ===
+        # collision_force_threshold: 终止/硬碰撞阈值
+        # collision_penalty_threshold: 惩罚/统计阈值（更敏感）
+        collision_force_threshold = 1.0  # Newton（终止判据）
+        collision_penalty_threshold = 0.5
         
         # === P1.2: Curriculum质量门槛（基于raw统计） ===
         curriculum_stability_threshold = 0.10  # camera_stability范围[0,1]
@@ -176,6 +176,9 @@ class HexTerrainCfg(LeggedRobotCfg):
         curriculum_quality_score = 2.0         # 4项中至少2项达标
         curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
         curriculum_distance_threshold = 1.0   # episode累计距离阈值(米)
+        curriculum_expert_level_cap_start = 1
+        curriculum_expert_level_cap_end = -1
+        curriculum_post_expert_freeze_iters = 100
         
         # === 底噪渐进参数 ===
         noise_amplitude_min = 0.005  # 0.5cm
@@ -333,6 +336,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         # 奖励截断（防止梯度爆炸）
         min_reward_clip = -10.0
         max_reward_clip = 10.0
+        low_height_penalty_threshold = 0.05
+        low_height_penalty_value = -1.0
         
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
@@ -340,7 +345,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
         camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
         
-        # 【GPT建议】防止偶发尖峰污染curriculum的鲁棒性阈值
+        # 防止偶发尖峰污染curriculum的鲁棒性阈值
         # 这些cap基于正常六足运动的物理约束（不同dt/动力学参数需调整）
         camera_jitter_cap = 50.0     # (rad/s²)² 上限，对应~7rad/s² 角加速度
         camera_wobble_cap = 4.0      # (rad/s)² 上限，对应~2rad/s 角速度
@@ -365,7 +370,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             feet_air_time = 0.5         # 鼓励合理的摆动相位
             
             # === 惩罚项 ===
-            collision = -1.0            # 非足端接触
+            collision = -2.0            # 非足端接触
             action_rate = -0.05         # 平滑动作变化
             dof_acc = -3.0e-7           # 关节加速度惩罚
             stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚, 2025-12-17)
@@ -444,7 +449,9 @@ class HexTerrainCfgPPO(LeggedRobotCfgPPO):
         
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
-        expert_interface_iter=200 #专家干预的时间
+        expert_interface_iter=500 #专家干预的时间
+        expert_alpha_min=0.1
+        expert_alpha_schedule="cosine"
 
         pass
     class runner(LeggedRobotCfgPPO.runner):

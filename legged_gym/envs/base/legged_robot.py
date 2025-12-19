@@ -851,8 +851,10 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
     
     def _reward_collision(self):
-        # === P0.4: 使用统一的collision_force_threshold ===
-        collision_threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
+        # 使用惩罚阈值（若未配置，则回退到终止阈值）
+        collision_threshold = getattr(self.cfg.terrain, 'collision_penalty_threshold', None)
+        if collision_threshold is None:
+            collision_threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
         return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > collision_threshold), dim=1)
     
     def _reward_termination(self):

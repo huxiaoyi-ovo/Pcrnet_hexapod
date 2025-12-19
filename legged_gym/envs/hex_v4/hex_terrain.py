@@ -160,9 +160,12 @@ class HexTerrain(LeggedRobot):
         headings = self._yaw_from_quat(self.root_states[:, 3:7])
         self.goal_buf = self.nav_task.get_relative_goal(robot_pos_local, headings)
 
+        self._train_iter = 0
+        self._expert_interface_iter = None
 
 
-    def _compute_collision_mask(self) -> torch.Tensor:
+
+    def _compute_collision_mask(self, threshold: float = None) -> torch.Tensor:
         """统一的collision事件判定
         
         【P0.4封装】:
@@ -173,7 +176,10 @@ class HexTerrain(LeggedRobot):
         Returns:
             collision_mask: (N,) bool - 发生碰撞为True
         """
-        threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
+        if threshold is None:
+            threshold = getattr(self.cfg.terrain, 'collision_penalty_threshold', None)
+            if threshold is None:
+                threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
         # 只检测非足端刚体的碰撞力
         rb_force = torch.norm(
             self.contact_forces[:, self.penalised_contact_indices, :], 
@@ -856,7 +862,10 @@ class HexTerrain(LeggedRobot):
             self.intensity_buf = torch.clamp(speed_xy / max_speed, 0.0, 1.0)
             
             # === P0.4: Collision mask (使用封装函数) ===
-            collision_mask = self._compute_collision_mask()
+            collision_penalty_threshold = getattr(self.cfg.terrain, 'collision_penalty_threshold', None)
+            collision_mask = self._compute_collision_mask(threshold=collision_penalty_threshold)
+            collision_term_threshold = getattr(self.cfg.terrain, 'collision_force_threshold', 1.0)
+            collision_mask_term = self._compute_collision_mask(threshold=collision_term_threshold)
 
             # terrain difficulty: use terrain level normalized to [0,1]
             # terrain_levels 在 LeggedRobot 里一般存在（课程学习用）
@@ -899,7 +908,7 @@ class HexTerrain(LeggedRobot):
                 self.episode_raw_stats[:, 6] += z_bobbing
                 
                 # 2. base_height: [0,1]质量指标，每步累加
-                height_quality = self._reward_base_height()  # 返回[0,1]
+                height_quality, _ = self._base_height_quality()
                 self.episode_raw_stats[:, 1] += height_quality
                 
                 # 3. collision_count: 事件计数，每次碰撞+1
@@ -918,14 +927,13 @@ class HexTerrain(LeggedRobot):
                     # 复用 Phase 1 的 camera_stability 奖励函数 (这里是reward shaping，可以乘scale*dt)
                     camera_rew_shaped = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
                     self.rew_buf += nav_stability_weight * camera_rew_shaped
-                    
                     # 【GPT审查修正】日志字段改名避免与raw混淆
                     self.extras["nav_rew"]["camera_stability_shaped"] = camera_rew_shaped.mean().item()
 
             # nav termination: reached goal / timeout / collision (使用 local 坐标)
             dones_nav, successes, info_nav = self.nav_task.check_termination(
                 robot_positions=robot_pos_local,
-                collision_mask=collision_mask,
+                collision_mask=collision_mask_term,
             )
             self.reset_buf |= dones_nav
 
@@ -937,6 +945,8 @@ class HexTerrain(LeggedRobot):
             # logging
             self.extras["nav_rew"] = {k: v.mean().item() for k, v in rew_dict.items() if k != "total"}
             self.extras["nav_success_rate"] = successes.float().mean().item()
+            self.extras["nav_collision_soft_rate"] = collision_mask.float().mean().item()
+            self.extras["nav_collision_hard_rate"] = collision_mask_term.float().mean().item()
             # Step A-P1: 添加intensity监控日志
             self.extras["intensity_mean"] = self.intensity_buf.mean().item()
             self.extras["speed_xy_mean"] = speed_xy.mean().item()
@@ -990,7 +1000,7 @@ class HexTerrain(LeggedRobot):
                 self.episode_raw_stats[:, 6] += z_bobbing
                 
                 # 2. base_height: [0,1]质量指标
-                height_quality = self._reward_base_height()
+                height_quality, _ = self._base_height_quality()
                 self.episode_raw_stats[:, 1] += height_quality
                 
                 # 3. collision_count: 使用封装函数
@@ -1064,6 +1074,32 @@ class HexTerrain(LeggedRobot):
         
 
 
+
+    def set_train_progress(self, train_iter, expert_interface_iter=None):
+        self._train_iter = int(train_iter)
+        if expert_interface_iter is not None:
+            self._expert_interface_iter = int(expert_interface_iter)
+
+    def check_termination(self):
+        contact_threshold = getattr(self.cfg.terrain, "collision_force_threshold", 1.0)
+        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > contact_threshold, dim=1)
+
+        height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
+        if height_threshold is not None:
+            if hasattr(self, "measured_heights"):
+                height = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.025 - self.measured_heights, min=-1, max=1.0)
+                base_height = torch.mean(height, dim=1)
+            else:
+                base_height = self.root_states[:, 2]
+            self.reset_buf |= base_height < height_threshold
+
+        max_tilt_deg = getattr(self.cfg.env, "termination_max_tilt_deg", None)
+        if max_tilt_deg is not None:
+            cos_max_tilt = math.cos(math.radians(max_tilt_deg))
+            self.reset_buf |= self.projected_gravity[:, 2] > -cos_max_tilt
+
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf |= self.time_out_buf
 
     def _get_effective_commands(self):
         """
@@ -1676,6 +1712,22 @@ class HexTerrain(LeggedRobot):
         distance_th = getattr(cfg_t, 'curriculum_distance_threshold', 1.0)
         quality_score = getattr(cfg_t, 'curriculum_quality_score', 3.0)
         consecutive_passes = getattr(cfg_t, 'curriculum_consecutive_passes', 2)
+        cap_start = getattr(cfg_t, 'curriculum_expert_level_cap_start', 0)
+        cap_end = getattr(cfg_t, 'curriculum_expert_level_cap_end', -1)
+        freeze_iters = getattr(cfg_t, 'curriculum_post_expert_freeze_iters', 0)
+
+        train_iter = getattr(self, "_train_iter", None)
+        expert_iter = getattr(self, "_expert_interface_iter", None)
+        cap_level = None
+        if train_iter is not None and expert_iter is not None and expert_iter > 0:
+            if cap_end < 0:
+                cap_end = self.max_terrain_level - 1
+            progress = min(float(train_iter) / expert_iter, 1.0)
+            cap_level = int(math.floor(cap_start + (cap_end - cap_start) * progress))
+            cap_level = max(0, min(cap_level, self.max_terrain_level - 1))
+        freeze_upgrading = False
+        if train_iter is not None and expert_iter is not None and freeze_iters > 0:
+            freeze_upgrading = train_iter >= expert_iter and train_iter < expert_iter + freeze_iters
         
         # 从 episode_raw_stats 提取指标 [camera_stability, base_height, collision_count, distance]
         # 【GPT审查修正】用实际步数而非max_episode_length求均值
@@ -1698,6 +1750,8 @@ class HexTerrain(LeggedRobot):
         
         # 软升级: 连续通过计数
         current_pass = score >= quality_score
+        if freeze_upgrading:
+            current_pass = torch.zeros_like(current_pass, dtype=torch.bool)
         self.terrain_pass_count[env_ids] = torch.where(
             current_pass,
             self.terrain_pass_count[env_ids] + 1,
@@ -1706,6 +1760,8 @@ class HexTerrain(LeggedRobot):
         
         # 升级条件: 连续N次通过
         move_up = self.terrain_pass_count[env_ids] >= consecutive_passes
+        if freeze_upgrading:
+            move_up = torch.zeros_like(move_up)
         
         # 降级条件: 分数低于2分
         move_down = (score < 2.0) & ~move_up
@@ -1717,6 +1773,8 @@ class HexTerrain(LeggedRobot):
             torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
             torch.clip(self.terrain_levels[env_ids], 0)
         )
+        if cap_level is not None:
+            self.terrain_levels[env_ids] = torch.clamp(self.terrain_levels[env_ids], 0, cap_level)
         
         # 重置升级计数器 (升级后清零，避免连续跳级)
         self.terrain_pass_count[env_ids] = torch.where(
@@ -1922,7 +1980,7 @@ class HexTerrain(LeggedRobot):
         # 返回速度惩罚（零指令时生效）
         return base_speed * is_zero_command
 
-    def _reward_base_height(self):
+    def _base_height_quality(self):
         #修改成正的奖励，越靠近目标值，奖励越高
         # print("in reward_base_height, base_height=",torch.mean(self.root_states[:,2].unsqueeze(1)-self.measured_heights,dim=1))
         # print("robot_states z=",self.root_states[0,2])
@@ -1931,7 +1989,17 @@ class HexTerrain(LeggedRobot):
         base_height = torch.mean(height,dim=1)
         err = torch.abs(base_height-self.cfg.rewards.base_height_target)
         # print("err = ",err)
-        return torch.exp(-err/0.04)
+        quality = torch.exp(-err/0.04)
+        return quality, base_height
+
+    def _reward_base_height(self):
+        quality, base_height = self._base_height_quality()
+        reward = quality
+        low_height_threshold = getattr(self.cfg.rewards, "low_height_penalty_threshold", None)
+        if low_height_threshold is not None:
+            low_height_penalty = getattr(self.cfg.rewards, "low_height_penalty_value", -1.0)
+            reward = torch.where(base_height < low_height_threshold, torch.full_like(reward, low_height_penalty), reward)
+        return reward
         # return torch.abs(base_height-self.cfg.rewards.base_height_target)
         # return super()._reward_base_height()
 

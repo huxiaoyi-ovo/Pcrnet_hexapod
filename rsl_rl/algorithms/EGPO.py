@@ -22,7 +22,9 @@ class EGPO(PPO):
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
-                 expert_interface_iter=200
+                 expert_interface_iter=200,
+                 expert_alpha_min=0.1,
+                 expert_alpha_schedule="cosine"
                  ):
         super().__init__(actor_critic,
                          num_learning_epochs,
@@ -40,9 +42,21 @@ class EGPO(PPO):
                          device)
         # self.tic1=time.time()
         # self.tic2=time.time()
-        self.expert_interface_iter=expert_interface_iter #专家干预的迭代次数
+        self.expert_interface_iter = expert_interface_iter #专家干预的迭代次数
+        self.expert_alpha_min = expert_alpha_min
+        self.expert_alpha_schedule = expert_alpha_schedule
 
         
+    def _get_expert_alpha(self, it):
+        if self.expert_interface_iter <= 0:
+            return 0.0
+        progress = min(float(it) / self.expert_interface_iter, 1.0)
+        if self.expert_alpha_schedule == "cosine":
+            alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:
+            alpha = 1.0 - progress
+        return max(alpha, self.expert_alpha_min)
+
     def act(self,obs,critic_obs,expert_action,it):
         
         agent_actions=self.actor_critic.act(obs).detach()
@@ -51,7 +65,7 @@ class EGPO(PPO):
         # self.transition.actions = expert_action.detach()
         # self.transition.actions = agent_actions.detach()
 
-        alpha_t=1.0-min(float(it)/self.expert_interface_iter,1.0)
+        alpha_t = self._get_expert_alpha(it)
         # # alpha_t = math.exp(-(it/200.0)/0.2)#测试专家动作一下非线性衰减
         self.transition.actions = alpha_t*expert_action.detach() + (1-alpha_t)*agent_actions.detach()
 
@@ -124,11 +138,11 @@ class EGPO(PPO):
 
 
                 #BC
-                alpha =1.0-min(float(it)/self.expert_interface_iter,1.0)
+                expert_alpha = self._get_expert_alpha(it)
                 # BC_loss_fn = torch.nn.MSELoss()
                 # BC_loss = BC_loss_fn(agent_actions_batch,expert_actions_batch)*alpha*5.0
                 # BC_loss = -self.actor_critic.get_actions_log_prob(expert_actions_batch).mean(dim=-1)*alpha*0.5
-                BC_loss = -self.actor_critic.get_actions_log_prob(expert_actions_batch).mean(dim=-1)*alpha*2.0
+                BC_loss = -self.actor_critic.get_actions_log_prob(expert_actions_batch).mean(dim=-1)*expert_alpha*2.0
                 
                 # KL
                 if self.desired_kl != None and self.schedule == 'adaptive':
@@ -189,11 +203,11 @@ class EGPO(PPO):
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
                 #给探索因子加上一个时间衰减项,专家退出前，适当提高这一项权重，避免方差下降太快导致失去探索性
-                alpha=math.exp( -(it/tot_iter) / 0.4)
+                entropy_alpha = math.exp(-(it/tot_iter) / 0.4)
                 # if it<150:
                 #     loss=self.value_loss_coef * value_loss - alpha * self.entropy_coef * entropy_batch.mean()+BC_loss
                 # else:
-                loss=surrogate_loss + self.value_loss_coef * value_loss - alpha * self.entropy_coef * entropy_batch.mean()+BC_loss
+                loss = surrogate_loss + self.value_loss_coef * value_loss - entropy_alpha * self.entropy_coef * entropy_batch.mean() + BC_loss
 
                 # Gradient stepv  
                 self.optimizer.zero_grad()

@@ -17,6 +17,8 @@ class HexGroundCfg(LeggedRobotCfg):
         num_actions = 18
         episode_length_s=10
         env_spacing=2.0
+        termination_height_threshold = 0.035
+        termination_max_tilt_deg = 60.0
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
         #mesh_type = 'plane'
@@ -49,6 +51,8 @@ class HexGroundCfg(LeggedRobotCfg):
                         "num_rects":5,
                         "platform_size":2.}
         slope_treshold=0.1
+        collision_force_threshold = 1.0
+        collision_penalty_threshold = 0.5
 
 
     class commands(LeggedRobotCfg.commands):
@@ -152,6 +156,8 @@ class HexGroundCfg(LeggedRobotCfg):
 
         
     class rewards(LeggedRobotCfg.rewards):
+        low_height_penalty_threshold = 0.05
+        low_height_penalty_value = -1.0
         class scales(LeggedRobotCfg.rewards.scales):
             action_rate = -0.04
             tracking_ang_vel = 2.0
@@ -161,7 +167,7 @@ class HexGroundCfg(LeggedRobotCfg):
             base_height = 0.8
             orientation = -8.0
             feet_air_time = 0.5
-            collision = -1.0
+            collision = -2.0
 
             dof_acc=-3.0e-7
             # dof_vel = -2.0e-5
@@ -266,7 +272,9 @@ class HexGroundCfgPPO(LeggedRobotCfgPPO):
         
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
-        expert_interface_iter=200 #专家干预的时间
+        expert_interface_iter=500 #专家干预的时间
+        expert_alpha_min=0.1
+        expert_alpha_schedule="cosine"
 
         pass
     class runner(LeggedRobotCfgPPO.runner):

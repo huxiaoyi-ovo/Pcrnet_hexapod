@@ -92,6 +92,8 @@ class EGPORunner(OnPolicyRunner):
 
         tot_iter=self.current_learning_iteration+num_learning_iterations
         for it in range(self.current_learning_iteration,tot_iter):
+            if hasattr(self.env, "set_train_progress"):
+                self.env.set_train_progress(it, self.alg.expert_interface_iter)
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -236,4 +238,3 @@ class EGPORunner(OnPolicyRunner):
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
-

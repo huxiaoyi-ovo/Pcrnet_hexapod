@@ -26,7 +26,9 @@ class EGPOEncoder:
                  schedule='fixed',
                  desired_kl=0.01,
                  device='cpu',
-                 expert_interface_iter=200
+                 expert_interface_iter=200,
+                 expert_alpha_min=0.1,
+                 expert_alpha_schedule="cosine"
                  ):
         
         self.device = device
@@ -53,7 +55,9 @@ class EGPOEncoder:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-        self.expert_interface_iter=expert_interface_iter
+        self.expert_interface_iter = expert_interface_iter
+        self.expert_alpha_min = expert_alpha_min
+        self.expert_alpha_schedule = expert_alpha_schedule
 
     def init_storage(self, num_envs, num_transitions_per_env ,actor_obs_shape, critic_obs_shape, action_shape):
             #先写在这里面，后面放到cfg参数中
@@ -135,6 +139,16 @@ class EGPOEncoder:
 
         return obs_splice, obs_terrain_latent
 
+    def _get_expert_alpha(self, it):
+        if self.expert_interface_iter <= 0:
+            return 0.0
+        progress = min(float(it) / self.expert_interface_iter, 1.0)
+        if self.expert_alpha_schedule == "cosine":
+            alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:
+            alpha = 1.0 - progress
+        return max(alpha, self.expert_alpha_min)
+
     def act(self, obs_splice,obs_terrain_latent, expert_actions, it):
         """EGPO动作选择: 专家引导线性衰减
         
@@ -177,7 +191,7 @@ class EGPOEncoder:
         # ============================================================
         # 专家引导混合: 线性衰减
         # ============================================================
-        alpha_t = 1.0 - min(float(it) / self.expert_interface_iter, 1.0)
+        alpha_t = self._get_expert_alpha(it)
         self.transition.actions = alpha_t * expert_actions.detach() + (1 - alpha_t) * agent_actions.detach()
 
 
@@ -301,14 +315,14 @@ class EGPOEncoder:
                 lstm_encoder_loss = nn.MSELoss()(self.actor_critic.LSTM_encode(obs_hist_padded_batch,masks_batch),obs_terrain_latent_batch.detach())
 
                 # Behaviour cloning loss
-                alpha =1.0-min(float(it)/self.expert_interface_iter,1.0)
-                BC_loss = -self.actor_critic.get_actions_log_prob(expert_actions_batch).mean(dim=-1)*alpha*2.0
+                expert_alpha = self._get_expert_alpha(it)
+                BC_loss = -self.actor_critic.get_actions_log_prob(expert_actions_batch).mean(dim=-1)*expert_alpha*2.0
 
 
                 #Total loss
                 #给探索因子加上一个时间衰减项
-                alpha = math.exp(-(it/tot_iter)/0.2)
-                loss = surrogate_loss + self.value_loss_coef * value_loss - alpha*self.entropy_coef * entropy_batch.mean() + estimator_loss + lstm_encoder_loss + BC_loss
+                entropy_alpha = math.exp(-(it/tot_iter)/0.2)
+                loss = surrogate_loss + self.value_loss_coef * value_loss - entropy_alpha * self.entropy_coef * entropy_batch.mean() + estimator_loss + lstm_encoder_loss + BC_loss
 
 
                 # Gradient step

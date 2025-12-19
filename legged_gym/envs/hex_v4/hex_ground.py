@@ -227,6 +227,27 @@ class HexGround(LeggedRobot):
 
         if self.viewer and self.foot_traj_viz:
             self._draw_foot_end_trajectory()
+
+    def check_termination(self):
+        contact_threshold = getattr(self.cfg.terrain, "collision_force_threshold", 1.0)
+        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > contact_threshold, dim=1)
+
+        height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
+        if height_threshold is not None:
+            if hasattr(self, "measured_heights"):
+                height = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.025 - self.measured_heights, min=-1, max=1.0)
+                base_height = torch.mean(height, dim=1)
+            else:
+                base_height = self.root_states[:, 2]
+            self.reset_buf |= base_height < height_threshold
+
+        max_tilt_deg = getattr(self.cfg.env, "termination_max_tilt_deg", None)
+        if max_tilt_deg is not None:
+            cos_max_tilt = math.cos(math.radians(max_tilt_deg))
+            self.reset_buf |= self.projected_gravity[:, 2] > -cos_max_tilt
+
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf |= self.time_out_buf
         
       
 
@@ -665,7 +686,12 @@ class HexGround(LeggedRobot):
         base_height = torch.mean(height,dim=1)
         err = torch.abs(base_height-self.cfg.rewards.base_height_target)
         # print("err = ",err)
-        return torch.exp(-err/0.04)
+        reward = torch.exp(-err/0.04)
+        low_height_threshold = getattr(self.cfg.rewards, "low_height_penalty_threshold", None)
+        if low_height_threshold is not None:
+            low_height_penalty = getattr(self.cfg.rewards, "low_height_penalty_value", -1.0)
+            reward = torch.where(base_height < low_height_threshold, torch.full_like(reward, low_height_penalty), reward)
+        return reward
         # return torch.abs(base_height-self.cfg.rewards.base_height_target)
         # return super()._reward_base_height()
 
