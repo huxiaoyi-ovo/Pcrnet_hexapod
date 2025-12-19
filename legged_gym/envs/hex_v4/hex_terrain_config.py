@@ -176,8 +176,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         curriculum_quality_score = 2.0         # 4项中至少2项达标
         curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
         curriculum_distance_threshold = 1.0   # episode累计距离阈值(米)
-        curriculum_expert_level_cap_start = 1
-        curriculum_expert_level_cap_end = -1
+        curriculum_expert_level_cap_start = 0
+        curriculum_expert_level_cap_end = 4
         curriculum_post_expert_freeze_iters = 100
         
         # === 底噪渐进参数 ===
@@ -356,13 +356,13 @@ class HexTerrainCfg(LeggedRobotCfg):
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
-            tracking_lin_vel = 2.0      # 跟踪线速度指令
-            tracking_ang_vel = 1.5      # 跟踪角速度指令
+            tracking_lin_vel = 3.0      # 跟踪线速度指令
+            tracking_ang_vel = 2.0      # 跟踪角速度指令
             
             # === 相机稳定性（Sim-to-Real关键）===
             camera_stability = 2.5      # 新增：惩罚机身抖动以提升视觉质量
-            lin_vel_z = -2.0            # 惩罚垂直颠簸
-            ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
+            lin_vel_z = -1.5            # 惩罚垂直颠簸
+            ang_vel_xy = -0.03          # 惩罚俯仰/横滚角速度
             
             # === 姿态与步态 ===
             base_height = 0.5           # 保持目标高度
@@ -371,8 +371,8 @@ class HexTerrainCfg(LeggedRobotCfg):
             
             # === 惩罚项 ===
             collision = -2.0            # 非足端接触
-            action_rate = -0.05         # 平滑动作变化
-            dof_acc = -3.0e-7           # 关节加速度惩罚
+            action_rate = -0.03         # 平滑动作变化
+            dof_acc = -1.5e-7           # 关节加速度惩罚
             stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚, 2025-12-17)
             
             # === 能耗（可选）===
@@ -450,7 +450,7 @@ class HexTerrainCfgPPO(LeggedRobotCfgPPO):
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
         expert_interface_iter=500 #专家干预的时间
-        expert_alpha_min=0.1
+        expert_alpha_min=0.0
         expert_alpha_schedule="cosine"
 
         pass
