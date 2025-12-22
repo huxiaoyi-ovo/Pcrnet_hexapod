@@ -120,6 +120,7 @@ class HexTerrain(LeggedRobot):
         #额外初始化专家类，可以在step时，提供专家动作参考
         # if self.cfg.env.gen_expert_actions:
         self.expert=ExpertGround(self.cfg,self.device,self.cfg.env.num_envs)
+        self._init_contact_debug_indices()
 
         #额外初始化相机类
         cam_prop=gymapi.CameraProperties()
@@ -236,6 +237,26 @@ class HexTerrain(LeggedRobot):
         super()._create_envs()
         # 相机创建移到create_sim中
 
+    def _init_contact_debug_indices(self):
+        """Cache rigid-body indices for debug statistics (knee/thigh contacts)."""
+        try:
+            rb_names = self.gym.get_actor_rigid_body_names(self.envs[0], self.actor_handles[0])
+        except Exception:
+            rb_names = []
+        self._rb_names = rb_names
+
+        def _indices_for(substr: str):
+            return [i for i, n in enumerate(rb_names) if substr in n]
+
+        knee = _indices_for("knee")
+        thigh = _indices_for("thigh")
+        self._knee_contact_indices = (
+            torch.tensor(knee, dtype=torch.long, device=self.device) if len(knee) else None
+        )
+        self._thigh_contact_indices = (
+            torch.tensor(thigh, dtype=torch.long, device=self.device) if len(thigh) else None
+        )
+
     def _init_navigation_buffers(self):
         """初始化导航和EGPO观测buffers
         
@@ -342,6 +363,16 @@ class HexTerrain(LeggedRobot):
         self._expert_action_updated = False
         self._expert_action_norm_buf = torch.zeros(
             self.num_envs,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False
+        )
+
+        # === Debug stats for failure modes (episode accumulation) ===
+        # [knee_contact_steps, thigh_contact_steps, dof_pos_limit_violation_sum, nonfoot_contact_steps]
+        self.episode_debug_stats = torch.zeros(
+            self.num_envs,
+            4,
             dtype=torch.float32,
             device=self.device,
             requires_grad=False
@@ -838,7 +869,6 @@ class HexTerrain(LeggedRobot):
             cmd_nonzero_th = getattr(self.cfg.commands, 'nonzero_threshold', 0.05)
             cmd_nonzero = cmd_norm > cmd_nonzero_th
             base_speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
-
             self.episode_cmd_stats[:, 0] += cmd_norm
             self.episode_cmd_stats[:, 1] += cmd_nonzero.float()
             self.episode_cmd_stats[:, 2] += base_speed
@@ -846,6 +876,44 @@ class HexTerrain(LeggedRobot):
                 self.episode_cmd_stats[:, 3] += self._expert_action_norm_buf
                 self.episode_cmd_stats[:, 4] += 1.0
                 self._expert_action_updated = False
+                
+            # === Failure mode debug stats ===
+            contact_th = getattr(self.cfg.terrain, "collision_penalty_threshold", 0.5)
+            # knee/thigh contacts (if indices are available)
+            if self._knee_contact_indices is not None:
+                knee_force = torch.norm(self.contact_forces[:, self._knee_contact_indices, :], dim=-1)
+                self.episode_debug_stats[:, 0] += (knee_force > contact_th).any(dim=1).float()
+            if self._thigh_contact_indices is not None:
+                thigh_force = torch.norm(self.contact_forces[:, self._thigh_contact_indices, :], dim=-1)
+                self.episode_debug_stats[:, 1] += (thigh_force > contact_th).any(dim=1).float()
+            # dof pos limit violations (soft limits from URDF)
+            out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clamp(max=0.0)
+            out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clamp(min=0.0)
+            self.episode_debug_stats[:, 2] += torch.sum(out_of_limits, dim=1)
+            # any non-foot contact (penalized bodies)
+            self.episode_debug_stats[:, 3] += self._compute_collision_mask(threshold=contact_th).float()
+
+            # one-time debug: verify penalised_contact_indices actually cover knee/thigh bodies
+            if self.common_step_counter == 1 and hasattr(self, "extras"):
+                try:
+                    penalised = set(self.penalised_contact_indices.detach().cpu().tolist())
+                except Exception:
+                    penalised = set()
+                knee = (
+                    set(self._knee_contact_indices.detach().cpu().tolist())
+                    if self._knee_contact_indices is not None
+                    else set()
+                )
+                thigh = (
+                    set(self._thigh_contact_indices.detach().cpu().tolist())
+                    if self._thigh_contact_indices is not None
+                    else set()
+                )
+                self.extras["debug/contact/penalised_count"] = float(len(penalised))
+                self.extras["debug/contact/knee_count"] = float(len(knee))
+                self.extras["debug/contact/thigh_count"] = float(len(thigh))
+                self.extras["debug/contact/knee_overlap_penalised"] = float(len(knee & penalised))
+                self.extras["debug/contact/thigh_overlap_penalised"] = float(len(thigh & penalised))
 
         if getattr(self.nav_cfg, "enable_nav_reward", False):
             # === [P0.2 数据一致性] Phase 2: Navigation Reward 分支 ===
@@ -921,9 +989,9 @@ class HexTerrain(LeggedRobot):
             
             # Phase 2/3: 可选的稳定性保持（避免导航时相机质量退化）
             # 如果配置中启用了 nav_stability_weight，额外添加 camera_stability 奖励
-            if hasattr(self.cfg.rewards.scales, 'nav_stability_weight'):
-                nav_stability_weight = self.cfg.rewards.scales.nav_stability_weight
-                if nav_stability_weight > 0:
+            if hasattr(self.cfg.rewards, 'nav_stability_weight'):
+                nav_stability_weight = getattr(self.cfg.rewards, 'nav_stability_weight', 0.0)
+                if nav_stability_weight and nav_stability_weight > 0:
                     # 复用 Phase 1 的 camera_stability 奖励函数 (这里是reward shaping，可以乘scale*dt)
                     camera_rew_shaped = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
                     self.rew_buf += nav_stability_weight * camera_rew_shaped
@@ -1065,6 +1133,8 @@ class HexTerrain(LeggedRobot):
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+        # Update contact history for reward contact filtering (PhysX meshes can be noisy)
+        self.last_contacts = (torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.)
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()        
@@ -1206,9 +1276,9 @@ class HexTerrain(LeggedRobot):
             ep_expert_action_norm_mean = (self.episode_cmd_stats[env_ids, 3] / expert_denom).mean().item()
             ep_expert_update_frac = (expert_update_count / ep_len).mean().item()
 
-            jitter_w = getattr(self.cfg.rewards.scales, 'camera_jitter_weight', 0.05)
-            wobble_w = getattr(self.cfg.rewards.scales, 'camera_wobble_weight', 0.5)
-            bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
+            jitter_w = getattr(self.cfg.rewards, 'camera_jitter_weight', 0.05)
+            wobble_w = getattr(self.cfg.rewards, 'camera_wobble_weight', 0.5)
+            bobbing_w = getattr(self.cfg.rewards, 'camera_bobbing_weight', 0.1)
             ep_camera_penalty = ep_camera_jitter * jitter_w + ep_camera_wobble * wobble_w + ep_camera_bobbing * bobbing_w
 
             base_ang_acc_xy_rms = torch.sqrt(torch.mean(self.base_ang_acc[env_ids, :2] ** 2)).item()
@@ -1252,6 +1322,15 @@ class HexTerrain(LeggedRobot):
                 self.extras["episode"]["ep_base_speed_mean"] = ep_base_speed_mean
                 self.extras["episode"]["ep_expert_action_norm_mean"] = ep_expert_action_norm_mean
                 self.extras["episode"]["ep_expert_update_frac"] = ep_expert_update_frac
+                # failure mode diagnostics
+                ep_knee_contact_frac = (self.episode_debug_stats[env_ids, 0] / ep_len).mean().item()
+                ep_thigh_contact_frac = (self.episode_debug_stats[env_ids, 1] / ep_len).mean().item()
+                ep_dof_limit_violation = (self.episode_debug_stats[env_ids, 2] / ep_len).mean().item()
+                ep_nonfoot_contact_frac = (self.episode_debug_stats[env_ids, 3] / ep_len).mean().item()
+                self.extras["episode"]["knee_contact_frac"] = ep_knee_contact_frac
+                self.extras["episode"]["thigh_contact_frac"] = ep_thigh_contact_frac
+                self.extras["episode"]["dof_pos_limit_violation"] = ep_dof_limit_violation
+                self.extras["episode"]["nonfoot_contact_frac"] = ep_nonfoot_contact_frac
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:
@@ -1280,6 +1359,7 @@ class HexTerrain(LeggedRobot):
             # 5. 【P0.3】重置 raw 统计 - 确保 curriculum 正常工作
             self.episode_raw_stats[env_ids] = 0.0
             self.episode_cmd_stats[env_ids] = 0.0
+            self.episode_debug_stats[env_ids] = 0.0
             # =====================================================
 
         # 重置深度图为零（避免使用旧数据）
@@ -1837,80 +1917,101 @@ class HexTerrain(LeggedRobot):
 
 
     def _reward_feet_air_time(self):
-        # Reward long steps
-        # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        #重设六足的足端腾空时间不少于0.18s
+        """Reward reasonable swing time, but avoid 'very long air-time' reward hacking.
+
+        - Uses contact filtering for mesh noise.
+        - Rewards only on first contact event.
+        - Saturates and adds penalty when air time is too long.
+        - Gates reward when body is not upright or when knee/thigh are in contact.
+        """
         contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
-        contact_filt = torch.logical_or(contact, self.last_contacts) 
-        # self.last_contacts = contact #放到post_physics_step后面计算，因为reward中还有其他奖励要使用
+        contact_filt = torch.logical_or(contact, self.last_contacts)
         first_contact = (self.feet_air_time > 0.) * contact_filt
+
+        # update timers
         self.feet_air_time += self.dt
-        # print("feet_air_time=",self.feet_air_time[0])
-        # print("first_contact=",first_contact[0])
-        rew_airTime = torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1) # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.2 #no reward for zero command
+
+        # shaping parameters (seconds)
+        t_target = getattr(self.cfg.rewards, "feet_air_time_target_s", 0.18)
+        t_max = getattr(self.cfg.rewards, "feet_air_time_max_s", 0.45)
+        long_penalty = getattr(self.cfg.rewards, "feet_air_time_long_penalty", 1.0)
+        over_cap = getattr(self.cfg.rewards, "feet_air_time_over_cap_s", 0.60)
+        cmd_th = getattr(self.cfg.rewards, "feet_air_time_cmd_threshold", 0.2)
+
+        t = self.feet_air_time
+        t_good = torch.clamp(torch.clamp(t, max=t_max) - t_target, min=0.0)
+        t_over = torch.clamp(t - t_max, min=0.0, max=over_cap)
+        per_foot = t_good - long_penalty * t_over
+
+        rew_air_time = torch.sum(per_foot * first_contact, dim=1)
+        rew_air_time *= (torch.norm(self.commands[:, :3], dim=1) > cmd_th)
+
+        # Gate: only count when body is upright and no knee/thigh contact is happening
+        upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
+        upright = self.projected_gravity[:, 2] > upright_cos_min
+        collision_th = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
+        no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
+        rew_air_time *= (upright & no_nonfoot_contact).float()
+
+        # reset on (filtered) contact
         self.feet_air_time *= ~contact_filt
-        return rew_airTime
+        return rew_air_time
     
     def _reward_footend_pos_xy(self):
-        """单次分段奖励"""
-        # # swing或者stance阶段，只要靠近一次init point就给奖励，只给一次
-        # # 区分swing或者stance
+        """Continuous foot placement shaping (swing legs only), with deadzone for obstacle tolerance."""
         contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
-        contact_filt = torch.logical_or(contact, self.last_contacts) 
-        self.expert.kin.ForwardKin(self.dof_pos.view(-1,3),self.expert.B_e_cur_flat)
-        dist=torch.norm(self.expert.B_e_cur[...,0:2]-self.expert.swing_init_point[:,0:2],dim=-1)
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        swing_mask = ~contact_filt  # (N,6)
 
-        self.reach_stance_init[~contact_filt]=False
-        self.reach_swing_init[contact_filt]=False
+        # forward kinematics for current foot positions (body/leg base frame)
+        self.expert.kin.ForwardKin(self.dof_pos.view(-1, 3), self.expert.B_e_cur_flat)
+        dist_xy = torch.norm(
+            self.expert.B_e_cur[..., 0:2] - self.expert.swing_init_point[:, 0:2],
+            dim=-1,
+        )  # (N,6)
 
-        # rew=torch.exp(-dist/(0.14*0.2))
-        reach=(dist<0.01) & (~contact_filt)
-        #靠近范围 没有获得过 距离上一次获得奖励时间高于0.18s
-        get_rew_mask = reach & (~self.reach_swing_init) & (self.reach_rew_time>0.25)
-        # rew[~(reach &(~self.reach_swing_init))] =0.0
-        swing_reward = torch.sum( get_rew_mask, dim=1)
-        self.reach_swing_init[reach]=True
-        self.reach_rew_time[self.reach_swing_init] += self.dt
-        self.reach_rew_time[get_rew_mask]=0.0
+        # allow larger deviations on harder terrain (curriculum)
+        if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
+            denom = max(1, int(self.max_terrain_level - 1))
+            difficulty = torch.clamp(self.terrain_levels.float() / denom, 0.0, 1.0).unsqueeze(1)
+        else:
+            difficulty = torch.zeros(self.num_envs, 1, device=self.device)
 
+        deadzone_base = getattr(self.cfg.rewards, "foot_xy_deadzone_base", 0.03)
+        deadzone_extra = getattr(self.cfg.rewards, "foot_xy_deadzone_per_difficulty", 0.03)
+        sigma_base = getattr(self.cfg.rewards, "foot_xy_sigma_base", 0.10)
+        sigma_extra = getattr(self.cfg.rewards, "foot_xy_sigma_per_difficulty", 0.08)
+        reward_min = getattr(self.cfg.rewards, "foot_xy_reward_min", 0.0)
+        reward_max = getattr(self.cfg.rewards, "foot_xy_reward_max", 1.0)
 
+        deadzone = deadzone_base + deadzone_extra * difficulty  # (N,1)
+        sigma = sigma_base + sigma_extra * difficulty           # (N,1)
 
-        # reach=(dist<0.015) & (contact_filt)
-        # get_rew_mask = reach & (~self.reach_stance_init) & (self.reach_rew_time>0.25)
-        # # rew[~(reach &(~self.reach_stance_init))] =0.0
-        # stance_reward = torch.sum( get_rew_mask, dim=1)
-        # self.reach_stance_init[reach]=True
-        # self.reach_rew_time[self.reach_stance_init] += self.dt
-        # self.reach_rew_time[get_rew_mask]=0.0
+        dist_excess = torch.clamp(dist_xy - deadzone, min=0.0)
+        per_leg_quality = torch.exp(-torch.square(dist_excess / (sigma + 1e-6)))
+        per_leg_quality = torch.clamp(per_leg_quality, reward_min, reward_max)
 
-        # for i in range(6):
-        #     print(f"gaits={float(self.expert.gaits[0,i])}, dist={dist[0,i]}, reach_stance={self.reach_stance_init[0,i]}")
-        # print(f"stance_rew={stance_reward[0]}")
-        # print("\n")
-        # time.sleep(0.5)
-        # rew = (stance_reward+swing_reward) * (torch.norm(self.commands[:,:3])>0.2)
-        rew = (swing_reward) * (torch.norm(self.commands[:,:3])>0.2)
-        return rew
+        # average only across swing legs to avoid over-constraining stance/obstacle contacts
+        swing_count = swing_mask.sum(dim=1).clamp_min(1)
+        quality = (per_leg_quality * swing_mask.float()).sum(dim=1) / swing_count
 
-        """持续奖励"""
-        xy_dist=torch.norm(self.expert.B_e_cur[...,0:2]-self.expert.swing_init_point[:,0:2],dim=-1).sum(dim=-1)
-        # xy_dist=(xy_dist*(~contact_filt)).sum(dim=1) #只计算swing状态下的contact_filt
-        # xy_dist[xy_dist<0.2]=0.2
-        # print("xy_dist=",xy_dist[0])
-        # rew=(torch.exp(-xy_dist/0.12)*(~contact_filt))/(torch.sum(~contact_filt,dim=1)+1e-6)
-        
-            
-            
-        return torch.exp(-xy_dist/(0.4*0.5))
+        # only apply when commands are non-trivial
+        quality *= (torch.norm(self.commands[:, :3], dim=1) > 0.2).float()
+
+        # Gate: disable shaping when posture is abnormal or when non-foot bodies are touching (anti-hack)
+        upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
+        upright = self.projected_gravity[:, 2] > upright_cos_min
+        collision_th = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
+        no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
+        quality *= (upright & no_nonfoot_contact).float()
+        return quality
 
     def _reward_swing(self):
         #估计摆动时，靠近设置的初始点，来避免长期运动带来的累计误差
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts) 
-        self.last_contacts = contact
         # 
         # print("reach_swing_init=",self.reach_swing_init[0])
         # print("contact_filt=",contact_filt[0])
@@ -2075,24 +2176,24 @@ class HexTerrain(LeggedRobot):
         # 单位: (rad/s)²
         ang_wobble = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
         
-        # 3. 垂直颠簸（影响深度估计）- z轴线加速度
-        # 单位: g² （base_lin_acc已除以9.81，见Line 794）
-        z_bobbing = torch.square(self.base_lin_acc[:, 2])
+            # 3. 垂直颠簸（影响深度估计）
+            # base_lin_acc 为“加速度计读数”（单位:g，包含重力），因此用 (a_z - 1g)^2 衡量上下颠簸与失重/跳跃
+        z_bobbing = torch.square(self.base_lin_acc[:, 2] - 1.0)
         
         # 【GPT建议】从config读取cap阈值，避免硬编码暗参
         # 使得调参可复现、可追溯（cfg文件记录所有超参）
-        jitter_cap = getattr(self.cfg.rewards.scales, 'camera_jitter_cap', 50.0)
-        wobble_cap = getattr(self.cfg.rewards.scales, 'camera_wobble_cap', 4.0)
-        bobbing_cap = getattr(self.cfg.rewards.scales, 'camera_bobbing_cap', 100.0)
+        jitter_cap = getattr(self.cfg.rewards, 'camera_jitter_cap', 50.0)
+        wobble_cap = getattr(self.cfg.rewards, 'camera_wobble_cap', 4.0)
+        bobbing_cap = getattr(self.cfg.rewards, 'camera_bobbing_cap', 100.0)
         
         ang_jitter = torch.clamp(ang_jitter, 0, jitter_cap)
         ang_wobble = torch.clamp(ang_wobble, 0, wobble_cap)
         z_bobbing = torch.clamp(z_bobbing, 0, bobbing_cap)
         
         # 组合惩罚（使用可配置权重）
-        jitter_w = getattr(self.cfg.rewards.scales, 'camera_jitter_weight', 0.05)
-        wobble_w = getattr(self.cfg.rewards.scales, 'camera_wobble_weight', 0.5)
-        bobbing_w = getattr(self.cfg.rewards.scales, 'camera_bobbing_weight', 0.1)
+        jitter_w = getattr(self.cfg.rewards, 'camera_jitter_weight', 0.05)
+        wobble_w = getattr(self.cfg.rewards, 'camera_wobble_weight', 0.5)
+        bobbing_w = getattr(self.cfg.rewards, 'camera_bobbing_weight', 0.1)
         penalty = ang_jitter * jitter_w + ang_wobble * wobble_w + z_bobbing * bobbing_w
         
         # 【GPT建议】层级式日志键名，提升logger兼容性（很多logger对 '/' 分层有更好支持）
@@ -2104,8 +2205,11 @@ class HexTerrain(LeggedRobot):
             self.extras['debug/camera/base_ang_acc_xy_std'] = self.base_ang_acc[:, :2].std().item()
             self.extras['debug/camera/base_lin_acc_z_std'] = self.base_lin_acc[:, 2].std().item()
         
-        # 使用exp确保平滑梯度和正向奖励
+        # 使用exp确保平滑梯度和正向奖励；并对异常姿态做门控，防止刷分
         camera_quality = torch.exp(-penalty)
+        upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
+        upright = self.projected_gravity[:, 2] > upright_cos_min
+        camera_quality = torch.where(upright, camera_quality, torch.zeros_like(camera_quality))
         
         # 【诊断日志】记录最终quality分布（层级式键名提升可见性）
         if self.common_step_counter % 500 == 0 and hasattr(self, 'extras'):

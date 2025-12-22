@@ -132,6 +132,9 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
+        # commands options
+        if getattr(args, "commands_only_y", False):
+            env_cfg.commands.only_y = True
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -166,6 +169,8 @@ def get_args():
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+
+        {"name": "--commands_only_y", "action": "store_true", "default": False, "help": "Sample random commands only along Y axis (vy), with vx=0 and yaw=0."},
 
         # play.py 专用选项（默认严格复现训练配置）
         {"name": "--play_overrides", "action": "store_true", "default": False, "help": "Enable play-time overrides (rows/cols, disable curriculum/noise/domain_rand). Default: off for exact training cfg."},

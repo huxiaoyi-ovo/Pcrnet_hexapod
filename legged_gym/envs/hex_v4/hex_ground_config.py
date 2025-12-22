@@ -272,7 +272,7 @@ class HexGroundCfgPPO(LeggedRobotCfgPPO):
         
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
-        expert_interface_iter=500 #专家干预的时间
+        expert_interface_iter=200 #专家干预的时间
         expert_alpha_min=0.0
         expert_alpha_schedule="cosine"
 

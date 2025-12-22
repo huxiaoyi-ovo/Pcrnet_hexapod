@@ -338,6 +338,10 @@ class HexTerrainCfg(LeggedRobotCfg):
         max_reward_clip = 10.0
         low_height_penalty_threshold = 0.05
         low_height_penalty_value = -1.0
+
+        # ==================== 姿态门控（防刷分/异常形态） ====================
+        # projected_gravity[:,2] = cos(tilt)；0.7≈45°，0.85≈31.8°
+        upright_cos_min = 0.75
         
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
@@ -349,10 +353,26 @@ class HexTerrainCfg(LeggedRobotCfg):
         # 这些cap基于正常六足运动的物理约束（不同dt/动力学参数需调整）
         camera_jitter_cap = 50.0     # (rad/s²)² 上限，对应~7rad/s² 角加速度
         camera_wobble_cap = 4.0      # (rad/s)² 上限，对应~2rad/s 角速度
-        camera_bobbing_cap = 100.0   # (m/s²)² 上限，对应~10m/s² (1g) 垂直加速度
+        camera_bobbing_cap = 100.0   # (g 偏差)² 上限：_reward_camera_stability 使用 (a_z - 1g)^2（base_lin_acc单位:g）
         
         # Phase 2/3: 导航时的稳定性保持权重
         nav_stability_weight = 0.3  # 导航时额外添加 camera_stability 的权重
+
+        # ==================== 步态 shaping 超参（容忍偏离） ====================
+        # 仅对 swing 腿生效；deadzone 内不惩罚，deadzone 外逐渐衰减
+        foot_xy_deadzone_base = 0.03            # [m]
+        foot_xy_deadzone_per_difficulty = 0.03  # [m] 难度越高越宽松
+        foot_xy_sigma_base = 0.10               # [m]
+        foot_xy_sigma_per_difficulty = 0.08     # [m]
+        foot_xy_reward_min = 0.0
+        foot_xy_reward_max = 1.0
+
+        # ==================== 腾空时间 shaping（避免超长刷分） ====================
+        feet_air_time_target_s = 0.18
+        feet_air_time_max_s = 0.45
+        feet_air_time_long_penalty = 1.0     # 超过max后的惩罚斜率（相对奖励）
+        feet_air_time_over_cap_s = 0.60      # 超长惩罚裁剪，避免极端尖峰
+        feet_air_time_cmd_threshold = 0.2    # 低指令时不计入
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
@@ -362,27 +382,29 @@ class HexTerrainCfg(LeggedRobotCfg):
             # === 相机稳定性（Sim-to-Real关键）===
             camera_stability = 2.5      # 新增：惩罚机身抖动以提升视觉质量
             lin_vel_z = -1.5            # 惩罚垂直颠簸
-            ang_vel_xy = -0.03          # 惩罚俯仰/横滚角速度
+            ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
             
             # === 姿态与步态 ===
             base_height = 0.5           # 保持目标高度
-            orientation = 0.0           # 保持水平（由camera_stability覆盖）
+            orientation = -0.5          # 软姿态约束：防止异常姿态刷分
             feet_air_time = 0.5         # 鼓励合理的摆动相位
             
             # === 惩罚项 ===
-            collision = -2.0            # 非足端接触
+            collision = -5.0            # 非足端接触
             action_rate = -0.03         # 平滑动作变化
             dof_acc = -1.5e-7           # 关节加速度惩罚
-            stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚, 2025-12-17)
+            stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚)
             
             # === 能耗（可选）===
             CoT = 0.0                   # 运输成本（已禁用）
             
             # === 六足特定（实验性）===
-            # tracking_dof = -0.1       # 关节位置跟踪
-            # footend_pos_xy = 3.0      # 足端位置奖励            
+            tracking_dof = -0.01       # 关节位置跟踪
+            footend_pos_xy = 1.0      # 足端位置奖励            
+            dof_pos_limits = -0.2     # 关节接近软限位惩罚（防反折/僵直）
 
-
+        # 软关节限位：避免反折/僵直，但不锁死越障
+        soft_dof_pos_limit = 0.95
         only_positive_rewards = False
         tracking_sigma = 0.12
         # tracking_sigma = 0.04
@@ -449,7 +471,7 @@ class HexTerrainCfgPPO(LeggedRobotCfgPPO):
         
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
-        expert_interface_iter=500 #专家干预的时间
+        expert_interface_iter=200 #专家干预的时间
         expert_alpha_min=0.0
         expert_alpha_schedule="cosine"
 
