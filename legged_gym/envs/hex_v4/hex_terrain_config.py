@@ -346,7 +346,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
         camera_jitter_weight = 0.05   # 抖动权重（角加速度）
-        camera_wobble_weight = 0.5    # 晃动权重（俯仰/横滚角速度）
+        camera_wobble_weight = 0.25   # 晃动权重（俯仰/横滚角速度）- 下降以避免抬腿时“过度求稳”
         camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
         
         # 防止偶发尖峰污染curriculum的鲁棒性阈值
