@@ -30,6 +30,8 @@
 
 import time
 import os
+import atexit
+import datetime
 from collections import deque
 import statistics
 
@@ -77,8 +79,50 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self._terminal_log_f = None
 
         _, _ = self.env.reset()
+
+    def _ensure_terminal_log(self):
+        if not self.log_dir:
+            return None
+        if not hasattr(self, "_terminal_log_f"):
+            self._terminal_log_f = None
+        if self._terminal_log_f is not None:
+            return self._terminal_log_f
+        os.makedirs(self.log_dir, exist_ok=True)
+        path = os.path.join(self.log_dir, "terminal_output.txt")
+        self._terminal_log_f = open(path, "a", buffering=1, encoding="utf-8")
+        self._terminal_log_f.write(f"\n\n===== Training log started {datetime.datetime.now().isoformat()} =====\n")
+        atexit.register(self._close_terminal_log)
+        return self._terminal_log_f
+
+    def _close_terminal_log(self):
+        if getattr(self, "_terminal_log_f", None) is None:
+            return
+        try:
+            self._terminal_log_f.flush()
+        finally:
+            try:
+                self._terminal_log_f.close()
+            finally:
+                self._terminal_log_f = None
+
+    def _should_persist_terminal_log(self, it: int | None) -> bool:
+        if it is None:
+            return True
+        return (it > 0) and (it <= 2000) and (it % 200 == 0)
+
+    def _terminal_print(self, text: str, it: int | None = None):
+        print(text)
+        if not self._should_persist_terminal_log(it):
+            return
+        f = self._ensure_terminal_log()
+        if f is None:
+            return
+        if not text.endswith("\n"):
+            text = text + "\n"
+        f.write(text)
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -238,7 +282,7 @@ class OnPolicyRunner:
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        self._terminal_print(log_string, it=locs.get("it"))
 
     def save(self, path, infos=None):
         torch.save({

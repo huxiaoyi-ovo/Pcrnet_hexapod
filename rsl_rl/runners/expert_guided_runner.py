@@ -237,4 +237,4 @@ class EGPORunner(OnPolicyRunner):
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        self._terminal_print(log_string, it=locs.get("it"))
