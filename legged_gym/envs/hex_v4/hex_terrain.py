@@ -927,7 +927,7 @@ class HexTerrain(LeggedRobot):
                     # 复用 Phase 1 的 camera_stability 奖励函数 (这里是reward shaping，可以乘scale*dt)
                     camera_rew_shaped = self._reward_camera_stability() * self.cfg.rewards.scales.camera_stability * self.dt
                     self.rew_buf += nav_stability_weight * camera_rew_shaped
-                    # 【GPT审查修正】日志字段改名避免与raw混淆
+                    # 日志字段改名避免与raw混淆
                     self.extras["nav_rew"]["camera_stability_shaped"] = camera_rew_shaped.mean().item()
 
             # nav termination: reached goal / timeout / collision (使用 local 坐标)
@@ -1015,7 +1015,7 @@ class HexTerrain(LeggedRobot):
                 # 更新prev_robot_pos_buf用于下一步距离计算
                 self.prev_robot_pos_buf[:] = robot_pos_local
             
-            # 【GPT建议】Phase 1数据链完整性断言（debug模式）
+            # Phase 1数据链完整性断言（debug模式）
             if getattr(self.cfg.env, 'debug_mode', False):
                 assert torch.isfinite(self.rew_buf).all(), \
                     f"[Phase1-Debug] rew_buf has NaN/Inf! mean={self.rew_buf.mean()}, min={self.rew_buf.min()}, max={self.rew_buf.max()}"
@@ -1028,7 +1028,7 @@ class HexTerrain(LeggedRobot):
                     max=self.cfg.rewards.max_reward_clip
                 )
         
-        # 【GPT建议】Curriculum统计有效性断言（每500步检查一次，避免性能影响）
+        # Curriculum统计有效性断言（每500步检查一次，避免性能影响）
         if getattr(self.cfg.env, 'debug_mode', False) and self.common_step_counter % 500 == 0:
             # 确保raw统计链没有断掉（episode至少有一个非零变化）
             # episode_raw_stats[:, 0-3]应该在递增（camera/height质量、collision次数、距离）

@@ -166,6 +166,12 @@ def get_args():
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+
+        # play.py 专用选项（默认严格复现训练配置）
+        {"name": "--play_overrides", "action": "store_true", "default": False, "help": "Enable play-time overrides (rows/cols, disable curriculum/noise/domain_rand). Default: off for exact training cfg."},
+        {"name": "--train_iter", "type": int, "help": "Training iteration used to sync env curriculum state in play (defaults to --checkpoint when available)."},
+        {"name": "--keyboard_cmds", "action": "store_true", "default": False, "help": "Use keyboard to override commands (vx/vy/yaw) in play."},
+        {"name": "--allow_fallback", "action": "store_true", "default": False, "help": "Allow play fallback path when encode_obs fails (not recommended)."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
