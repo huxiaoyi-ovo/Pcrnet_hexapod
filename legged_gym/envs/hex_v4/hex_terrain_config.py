@@ -297,8 +297,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         damping={}
         for t in _tao:
             for qn in _q_name:
-                stiffness['j_'+t+'_' + qn]=70.0
-                damping['j_'+t+'_'+qn] = 2.0
+                stiffness['j_'+t+'_' + qn]=70.0#70.0
+                damping['j_'+t+'_'+qn] = 3.0#2.0
         action_scale=0.5
         decimation = 4
 

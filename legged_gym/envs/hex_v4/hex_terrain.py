@@ -846,11 +846,12 @@ class HexTerrain(LeggedRobot):
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
 
-        #添加的部分，模拟加速度计的输出，所以要减去重力加速度，这里加速度的单位是g
-        root_acc = ((self.root_states[:,7:10]-self.last_root_vel[:,:3])/self.cfg.sim.dt)/9.81 - self.gravity_vec
+        # 添加的部分，模拟加速度计的输出，所以要减去重力加速度，这里加速度的单位是g
+        # 注意：last_root_vel 在每个 control step 更新一次，因此差分时间应使用 self.dt (= sim_dt * decimation)
+        root_acc = ((self.root_states[:, 7:10] - self.last_root_vel[:, :3]) / self.dt) / 9.81 - self.gravity_vec
         self.base_lin_acc[:] = quat_rotate_inverse(self.base_quat, root_acc)
 
-        root_ang_acc = (self.root_states[:,10:13]-self.last_root_vel[:,3:])/self.cfg.sim.dt
+        root_ang_acc = (self.root_states[:, 10:13] - self.last_root_vel[:, 3:]) / self.dt
         self.base_ang_acc[:] = quat_rotate_inverse(self.base_quat, root_ang_acc)
         #根据IMU安装的位置，根据基座质心计算IMU质心处加速度的大小
         self.IMU_lin_acc = self.base_lin_acc + (self.base_ang_acc.cross(self.IMU_pos,dim=1) + self.base_ang_vel.cross(self.base_ang_vel.cross(self.IMU_pos,dim=1),dim=1))/9.81
