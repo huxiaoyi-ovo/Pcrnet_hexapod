@@ -390,8 +390,8 @@ class HexTerrainCfg(LeggedRobotCfg):
             feet_air_time = 0.5         # 鼓励合理的摆动相位
             
             # === 惩罚项 ===
-            collision = -5.0            # 非足端接触
-            action_rate = -0.03         # 平滑动作变化
+            collision = -8.0            # 非足端接触
+            action_rate = -0.05         # 平滑动作变化
             dof_acc = -1.5e-7           # 关节加速度惩罚
             stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚)
             
@@ -399,7 +399,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             CoT = 0.0                   # 运输成本（已禁用）
             
             # === 六足特定（实验性）===
-            tracking_dof = -0.01       # 关节位置跟踪
+            tracking_dof = -0.05       # 关节位置跟踪
             footend_pos_xy = 1.0      # 足端位置奖励            
             dof_pos_limits = -0.2     # 关节接近软限位惩罚（防反折/僵直）
 

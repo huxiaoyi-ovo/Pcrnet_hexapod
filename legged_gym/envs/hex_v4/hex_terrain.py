@@ -352,10 +352,11 @@ class HexTerrain(LeggedRobot):
         )
 
         # === Command/Expert诊断统计 ===
-        # [cmd_norm_sum, cmd_nonzero_count, base_speed_sum, expert_action_norm_sum, expert_action_update_count]
+        # [cmd_norm_sum, cmd_nonzero_count, base_speed_sum, expert_action_norm_sum, expert_action_update_count,
+        #  cmd_abs_x_sum, cmd_abs_y_sum, base_abs_x_sum, base_abs_y_sum, upright_count, swing_frac_sum]
         self.episode_cmd_stats = torch.zeros(
             self.num_envs,
-            5,
+            11,
             dtype=torch.float32,
             device=self.device,
             requires_grad=False
@@ -872,6 +873,20 @@ class HexTerrain(LeggedRobot):
             self.episode_cmd_stats[:, 0] += cmd_norm
             self.episode_cmd_stats[:, 1] += cmd_nonzero.float()
             self.episode_cmd_stats[:, 2] += base_speed
+
+            # x/y command distribution and realized motion (user mapping: y=前后, x=横移)
+            self.episode_cmd_stats[:, 5] += torch.abs(cmd[:, 0])
+            self.episode_cmd_stats[:, 6] += torch.abs(cmd[:, 1])
+            self.episode_cmd_stats[:, 7] += torch.abs(self.base_lin_vel[:, 0])
+            self.episode_cmd_stats[:, 8] += torch.abs(self.base_lin_vel[:, 1])
+
+            upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
+            upright = self.projected_gravity[:, 2] < -upright_cos_min
+            self.episode_cmd_stats[:, 9] += upright.float()
+
+            foot_contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.0
+            swing_frac = (~foot_contact).float().mean(dim=1)
+            self.episode_cmd_stats[:, 10] += swing_frac
             if self._expert_action_updated:
                 self.episode_cmd_stats[:, 3] += self._expert_action_norm_buf
                 self.episode_cmd_stats[:, 4] += 1.0
@@ -1276,6 +1291,13 @@ class HexTerrain(LeggedRobot):
             ep_expert_action_norm_mean = (self.episode_cmd_stats[env_ids, 3] / expert_denom).mean().item()
             ep_expert_update_frac = (expert_update_count / ep_len).mean().item()
 
+            cmd_abs_x_mean = (self.episode_cmd_stats[env_ids, 5] / ep_len).mean().item()
+            cmd_abs_y_mean = (self.episode_cmd_stats[env_ids, 6] / ep_len).mean().item()
+            base_abs_x_mean = (self.episode_cmd_stats[env_ids, 7] / ep_len).mean().item()
+            base_abs_y_mean = (self.episode_cmd_stats[env_ids, 8] / ep_len).mean().item()
+            upright_frac = (self.episode_cmd_stats[env_ids, 9] / ep_len).mean().item()
+            swing_frac = (self.episode_cmd_stats[env_ids, 10] / ep_len).mean().item()
+
             jitter_w = getattr(self.cfg.rewards, 'camera_jitter_weight', 0.05)
             wobble_w = getattr(self.cfg.rewards, 'camera_wobble_weight', 0.5)
             bobbing_w = getattr(self.cfg.rewards, 'camera_bobbing_weight', 0.1)
@@ -1301,6 +1323,12 @@ class HexTerrain(LeggedRobot):
             self.extras["ep_base_speed_mean"] = ep_base_speed_mean
             self.extras["ep_expert_action_norm_mean"] = ep_expert_action_norm_mean
             self.extras["ep_expert_update_frac"] = ep_expert_update_frac
+            self.extras["ep_cmd_abs_x_mean"] = cmd_abs_x_mean
+            self.extras["ep_cmd_abs_y_mean"] = cmd_abs_y_mean
+            self.extras["ep_base_abs_x_mean"] = base_abs_x_mean
+            self.extras["ep_base_abs_y_mean"] = base_abs_y_mean
+            self.extras["ep_upright_frac"] = upright_frac
+            self.extras["ep_swing_frac"] = swing_frac
 
         super().reset_idx(env_ids)
 
@@ -1322,6 +1350,12 @@ class HexTerrain(LeggedRobot):
                 self.extras["episode"]["ep_base_speed_mean"] = ep_base_speed_mean
                 self.extras["episode"]["ep_expert_action_norm_mean"] = ep_expert_action_norm_mean
                 self.extras["episode"]["ep_expert_update_frac"] = ep_expert_update_frac
+                self.extras["episode"]["cmd_abs_x_mean"] = cmd_abs_x_mean
+                self.extras["episode"]["cmd_abs_y_mean"] = cmd_abs_y_mean
+                self.extras["episode"]["base_abs_x_mean"] = base_abs_x_mean
+                self.extras["episode"]["base_abs_y_mean"] = base_abs_y_mean
+                self.extras["episode"]["upright_frac"] = upright_frac
+                self.extras["episode"]["swing_frac"] = swing_frac
                 # failure mode diagnostics
                 ep_knee_contact_frac = (self.episode_debug_stats[env_ids, 0] / ep_len).mean().item()
                 ep_thigh_contact_frac = (self.episode_debug_stats[env_ids, 1] / ep_len).mean().item()
@@ -1761,7 +1795,7 @@ class HexTerrain(LeggedRobot):
         self.commands[env_ids,1] *= torch.abs(self.commands[env_ids,1])>0.2
         self.commands[env_ids,2] *= torch.abs(self.commands[env_ids,2])>0.2
         # self.commands[:,1].fill_(0.7)
-        self.commands[env_ids, :3] *= (torch.norm(self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
+        # Avoid extra norm-based zeroing (can unintentionally suppress small-but-valid pure-x lateral commands)
 
     def _update_terrain_curriculum(self, env_ids):
         """=== P1.1: Curriculum重构 - 基于raw统计的稳定升级 ===
@@ -1948,7 +1982,8 @@ class HexTerrain(LeggedRobot):
 
         # Gate: only count when body is upright and no knee/thigh contact is happening
         upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
-        upright = self.projected_gravity[:, 2] > upright_cos_min
+        # projected_gravity is gravity expressed in base frame; upright => gravity points to -Z in base frame.
+        upright = self.projected_gravity[:, 2] < -upright_cos_min
         collision_th = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
         no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
         rew_air_time *= (upright & no_nonfoot_contact).float()
@@ -2000,7 +2035,7 @@ class HexTerrain(LeggedRobot):
 
         # Gate: disable shaping when posture is abnormal or when non-foot bodies are touching (anti-hack)
         upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
-        upright = self.projected_gravity[:, 2] > upright_cos_min
+        upright = self.projected_gravity[:, 2] < -upright_cos_min
         collision_th = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
         no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
         quality *= (upright & no_nonfoot_contact).float()
@@ -2126,6 +2161,25 @@ class HexTerrain(LeggedRobot):
         return torch.any(torch.norm(self.contact_forces[:,self.feet_indices,:2],dim=2)>\
                          torch.abs(self.contact_forces[:,self.feet_indices,2]),dim=1)
 
+    def _reward_collision(self):
+        """Penalize non-foot contacts on unique penalised bodies.
+
+        Note: `cfg.asset.penalize_contacts_on` may include duplicated substrings (e.g. "knee") to
+        shape observation dimensions; reward should not double-count the same rigid body.
+        """
+        if not hasattr(self, "_penalised_contact_indices_unique"):
+            self._penalised_contact_indices_unique = torch.unique(self.penalised_contact_indices)
+
+        collision_threshold = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
+        if collision_threshold is None:
+            collision_threshold = getattr(self.cfg.terrain, "collision_force_threshold", 1.0)
+
+        rb_force = torch.norm(
+            self.contact_forces[:, self._penalised_contact_indices_unique, :],
+            dim=-1,
+        )
+        return torch.sum((rb_force > collision_threshold).float(), dim=1)
+
     def _reward_tracking_lin_vel(self):
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
         lin_vel_error *= lin_vel_error>0.1 #小于0.1的速度误差对机器人来说一样，可以鼓励优化其他部分而不是牺牲自然状态追求高精度的速度跟踪
@@ -2208,7 +2262,7 @@ class HexTerrain(LeggedRobot):
         # 使用exp确保平滑梯度和正向奖励；并对异常姿态做门控，防止刷分
         camera_quality = torch.exp(-penalty)
         upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
-        upright = self.projected_gravity[:, 2] > upright_cos_min
+        upright = self.projected_gravity[:, 2] < -upright_cos_min
         camera_quality = torch.where(upright, camera_quality, torch.zeros_like(camera_quality))
         
         # 【诊断日志】记录最终quality分布（层级式键名提升可见性）
