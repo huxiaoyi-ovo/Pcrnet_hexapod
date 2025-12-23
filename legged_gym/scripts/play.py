@@ -60,6 +60,22 @@ def play(args):
     
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
 
+    camera_mode = getattr(args, "camera_mode", "none")
+    camera_interval = max(1, int(getattr(args, "camera_interval", 5)))
+    camera_env = int(getattr(args, "camera_env", 0))
+    camera_env_random = camera_env < 0
+    camera_save = bool(getattr(args, "camera_save", False))
+    camera_show = bool(getattr(args, "camera_show", False))
+    camera_dir = getattr(args, "camera_dir", None)
+    camera_active = camera_mode in ("depth", "rgb", "both")
+
+    if camera_active:
+        if hasattr(env_cfg, "sensor") and hasattr(env_cfg.sensor, "depth_camera"):
+            env_cfg.sensor.depth_camera.enable = True
+        else:
+            print("[Play] ⚠ Camera requested but env has no depth_camera config. Disabling.")
+            camera_active = False
+
     # play 默认严格复现训练配置（除非显式打开 --play_overrides）
     if getattr(args, "play_overrides", False):
         env_cfg.terrain.num_rows = 5
@@ -158,6 +174,61 @@ def play(args):
     camera_vel = np.array([1., 1., 0.])
     camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     img_idx = 0
+    camera_frame_idx = 0
+    camera_cfg = getattr(env, "camera_cfg", None)
+    camera_cv2 = None
+    camera_warned = False
+
+    if camera_active:
+        if camera_env_random:
+            print("[Play] camera_env<0: random env will be sampled each capture")
+        elif camera_env >= env.num_envs:
+            print(f"[Play] ⚠ camera_env={camera_env} out of range, clamping to 0")
+            camera_env = 0
+        if camera_show and getattr(args, "headless", False):
+            print("[Play] ⚠ camera_show requested but headless=True. Disabling.")
+            camera_show = False
+        if camera_show:
+            try:
+                import cv2 as _cv2
+                camera_cv2 = _cv2
+            except Exception as exc:
+                print(f"[Play] ⚠ camera_show requires cv2: {exc}. Disabling.")
+                camera_show = False
+
+    if camera_save and camera_dir is None:
+        camera_dir = os.path.join(
+            LEGGED_GYM_ROOT_DIR,
+            'logs',
+            train_cfg.runner.experiment_name,
+            'camera_frames',
+        )
+    if camera_save and camera_dir:
+        os.makedirs(camera_dir, exist_ok=True)
+
+    def _normalize_depth(depth_np):
+        if camera_cfg is None:
+            depth_norm = depth_np
+        else:
+            near = float(getattr(camera_cfg, "near_clip", 0.0))
+            far = float(getattr(camera_cfg, "far_clip", 1.0))
+            denom = max(far - near, 1e-6)
+            depth_norm = (depth_np - near) / denom
+        return np.clip(depth_norm, 0.0, 1.0)
+
+    def _write_image(path, img):
+        if camera_cv2 is not None:
+            if img.ndim == 3 and img.shape[2] == 3:
+                bgr = camera_cv2.cvtColor(img, camera_cv2.COLOR_RGB2BGR)
+            else:
+                bgr = img
+            return bool(camera_cv2.imwrite(path, bgr))
+        try:
+            import imageio.v2 as imageio
+            imageio.imwrite(path, img)
+            return True
+        except Exception:
+            return False
 
     #设置变量，用于统计v g f估计的平均误差
     v_ave_err = 0
@@ -314,6 +385,52 @@ def play(args):
                 obs, _, rews, dones, infos = env.step(actions.detach())
 
 
+            if camera_active and (i % camera_interval == 0):
+                capture_env = camera_env
+                if camera_env_random:
+                    capture_env = int(np.random.randint(0, env.num_envs))
+                depth_np = None
+                rgb_np = None
+                if camera_mode in ("depth", "both"):
+                    if hasattr(env, "_get_depth_images"):
+                        depth = env._get_depth_images()
+                        depth_np = depth[capture_env].detach().cpu().numpy()
+                    elif not camera_warned:
+                        print("[Play] ⚠ env has no _get_depth_images; depth capture disabled.")
+                        camera_warned = True
+                if camera_mode in ("rgb", "both"):
+                    if hasattr(env, "_get_rgb_images"):
+                        rgb = env._get_rgb_images(normalize=False, channels_last=True)
+                        rgb_np = rgb[capture_env].detach().cpu().numpy()
+                    elif not camera_warned:
+                        print("[Play] ⚠ env has no _get_rgb_images; rgb capture disabled.")
+                        camera_warned = True
+
+                depth_vis = None
+                if depth_np is not None:
+                    depth_norm = _normalize_depth(depth_np)
+                    depth_u8 = (depth_norm * 255.0).astype(np.uint8)
+                    if camera_cv2 is not None:
+                        depth_vis = camera_cv2.applyColorMap(255 - depth_u8, camera_cv2.COLORMAP_TURBO)
+                    else:
+                        depth_vis = depth_u8
+
+                if camera_show and camera_cv2 is not None:
+                    if rgb_np is not None:
+                        camera_cv2.imshow("camera_rgb", camera_cv2.cvtColor(rgb_np, camera_cv2.COLOR_RGB2BGR))
+                    if depth_vis is not None:
+                        camera_cv2.imshow("camera_depth", depth_vis)
+                    camera_cv2.waitKey(1)
+
+                if camera_save and camera_dir:
+                    if rgb_np is not None:
+                        _write_image(os.path.join(camera_dir, f"rgb_{camera_frame_idx:06d}.png"), rgb_np)
+                    if depth_np is not None:
+                        np.save(os.path.join(camera_dir, f"depth_{camera_frame_idx:06d}.npy"), depth_np)
+                        if depth_vis is not None:
+                            _write_image(os.path.join(camera_dir, f"depth_{camera_frame_idx:06d}.png"), depth_vis)
+                    camera_frame_idx += 1
+
             if RECORD_FRAMES:
                 if i % 2:
                     filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames', f"{img_idx}.png")
@@ -352,6 +469,8 @@ def play(args):
                 #打印平均误差
                 # print(f"v err={v_ave_err/(i+1)}, g err={g_ave_err/(i+1)}, f err={f_ave_err/(i+1)}")
 
+    if camera_cv2 is not None:
+        camera_cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     EXPORT_POLICY = True

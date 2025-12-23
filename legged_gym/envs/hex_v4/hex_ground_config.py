@@ -19,10 +19,29 @@ class HexGroundCfg(LeggedRobotCfg):
         env_spacing=2.0
         termination_height_threshold = 0.035
         termination_max_tilt_deg = 60.0
+    class sensor:
+        class depth_camera:
+            enable = False  # play/调试时可打开
+            width = 128
+            height = 128
+            horizontal_fov = 87.0
+            near_clip = 0.05
+            far_clip = 5.0
+            # 坐标系：x左右，y前后，z上（body link坐标系）
+            position = [0.00, 0.22, 0.08]
+            pitch_deg = 0.0
+            roll_deg = 20.0
+            yaw_deg = 90.0
+            capture_interval = 5
+            output_size = 128
+            add_noise = True
+            noise_level = 0.02
+            hole_ratio = 0.05
+            edge_blur_strength = 0.05
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
         #mesh_type = 'plane'
-        curriculum = False
+        curriculum = True
         border_size=1.0
         terrain_length=8.0
         terrain_width=8.0
@@ -32,11 +51,10 @@ class HexGroundCfg(LeggedRobotCfg):
         measure_heights = True
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
         measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
-        # terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap, pit, gate, slalom]
+        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         #开启了地形选择，就按照参数中的地形生成
-        selected=True
+        selected=False
         num_sub_terrains=1
         '''
         terrain_kwargs={"type":"terrain_utils.pyramid_stairs_terrain",
@@ -50,6 +68,10 @@ class HexGroundCfg(LeggedRobotCfg):
                         "max_size":1.0,
                         "num_rects":5,
                         "platform_size":2.}
+        # 关闭底噪，确保仅有离散障碍物
+        noise_amplitude_min = 0.0
+        noise_amplitude_max = 0.0
+        noise_downsampled_scale = 0.3
         slope_treshold=0.1
         collision_force_threshold = 1.0
         collision_penalty_threshold = 0.5

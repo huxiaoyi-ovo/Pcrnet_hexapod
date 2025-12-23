@@ -16,6 +16,15 @@ import math
 import time
 class HexGround(LeggedRobot):
     def __init__(self,cfg:HexGroundCfg,sim_params,physics_engine,sim_device,headless):
+        # 相机配置（在调用父类初始化前设置）
+        self.camera_cfg = None
+        self.enable_camera = False
+        self._use_camera_in_headless = False
+        self.camera_handles = []
+        if hasattr(cfg, "sensor") and hasattr(cfg.sensor, "depth_camera"):
+            self.camera_cfg = cfg.sensor.depth_camera
+            self.enable_camera = bool(self.camera_cfg.enable)
+            self._use_camera_in_headless = headless and self.enable_camera
         super().__init__(cfg,sim_params,physics_engine,sim_device,headless)
         self.cfg:HexGroundCfg = cfg
         self.debug_viz = False
@@ -29,6 +38,16 @@ class HexGround(LeggedRobot):
         #额外初始化相机类
         cam_prop=gymapi.CameraProperties()
         # print("sim_params.use_gpu_pipline=",sim_params.use_gpu_pipline)
+        if self.camera_cfg is not None:
+            self._init_camera_buffers()
+
+    def create_sim(self):
+        """重写create_sim以在headless模式下支持相机"""
+        if self._use_camera_in_headless:
+            self.graphics_device_id = self.sim_device_id
+        super().create_sim()
+        if self.camera_cfg is not None:
+            self.cameras_created = False
     #当返回的观测是分离时，重写这个函数，否则进行注释
     # def reset(self):
     #     self.reset_idx(torch.arange(self.num_envs, device=self.device))
@@ -42,6 +61,206 @@ class HexGround(LeggedRobot):
     def _create_envs(self):
         super()._create_envs()
         #打印一些值进行查看
+
+    def _init_camera_buffers(self):
+        """初始化相机图像接收buffer"""
+        self.depth_raw = torch.zeros(
+            self.num_envs,
+            self.camera_cfg.height,
+            self.camera_cfg.width,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.depth_images = torch.zeros(
+            self.num_envs,
+            1,
+            self.camera_cfg.height,
+            self.camera_cfg.width,
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.rgb_images = None
+
+    def _create_depth_cameras(self):
+        """为所有环境创建深度相机"""
+        camera_props = gymapi.CameraProperties()
+        camera_props.width = self.camera_cfg.width
+        camera_props.height = self.camera_cfg.height
+        camera_props.enable_tensors = True
+        camera_props.horizontal_fov = self.camera_cfg.horizontal_fov
+        camera_props.near_plane = self.camera_cfg.near_clip
+        camera_props.far_plane = self.camera_cfg.far_clip
+
+        self.camera_handles = []
+        for env_idx in range(self.num_envs):
+            env_handle = self.envs[env_idx]
+            camera_handle = self.gym.create_camera_sensor(env_handle, camera_props)
+            if camera_handle == -1:
+                continue
+            robot_handle = self.actor_handles[env_idx]
+            local_transform = gymapi.Transform()
+            local_transform.p = gymapi.Vec3(
+                self.camera_cfg.position[0],
+                self.camera_cfg.position[1],
+                self.camera_cfg.position[2],
+            )
+            pitch_rad = np.deg2rad(self.camera_cfg.pitch_deg)
+            yaw_rad = np.deg2rad(self.camera_cfg.yaw_deg)
+            roll_rad = np.deg2rad(self.camera_cfg.roll_deg)
+            pitch_q = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), pitch_rad)
+            yaw_q = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), yaw_rad)
+            roll_q = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), roll_rad)
+            local_transform.r = pitch_q * yaw_q * roll_q
+            body_handle = self.gym.find_actor_rigid_body_handle(
+                env_handle,
+                robot_handle,
+                "body",
+            )
+            if body_handle == -1:
+                continue
+            self.gym.attach_camera_to_body(
+                camera_handle,
+                env_handle,
+                body_handle,
+                local_transform,
+                gymapi.FOLLOW_TRANSFORM,
+            )
+            self.camera_handles.append(camera_handle)
+        self.depth_debug_count = 0
+
+    def _get_depth_images(self):
+        """获取所有环境的深度图像 (num_envs, H, W)"""
+        if self.enable_camera and not self.cameras_created:
+            self._create_depth_cameras()
+            self.cameras_created = True
+            if len(self.camera_handles) > 0:
+                try:
+                    self.gym.fetch_results(self.sim, True)
+                    self.gym.step_graphics(self.sim)
+                    self.gym.render_all_camera_sensors(self.sim)
+                    if isinstance(self.device, str) and ('cuda' in self.device or 'gpu' in self.device):
+                        try:
+                            torch.cuda.synchronize()
+                        except Exception:
+                            pass
+                except Exception:
+                    self.enable_camera = False
+                    self.depth_raw.fill_(self.camera_cfg.far_clip)
+                    return self.depth_raw
+
+        if not self.enable_camera or len(self.camera_handles) == 0:
+            self.depth_raw.fill_(self.camera_cfg.far_clip)
+            return self.depth_raw
+        try:
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+        except Exception:
+            self.depth_raw.fill_(self.camera_cfg.far_clip)
+            return self.depth_raw
+
+        self.gym.start_access_image_tensors(self.sim)
+        depth_images_list = []
+        H = self.camera_cfg.height
+        W = self.camera_cfg.width
+        far = self.camera_cfg.far_clip
+        near = self.camera_cfg.near_clip
+        for env_idx in range(self.num_envs):
+            if env_idx >= len(self.camera_handles):
+                depth_images_list.append(torch.full((H, W), far, dtype=torch.float32, device=self.device))
+                continue
+            depth_tensor = self.gym.get_camera_image_gpu_tensor(
+                self.sim,
+                self.envs[env_idx],
+                self.camera_handles[env_idx],
+                gymapi.IMAGE_DEPTH,
+            )
+            depth_image = gymtorch.wrap_tensor(depth_tensor)
+            if (depth_image < 0).any():
+                depth_image = -depth_image
+            invalid_mask = ~torch.isfinite(depth_image)
+            if invalid_mask.any():
+                depth_image = depth_image.clone()
+                depth_image[invalid_mask] = far
+            depth_image = depth_image.clamp(near, far)
+            depth_images_list.append(depth_image)
+        self.gym.end_access_image_tensors(self.sim)
+        self.depth_raw[:] = torch.stack(depth_images_list, dim=0)
+        return self.depth_raw
+
+    def _get_rgb_images(self, normalize: bool = True, channels_last: bool = False):
+        """获取所有环境的 RGB 图像"""
+        if self.enable_camera and not self.cameras_created:
+            self._create_depth_cameras()
+            self.cameras_created = True
+            try:
+                self.gym.fetch_results(self.sim, True)
+                self.gym.step_graphics(self.sim)
+                self.gym.render_all_camera_sensors(self.sim)
+            except Exception:
+                return torch.zeros(
+                    self.num_envs,
+                    3,
+                    self.camera_cfg.height,
+                    self.camera_cfg.width,
+                    dtype=torch.float32 if normalize else torch.uint8,
+                    device=self.device,
+                )
+
+        if not self.enable_camera or len(self.camera_handles) == 0:
+            return torch.zeros(
+                self.num_envs,
+                3 if not channels_last else self.camera_cfg.height,
+                self.camera_cfg.height if not channels_last else self.camera_cfg.width,
+                self.camera_cfg.width if not channels_last else 3,
+                dtype=torch.float32 if normalize else torch.uint8,
+                device=self.device,
+            )
+
+        try:
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+        except Exception:
+            return torch.zeros(
+                self.num_envs,
+                3 if not channels_last else self.camera_cfg.height,
+                self.camera_cfg.height if not channels_last else self.camera_cfg.width,
+                self.camera_cfg.width if not channels_last else 3,
+                dtype=torch.float32 if normalize else torch.uint8,
+                device=self.device,
+            )
+
+        self.gym.start_access_image_tensors(self.sim)
+        rgb_list = []
+        H = self.camera_cfg.height
+        W = self.camera_cfg.width
+        for env_idx in range(self.num_envs):
+            if env_idx >= len(self.camera_handles):
+                blank = torch.zeros(H, W, 3, dtype=torch.float32 if normalize else torch.uint8, device=self.device)
+                rgb_list.append(blank)
+                continue
+            color_tensor = self.gym.get_camera_image_gpu_tensor(
+                self.sim,
+                self.envs[env_idx],
+                self.camera_handles[env_idx],
+                gymapi.IMAGE_COLOR,
+            )
+            color_image = gymtorch.wrap_tensor(color_tensor)
+            rgb = color_image[..., :3]
+            if normalize:
+                rgb = rgb.to(torch.float32) / 255.0
+            if not channels_last:
+                rgb = rgb.permute(2, 0, 1).contiguous()
+            rgb_list.append(rgb)
+        self.gym.end_access_image_tensors(self.sim)
+        if channels_last:
+            self.rgb_images = torch.stack(rgb_list, dim=0)
+        else:
+            self.rgb_images = torch.stack(rgb_list, dim=0)
+        return self.rgb_images
 
 
     def step(self,actions):

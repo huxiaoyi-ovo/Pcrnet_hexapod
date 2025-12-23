@@ -177,6 +177,12 @@ def get_args():
         {"name": "--train_iter", "type": int, "help": "Training iteration used to sync env curriculum state in play (defaults to --checkpoint when available)."},
         {"name": "--keyboard_cmds", "action": "store_true", "default": False, "help": "Use keyboard to override commands (vx/vy/yaw) in play."},
         {"name": "--allow_fallback", "action": "store_true", "default": False, "help": "Allow play fallback path when encode_obs fails (not recommended)."},
+        {"name": "--camera_mode", "type": str, "default": "none", "help": "Play camera output: none|depth|rgb|both"},
+        {"name": "--camera_interval", "type": int, "default": 5, "help": "Camera capture interval (steps) in play"},
+        {"name": "--camera_env", "type": int, "default": 0, "help": "Env index for camera output in play (-1: random)"},
+        {"name": "--camera_save", "action": "store_true", "default": False, "help": "Save camera frames to disk in play"},
+        {"name": "--camera_show", "action": "store_true", "default": False, "help": "Show camera frames (requires display + cv2)"},
+        {"name": "--camera_dir", "type": str, "help": "Output directory for camera frames"},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

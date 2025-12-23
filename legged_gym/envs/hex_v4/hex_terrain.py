@@ -14,7 +14,7 @@ from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
 import time
-from legged_gym.scripts.navigation_env import NavigationRewardFunction, NavigationRewardConfig, NavigationTaskManager
+from legged_gym.envs.hex_v4.navigation_env import NavigationRewardFunction, NavigationRewardConfig, NavigationTaskManager
 
 
 # ==================== LocomotionAdapter ====================

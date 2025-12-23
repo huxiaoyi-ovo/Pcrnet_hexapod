@@ -94,8 +94,8 @@ def import_modules():
         globals()['AffordanceEstimator'] = None
 
     try:
-        from legged_gym.scripts.navigation_env import NavigationRewardFunction as NRF
-        from legged_gym.scripts.navigation_env import NavigationRewardConfig as NRC
+        from legged_gym.envs.hex_v4.navigation_env import NavigationRewardFunction as NRF
+        from legged_gym.envs.hex_v4.navigation_env import NavigationRewardConfig as NRC
         globals()['NavigationRewardFunction'] = NRF
         globals()['NavigationRewardConfig'] = NRC
         print("[Init] ✓ NavigationReward 导入成功")
