@@ -866,6 +866,27 @@ class HexTerrain(LeggedRobot):
 
         # === Command/Expert诊断统计（每步累加） ===
         with torch.no_grad():
+            # === A: 非足端接触滞后触发（供 collision reward 使用） ===
+            collision_penalty_threshold = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
+            nonfoot_now = self._compute_collision_mask(threshold=collision_penalty_threshold)
+            self.nonfoot_contact_streak[nonfoot_now] += 1
+            self.nonfoot_contact_streak[~nonfoot_now] = 0
+            h_steps = int(getattr(self.cfg.rewards, "nonfoot_contact_hysteresis_steps", 1))
+            h_steps = max(1, h_steps)
+            self.nonfoot_contact_trigger = self.nonfoot_contact_streak >= h_steps
+            self.episode_nonfoot_trigger_steps += self.nonfoot_contact_trigger.float()
+
+            # === B1: jitter 饱和比例 + 足端冲击（episode累加）===
+            raw_ang_jitter = torch.sum(torch.square(self.base_ang_acc[:, :2]), dim=1)  # (rad/s^2)^2
+            jitter_cap = float(getattr(self.cfg.rewards, "camera_jitter_cap", 50.0))
+            self.episode_jitter_sat_steps += (raw_ang_jitter >= jitter_cap).float()
+            self.episode_raw_ang_jitter_sum += raw_ang_jitter
+
+            feet_force_norm = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+            dF = torch.clamp(feet_force_norm - self._prev_feet_force_norm, min=0.0)
+            self.episode_foot_dF_sum += dF.mean(dim=1)
+            self._prev_feet_force_norm[:] = feet_force_norm
+
             cmd = self._get_effective_commands()
             cmd_norm = torch.norm(cmd, dim=1)
             cmd_nonzero_th = getattr(self.cfg.commands, 'nonzero_threshold', 0.05)
@@ -1304,6 +1325,28 @@ class HexTerrain(LeggedRobot):
             bobbing_w = getattr(self.cfg.rewards, 'camera_bobbing_weight', 0.1)
             ep_camera_penalty = ep_camera_jitter * jitter_w + ep_camera_wobble * wobble_w + ep_camera_bobbing * bobbing_w
 
+            ep_camera_raw_ang_jitter_mean = (
+                (self.episode_raw_ang_jitter_sum[env_ids] / ep_len).mean().item()
+                if hasattr(self, "episode_raw_ang_jitter_sum")
+                else 0.0
+            )
+            ep_camera_raw_ang_acc_xy_rms = float(math.sqrt(max(ep_camera_raw_ang_jitter_mean, 0.0)))
+            ep_camera_jitter_sat_frac = (
+                (self.episode_jitter_sat_steps[env_ids] / ep_len).mean().item()
+                if hasattr(self, "episode_jitter_sat_steps")
+                else 0.0
+            )
+            ep_foot_impact_df_mean = (
+                (self.episode_foot_dF_sum[env_ids] / ep_len).mean().item()
+                if hasattr(self, "episode_foot_dF_sum")
+                else 0.0
+            )
+            ep_nonfoot_contact_trigger_frac = (
+                (self.episode_nonfoot_trigger_steps[env_ids] / ep_len).mean().item()
+                if hasattr(self, "episode_nonfoot_trigger_steps")
+                else 0.0
+            )
+
             base_ang_acc_xy_rms = torch.sqrt(torch.mean(self.base_ang_acc[env_ids, :2] ** 2)).item()
             base_ang_vel_xy_rms = torch.sqrt(torch.mean(self.base_ang_vel[env_ids, :2] ** 2)).item()
             base_lin_acc_z_rms = torch.sqrt(torch.mean(self.base_lin_acc[env_ids, 2] ** 2)).item()
@@ -1316,6 +1359,10 @@ class HexTerrain(LeggedRobot):
             self.extras["ep_camera_wobble"] = ep_camera_wobble
             self.extras["ep_camera_bobbing"] = ep_camera_bobbing
             self.extras["ep_camera_penalty"] = ep_camera_penalty
+            self.extras["ep_camera_raw_ang_acc_xy_rms"] = ep_camera_raw_ang_acc_xy_rms
+            self.extras["ep_camera_jitter_sat_frac"] = ep_camera_jitter_sat_frac
+            self.extras["ep_foot_impact_df_mean"] = ep_foot_impact_df_mean
+            self.extras["ep_nonfoot_contact_trigger_frac"] = ep_nonfoot_contact_trigger_frac
             self.extras["ep_base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
             self.extras["ep_base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
             self.extras["ep_base_lin_acc_z_rms"] = base_lin_acc_z_rms
@@ -1339,6 +1386,10 @@ class HexTerrain(LeggedRobot):
                 self.extras["episode"]["camera_wobble_mean"] = ep_camera_wobble
                 self.extras["episode"]["camera_bobbing_mean"] = ep_camera_bobbing
                 self.extras["episode"]["camera_penalty_mean"] = ep_camera_penalty
+                self.extras["episode"]["camera_raw_ang_acc_xy_rms"] = ep_camera_raw_ang_acc_xy_rms
+                self.extras["episode"]["camera_jitter_sat_frac"] = ep_camera_jitter_sat_frac
+                self.extras["episode"]["foot_impact_df_mean"] = ep_foot_impact_df_mean
+                self.extras["episode"]["nonfoot_contact_trigger_frac"] = ep_nonfoot_contact_trigger_frac
                 self.extras["episode"]["base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
                 self.extras["episode"]["base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
                 self.extras["episode"]["base_lin_acc_z_rms"] = base_lin_acc_z_rms
@@ -1383,6 +1434,10 @@ class HexTerrain(LeggedRobot):
             
             # 3. 重置其他状态历史
             self.last_contacts[env_ids] = 0.
+            if hasattr(self, "nonfoot_contact_streak"):
+                self.nonfoot_contact_streak[env_ids] = 0
+            if hasattr(self, "nonfoot_contact_trigger"):
+                self.nonfoot_contact_trigger[env_ids] = False
             
             # 3. 重置角加速度 - 确保 camera_stability 奖励正常
             self.base_ang_acc[env_ids] = 0.
@@ -1395,6 +1450,18 @@ class HexTerrain(LeggedRobot):
             self.episode_raw_stats[env_ids] = 0.0
             self.episode_cmd_stats[env_ids] = 0.0
             self.episode_debug_stats[env_ids] = 0.0
+            if hasattr(self, "episode_nonfoot_trigger_steps"):
+                self.episode_nonfoot_trigger_steps[env_ids] = 0.0
+            if hasattr(self, "episode_jitter_sat_steps"):
+                self.episode_jitter_sat_steps[env_ids] = 0.0
+            if hasattr(self, "episode_raw_ang_jitter_sum"):
+                self.episode_raw_ang_jitter_sum[env_ids] = 0.0
+            if hasattr(self, "episode_foot_dF_sum"):
+                self.episode_foot_dF_sum[env_ids] = 0.0
+            if hasattr(self, "_prev_feet_force_norm"):
+                self._prev_feet_force_norm[env_ids] = torch.norm(
+                    self.contact_forces[env_ids][:, self.feet_indices, :], dim=-1
+                )
             # =====================================================
 
         # 重置深度图为零（避免使用旧数据）
@@ -1702,6 +1769,35 @@ class HexTerrain(LeggedRobot):
         self.base_ang_acc = torch.zeros_like(self.base_ang_vel)
         #额外添加上一次的接触力
         self.last_contact_forces = torch.zeros_like(self.contact_forces)
+
+        # === 非足端接触惩罚滞后（防噪声误触发） ===
+        self.nonfoot_contact_streak = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.device, requires_grad=False
+        )
+        self.nonfoot_contact_trigger = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False
+        )
+        self.episode_nonfoot_trigger_steps = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+
+        # === B1: 相机/接触冲击诊断统计（episode累加） ===
+        self.episode_jitter_sat_steps = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self.episode_raw_ang_jitter_sum = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self.episode_foot_dF_sum = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self._prev_feet_force_norm = torch.zeros(
+            self.num_envs,
+            int(self.feet_indices.shape[0]),
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=False,
+        )
 
         #设置记录观测的最大和最小和平均值，用于判断观测归一化合理程度
         # self.priv_obs_min = torch.zeros_like(self.privileged_obs_buf[0])
@@ -2175,11 +2271,8 @@ class HexTerrain(LeggedRobot):
         if collision_threshold is None:
             collision_threshold = getattr(self.cfg.terrain, "collision_force_threshold", 1.0)
 
-        rb_force = torch.norm(
-            self.contact_forces[:, self._penalised_contact_indices_unique, :],
-            dim=-1,
-        )
-        return torch.sum((rb_force > collision_threshold).float(), dim=1)
+        # A: 使用滞后触发（由 post_physics_step_separate() 统一更新），防止接触噪声误罚
+        return self.nonfoot_contact_trigger.float()
 
     def _reward_tracking_lin_vel(self):
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
@@ -2196,6 +2289,54 @@ class HexTerrain(LeggedRobot):
         pos_err *= pos_err>0.15
 
         return torch.square(pos_err).sum(dim=1)
+
+    def _reward_tripod_gait(self):
+        """Encourage expert-style tripod gait (3 legs stance, 3 legs swing).
+
+        Uses the same A/B leg grouping as `ExpertGround`:
+        - A group: [0,1,5]
+        - B group: [2,3,4]
+
+        Reward is high when either:
+        - A is in contact (stance) and B is in swing (no contact), or
+        - B is in contact (stance) and A is in swing (no contact).
+        """
+        if not hasattr(self, "expert") or not hasattr(self.expert, "A_group_index"):
+            return torch.zeros(self.num_envs, device=self.device)
+
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.0
+        contact_filt = torch.logical_or(contact, self.last_contacts)  # (N,6)
+
+        A = self.expert.A_group_index
+        B = self.expert.B_group_index
+
+        stance_w = float(getattr(self.cfg.rewards, "tripod_stance_weight", 0.4))
+        swing_w = float(getattr(self.cfg.rewards, "tripod_swing_weight", 0.6))
+        cmd_th = float(getattr(self.cfg.rewards, "tripod_cmd_threshold", 0.2))
+
+        # Pattern A stance / B swing
+        stance_A = contact_filt[:, A].float().mean(dim=1)
+        swing_B = (~contact_filt[:, B]).float().mean(dim=1)
+        qA = stance_w * stance_A + swing_w * swing_B
+
+        # Pattern B stance / A swing
+        stance_B = contact_filt[:, B].float().mean(dim=1)
+        swing_A = (~contact_filt[:, A]).float().mean(dim=1)
+        qB = stance_w * stance_B + swing_w * swing_A
+
+        quality = torch.maximum(qA, qB)
+
+        # Only apply when commands are non-trivial
+        quality *= (torch.norm(self.commands[:, :3], dim=1) > cmd_th).float()
+
+        # Gate: disable shaping when posture is abnormal or when non-foot bodies are touching
+        upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
+        upright = self.projected_gravity[:, 2] < -upright_cos_min
+        collision_th = getattr(self.cfg.terrain, "collision_penalty_threshold", None)
+        no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
+        quality *= (upright & no_nonfoot_contact).float()
+
+        return quality
     
     def _reward_camera_stability(self, return_terms=False):
         """相机稳定性奖励 - 通过惩罚机身抖动提升视觉质量

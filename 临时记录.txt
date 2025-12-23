@@ -1,0 +1,141 @@
+## 0) 先把“jitter 低”定义清楚（你刚才的直觉对应到可优化的量）
+
+  你说得对：动起来脚一落地一定有尖峰；我们优化的是：
+
+  - 尖峰频率：每秒出现多少次高角加速度事件（尤其是非必要的二次碰撞/打滑/卡边缘导致的尖峰）。
+  - 尖峰幅值分布：p95/p99（而不是 mean）；mean 很容易被少量极端点污染或被 clamp 失真。
+  - 尖峰持续时间：落地后是否“振铃”（高频抖持续多个 control step）。
+  - 落地冲击源：接触力上升沿是否很陡（砸地），这是最直接导致机身角加速度尖峰的原因之一。
+
+  ———
+
+  ## 1) 指标体系改造（先让你“看得见”问题）
+
+  ### 1.1 保留现有 Episode/camera_jitter_mean，但增加“更有信息量”的统计
+
+  在 legged_gym/envs/hex_v4/hex_terrain.py 里（你现在已有 debug/camera 日志）建议新增：
+
+  - debug/camera/ang_acc_xy_rms：sqrt(mean(ax^2+ay^2))（当前你主要看 episode end 的 RMS，容易被末帧污染）
+  - debug/camera/ang_acc_xy_p95、p99：用近似分位（torch quantile 或采样估计）
+  - debug/camera/jitter_sat_frac：(ang_jitter >= camera_jitter_cap) 的比例
+      - 一旦这个值接近 1，说明 cap 太低，reward 没梯度，曲线贴顶属于“测量失效”。
+
+  ### 1.2 将“落地冲击”单独量化
+
+  你代码里已经有足端接触力变化量的雏形：_reward_feet_contact_forces_increase()（legged_gym/envs/hex_v4/hex_terrain.py:2143附
+  近）。
+  把它变成纯日志（或 reward 项）：
+
+  - debug/contact/foot_dF_mean、p95：落地冲击强度
+    这能直接告诉你“尖峰到底是不是砸地造成的”。
+
+  > 这一步做完，你能判断：jitter 高是“必要尖峰”还是“冲击/振铃/卡边缘”导致的可控尖峰。
+
+  ———
+
+  ## 2) camera jitter reward 的改造思路（从“硬 clamp + 平方”变成“鲁棒 + 有梯度”）
+
+  你现在的 jitter 是 ax^2+ay^2，然后 clamp(cap)；如果典型值远大于 cap，就会一直饱和。
+
+  ### 2.1 把惩罚从“平方量”换成“幅值量 + 鲁棒惩罚”
+
+  建议把 jitter 基础量改为：
+
+  - a = ||base_ang_acc_xy||（单位 rad/s²）
+    然后惩罚用 Huber/softplus 之类：
+  - 低于阈值（正常摆动）近似二次（有梯度、可微）
+  - 高于阈值（尖峰）近似线性（不被极端值支配）
+
+  这比“平方+硬 cap”更符合“尖峰不可避免，但不要过分放大极端点”的目标。
+
+  ### 2.2 加一个“振铃能量”项（解决落地后抖好几步）
+
+  落地尖峰不可避免，但落地后持续振动是可以学会减少的。设计方式：
+
+  - a_smooth = EMA(base_ang_acc_xy)（低频趋势）
+  - a_hf = base_ang_acc_xy - a_smooth（高频残差）
+  - 惩罚 mean(|a_hf|) 或 mean(a_hf^2)
+    这会逼策略减少“落地后还在抖”的部分，而不是和落地尖峰死磕。
+
+  ———
+
+  ## 3) “鼓励软落地”的奖励项（最对症，能显著降尖峰）
+
+  你想要的“尖峰少/小/短”，在腿式机器人上最有效的信号通常不是角加速度本身，而是接触冲击。
+
+  ### 3.1 添加 foot_impact_penalty（落地冲击惩罚）
+
+  利用你现成的 last_contact_forces：
+
+  - 计算 dF = max(0, ||F_t|| - ||F_{t-1}||)（只惩罚上升沿）
+  - 对足端求和/求 p95，再做一个 clamp（防极端）
+  - 只在“脚从离地→触地”的时刻重点计入（可选）
+
+  它会让策略学会：
+
+  - 摆腿末端速度更小
+  - 先轻触再承重
+  - 减少“砸地 + 反弹”
+
+  这通常比盯着 base_ang_acc 更稳定、学习信号更直接。
+
+  ———
+
+  ## 4) 参数标定策略（避免再次“贴顶/没梯度”）
+
+  ### 4.1 先用数据定标，不要拍脑袋设 cap
+
+  跑一段当前策略（哪怕很差），统计 a = ||ang_acc_xy|| 的分布：
+
+  - 取“你认为还算正常”的区间的 p95/p99
+  - 将 cap 设在 p99 附近，而不是远低于正常值
+
+  ### 4.2 用“比例缩放”保持奖励强度可控
+
+  如果你仍保留 cap，建议按公式保持最大惩罚幅度近似不变：
+
+  - new_weight = old_weight * old_cap / new_cap
+
+  这样你不会因为调大 cap 而把约束直接削没。
+
+  ———
+
+  ## 5) 训练调度（让策略先学会走，再学会稳）
+
+  你已经看到“太稳=不敢迈步”的问题，所以 camera 约束建议做 schedule：
+
+  - Phase A（会走）：camera 相关权重低（或只开 foot_impact_penalty，小权重）
+  - Phase B（走稳）：逐步拉高 tripod gait / foot impact / camera hf energy
+  - Phase C（相机质量）：最后再提高 camera_stability 主权重
+
+  这样更符合“先学步态结构，再学软落地，再学整体稳定”。
+
+  ———
+
+  ## 6) 仿真侧（dt/solver）会影响尖峰，但不是主因
+
+  你问“步长不够小？”——会放大冲击和穿透反弹，但通常是放大器，不是根因。
+
+  优先级建议：
+
+  1. 先用奖励/步态结构解决“砸地/振铃/卡边缘”
+  2. 如果仍然尖峰很离谱，再考虑：
+      - 增加 physx.num_position_iterations
+      - 增加 sim.substeps
+      - 调整接触参数（contact_offset 等）
+
+  ———
+
+  ## 7) 验收标准（你跑完能一眼看出有没有改善）
+  - debug/contact/foot_dF_p95 下降（砸地变少）
+  - debug/camera/ang_acc_xy_p99 下降（尖峰分布收敛）
+  - 同时 episode/knee_contact_frac 不上升、distance_traveled 不显著下降（否则是“靠不动换稳定”）
+
+  ———
+
+  如果你同意这个方向，我建议你先选一个落地实施顺序：
+
+  1. 只加日志（分位数 + sat_frac + foot_dF）
+  2. 只加 foot_impact_penalty（小权重）
+  3. 再改 camera jitter 的鲁棒形式（Huber + hf energy）
+

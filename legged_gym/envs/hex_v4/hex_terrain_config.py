@@ -9,9 +9,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         # 【GPT建议】Debug模式开关：启用Phase 2数据链和curriculum统计的断言检查
         debug_mode = True  # 开发阶段建议开启，生产训练可关闭（提升性能）
         
-        # ============================================================
+       
         # 【EGPO Encoder 观测空间架构】
-        # ============================================================
         # 本体观测 (可部署，无需特权信息)
         num_observations = 67  # [quat(4), ang_vel(3), lin_acc(3), dof_pos(18), dof_vel(18), torque(18), cmd(3)]
         
@@ -32,12 +31,12 @@ class HexTerrainCfg(LeggedRobotCfg):
         # Runner硬编码维度 (expert_guided_encoder_runner.py L51):
         #   actor_obs_shape = [num_obs + 30] = [97]  # obs拼接层
         #   critic_obs_shape = [11*13] = [143]       # terrain编码器输入
-        # ============================================================
+        
         
         num_actions = 18
         episode_length_s=10
         env_spacing=2.0
-        termination_height_threshold = 0.035
+        termination_height_threshold = 0.045#0.035可能低了，导致大量膝盖触地
         termination_max_tilt_deg = 60.0
 
     class sensor:
@@ -342,6 +341,10 @@ class HexTerrainCfg(LeggedRobotCfg):
         # ==================== 姿态门控（防刷分/异常形态） ====================
         # projected_gravity[:,2] = cos(tilt)；0.7≈45°，0.85≈31.8°
         upright_cos_min = 0.75
+
+        # ==================== 非足端接触惩罚滞后（防噪声误触发） ====================
+        # 连续 N 个 control step 检测到非足端接触才触发 collision 惩罚
+        nonfoot_contact_hysteresis_steps = 2
         
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
@@ -368,11 +371,17 @@ class HexTerrainCfg(LeggedRobotCfg):
         foot_xy_reward_max = 1.0
 
         # ==================== 腾空时间 shaping（避免超长刷分） ====================
-        feet_air_time_target_s = 0.18
-        feet_air_time_max_s = 0.45
+        feet_air_time_target_s = 0.1
+        feet_air_time_max_s = 0.3
         feet_air_time_long_penalty = 1.0     # 超过max后的惩罚斜率（相对奖励）
         feet_air_time_over_cap_s = 0.60      # 超长惩罚裁剪，避免极端尖峰
         feet_air_time_cmd_threshold = 0.2    # 低指令时不计入
+
+        # ==================== 三角步态（Tripod gait） ====================
+        # 基于 expert.py 的 A/B 三角分组：鼓励 3 腿支撑 + 3 腿摆动，减少小踏步
+        tripod_cmd_threshold = 0.2
+        tripod_stance_weight = 0.4
+        tripod_swing_weight = 0.6
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
@@ -380,17 +389,18 @@ class HexTerrainCfg(LeggedRobotCfg):
             tracking_ang_vel = 2.0      # 跟踪角速度指令
             
             # === 相机稳定性（Sim-to-Real关键）===
-            camera_stability = 2.5      # 新增：惩罚机身抖动以提升视觉质量
+            camera_stability = 1.5      # 新增：惩罚机身抖动以提升视觉质量
             lin_vel_z = -1.5            # 惩罚垂直颠簸
             ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
             
             # === 姿态与步态 ===
             base_height = 0.5           # 保持目标高度
             orientation = -0.5          # 软姿态约束：防止异常姿态刷分
-            feet_air_time = 0.5         # 鼓励合理的摆动相位
+            feet_air_time = 0.8         # 鼓励合理的摆动相位
+            tripod_gait = 1.0           # 鼓励三角步态（基于 expert.py A/B 分组）
             
             # === 惩罚项 ===
-            collision = -8.0            # 非足端接触
+            collision = -50.0           # 非足端接触：强惩罚（注意：总奖励仍会被 min/max_reward_clip 截断）
             action_rate = -0.05         # 平滑动作变化
             dof_acc = -1.5e-7           # 关节加速度惩罚
             stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚)
@@ -399,7 +409,7 @@ class HexTerrainCfg(LeggedRobotCfg):
             CoT = 0.0                   # 运输成本（已禁用）
             
             # === 六足特定（实验性）===
-            tracking_dof = -0.05       # 关节位置跟踪
+            tracking_dof = -0.1       # 关节位置跟踪
             footend_pos_xy = 1.0      # 足端位置奖励            
             dof_pos_limits = -0.2     # 关节接近软限位惩罚（防反折/僵直）
 
@@ -471,7 +481,7 @@ class HexTerrainCfgPPO(LeggedRobotCfgPPO):
         
         # learning_rate = 1.e-4
         # schedule = 'fixed' 
-        expert_interface_iter=200 #专家干预的时间
+        expert_interface_iter=300 #专家干预的时间
         expert_alpha_min=0.0
         expert_alpha_schedule="cosine"
 
