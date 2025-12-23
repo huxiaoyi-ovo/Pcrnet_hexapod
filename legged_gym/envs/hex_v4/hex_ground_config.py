@@ -45,14 +45,14 @@ class HexGroundCfg(LeggedRobotCfg):
         border_size=1.0
         terrain_length=8.0
         terrain_width=8.0
-        max_init_terrain_level=1 #这个必须比num_rows小，否则会超出索引边界
+        max_init_terrain_level=4 #这个必须比num_rows小，否则会超出索引边界
         num_rows=5 #等级
         num_cols=10 #不同地形种类的总数量，比例按照 terrain_proportions来
         measure_heights = True
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
         measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap, pit, gate, slalom]
-        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5]
         #开启了地形选择，就按照参数中的地形生成
         selected=False
         num_sub_terrains=1
