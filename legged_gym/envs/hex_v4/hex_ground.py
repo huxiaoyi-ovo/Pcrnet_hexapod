@@ -262,6 +262,54 @@ class HexGround(LeggedRobot):
             self.rgb_images = torch.stack(rgb_list, dim=0)
         return self.rgb_images
 
+    def _reset_root_states(self, env_ids):
+        """重置root状态，slalom地形时固定入口位姿"""
+        if len(env_ids) == 0:
+            return
+        if self.custom_origins:
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            self.root_states[env_ids, :2] += torch_rand_float(
+                -1.0, 1.0, (len(env_ids), 2), device=self.device
+            )
+            if hasattr(self, "terrain_types"):
+                proportions = []
+                running = 0.0
+                for p in self.cfg.terrain.terrain_proportions:
+                    running += float(p)
+                    proportions.append(running)
+                slalom_low = proportions[-2] if len(proportions) > 1 else 0.0
+                slalom_high = proportions[-1] if proportions else 0.0
+                choice = self.terrain_types[env_ids].float() / float(self.cfg.terrain.num_cols) + 0.001
+                slalom_mask = (choice >= slalom_low) & (choice < slalom_high)
+                if slalom_mask.any():
+                    slalom_env_ids = env_ids[slalom_mask]
+                    x_offset = -0.5 * self.cfg.terrain.terrain_length + 1.0
+                    y_offset = 0.0
+                    self.root_states[slalom_env_ids] = self.base_init_state
+                    self.root_states[slalom_env_ids, :3] += self.env_origins[slalom_env_ids]
+                    self.root_states[slalom_env_ids, 0] += x_offset
+                    self.root_states[slalom_env_ids, 1] += y_offset
+                    yaw = -0.5 * math.pi
+                    qz = math.sin(yaw / 2.0)
+                    qw = math.cos(yaw / 2.0)
+                    quat = torch.tensor([0.0, 0.0, qz, qw], device=self.device)
+                    self.root_states[slalom_env_ids, 3:7] = quat.repeat(len(slalom_env_ids), 1)
+        else:
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+        # base velocities
+        self.root_states[env_ids, 7:13] = torch_rand_float(
+            -0.1, 0.1, (len(env_ids), 6), device=self.device
+        )
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
 
     def step(self,actions):
         #因为返回的观测改变了，因此需要重新定义step函数
@@ -699,13 +747,13 @@ class HexGround(LeggedRobot):
     def _resample_commands(self, env_ids):
         for i, key in enumerate(['lin_vel_x','lin_vel_y','ang_vel_yaw']):
             self.commands[env_ids, i] = torch_rand_float(self.command_ranges[key][0], self.command_ranges[key][1], (len(env_ids), 1), device=self.device).squeeze(1)
-            self.commands[env_ids,i] *= torch.abs(self.commands[env_ids,i])>0.15
+            self.commands[env_ids,i] *= torch.abs(self.commands[env_ids,i])>0.05
             x=self.commands[env_ids,i]
 
             x[x<self.command_ranges[key][0]*0.8]=self.command_ranges[key][0]
             x[x>self.command_ranges[key][1]*0.8]=self.command_ranges[key][1]
             self.commands[env_ids,i]=x   
-        self.commands[env_ids, :3] *= (torch.norm(self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
+        self.commands[env_ids, :3] *= (torch.norm(self.commands[env_ids, :3], dim=1) > 0.1).unsqueeze(1)
 
     def _update_terrain_curriculum(self, env_ids):
         #重新设计地形更新的规则
@@ -935,6 +983,9 @@ class HexGround(LeggedRobot):
     def _reward_stumble(self):
         return torch.any(torch.norm(self.contact_forces[:,self.feet_indices,:2],dim=2)>\
                          torch.abs(self.contact_forces[:,self.feet_indices,2]),dim=1)
+
+    def _reward_camera_wobble_y(self):
+        return torch.square(self.base_ang_vel[:, 1])
 
     # def _reward_tracking_lin_vel(self):
     #     lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)

@@ -52,7 +52,7 @@ class HexGroundCfg(LeggedRobotCfg):
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
         measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap, pit, gate, slalom]
-        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5]
+        terrain_proportions = [0.7, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         #开启了地形选择，就按照参数中的地形生成
         selected=False
         num_sub_terrains=1
@@ -72,6 +72,8 @@ class HexGroundCfg(LeggedRobotCfg):
         noise_amplitude_min = 0.0
         noise_amplitude_max = 0.0
         noise_downsampled_scale = 0.3
+        # slalom走廊加宽（相对默认2.8扩大1.5倍）
+        slalom_corridor_width_scale = 4.2
         slope_treshold=0.1
         collision_force_threshold = 1.0
         collision_penalty_threshold = 0.5
@@ -96,6 +98,7 @@ class HexGroundCfg(LeggedRobotCfg):
             ang_vel_yaw=[-2.0,2.0]            
     class init_state(LeggedRobotCfg.init_state):
         pos = [0.0, 0.0, 0.1]
+        rot = [0.0, 0.0, 0.0, 1.0]
         _tao=['lb','lf','lm','rb','rf','rm']
         _q_name=['thigh','knee','ankle']
         _joint=0.0
@@ -186,6 +189,7 @@ class HexGroundCfg(LeggedRobotCfg):
             tracking_lin_vel = 3.0
             lin_vel_z = -1.5
             ang_vel_xy = -0.15
+            camera_wobble_y = -0.05
             base_height = 0.8
             orientation = -8.0
             feet_air_time = 0.5

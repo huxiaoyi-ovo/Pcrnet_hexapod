@@ -258,9 +258,10 @@ def play(args):
         viewer = env.viewer
 
         print("\n[Play] Keyboard control enabled:")
-        print("  - ↑/↓: vx +/-")
-        print("  - ←/→: vy +/-")
-        print("  - A/D: yaw +/-")
+        print("  - ↑/↓: vx +/- (override)")
+        print("  - ←/→: vy +/- (override)")
+        print("  - A/D: yaw +/- (override)")
+        print("  - Q/E: yaw +/- (rotate in place, override)")
         print("  - Space: stop")
         print("  - R: reset")
 
@@ -270,6 +271,8 @@ def play(args):
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_RIGHT, "CMD_VY_RIGHT")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "CMD_YAW_LEFT")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "CMD_YAW_RIGHT")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_Q, "CMD_YAW_LEFT_ONLY")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_E, "CMD_YAW_RIGHT_ONLY")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "CMD_STOP")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "CMD_RESET")
 
@@ -286,17 +289,21 @@ def play(args):
                     if evt.value <= 0:
                         continue
                     if evt.action == "CMD_VX_UP":
-                        cmd_vx += cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = cmd_step, 0.0, 0.0
                     elif evt.action == "CMD_VX_DOWN":
-                        cmd_vx -= cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = -cmd_step, 0.0, 0.0
                     elif evt.action == "CMD_VY_LEFT":
-                        cmd_vy += cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, cmd_step, 0.0
                     elif evt.action == "CMD_VY_RIGHT":
-                        cmd_vy -= cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, -cmd_step, 0.0
                     elif evt.action == "CMD_YAW_LEFT":
-                        cmd_yaw += cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, cmd_step
                     elif evt.action == "CMD_YAW_RIGHT":
-                        cmd_yaw -= cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, -cmd_step
+                    elif evt.action == "CMD_YAW_LEFT_ONLY":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, cmd_step
+                    elif evt.action == "CMD_YAW_RIGHT_ONLY":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, -cmd_step
                     elif evt.action == "CMD_STOP":
                         cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
                     elif evt.action == "CMD_RESET":
