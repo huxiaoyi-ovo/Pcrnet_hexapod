@@ -450,7 +450,6 @@ class HexTerrainCfg(LeggedRobotCfg):
             gravity = 0.05
             contact_force = 10.0
             height_measurements = 0.02
-
             camera_depth = 0.02
     
     class viewer(LeggedRobotCfg.viewer):
