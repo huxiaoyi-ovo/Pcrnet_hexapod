@@ -34,6 +34,7 @@ import atexit
 import datetime
 from collections import deque
 import statistics
+from typing import Optional
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
@@ -108,12 +109,12 @@ class OnPolicyRunner:
             finally:
                 self._terminal_log_f = None
 
-    def _should_persist_terminal_log(self, it: int | None) -> bool:
+    def _should_persist_terminal_log(self, it: Optional[int]) -> bool:
         if it is None:
             return True
         return (it > 0) and (it <= 2000) and (it % 200 == 0)
 
-    def _terminal_print(self, text: str, it: int | None = None):
+    def _terminal_print(self, text: str, it: Optional[int] = None):
         print(text)
         if not self._should_persist_terminal_log(it):
             return
