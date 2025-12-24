@@ -173,7 +173,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         curriculum_height_threshold = 0.12     # base_height范围[0,1]
         curriculum_collision_threshold = 30.0  # 碰撞事件数（使用统一阈值）
         curriculum_quality_score = 2.0         # 4项中至少2项达标
-        curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
+        curriculum_consecutive_passes = 3      # 连续3次才升级（放慢升级节奏）
         curriculum_distance_threshold = 0.8   # episode累计距离阈值(米)
         curriculum_expert_level_cap_start = 0
         curriculum_expert_level_cap_end = 4
