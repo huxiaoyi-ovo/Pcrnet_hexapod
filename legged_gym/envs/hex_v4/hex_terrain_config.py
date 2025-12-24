@@ -175,7 +175,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         curriculum_quality_score = 2.0         # 4项中至少2项达标
         curriculum_consecutive_passes = 3      # 连续3次才升级（放慢升级节奏）
         curriculum_distance_threshold = 0.8   # 课程距离地板(米)，防止极小指令导致过小阈值
-        curriculum_distance_k = 0.8           # 目标距离系数：||cmd|| * episode_time * k
+        curriculum_distance_k = 0.7           # 目标距离系数：||cmd|| * episode_time * k
         curriculum_min_command = 0.1          # 指令均值小于该值时不允许升级
         curriculum_expert_level_cap_start = 0
         curriculum_expert_level_cap_end = 4
@@ -371,8 +371,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         foot_xy_reward_max = 1.0
 
         # ==================== 腾空时间 shaping（避免超长刷分） ====================
-        feet_air_time_target_s = 0.2
-        feet_air_time_max_s = 2.0
+        feet_air_time_target_s = 0.18
+        feet_air_time_max_s = 1.0
         feet_air_time_long_penalty = 1.0     # 超过max后的惩罚斜率（相对奖励）
         feet_air_time_over_cap_s = 1.20      # 超长惩罚裁剪，避免极端尖峰
         feet_air_time_cmd_threshold = 0.2    # 低指令时不计入
@@ -401,8 +401,8 @@ class HexTerrainCfg(LeggedRobotCfg):
             
             # === 惩罚项 ===
             collision = -2.0            # 非足端接触：适中惩罚
-            action_rate = -0.03         # 平滑动作变化（保守）
-            dof_acc = -1.0e-7           # 关节加速度惩罚（保守）
+            action_rate = -0.05         # 平滑动作变化（保守）
+            dof_acc = -1.5e-7           # 关节加速度惩罚（保守）
             stand_still = -1.0          # 零指令时保持静止
             
             # === 能耗（可选）===

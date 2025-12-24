@@ -10,6 +10,7 @@ import numpy as np
 from isaacgym import gymtorch,gymapi,gymutil
 from legged_gym.utils import get_args,class_to_dict
 from legged_gym.utils.helpers import parse_sim_params
+from legged_gym.utils.my_math import quat_apply_yaw
 from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
@@ -1033,8 +1034,11 @@ class HexTerrain(LeggedRobot):
                 delta_xy = robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2]
                 cmd_xy = self._get_effective_commands()[:, :2]
                 cmd_norm = torch.norm(cmd_xy, dim=1, keepdim=True)
-                cmd_dir = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
-                step_progress = torch.sum(delta_xy * cmd_dir, dim=1)
+                cmd_dir_body = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
+                cmd_dir_world = quat_apply_yaw(
+                    self.base_quat, torch.cat([cmd_dir_body, torch.zeros_like(cmd_dir_body[:, :1])], dim=1)
+                )[:, :2]
+                step_progress = torch.sum(delta_xy * cmd_dir_world, dim=1)
                 self.episode_raw_stats[:, 3] += torch.clamp(step_progress, min=0.0)
             
             # Phase 2/3: 可选的稳定性保持（避免导航时相机质量退化）
@@ -1130,8 +1134,11 @@ class HexTerrain(LeggedRobot):
                 delta_xy = robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2]
                 cmd_xy = self._get_effective_commands()[:, :2]
                 cmd_norm = torch.norm(cmd_xy, dim=1, keepdim=True)
-                cmd_dir = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
-                step_progress = torch.sum(delta_xy * cmd_dir, dim=1)
+                cmd_dir_body = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
+                cmd_dir_world = quat_apply_yaw(
+                    self.base_quat, torch.cat([cmd_dir_body, torch.zeros_like(cmd_dir_body[:, :1])], dim=1)
+                )[:, :2]
+                step_progress = torch.sum(delta_xy * cmd_dir_world, dim=1)
                 self.episode_raw_stats[:, 3] += torch.clamp(step_progress, min=0.0)
                 
                 # 更新prev_robot_pos_buf用于下一步距离计算
