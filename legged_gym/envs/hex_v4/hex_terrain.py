@@ -1021,9 +1021,13 @@ class HexTerrain(LeggedRobot):
                 collision_events = collision_mask.float()
                 self.episode_raw_stats[:, 2] += collision_events
                 
-                # 4. distance_traveled: 增量距离累加(米)
-                step_distance = torch.norm(robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2], dim=1)
-                self.episode_raw_stats[:, 3] += step_distance
+                # 4. distance_traveled: 沿指令方向的位移投影累加(米)
+                delta_xy = robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2]
+                cmd_xy = self._get_effective_commands()[:, :2]
+                cmd_norm = torch.norm(cmd_xy, dim=1, keepdim=True)
+                cmd_dir = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
+                step_progress = torch.sum(delta_xy * cmd_dir, dim=1)
+                self.episode_raw_stats[:, 3] += torch.clamp(step_progress, min=0.0)
             
             # Phase 2/3: 可选的稳定性保持（避免导航时相机质量退化）
             # 如果配置中启用了 nav_stability_weight，额外添加 camera_stability 奖励
@@ -1113,10 +1117,14 @@ class HexTerrain(LeggedRobot):
                 collision_mask = self._compute_collision_mask()
                 self.episode_raw_stats[:, 2] += collision_mask.float()
                 
-                # 4. distance_traveled: 增量距离累加
+                # 4. distance_traveled: 沿指令方向的位移投影累加
                 robot_pos_local = self.root_states[:, :3] - self.env_origins
-                step_distance = torch.norm(robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2], dim=1)
-                self.episode_raw_stats[:, 3] += step_distance
+                delta_xy = robot_pos_local[:, :2] - self.prev_robot_pos_buf[:, :2]
+                cmd_xy = self._get_effective_commands()[:, :2]
+                cmd_norm = torch.norm(cmd_xy, dim=1, keepdim=True)
+                cmd_dir = torch.where(cmd_norm > 1e-6, cmd_xy / cmd_norm, torch.zeros_like(cmd_xy))
+                step_progress = torch.sum(delta_xy * cmd_dir, dim=1)
+                self.episode_raw_stats[:, 3] += torch.clamp(step_progress, min=0.0)
                 
                 # 更新prev_robot_pos_buf用于下一步距离计算
                 self.prev_robot_pos_buf[:] = robot_pos_local
@@ -1515,13 +1523,17 @@ class HexTerrain(LeggedRobot):
         获取当前的观测字典
         用于训练时获取观测
         """
+        foot_contact_forces = None
+        if hasattr(self, "contact_forces"):
+            foot_contact_forces = self.contact_forces[:, self.feet_indices, :]
         obs_dict = {
             'proprioception': self.obs_buf,
             'privileged': self.obs_vgf_buf,
             'terrain': self.obs_terrain_buf,
             'depth': self.depth_images if hasattr(self, 'depth_images') else None,
             'robot_state': self.robot_state_buf,
-            'goal': self.goal_buf
+            'goal': self.goal_buf,
+            'foot_contact_forces': foot_contact_forces
         }
         return obs_dict
 
@@ -1915,7 +1927,9 @@ class HexTerrain(LeggedRobot):
         stability_th = getattr(cfg_t, 'curriculum_stability_threshold', 0.7)
         height_th = getattr(cfg_t, 'curriculum_height_threshold', 0.7)
         collision_th = getattr(cfg_t, 'curriculum_collision_threshold', 5.0)
-        distance_th = getattr(cfg_t, 'curriculum_distance_threshold', 1.0)
+        distance_floor = getattr(cfg_t, 'curriculum_distance_threshold', 0.0)
+        distance_k = getattr(cfg_t, 'curriculum_distance_k', 0.8)
+        min_cmd = getattr(cfg_t, 'curriculum_min_command', 0.1)
         quality_score = getattr(cfg_t, 'curriculum_quality_score', 3.0)
         consecutive_passes = getattr(cfg_t, 'curriculum_consecutive_passes', 2)
         cap_start = getattr(cfg_t, 'curriculum_expert_level_cap_start', 0)
@@ -1947,15 +1961,18 @@ class HexTerrain(LeggedRobot):
         pass_height = base_height > height_th
         pass_collision = collision_count < collision_th
         
-        # 距离指标 (基于episode累计距离)
+        # 距离指标 (基于episode累计距离，且必须对齐指令强度)
         distance_traveled = self.episode_raw_stats[env_ids, 3]
-        pass_distance = distance_traveled > distance_th
+        cmd_norm_mean = self.episode_cmd_stats[env_ids, 0] / (episode_length + 1e-6)
+        episode_time = episode_length * self.dt
+        target_distance = torch.clamp(cmd_norm_mean * episode_time * distance_k, min=distance_floor)
+        pass_distance = (cmd_norm_mean >= min_cmd) & (distance_traveled > target_distance)
         
         # 计算质量分数 (4项中满足几项)
         score = pass_stability.float() + pass_height.float() + pass_collision.float() + pass_distance.float()
         
         # 软升级: 连续通过计数
-        current_pass = score >= quality_score
+        current_pass = (score >= quality_score) & pass_distance
         if freeze_upgrading:
             current_pass = torch.zeros_like(current_pass, dtype=torch.bool)
         self.terrain_pass_count[env_ids] = torch.where(
@@ -1994,6 +2011,9 @@ class HexTerrain(LeggedRobot):
         self.extras["curr_height_quality_mean"] = base_height.mean().item()
         self.extras["curr_collision_mean"] = collision_count.mean().item()
         self.extras["curr_distance_mean"] = distance_traveled.mean().item()
+        self.extras["curr_cmd_norm_mean"] = cmd_norm_mean.mean().item()
+        self.extras["curr_target_distance_mean"] = target_distance.mean().item()
+        self.extras["curr_pass_distance_rate"] = pass_distance.float().mean().item()
         self.extras["curr_score_mean"] = score.mean().item()
         self.extras["curr_pass_rate"] = current_pass.float().mean().item()
         self.extras["curr_move_up_rate"] = move_up.float().mean().item()
