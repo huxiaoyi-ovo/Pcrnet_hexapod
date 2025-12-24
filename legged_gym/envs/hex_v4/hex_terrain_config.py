@@ -372,9 +372,9 @@ class HexTerrainCfg(LeggedRobotCfg):
 
         # ==================== 腾空时间 shaping（避免超长刷分） ====================
         feet_air_time_target_s = 0.2
-        feet_air_time_max_s = 1.0
+        feet_air_time_max_s = 2.0
         feet_air_time_long_penalty = 1.0     # 超过max后的惩罚斜率（相对奖励）
-        feet_air_time_over_cap_s = 0.60      # 超长惩罚裁剪，避免极端尖峰
+        feet_air_time_over_cap_s = 1.20      # 超长惩罚裁剪，避免极端尖峰
         feet_air_time_cmd_threshold = 0.2    # 低指令时不计入
 
         # ==================== 三角步态（Tripod gait） ====================

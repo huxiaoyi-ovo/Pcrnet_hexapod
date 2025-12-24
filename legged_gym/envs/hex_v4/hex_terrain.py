@@ -908,8 +908,16 @@ class HexTerrain(LeggedRobot):
 
             foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
             foot_contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
+            contact_filt = torch.logical_or(foot_contact, self.last_contacts)
+            first_contact = (self.feet_air_time > 0.0) & contact_filt
             swing_frac = (~foot_contact).float().mean(dim=1)
             self.episode_cmd_stats[:, 10] += swing_frac
+            # foot contact timing stats
+            self.episode_foot_contact_events += first_contact.float().sum(dim=1)
+            self.episode_foot_contact_time_sum += (self.feet_air_time * first_contact.float()).sum(dim=1)
+            contact_fz = torch.abs(self.contact_forces[:, self.feet_indices, 2])
+            self.episode_foot_contact_fz_sum += (contact_fz * contact_filt.float()).sum(dim=1)
+            self.episode_foot_contact_fz_count += contact_filt.float().sum(dim=1)
             if self._expert_action_updated:
                 self.episode_cmd_stats[:, 3] += self._expert_action_norm_buf
                 self.episode_cmd_stats[:, 4] += 1.0
@@ -1344,6 +1352,23 @@ class HexTerrain(LeggedRobot):
                 if hasattr(self, "episode_foot_dF_sum")
                 else 0.0
             )
+            ep_foot_contact_event_rate = (
+                (self.episode_foot_contact_events[env_ids] / (ep_len * float(self.feet_indices.shape[0]))).mean().item()
+                if hasattr(self, "episode_foot_contact_events")
+                else 0.0
+            )
+            ep_foot_air_time_at_contact = (
+                (self.episode_foot_contact_time_sum[env_ids] /
+                 torch.clamp(self.episode_foot_contact_events[env_ids], min=1.0)).mean().item()
+                if hasattr(self, "episode_foot_contact_time_sum")
+                else 0.0
+            )
+            ep_foot_contact_fz_mean = (
+                (self.episode_foot_contact_fz_sum[env_ids] /
+                 torch.clamp(self.episode_foot_contact_fz_count[env_ids], min=1.0)).mean().item()
+                if hasattr(self, "episode_foot_contact_fz_sum")
+                else 0.0
+            )
             ep_nonfoot_contact_trigger_frac = (
                 (self.episode_nonfoot_trigger_steps[env_ids] / ep_len).mean().item()
                 if hasattr(self, "episode_nonfoot_trigger_steps")
@@ -1365,6 +1390,9 @@ class HexTerrain(LeggedRobot):
             self.extras["ep_camera_raw_ang_acc_xy_rms"] = ep_camera_raw_ang_acc_xy_rms
             self.extras["ep_camera_jitter_sat_frac"] = ep_camera_jitter_sat_frac
             self.extras["ep_foot_impact_df_mean"] = ep_foot_impact_df_mean
+            self.extras["ep_foot_contact_event_rate"] = ep_foot_contact_event_rate
+            self.extras["ep_foot_air_time_at_contact"] = ep_foot_air_time_at_contact
+            self.extras["ep_foot_contact_fz_mean"] = ep_foot_contact_fz_mean
             self.extras["ep_nonfoot_contact_trigger_frac"] = ep_nonfoot_contact_trigger_frac
             self.extras["ep_base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
             self.extras["ep_base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
@@ -1392,6 +1420,9 @@ class HexTerrain(LeggedRobot):
                 self.extras["episode"]["camera_raw_ang_acc_xy_rms"] = ep_camera_raw_ang_acc_xy_rms
                 self.extras["episode"]["camera_jitter_sat_frac"] = ep_camera_jitter_sat_frac
                 self.extras["episode"]["foot_impact_df_mean"] = ep_foot_impact_df_mean
+                self.extras["episode"]["foot_contact_event_rate"] = ep_foot_contact_event_rate
+                self.extras["episode"]["foot_air_time_at_contact"] = ep_foot_air_time_at_contact
+                self.extras["episode"]["foot_contact_fz_mean"] = ep_foot_contact_fz_mean
                 self.extras["episode"]["nonfoot_contact_trigger_frac"] = ep_nonfoot_contact_trigger_frac
                 self.extras["episode"]["base_ang_acc_xy_rms"] = base_ang_acc_xy_rms
                 self.extras["episode"]["base_ang_vel_xy_rms"] = base_ang_vel_xy_rms
@@ -1461,6 +1492,14 @@ class HexTerrain(LeggedRobot):
                 self.episode_raw_ang_jitter_sum[env_ids] = 0.0
             if hasattr(self, "episode_foot_dF_sum"):
                 self.episode_foot_dF_sum[env_ids] = 0.0
+            if hasattr(self, "episode_foot_contact_events"):
+                self.episode_foot_contact_events[env_ids] = 0.0
+            if hasattr(self, "episode_foot_contact_time_sum"):
+                self.episode_foot_contact_time_sum[env_ids] = 0.0
+            if hasattr(self, "episode_foot_contact_fz_sum"):
+                self.episode_foot_contact_fz_sum[env_ids] = 0.0
+            if hasattr(self, "episode_foot_contact_fz_count"):
+                self.episode_foot_contact_fz_count[env_ids] = 0.0
             if hasattr(self, "_prev_feet_force_norm"):
                 self._prev_feet_force_norm[env_ids] = torch.norm(
                     self.contact_forces[env_ids][:, self.feet_indices, :], dim=-1
@@ -1796,6 +1835,19 @@ class HexTerrain(LeggedRobot):
             self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
         )
         self.episode_foot_dF_sum = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        # === Feet contact timing stats (episode accumulation) ===
+        self.episode_foot_contact_events = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self.episode_foot_contact_time_sum = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self.episode_foot_contact_fz_sum = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
+        )
+        self.episode_foot_contact_fz_count = torch.zeros(
             self.num_envs, dtype=torch.float32, device=self.device, requires_grad=False
         )
         self._prev_feet_force_norm = torch.zeros(
