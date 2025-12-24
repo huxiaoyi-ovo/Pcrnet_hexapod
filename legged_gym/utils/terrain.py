@@ -112,9 +112,9 @@ class Terrain:
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
         #核心参数
-        slope = difficulty * 0.6
+        slope = difficulty * 0.35
         # step_height = 0.05 + 0.18 * difficulty #这个递增对六足来说太快了
-        step_height = 0.05 + 0.125 * difficulty
+        step_height = 0.03 + 0.06 * difficulty
         # print("step_height=",step_height)
         # discrete_obstacles_height = 0.05 + difficulty * 0.2
         # discrete_obstacles_height = 0.05 + difficulty * 0.125  # 原值: 5cm→17.5cm 太高

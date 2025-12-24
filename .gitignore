@@ -5,6 +5,7 @@ legged_gym/outputs/train_v4/run_20251208_145234/best_model.pt
 legged_gym/data/processed/affordance_data.pt
 legged_gym/outputs/*
 legged_gym/data/processed/*.pt
+reference_code/*
 **/__pycache__/
 *.pyc
 # 1. Python 运行时垃圾

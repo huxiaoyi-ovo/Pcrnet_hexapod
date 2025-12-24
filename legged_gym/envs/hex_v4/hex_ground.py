@@ -441,7 +441,8 @@ class HexGround(LeggedRobot):
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
-        self.last_contacts = (self.contact_forces[:, self.feet_indices, 2] > 1.)
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        self.last_contacts = (self.contact_forces[:, self.feet_indices, 2] > foot_contact_threshold)
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()        
@@ -817,7 +818,8 @@ class HexGround(LeggedRobot):
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
         #重设六足的足端腾空时间不少于0.18s
-        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts) 
         # self.last_contacts = contact #放到post_physics_step后面计算，因为reward中还有其他奖励要使用
         first_contact = (self.feet_air_time > 0.) * contact_filt
@@ -882,7 +884,8 @@ class HexGround(LeggedRobot):
         #估计摆动时，靠近设置的初始点，来避免长期运动带来的累计误差
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = self.contact_forces[:, self.feet_indices, 2] > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts) 
         self.last_contacts = contact
         # 

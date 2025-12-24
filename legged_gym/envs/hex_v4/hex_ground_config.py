@@ -155,7 +155,7 @@ class HexGroundCfg(LeggedRobotCfg):
         file=f"{LEGGED_GYM_ROOT_DIR}/resources/robots/hex_v4/urdf/hex_ground.urdf"
         name="hex_v4"
         foot_name="toe"
-        penalize_contacts_on=["knee","knee","thigh"]
+        penalize_contacts_on=["thigh","knee","ankle"]
         terminate_after_contacts_on=["body"]
         # terminate_after_contacts_on=[]
         collapse_fixed_joints=False #ankle 和 toe 之间是固定关节，toe接触地面，不能被折叠
@@ -183,6 +183,7 @@ class HexGroundCfg(LeggedRobotCfg):
     class rewards(LeggedRobotCfg.rewards):
         low_height_penalty_threshold = 0.05
         low_height_penalty_value = -1.0
+        feet_contact_force_threshold = 1.0
         class scales(LeggedRobotCfg.rewards.scales):
             action_rate = -0.04
             tracking_ang_vel = 2.0

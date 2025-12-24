@@ -805,9 +805,9 @@ class HexTerrain(LeggedRobot):
         super()._parse_cfg(cfg)
         #因为要对command ranges 进行修改，所以重新定义这个函数
         if self.cfg.commands.curriculum:
-            self.command_ranges["lin_vel_x"]=[-0.6,0.6]
-            self.command_ranges["lin_vel_y"]=[-0.9,0.9]
-            self.command_ranges["ang_vel_yaw"]=[-0.6,0.6]
+            self.command_ranges["lin_vel_x"]=[-0.4,0.4]
+            self.command_ranges["lin_vel_y"]=[-0.6,0.6]
+            self.command_ranges["ang_vel_yaw"]=[-0.4,0.4]
         
 
     def _compute_torques(self, actions):
@@ -906,7 +906,8 @@ class HexTerrain(LeggedRobot):
             upright = self.projected_gravity[:, 2] < -upright_cos_min
             self.episode_cmd_stats[:, 9] += upright.float()
 
-            foot_contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.0
+            foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+            foot_contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
             swing_frac = (~foot_contact).float().mean(dim=1)
             self.episode_cmd_stats[:, 10] += swing_frac
             if self._expert_action_updated:
@@ -1125,13 +1126,6 @@ class HexTerrain(LeggedRobot):
                 assert torch.isfinite(self.rew_buf).all(), \
                     f"[Phase1-Debug] rew_buf has NaN/Inf! mean={self.rew_buf.mean()}, min={self.rew_buf.min()}, max={self.rew_buf.max()}"
             
-            # 奖励截断（防止梯度爆炸）
-            if hasattr(self.cfg.rewards, 'min_reward_clip'):
-                self.rew_buf = torch.clamp(
-                    self.rew_buf,
-                    min=self.cfg.rewards.min_reward_clip,
-                    max=self.cfg.rewards.max_reward_clip
-                )
         
         # Curriculum统计有效性断言（每500步检查一次，避免性能影响）
         if getattr(self.cfg.env, 'debug_mode', False) and self.common_step_counter % 500 == 0:
@@ -1171,7 +1165,8 @@ class HexTerrain(LeggedRobot):
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
         # Update contact history for reward contact filtering (PhysX meshes can be noisy)
-        self.last_contacts = (torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.)
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        self.last_contacts = (torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold)
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()        
@@ -2055,7 +2050,8 @@ class HexTerrain(LeggedRobot):
         - Saturates and adds penalty when air time is too long.
         - Gates reward when body is not upright or when knee/thigh are in contact.
         """
-        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts)
         first_contact = (self.feet_air_time > 0.) * contact_filt
 
@@ -2075,7 +2071,8 @@ class HexTerrain(LeggedRobot):
         per_foot = t_good - long_penalty * t_over
 
         rew_air_time = torch.sum(per_foot * first_contact, dim=1)
-        rew_air_time *= (torch.norm(self.commands[:, :3], dim=1) > cmd_th)
+        cmd_gate = (torch.norm(self.commands[:, :3], dim=1) > cmd_th)
+        rew_air_time *= cmd_gate
 
         # Gate: only count when body is upright and no knee/thigh contact is happening
         upright_cos_min = getattr(self.cfg.rewards, "upright_cos_min", 0.75)
@@ -2085,13 +2082,20 @@ class HexTerrain(LeggedRobot):
         no_nonfoot_contact = ~self._compute_collision_mask(threshold=collision_th)
         rew_air_time *= (upright & no_nonfoot_contact).float()
 
+        # Penalize excessive air-time even without toe contact (avoid "never touch" loophole).
+        miss_penalty = (t_over * (~contact_filt)).mean(dim=1) * long_penalty
+        miss_penalty *= cmd_gate
+        miss_penalty *= upright.float()
+        rew_air_time -= miss_penalty
+
         # reset on (filtered) contact
         self.feet_air_time *= ~contact_filt
         return rew_air_time
     
     def _reward_footend_pos_xy(self):
         """Continuous foot placement shaping (swing legs only), with deadzone for obstacle tolerance."""
-        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts)
         swing_mask = ~contact_filt  # (N,6)
 
@@ -2142,7 +2146,8 @@ class HexTerrain(LeggedRobot):
         #估计摆动时，靠近设置的初始点，来避免长期运动带来的累计误差
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts) 
         # 
         # print("reach_swing_init=",self.reach_swing_init[0])
@@ -2222,7 +2227,7 @@ class HexTerrain(LeggedRobot):
         base_height = torch.mean(height,dim=1)
         err = torch.abs(base_height-self.cfg.rewards.base_height_target)
         # print("err = ",err)
-        quality = torch.exp(-err/0.04)
+        quality = torch.exp(-err/0.03)
         return quality, base_height
 
     def _reward_base_height(self):
@@ -2304,7 +2309,8 @@ class HexTerrain(LeggedRobot):
         if not hasattr(self, "expert") or not hasattr(self.expert, "A_group_index"):
             return torch.zeros(self.num_envs, device=self.device)
 
-        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > 1.0
+        foot_contact_threshold = getattr(self.cfg.rewards, "feet_contact_force_threshold", 1.0)
+        contact = torch.abs(self.contact_forces[:, self.feet_indices, 2]) > foot_contact_threshold
         contact_filt = torch.logical_or(contact, self.last_contacts)  # (N,6)
 
         A = self.expert.A_group_index

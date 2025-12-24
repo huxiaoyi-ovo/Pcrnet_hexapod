@@ -169,12 +169,12 @@ class HexTerrainCfg(LeggedRobotCfg):
         collision_penalty_threshold = 0.5
         
         # === P1.2: Curriculum质量门槛（基于raw统计） ===
-        curriculum_stability_threshold = 0.10  # camera_stability范围[0,1]
-        curriculum_height_threshold = 0.15     # base_height范围[0,1]
-        curriculum_collision_threshold = 20.0  # 碰撞事件数（使用统一阈值）
+        curriculum_stability_threshold = 0.08  # camera_stability范围[0,1]
+        curriculum_height_threshold = 0.12     # base_height范围[0,1]
+        curriculum_collision_threshold = 30.0  # 碰撞事件数（使用统一阈值）
         curriculum_quality_score = 2.0         # 4项中至少2项达标
         curriculum_consecutive_passes = 2      # 连续2次才升级（软升级）
-        curriculum_distance_threshold = 1.0   # episode累计距离阈值(米)
+        curriculum_distance_threshold = 0.8   # episode累计距离阈值(米)
         curriculum_expert_level_cap_start = 0
         curriculum_expert_level_cap_end = 4
         curriculum_post_expert_freeze_iters = 100
@@ -241,10 +241,10 @@ class HexTerrainCfg(LeggedRobotCfg):
         heading_command = False
         resampling_time=10.0
         #越障模式
-        curriculum = False
+        curriculum = True
         class ranges:
-            lin_vel_x=[-0.6,0.6]
-            lin_vel_y=[-0.8,0.8]
+            lin_vel_x=[-1.0,1.0]
+            lin_vel_y=[-1.2,1.2]
             ang_vel_yaw=[-1.0,1.0]
     
     class init_state(LeggedRobotCfg.init_state):
@@ -305,7 +305,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         file=f"{LEGGED_GYM_ROOT_DIR}/resources/robots/hex_v4/urdf/hex_ground.urdf"
         name="hex_v4"
         foot_name="toe"
-        penalize_contacts_on=["knee","knee","thigh"]
+        penalize_contacts_on=["thigh","knee","ankle"]
         terminate_after_contacts_on=["body"]
         # terminate_after_contacts_on=[]
         collapse_fixed_joints=False #ankle 和 toe 之间是固定关节，toe接触地面，不能被折叠
@@ -332,15 +332,13 @@ class HexTerrainCfg(LeggedRobotCfg):
         
     class rewards(LeggedRobotCfg.rewards):
         # ==================== 奖励安全参数 ====================
-        # 奖励截断（防止梯度爆炸）
-        min_reward_clip = -10.0
-        max_reward_clip = 10.0
         low_height_penalty_threshold = 0.05
         low_height_penalty_value = -1.0
 
         # ==================== 姿态门控（防刷分/异常形态） ====================
         # projected_gravity[:,2] = cos(tilt)；0.7≈45°，0.85≈31.8°
         upright_cos_min = 0.75
+        feet_contact_force_threshold = 1.0
 
         # ==================== 非足端接触惩罚滞后（防噪声误触发） ====================
         # 连续 N 个 control step 检测到非足端接触才触发 collision 惩罚
@@ -348,15 +346,15 @@ class HexTerrainCfg(LeggedRobotCfg):
         
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
-        camera_jitter_weight = 0.05   # 抖动权重（角加速度）
-        camera_wobble_weight = 0.05   # 晃动权重（俯仰/横滚角速度）- 下降以避免抬腿时“过度求稳”
-        camera_bobbing_weight = 0.01   # 颠簸权重（垂直加速度）
+        camera_jitter_weight = 0.0003 # 抖动权重（角加速度）
+        camera_wobble_weight = 0.08   # 晃动权重（俯仰/横滚角速度）
+        camera_bobbing_weight = 0.015  # 颠簸权重（垂直加速度）
         
         # 防止偶发尖峰污染curriculum的鲁棒性阈值
         # 这些cap基于正常六足运动的物理约束（不同dt/动力学参数需调整）
-        camera_jitter_cap = 50.0     # (rad/s²)² 上限，对应~7rad/s² 角加速度
-        camera_wobble_cap = 4.0      # (rad/s)² 上限，对应~2rad/s 角速度
-        camera_bobbing_cap = 100.0   # (g 偏差)² 上限：_reward_camera_stability 使用 (a_z - 1g)^2（base_lin_acc单位:g）
+        camera_jitter_cap = 20000.0  # (rad/s²)² 上限，对应~141rad/s² 角加速度 (2轴合成)
+        camera_wobble_cap = 5.0      # (rad/s)² 上限，对应~1.6rad/s 角速度 (2轴合成)
+        camera_bobbing_cap = 1.0     # (g 偏差)² 上限：允许约±1g 的竖向加速度偏差
         
         # Phase 2/3: 导航时的稳定性保持权重
         nav_stability_weight = 0.3  # 导航时额外添加 camera_stability 的权重
@@ -371,8 +369,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         foot_xy_reward_max = 1.0
 
         # ==================== 腾空时间 shaping（避免超长刷分） ====================
-        feet_air_time_target_s = 0.1
-        feet_air_time_max_s = 0.3
+        feet_air_time_target_s = 0.2
+        feet_air_time_max_s = 1.0
         feet_air_time_long_penalty = 1.0     # 超过max后的惩罚斜率（相对奖励）
         feet_air_time_over_cap_s = 0.60      # 超长惩罚裁剪，避免极端尖峰
         feet_air_time_cmd_threshold = 0.2    # 低指令时不计入
@@ -385,38 +383,38 @@ class HexTerrainCfg(LeggedRobotCfg):
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
-            tracking_lin_vel = 3.5      # 跟踪线速度指令
-            tracking_ang_vel = 2.5      # 跟踪角速度指令
+            tracking_lin_vel = 2.0      # 跟踪线速度指令（主任务）
+            tracking_ang_vel = 1.0      # 跟踪角速度指令（保守）
             
             # === 相机稳定性（Sim-to-Real关键）===
-            camera_stability = 1.5      # 新增：惩罚机身抖动以提升视觉质量
-            lin_vel_z = -1.5            # 惩罚垂直颠簸
-            ang_vel_xy = -0.05          # 惩罚俯仰/横滚角速度
+            camera_stability = 1.5      # 视觉稳定优先
+            lin_vel_z = 0.0             # 由 camera_stability 统一约束
+            ang_vel_xy = 0.0            # 由 camera_stability 统一约束
             
             # === 姿态与步态 ===
-            base_height = 0.5           # 保持目标高度
-            orientation = -0.5          # 软姿态约束：防止异常姿态刷分
-            feet_air_time = 0.8         # 鼓励合理的摆动相位
-            tripod_gait = 1.0           # 鼓励三角步态（基于 expert.py A/B 分组）
+            base_height = 0.5           # 提高高度约束，稳定到目标值
+            orientation = -0.3          # 轻量姿态约束
+            feet_air_time = 0.5         # 六足特有：合理摆动相位
+            tripod_gait = 0.0           # 关闭三角步态，避免冗余
             
             # === 惩罚项 ===
-            collision = -10.0           # 非足端接触：强惩罚（注意：总奖励仍会被 min/max_reward_clip 截断）
-            action_rate = -0.05         # 平滑动作变化
-            dof_acc = -1.5e-7           # 关节加速度惩罚
-            stand_still = -3.0          # 零指令时保持静止 (修复: 增强惩罚)
+            collision = -2.0            # 非足端接触：适中惩罚
+            action_rate = -0.03         # 平滑动作变化（保守）
+            dof_acc = -1.0e-7           # 关节加速度惩罚（保守）
+            stand_still = -1.0          # 零指令时保持静止
             
             # === 能耗（可选）===
-            CoT = 0.0                   # 运输成本（已禁用）
+            CoT = 0.0                   # 能耗
             
             # === 六足特定（实验性）===
-            tracking_dof = -0.0       # 关节位置跟踪
-            footend_pos_xy = 1.0      # 足端位置奖励            
-            dof_pos_limits = -0.2     # 关节接近软限位惩罚（防反折/僵直）
+            tracking_dof = 0.0        # 关节位置跟踪
+            footend_pos_xy = 0.0      # 关闭足端位置 shaping
+            dof_pos_limits = -0.05    # 软限位惩罚（轻量）
 
         # 软关节限位：避免反折/僵直，但不锁死越障
         soft_dof_pos_limit = 0.95
         only_positive_rewards = False
-        tracking_sigma = 0.12
+        tracking_sigma = 0.14
         # tracking_sigma = 0.04
         base_height_target = 0.1
         max_contact_force = 60.0
