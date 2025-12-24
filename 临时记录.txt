@@ -131,11 +131,84 @@
   - debug/camera/ang_acc_xy_p99 下降（尖峰分布收敛）
   - 同时 episode/knee_contact_frac 不上升、distance_traveled 不显著下降（否则是“靠不动换稳定”）
 
-  ———
+  --------------------------------------------------------------------------------------------------------------------------------------------------
+下面按“当前代码里的尺度/权重”逐项列出，并给出简要合理性判断。注意：奖励权重会
+  在运行时乘以 dt（见 legged_gym/envs/base/legged_robot.py:566-576），你这里
+  dt=0.005（见 legged_gym/envs/hex_v4/hex_ground_config.py:279），所以所有
+  reward 的“每步实际权重”都会缩小同一比例，相对大小不变。
 
-  如果你同意这个方向，我建议你先选一个落地实施顺序：
+  Reward 权重与尺度（HexGround）
 
-  1. 只加日志（分位数 + sat_frac + foot_dF）
-  2. 只加 foot_impact_penalty（小权重）
-  3. 再改 camera jitter 的鲁棒形式（Huber + hf energy）
+  - tracking_lin_vel = 3.0（exp tracking，范围 ~0–1）主驱动项；相对其它项是最高
+    的正向奖励，合理。见 legged_gym/envs/hex_v4/hex_ground_config.py:188-190 +
+    legged_gym/envs/base/legged_robot.py:899-906
+  - tracking_ang_vel = 2.0（exp tracking，范围 ~0–1）次级驱动项，合理。见
+    legged_gym/envs/hex_v4/hex_ground_config.py:187-189 + legged_gym/envs/base/
+    legged_robot.py:904-909
+  - base_height = 0.8（exp 目标高度 + 低高度硬惩罚）正向奖励，幅度中等；但低高度
+    触发时会变负，约束较强。见 legged_gym/envs/hex_v4/hex_ground_config.py:193-
+    195 + legged_gym/envs/hex_v4/hex_ground.py:947-961
+  - feet_air_time = 0.5（触地事件奖励，阈值 0.18s）事件型奖励，峰值有限；作为步
+    态辅助合理。见 legged_gym/envs/hex_v4/hex_ground_config.py:195-196 +
+    legged_gym/envs/hex_v4/hex_ground.py:816-830
+  - footend_pos_xy = 0.5（exp(-xy_dist/0.2)）连续小奖励，幅度中等偏小；有助于步
+    态一致性。见 legged_gym/envs/hex_v4/hex_ground_config.py:206-208 +
+    legged_gym/envs/hex_v4/hex_ground.py:832-879
+  - orientation = -8.0（投影重力平方和）权重大但输入量通常小；整体约束中等偏强，
+    能稳定机身姿态。见 legged_gym/envs/hex_v4/hex_ground_config.py:194-195 +
+    legged_gym/envs/base/legged_robot.py:848-852
+  - lin_vel_z = -1.5（竖直速度平方）中等强度的抑制竖向跳动，合理。见 legged_gym/
+    envs/hex_v4/hex_ground_config.py:190-191 + legged_gym/envs/base/
+    legged_robot.py:840-844
+  - ang_vel_xy = -0.15（横滚/俯仰角速度平方和）稳定性约束偏弱。见 legged_gym/
+    envs/hex_v4/hex_ground_config.py:191-192 + legged_gym/envs/base/
+    legged_robot.py:844-848
+  - camera_wobble_y = -0.05（base_ang_vel_y^2）相对 ang_vel_xy 更弱，属于很保守
+    的抑制。见 legged_gym/envs/hex_v4/hex_ground_config.py:192-193 + legged_gym/
+    envs/hex_v4/hex_ground.py:987-988
+  - action_rate = -0.04（动作变化平方和）平滑项偏弱，但能抑制抖动；合理。见
+    legged_gym/envs/hex_v4/hex_ground_config.py:186-188 + legged_gym/envs/base/
+    legged_robot.py:869-873
+  - dof_acc = -3e-7（关节加速度平方和）权重极小，但加速度量级可能大，实际贡献仍
+    可能有可感知影响，整体偏弱。见 legged_gym/envs/hex_v4/
+    hex_ground_config.py:198 + legged_gym/envs/base/legged_robot.py:865-869
+  - stand_still = -2.0（低命令时的姿态偏离）只在低命令触发，力度很强；用于“零速
+    时要站稳”，合理但一旦触发会主导。见 legged_gym/envs/hex_v4/
+    hex_ground_config.py:201 + legged_gym/envs/hex_v4/hex_ground.py:939-945
+  - collision = -2.0（惩罚指定部位接触）离散惩罚，触发时可能主导回报，合理但需关
+    注是否频繁触发。见 legged_gym/envs/hex_v4/hex_ground_config.py:195-196 +
+    legged_gym/envs/base/legged_robot.py:873-879
+  - CoT = -0.001（|torque * vel|）能耗约束较弱，合理。见 legged_gym/envs/hex_v4/
+    hex_ground_config.py:204 + legged_gym/envs/hex_v4/hex_ground.py:980-981
+
+  未启用的 reward（因为 scale=0 或未配置）
+
+  - torques、dof_vel、tracking_dof、feet_contact_forces 等目前不会生效。见
+    legged_gym/envs/hex_v4/hex_ground_config.py:198-233
+
+  影响尺度的其它关键参数
+
+  - tracking_sigma = 0.2：tracking exp 的敏感度，中等偏紧。误差一上去，reward 会
+    快速下降。见 legged_gym/envs/hex_v4/hex_ground_config.py:235-237
+  - base_height_target = 0.12 + low_height_penalty_threshold=0.05 +
+    low_height_penalty_value=-1.0：高度奖励非对称，低于阈值会直接给负值。见
+    legged_gym/envs/hex_v4/hex_ground_config.py:183-186 + legged_gym/envs/
+    hex_v4/hex_ground.py:947-961
+  - collision_penalty_threshold = 0.5 +
+    penalize_contacts_on=["knee","knee","thigh"]：碰撞惩罚触发条件与部位。见
+    legged_gym/envs/hex_v4/hex_ground_config.py:79 + legged_gym/envs/hex_v4/
+    hex_ground_config.py:154-159
+
+  观测与噪声尺度（影响训练稳定性，不是 reward）
+
+    hex_ground_config.py:241-254）。整体上是“速度类偏小、地形高度偏大”的设置，常
+    见做法。
+  - noise_scales：dof_vel=1.5, contact_force=10.0, height_measurements=0.02 等
+    （见 legged_gym/envs/hex_v4/hex_ground_config.py:256-271）。如果启用噪声，力
+  - 主驱动项是 tracking_lin_vel/tracking_ang_vel，符合“先走起来”的训练逻辑。
+  - camera_wobble_y 相对偏弱，属于“轻度稳定性正则”，不太可能单独压住速度。
+  - stand_still 和 collision 触发时非常强，会显著影响回报结构；如果训练中经常触
+    发，会让策略变保守。
+  - dof_acc、action_rate、CoT 都偏弱，更多是软约束。
+
 

@@ -38,8 +38,9 @@ from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Log
 
 import numpy as np
 import torch
-from isaacgym import gymapi
+from isaacgym import gymapi, gymtorch
 import types
+import math
 
 
 def play(args):
@@ -84,6 +85,12 @@ def play(args):
         env_cfg.noise.add_noise = False
         env_cfg.domain_rand.randomize_friction = False
         env_cfg.domain_rand.push_robots = False
+    mesh_type_override = getattr(args, "terrain_mesh", None)
+    if mesh_type_override is not None:
+        mesh_type = str(mesh_type_override).lower()
+        if mesh_type not in ("plane", "heightfield", "trimesh"):
+            raise ValueError("Invalid --terrain_mesh. Use one of: plane, heightfield, trimesh.")
+        env_cfg.terrain.mesh_type = mesh_type
 
     if getattr(args, "num_envs", None) is None and getattr(env_cfg.env, "num_envs", 0) > 64:
         print(f"[Play] ⚠ env_cfg.env.num_envs={env_cfg.env.num_envs} (training setting). "
@@ -235,21 +242,39 @@ def play(args):
     g_ave_err = 0
     f_ave_err = 0
 
-    # 可选：键盘覆盖 commands（默认关闭）
+    # 可选：键盘覆盖 commands / 上帝模式（默认关闭）
     keyboard_enabled = bool(getattr(args, "keyboard_cmds", False))
-    if keyboard_enabled and getattr(env, "viewer", None) is None:
-        print("[Play] ⚠ keyboard_cmds requested but viewer is None (headless). Disabling keyboard control.")
+    god_enabled = keyboard_enabled or bool(getattr(args, "god_mode", False))
+    if (keyboard_enabled or god_enabled) and getattr(env, "viewer", None) is None:
+        print("[Play] ⚠ keyboard/god mode requested but viewer is None (headless). Disabling input control.")
         keyboard_enabled = False
+        god_enabled = False
+    input_enabled = keyboard_enabled or god_enabled
 
     cmd_vx = 0.0
     cmd_vy = 0.0
     cmd_yaw = 0.0
     cmd_step = 0.1
     reset_requested = False
+    god_active = bool(getattr(args, "god_mode", False))
+    god_env = int(getattr(getattr(env_cfg, "viewer", None), "ref_env", 0))
+    god_env = int(np.clip(god_env, 0, env.num_envs - 1))
+    god_pos = None
+    god_yaw = 0.0
+    god_speed = 0.6
+    god_yaw_speed = 1.5
+    god_keys = {
+        "GOD_FWD": False,
+        "GOD_BACK": False,
+        "GOD_LEFT": False,
+        "GOD_RIGHT": False,
+        "GOD_YAW_LEFT": False,
+        "GOD_YAW_RIGHT": False,
+    }
 
-    if keyboard_enabled:
-        # 禁用随机指令重采样，确保键盘指令覆盖随机指令
-        if hasattr(env, "_resample_commands"):
+    if input_enabled:
+        if keyboard_enabled and hasattr(env, "_resample_commands"):
+            # 禁用随机指令重采样，确保键盘指令覆盖随机指令
             def _no_resample(self, env_ids):
                 return
             env._resample_commands = types.MethodType(_no_resample, env)
@@ -257,60 +282,123 @@ def play(args):
         gym = env.gym
         viewer = env.viewer
 
-        print("\n[Play] Keyboard control enabled:")
-        print("  - ↑/↓: vx +/- (override)")
-        print("  - ←/→: vy +/- (override)")
-        print("  - A/D: yaw +/- (override)")
-        print("  - Q/E: yaw +/- (rotate in place, override)")
-        print("  - Space: stop")
-        print("  - R: reset")
+        if keyboard_enabled:
+            print("\n[Play] Keyboard control enabled:")
+            print("  - ↑/↓: vx max +/- (override)")
+            print("  - ←/→: vy max +/- (override)")
+            print("  - A/D: yaw max +/- (override)")
+            print("  - Q/E: yaw max +/- (rotate in place, override)")
+            print("  - Space: stop")
+            print("  - R: reset")
+            if god_enabled:
+                print("  - G: toggle god mode (WASD move, Q/E yaw)")
 
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_UP, "CMD_VX_UP")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_DOWN, "CMD_VX_DOWN")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_LEFT, "CMD_VY_LEFT")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_RIGHT, "CMD_VY_RIGHT")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "CMD_YAW_LEFT")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "CMD_YAW_RIGHT")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_Q, "CMD_YAW_LEFT_ONLY")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_E, "CMD_YAW_RIGHT_ONLY")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "CMD_STOP")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "CMD_RESET")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_UP, "CMD_VX_UP")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_DOWN, "CMD_VX_DOWN")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_LEFT, "CMD_VY_LEFT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_RIGHT, "CMD_VY_RIGHT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "CMD_YAW_LEFT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "CMD_YAW_RIGHT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_Q, "CMD_YAW_LEFT_ONLY")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_E, "CMD_YAW_RIGHT_ONLY")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "CMD_STOP")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "CMD_RESET")
+
+        if god_enabled:
+            print("\n[Play] God mode available:")
+            print("  - W/S: move forward/back (body heading)")
+            print("  - A/D: move left/right (body heading)")
+            print("  - Q/E: yaw + / -")
+            print("  - G: toggle god mode on/off")
+            if keyboard_enabled:
+                print("  - Note: keyboard commands are paused while god mode is active.")
+
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_W, "GOD_FWD")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_S, "GOD_BACK")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "GOD_LEFT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "GOD_RIGHT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_Q, "GOD_YAW_LEFT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_E, "GOD_YAW_RIGHT")
+            gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_G, "GOD_TOGGLE")
 
     def _clamp_cmd(val, rng, default_min, default_max):
         if rng is None:
             return float(np.clip(val, default_min, default_max))
         return float(np.clip(val, float(rng[0]), float(rng[1])))
 
+    def _cmd_range(rng, default_min, default_max):
+        if rng is None:
+            return float(default_min), float(default_max)
+        return float(rng[0]), float(rng[1])
+
+    def _yaw_from_quat(q):
+        siny_cosp = 2.0 * (q[3] * q[2] + q[0] * q[1])
+        cosy_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2])
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    def _quat_from_yaw(yaw):
+        half = 0.5 * yaw
+        return [0.0, 0.0, math.sin(half), math.cos(half)]
+
     for i in range(10*int(env.max_episode_length)):
         with torch.inference_mode():
-            if keyboard_enabled:
+            if input_enabled:
+                cmd_ranges = {}
+                vx_min, vx_max = -1.0, 1.0
+                vy_min, vy_max = -1.0, 1.0
+                yaw_min, yaw_max = -1.0, 1.0
+                if keyboard_enabled:
+                    cmd_ranges = getattr(env, "command_ranges", {})
+                    vx_min, vx_max = _cmd_range(cmd_ranges.get("lin_vel_x"), -1.0, 1.0)
+                    vy_min, vy_max = _cmd_range(cmd_ranges.get("lin_vel_y"), -1.0, 1.0)
+                    yaw_min, yaw_max = _cmd_range(cmd_ranges.get("ang_vel_yaw"), -1.0, 1.0)
+
                 events = env.gym.query_viewer_action_events(env.viewer)
                 for evt in events:
+                    if god_enabled and evt.action == "GOD_TOGGLE" and evt.value > 0:
+                        god_active = not god_active
+                        god_pos = None
+                        for key in god_keys:
+                            god_keys[key] = False
+                        state = "ON" if god_active else "OFF"
+                        print(f"[Play] God mode {state}")
+                        continue
+                    if god_enabled and god_active and evt.action in god_keys:
+                        god_keys[evt.action] = evt.value > 0
+                        continue
+                    if evt.action == "CMD_RESET" and evt.value > 0:
+                        reset_requested = True
+                        continue
+                    if not keyboard_enabled or god_active:
+                        continue
                     if evt.value <= 0:
                         continue
                     if evt.action == "CMD_VX_UP":
-                        cmd_vx, cmd_vy, cmd_yaw = cmd_step, 0.0, 0.0
+                        cmd_vx, cmd_vy, cmd_yaw = vx_max, 0.0, 0.0
                     elif evt.action == "CMD_VX_DOWN":
-                        cmd_vx, cmd_vy, cmd_yaw = -cmd_step, 0.0, 0.0
+                        cmd_vx, cmd_vy, cmd_yaw = vx_min, 0.0, 0.0
                     elif evt.action == "CMD_VY_LEFT":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, cmd_step, 0.0
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, vy_max, 0.0
                     elif evt.action == "CMD_VY_RIGHT":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, -cmd_step, 0.0
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, vy_min, 0.0
                     elif evt.action == "CMD_YAW_LEFT":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, yaw_max
                     elif evt.action == "CMD_YAW_RIGHT":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, -cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, yaw_min
                     elif evt.action == "CMD_YAW_LEFT_ONLY":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, yaw_max
                     elif evt.action == "CMD_YAW_RIGHT_ONLY":
-                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, -cmd_step
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, yaw_min
                     elif evt.action == "CMD_STOP":
                         cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
-                    elif evt.action == "CMD_RESET":
-                        reset_requested = True
+
+            if keyboard_enabled and not god_active:
+                cmd_ranges = getattr(env, "command_ranges", {})
+                vx_min, vx_max = _cmd_range(cmd_ranges.get("lin_vel_x"), -1.0, 1.0)
+                vy_min, vy_max = _cmd_range(cmd_ranges.get("lin_vel_y"), -1.0, 1.0)
+                yaw_min, yaw_max = _cmd_range(cmd_ranges.get("ang_vel_yaw"), -1.0, 1.0)
 
                 # clamp to training command ranges when available
-                cmd_ranges = getattr(env, "command_ranges", {})
                 cmd_vx = _clamp_cmd(cmd_vx, cmd_ranges.get("lin_vel_x"), -1.0, 1.0)
                 cmd_vy = _clamp_cmd(cmd_vy, cmd_ranges.get("lin_vel_y"), -1.0, 1.0)
                 cmd_yaw = _clamp_cmd(cmd_yaw, cmd_ranges.get("ang_vel_yaw"), -1.0, 1.0)
@@ -326,28 +414,71 @@ def play(args):
                     env.compute_observations()
                     obs = env.get_observations()
 
-                if reset_requested:
-                    reset_requested = False
-                    cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
-                    if use_separated_obs:
-                        obs_dict = env.reset_separate()
-                        obs = obs_dict['proprioception']
-                        obs_vgf = obs_dict['privileged']
-                        obs_terrain = obs_dict['terrain']
-                        # reset 后同步清空 history，避免把上一局残留带入下一局
-                        if hasattr(ppo_runner.alg, "storage") and ppo_runner.alg.storage is not None:
-                            storage = ppo_runner.alg.storage
-                            storage.clear()
-                            if hasattr(storage, "obs_hist"):
-                                storage.obs_hist.zero_()
-                            if hasattr(storage, "dones"):
-                                storage.dones.zero_()
-                            if hasattr(storage, "num_transitions_per_env") and hasattr(storage, "num_hist"):
-                                storage.valid_hist_index = storage.num_transitions_per_env + storage.num_hist - 1
-                    else:
-                        obs, _ = env.reset()
+            if god_enabled and god_active:
+                if god_pos is None:
+                    pos_np = env.root_states[god_env, :3].detach().cpu().numpy()
+                    quat_np = env.root_states[god_env, 3:7].detach().cpu().numpy()
+                    god_pos = [float(pos_np[0]), float(pos_np[1]), float(pos_np[2])]
+                    god_yaw = _yaw_from_quat(quat_np)
 
-            if use_separated_obs:
+                fwd_step = 0.0
+                side_step = 0.0
+                dyaw = 0.0
+                if god_keys["GOD_FWD"]:
+                    fwd_step += god_speed * env.dt
+                if god_keys["GOD_BACK"]:
+                    fwd_step -= god_speed * env.dt
+                if god_keys["GOD_LEFT"]:
+                    side_step += god_speed * env.dt
+                if god_keys["GOD_RIGHT"]:
+                    side_step -= god_speed * env.dt
+                if god_keys["GOD_YAW_LEFT"]:
+                    dyaw += god_yaw_speed * env.dt
+                if god_keys["GOD_YAW_RIGHT"]:
+                    dyaw -= god_yaw_speed * env.dt
+
+                if fwd_step != 0.0 or side_step != 0.0:
+                    forward = (math.cos(god_yaw), math.sin(god_yaw))
+                    left = (-math.sin(god_yaw), math.cos(god_yaw))
+                    dx = forward[0] * fwd_step + left[0] * side_step
+                    dy = forward[1] * fwd_step + left[1] * side_step
+                    god_pos[0] += dx
+                    god_pos[1] += dy
+                if dyaw != 0.0:
+                    god_yaw += dyaw
+
+                quat = _quat_from_yaw(god_yaw)
+                env.root_states[god_env, 0:3] = torch.tensor(god_pos, device=env.device)
+                env.root_states[god_env, 3:7] = torch.tensor(quat, device=env.device)
+                env.root_states[god_env, 7:13] = 0.0
+                env.gym.set_actor_root_state_tensor(env.sim, gymtorch.unwrap_tensor(env.root_states))
+                env.commands[god_env, :3] = 0.0
+
+            if reset_requested:
+                reset_requested = False
+                cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
+                god_pos = None
+                if use_separated_obs:
+                    obs_dict = env.reset_separate()
+                    obs = obs_dict['proprioception']
+                    obs_vgf = obs_dict['privileged']
+                    obs_terrain = obs_dict['terrain']
+                    # reset 后同步清空 history，避免把上一局残留带入下一局
+                    if hasattr(ppo_runner.alg, "storage") and ppo_runner.alg.storage is not None:
+                        storage = ppo_runner.alg.storage
+                        storage.clear()
+                        if hasattr(storage, "obs_hist"):
+                            storage.obs_hist.zero_()
+                        if hasattr(storage, "dones"):
+                            storage.dones.zero_()
+                        if hasattr(storage, "num_transitions_per_env") and hasattr(storage, "num_hist"):
+                            storage.valid_hist_index = storage.num_transitions_per_env + storage.num_hist - 1
+                else:
+                    obs, _ = env.reset()
+
+            if god_enabled and god_active:
+                actions = torch.zeros(env.num_envs, env.num_actions, device=env.device)
+            elif use_separated_obs:
                 # EGPO架构: 使用encode_obs获取terrain_latent，然后调用act_inference
                 if getattr(args, "allow_fallback", False):
                     try:

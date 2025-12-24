@@ -349,8 +349,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         # ==================== 相机稳定性细分权重 ====================
         # 这些参数被 _reward_camera_stability() 使用
         camera_jitter_weight = 0.05   # 抖动权重（角加速度）
-        camera_wobble_weight = 0.25   # 晃动权重（俯仰/横滚角速度）- 下降以避免抬腿时“过度求稳”
-        camera_bobbing_weight = 0.1   # 颠簸权重（垂直加速度）
+        camera_wobble_weight = 0.05   # 晃动权重（俯仰/横滚角速度）- 下降以避免抬腿时“过度求稳”
+        camera_bobbing_weight = 0.01   # 颠簸权重（垂直加速度）
         
         # 防止偶发尖峰污染curriculum的鲁棒性阈值
         # 这些cap基于正常六足运动的物理约束（不同dt/动力学参数需调整）
@@ -385,8 +385,8 @@ class HexTerrainCfg(LeggedRobotCfg):
         
         class scales(LeggedRobotCfg.rewards.scales):
             # === 核心运动奖励 ===
-            tracking_lin_vel = 3.0      # 跟踪线速度指令
-            tracking_ang_vel = 2.0      # 跟踪角速度指令
+            tracking_lin_vel = 3.5      # 跟踪线速度指令
+            tracking_ang_vel = 2.5      # 跟踪角速度指令
             
             # === 相机稳定性（Sim-to-Real关键）===
             camera_stability = 1.5      # 新增：惩罚机身抖动以提升视觉质量
@@ -400,16 +400,16 @@ class HexTerrainCfg(LeggedRobotCfg):
             tripod_gait = 1.0           # 鼓励三角步态（基于 expert.py A/B 分组）
             
             # === 惩罚项 ===
-            collision = -50.0           # 非足端接触：强惩罚（注意：总奖励仍会被 min/max_reward_clip 截断）
+            collision = -10.0           # 非足端接触：强惩罚（注意：总奖励仍会被 min/max_reward_clip 截断）
             action_rate = -0.05         # 平滑动作变化
             dof_acc = -1.5e-7           # 关节加速度惩罚
-            stand_still = -5.0          # 零指令时保持静止 (修复: 增强惩罚)
+            stand_still = -3.0          # 零指令时保持静止 (修复: 增强惩罚)
             
             # === 能耗（可选）===
             CoT = 0.0                   # 运输成本（已禁用）
             
             # === 六足特定（实验性）===
-            tracking_dof = -0.1       # 关节位置跟踪
+            tracking_dof = -0.0       # 关节位置跟踪
             footend_pos_xy = 1.0      # 足端位置奖励            
             dof_pos_limits = -0.2     # 关节接近软限位惩罚（防反折/僵直）
 
