@@ -185,14 +185,14 @@ class HexGroundCfg(LeggedRobotCfg):
         low_height_penalty_value = -1.0
         feet_contact_force_threshold = 1.0
         class scales(LeggedRobotCfg.rewards.scales):
-            action_rate = -0.04
+            action_rate = -0.045#-0.04
             tracking_ang_vel = 2.0
             tracking_lin_vel = 3.0
             lin_vel_z = -1.5
-            ang_vel_xy = -0.15
+            ang_vel_xy = -0.18#-0.15
             camera_wobble_y = -0.05
             base_height = 0.8
-            orientation = -8.0
+            orientation = -8.5#-0.80
             feet_air_time = 0.5
             collision = -2.0
 
