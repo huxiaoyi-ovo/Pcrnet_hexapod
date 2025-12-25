@@ -41,6 +41,7 @@ import torch
 from isaacgym import gymapi, gymtorch
 import types
 import math
+import time
 
 
 def play(args):
@@ -69,6 +70,14 @@ def play(args):
     camera_show = bool(getattr(args, "camera_show", False))
     camera_dir = getattr(args, "camera_dir", None)
     camera_active = camera_mode in ("depth", "rgb", "both")
+    camera_eval = bool(getattr(args, "camera_eval", False))
+    eval_cmd_time = 5.0
+    eval_cmd_scale = 0.6
+    eval_order = ["stop", "forward", "backward", "left", "right", "yaw_left", "yaw_right", "stop"]
+    if camera_eval:
+        camera_mode = "depth"
+        camera_active = True
+        camera_interval = 1
 
     if camera_active:
         if hasattr(env_cfg, "sensor") and hasattr(env_cfg.sensor, "depth_camera"):
@@ -85,6 +94,13 @@ def play(args):
         env_cfg.noise.add_noise = False
         env_cfg.domain_rand.randomize_friction = False
         env_cfg.domain_rand.push_robots = False
+    if camera_eval:
+        env_cfg.terrain.mesh_type = "plane"
+        env_cfg.noise.add_noise = False
+        env_cfg.domain_rand.randomize_friction = False
+        env_cfg.domain_rand.push_robots = False
+        if getattr(args, "num_envs", None) is None:
+            env_cfg.env.num_envs = 1
     mesh_type_override = getattr(args, "terrain_mesh", None)
     if mesh_type_override is not None:
         mesh_type = str(mesh_type_override).lower()
@@ -98,6 +114,69 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    if not camera_eval:
+        # play模式下冻结课程逻辑，避免自动升降级或调整指令范围
+        if hasattr(env, "cfg"):
+            env.cfg.terrain.curriculum = False
+            env.cfg.commands.curriculum = False
+        if hasattr(env, "_update_terrain_curriculum"):
+            def _no_update(self, env_ids):
+                return
+            env._update_terrain_curriculum = types.MethodType(_no_update, env)
+        if hasattr(env, "update_command_curriculum"):
+            def _no_cmd_update(self, env_ids):
+                return
+            env.update_command_curriculum = types.MethodType(_no_cmd_update, env)
+
+    # play模式下固定出生位姿（禁用随机偏移与随机初始速度）
+    if hasattr(env, "_reset_root_states"):
+        def _reset_root_states_fixed(self, env_ids):
+            if len(env_ids) == 0:
+                return
+            if self.custom_origins:
+                self.root_states[env_ids] = self.base_init_state
+                self.root_states[env_ids, :3] += self.env_origins[env_ids]
+                if hasattr(self, "terrain_types") and hasattr(self.cfg, "terrain"):
+                    proportions = []
+                    running = 0.0
+                    for p in self.cfg.terrain.terrain_proportions:
+                        running += float(p)
+                        proportions.append(running)
+                    slalom_low = proportions[-2] if len(proportions) > 1 else 0.0
+                    slalom_high = proportions[-1] if proportions else 0.0
+                    choice = self.terrain_types[env_ids].float() / float(self.cfg.terrain.num_cols) + 0.001
+                    slalom_mask = (choice >= slalom_low) & (choice < slalom_high)
+                    if slalom_mask.any():
+                        slalom_env_ids = env_ids[slalom_mask]
+                        x_offset = -0.5 * self.cfg.terrain.terrain_length + 1.0
+                        y_offset = 0.0
+                        self.root_states[slalom_env_ids] = self.base_init_state
+                        self.root_states[slalom_env_ids, :3] += self.env_origins[slalom_env_ids]
+                        self.root_states[slalom_env_ids, 0] += x_offset
+                        self.root_states[slalom_env_ids, 1] += y_offset
+                        yaw = -0.5 * math.pi
+                        qz = math.sin(yaw / 2.0)
+                        qw = math.cos(yaw / 2.0)
+                        quat = torch.tensor([0.0, 0.0, qz, qw], device=self.device)
+                        self.root_states[slalom_env_ids, 3:7] = quat.repeat(len(slalom_env_ids), 1)
+            else:
+                self.root_states[env_ids] = self.base_init_state
+                self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            self.root_states[env_ids, 7:13] = 0.0
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim,
+                gymtorch.unwrap_tensor(self.root_states),
+                gymtorch.unwrap_tensor(env_ids_int32),
+                len(env_ids_int32),
+            )
+        env._reset_root_states = types.MethodType(_reset_root_states_fixed, env)
+
+    if camera_eval and hasattr(env, "_resample_commands"):
+        # 禁用随机指令重采样，确保标准化评测流程稳定
+        def _no_resample(self, env_ids):
+            return
+        env._resample_commands = types.MethodType(_no_resample, env)
 
     # load policy（先load再reset，便于后续按 checkpoint 同步课程进度）
     train_cfg.runner.resume = True
@@ -202,6 +281,20 @@ def play(args):
             except Exception as exc:
                 print(f"[Play] ⚠ camera_show requires cv2: {exc}. Disabling.")
                 camera_show = False
+        if camera_show and camera_cv2 is not None:
+            show_scale = 4
+            base_w = int(getattr(camera_cfg, "width", 0)) if camera_cfg is not None else 0
+            base_h = int(getattr(camera_cfg, "height", 0)) if camera_cfg is not None else 0
+            if base_w <= 0 or base_h <= 0:
+                base_w, base_h = 320, 320
+            show_w = max(320, base_w * show_scale)
+            show_h = max(320, base_h * show_scale)
+            if camera_mode in ("rgb", "both"):
+                camera_cv2.namedWindow("camera_rgb", camera_cv2.WINDOW_NORMAL)
+                camera_cv2.resizeWindow("camera_rgb", show_w, show_h)
+            if camera_mode in ("depth", "both"):
+                camera_cv2.namedWindow("camera_depth", camera_cv2.WINDOW_NORMAL)
+                camera_cv2.resizeWindow("camera_depth", show_w, show_h)
 
     if camera_save and camera_dir is None:
         camera_dir = os.path.join(
@@ -331,6 +424,11 @@ def play(args):
             return float(default_min), float(default_max)
         return float(rng[0]), float(rng[1])
 
+    def _cmd_max_abs(rng, default_max):
+        if rng is None:
+            return float(default_max)
+        return float(max(abs(rng[0]), abs(rng[1])))
+
     def _yaw_from_quat(q):
         siny_cosp = 2.0 * (q[3] * q[2] + q[0] * q[1])
         cosy_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2])
@@ -340,7 +438,105 @@ def play(args):
         half = 0.5 * yaw
         return [0.0, 0.0, math.sin(half), math.cos(half)]
 
-    for i in range(10*int(env.max_episode_length)):
+    if camera_eval:
+        eval_steps_per_cmd = max(1, int(round(eval_cmd_time / env.dt)))
+        eval_total_steps = eval_steps_per_cmd * len(eval_order)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        run_tag = []
+        load_run = getattr(args, "load_run", None)
+        if load_run is not None and str(load_run) not in ("-1", ""):
+            run_tag.append(str(load_run))
+        checkpoint = getattr(args, "checkpoint", None)
+        if checkpoint is not None and int(checkpoint) >= 0:
+            run_tag.append(f"ckpt{int(checkpoint)}")
+        tag = "_".join(run_tag) if run_tag else "run"
+        camera_eval_out_dir = os.path.join(
+            LEGGED_GYM_ROOT_DIR,
+            "logs",
+            train_cfg.runner.experiment_name,
+            "camera_eval",
+            f"{tag}_{stamp}",
+        )
+        os.makedirs(camera_eval_out_dir, exist_ok=True)
+        metrics = {
+            "time_s": [],
+            "cmd": [],
+            "diff_mean": [],
+            "diff_rms": [],
+            "grad_diff_mean": [],
+            "depth_std": [],
+        }
+        last_depth = None
+        last_grad = None
+        eval_done = False
+        eval_saved = False
+    else:
+        eval_total_steps = None
+        eval_done = False
+        eval_saved = False
+
+    def _save_camera_eval(metrics, out_dir):
+        if not metrics["time_s"]:
+            return
+        csv_path = os.path.join(out_dir, "camera_eval_metrics.csv")
+        with open(csv_path, "w", encoding="ascii") as f:
+            f.write("time_s,cmd,diff_mean,diff_rms,grad_diff_mean,depth_std\n")
+            for t, cmd, d0, d1, g0, s0 in zip(
+                metrics["time_s"],
+                metrics["cmd"],
+                metrics["diff_mean"],
+                metrics["diff_rms"],
+                metrics["grad_diff_mean"],
+                metrics["depth_std"],
+            ):
+                f.write(f"{t:.4f},{cmd},{d0:.6f},{d1:.6f},{g0:.6f},{s0:.6f}\n")
+        try:
+            import matplotlib.pyplot as plt
+            times = np.array(metrics["time_s"])
+            plt.figure(figsize=(10, 6))
+            plt.plot(times, metrics["diff_mean"], label="frame_diff_mean")
+            plt.plot(times, metrics["grad_diff_mean"], label="edge_diff_mean")
+            plt.xlabel("time (s)")
+            plt.ylabel("depth change")
+            plt.title("Camera Stability (Depth Frame Differences)")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "camera_stability_timeseries.png"))
+            plt.close()
+
+            cmd_names = list(dict.fromkeys(metrics["cmd"]))
+            cmd_diff = []
+            cmd_edge = []
+            for name in cmd_names:
+                idx = [i for i, c in enumerate(metrics["cmd"]) if c == name]
+                if idx:
+                    cmd_diff.append(float(np.mean([metrics["diff_mean"][i] for i in idx])))
+                    cmd_edge.append(float(np.mean([metrics["grad_diff_mean"][i] for i in idx])))
+                else:
+                    cmd_diff.append(0.0)
+                    cmd_edge.append(0.0)
+            x = np.arange(len(cmd_names))
+            width = 0.35
+            plt.figure(figsize=(10, 6))
+            plt.bar(x - width / 2, cmd_diff, width, label="frame_diff_mean")
+            plt.bar(x + width / 2, cmd_edge, width, label="edge_diff_mean")
+            plt.xticks(x, cmd_names, rotation=30, ha="right")
+            plt.ylabel("mean depth change")
+            plt.title("Camera Stability by Command")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "camera_stability_by_command.png"))
+            plt.close()
+        except Exception as exc:
+            print(f"[Play] ⚠ Failed to plot camera eval charts: {exc}")
+
+    step_idx = 0
+    while True:
+        if getattr(env, "viewer", None) is not None:
+            if env.gym.query_viewer_has_closed(env.viewer):
+                break
+        camera_eval_active = camera_eval and (eval_total_steps is None or step_idx < eval_total_steps)
+        cmd_name = ""
         with torch.inference_mode():
             if input_enabled:
                 cmd_ranges = {}
@@ -392,7 +588,7 @@ def play(args):
                     elif evt.action == "CMD_STOP":
                         cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
 
-            if keyboard_enabled and not god_active:
+            if (keyboard_enabled and not god_active) or camera_eval_active:
                 cmd_ranges = getattr(env, "command_ranges", {})
                 vx_min, vx_max = _cmd_range(cmd_ranges.get("lin_vel_x"), -1.0, 1.0)
                 vy_min, vy_max = _cmd_range(cmd_ranges.get("lin_vel_y"), -1.0, 1.0)
@@ -402,6 +598,26 @@ def play(args):
                 cmd_vx = _clamp_cmd(cmd_vx, cmd_ranges.get("lin_vel_x"), -1.0, 1.0)
                 cmd_vy = _clamp_cmd(cmd_vy, cmd_ranges.get("lin_vel_y"), -1.0, 1.0)
                 cmd_yaw = _clamp_cmd(cmd_yaw, cmd_ranges.get("ang_vel_yaw"), -1.0, 1.0)
+
+                if camera_eval_active:
+                    cmd_name = eval_order[min(step_idx // eval_steps_per_cmd, len(eval_order) - 1)]
+                    vx_max_abs = _cmd_max_abs(cmd_ranges.get("lin_vel_x"), 1.0) * eval_cmd_scale
+                    vy_max_abs = _cmd_max_abs(cmd_ranges.get("lin_vel_y"), 1.0) * eval_cmd_scale
+                    yaw_max_abs = _cmd_max_abs(cmd_ranges.get("ang_vel_yaw"), 1.0) * eval_cmd_scale
+                    if cmd_name == "stop":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
+                    elif cmd_name == "forward":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, vy_max_abs, 0.0
+                    elif cmd_name == "backward":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, -vy_max_abs, 0.0
+                    elif cmd_name == "left":
+                        cmd_vx, cmd_vy, cmd_yaw = vx_max_abs, 0.0, 0.0
+                    elif cmd_name == "right":
+                        cmd_vx, cmd_vy, cmd_yaw = -vx_max_abs, 0.0, 0.0
+                    elif cmd_name == "yaw_left":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, yaw_max_abs
+                    elif cmd_name == "yaw_right":
+                        cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, -yaw_max_abs
 
                 # apply command override
                 cmd_tensor = torch.tensor([cmd_vx, cmd_vy, cmd_yaw], device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
@@ -568,9 +784,43 @@ def play(args):
                         if depth_vis is not None:
                             _write_image(os.path.join(camera_dir, f"depth_{camera_frame_idx:06d}.png"), depth_vis)
                     camera_frame_idx += 1
+                if camera_eval_active and depth_np is not None:
+                    depth = depth_np.astype(np.float32)
+                    depth_mask = np.isfinite(depth)
+                    depth_valid = depth[depth_mask]
+                    depth_std = float(depth_valid.std()) if depth_valid.size else 0.0
+                    diff_mean = 0.0
+                    diff_rms = 0.0
+                    grad_diff_mean = 0.0
+                    grad = None
+                    if depth_valid.size:
+                        depth_safe = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+                        gy, gx = np.gradient(depth_safe)
+                        grad = np.sqrt(gx ** 2 + gy ** 2)
+                    if last_depth is not None:
+                        diff = np.abs(depth - last_depth)
+                        diff_mask = np.isfinite(diff)
+                        diff_valid = diff[diff_mask]
+                        if diff_valid.size:
+                            diff_mean = float(diff_valid.mean())
+                            diff_rms = float(np.sqrt((diff_valid ** 2).mean()))
+                    if grad is not None and last_grad is not None:
+                        gdiff = np.abs(grad - last_grad)
+                        gdiff_mask = np.isfinite(gdiff)
+                        gdiff_valid = gdiff[gdiff_mask]
+                        if gdiff_valid.size:
+                            grad_diff_mean = float(gdiff_valid.mean())
+                    last_depth = depth
+                    last_grad = grad
+                    metrics["time_s"].append(step_idx * env.dt)
+                    metrics["cmd"].append(cmd_name if camera_eval_active else "")
+                    metrics["diff_mean"].append(diff_mean)
+                    metrics["diff_rms"].append(diff_rms)
+                    metrics["grad_diff_mean"].append(grad_diff_mean)
+                    metrics["depth_std"].append(depth_std)
 
             if RECORD_FRAMES:
-                if i % 2:
+                if step_idx % 2:
                     filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames', f"{img_idx}.png")
                     env.gym.write_viewer_image_to_file(env.viewer, filename)
                     img_idx += 1 
@@ -578,7 +828,7 @@ def play(args):
                 camera_position += camera_vel * env.dt
                 env.set_camera(camera_position, camera_position + camera_direction)
 
-            if i < stop_state_log:
+            if step_idx < stop_state_log:
                 logger.log_states(
                     {
                         'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
@@ -595,20 +845,33 @@ def play(args):
                         'contact_forces_z': env.contact_forces[robot_index, env.feet_indices, 2].cpu().numpy()
                     }
                 )
-            elif i==stop_state_log:
+            elif step_idx == stop_state_log:
                 logger.plot_states()
-            if  0 < i < stop_rew_log:
+            if  0 < step_idx < stop_rew_log:
                 if infos["episode"]:
                     num_episodes = torch.sum(env.reset_buf).item()
                     if num_episodes>0:
                         logger.log_rewards(infos["episode"], num_episodes)
-            elif i==stop_rew_log:
+            elif step_idx == stop_rew_log:
                 logger.print_rewards()
                 #打印平均误差
                 # print(f"v err={v_ave_err/(i+1)}, g err={g_ave_err/(i+1)}, f err={f_ave_err/(i+1)}")
 
+        if camera_eval and (not eval_done) and eval_total_steps is not None and step_idx + 1 >= eval_total_steps:
+            eval_done = True
+            if not eval_saved:
+                _save_camera_eval(metrics, camera_eval_out_dir)
+                eval_saved = True
+                print(f"[Play] Camera eval complete. Results saved to: {camera_eval_out_dir}")
+                print("[Play] Evaluation finished; continuing play. Close viewer or Ctrl+C to exit.")
+
+        step_idx += 1
+
     if camera_cv2 is not None:
         camera_cv2.destroyAllWindows()
+
+    if camera_eval and not eval_saved:
+        _save_camera_eval(metrics, camera_eval_out_dir)
 
 if __name__ == '__main__':
     EXPORT_POLICY = True

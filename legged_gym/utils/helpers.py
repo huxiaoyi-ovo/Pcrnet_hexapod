@@ -183,6 +183,7 @@ def get_args():
         {"name": "--camera_save", "action": "store_true", "default": False, "help": "Save camera frames to disk in play"},
         {"name": "--camera_show", "action": "store_true", "default": False, "help": "Show camera frames (requires display + cv2)"},
         {"name": "--camera_dir", "type": str, "help": "Output directory for camera frames"},
+        {"name": "--camera_eval", "action": "store_true", "default": False, "help": "Run standardized camera evaluation sequence"},
         {"name": "--terrain_mesh", "type": str, "default": None, "help": "Play-only: override terrain mesh type (plane|heightfield|trimesh)"},
         {"name": "--god_mode", "action": "store_true", "default": False, "help": "Play-only: enable god mode (WASD reposition + QE yaw). Optional; --keyboard_cmds enables it too."},
     ]

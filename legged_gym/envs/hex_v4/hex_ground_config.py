@@ -189,10 +189,10 @@ class HexGroundCfg(LeggedRobotCfg):
             tracking_ang_vel = 2.0
             tracking_lin_vel = 3.0
             lin_vel_z = -1.5
-            ang_vel_xy = -0.18#-0.15
+            ang_vel_xy = -0.2#-0.15
             camera_wobble_y = -0.05
-            base_height = 0.8
-            orientation = -8.5#-0.80
+            base_height = 1.0#0.8
+            orientation = -8.8#-0.80
             feet_air_time = 0.5
             collision = -2.0
 
