@@ -212,6 +212,24 @@ def play(args):
         obs_terrain = obs_dict['terrain']
     else:
         obs, _ = env.reset()
+
+    def _no_check_termination(self):
+        if hasattr(self, "reset_buf"):
+            self.reset_buf.zero_()
+        if hasattr(self, "time_out_buf"):
+            self.time_out_buf.zero_()
+
+    def _no_reset_idx(self, env_ids):
+        return
+
+    env.check_termination = types.MethodType(_no_check_termination, env)
+    env.reset_idx = types.MethodType(_no_reset_idx, env)
+    if hasattr(env, "reset_buf"):
+        env.reset_buf.zero_()
+    if hasattr(env, "time_out_buf"):
+        env.time_out_buf.zero_()
+    if hasattr(env, "episode_length_buf"):
+        env.episode_length_buf.zero_()
     
     # 根据架构类型获取不同的inference方法
     policy = None  # 初始化为None，避免未定义错误
@@ -354,8 +372,8 @@ def play(args):
     god_env = int(np.clip(god_env, 0, env.num_envs - 1))
     god_pos = None
     god_yaw = 0.0
-    god_speed = 0.6
-    god_yaw_speed = 1.5
+    god_speed = 2.0
+    god_yaw_speed = 3.0
     god_keys = {
         "GOD_FWD": False,
         "GOD_BACK": False,
@@ -437,6 +455,57 @@ def play(args):
     def _quat_from_yaw(yaw):
         half = 0.5 * yaw
         return [0.0, 0.0, math.sin(half), math.cos(half)]
+
+    def _soft_reset_in_place():
+        if hasattr(env, "reset_buf"):
+            env.reset_buf.zero_()
+        if hasattr(env, "time_out_buf"):
+            env.time_out_buf.zero_()
+        if hasattr(env, "episode_length_buf"):
+            env.episode_length_buf.zero_()
+        if hasattr(env, "commands"):
+            env.commands.zero_()
+        if hasattr(env, "root_states") and hasattr(env, "gym") and hasattr(env, "sim"):
+            env.root_states[:, 7:13] = 0.0
+            env.gym.set_actor_root_state_tensor(env.sim, gymtorch.unwrap_tensor(env.root_states))
+        if hasattr(env, "base_lin_vel"):
+            env.base_lin_vel.zero_()
+        if hasattr(env, "base_ang_vel"):
+            env.base_ang_vel.zero_()
+        if hasattr(env, "base_lin_acc"):
+            env.base_lin_acc.zero_()
+        if hasattr(env, "base_ang_acc"):
+            env.base_ang_acc.zero_()
+        if hasattr(env, "IMU_lin_acc"):
+            env.IMU_lin_acc.zero_()
+        if hasattr(env, "dof_state") and hasattr(env, "gym") and hasattr(env, "sim"):
+            if env.dof_state.shape[-1] >= 2:
+                env.dof_state[..., 1] = 0.0
+            env.gym.set_dof_state_tensor(env.sim, gymtorch.unwrap_tensor(env.dof_state))
+        elif hasattr(env, "dof_vel"):
+            env.dof_vel.zero_()
+        if hasattr(env, "last_actions"):
+            env.last_actions.zero_()
+        if hasattr(env, "last_dof_vel"):
+            env.last_dof_vel.zero_()
+        if hasattr(env, "last_root_vel"):
+            env.last_root_vel.zero_()
+        if hasattr(env, "episode_sums"):
+            for key in env.episode_sums:
+                val = env.episode_sums[key]
+                if torch.is_tensor(val):
+                    val.zero_()
+        if hasattr(env, "episode_raw_stats"):
+            env.episode_raw_stats.zero_()
+        if hasattr(env, "episode_cmd_stats"):
+            env.episode_cmd_stats.zero_()
+        if hasattr(env, "episode_debug_stats"):
+            env.episode_debug_stats.zero_()
+        if use_separated_obs and hasattr(env, "compute_observations_separated"):
+            env.compute_observations_separated()
+            return env.get_observations_separated()
+        env.compute_observations()
+        return env.get_observations(), None, None
 
     if camera_eval:
         eval_steps_per_cmd = max(1, int(round(eval_cmd_time / env.dt)))
@@ -674,11 +743,8 @@ def play(args):
                 reset_requested = False
                 cmd_vx, cmd_vy, cmd_yaw = 0.0, 0.0, 0.0
                 god_pos = None
+                obs, obs_vgf, obs_terrain = _soft_reset_in_place()
                 if use_separated_obs:
-                    obs_dict = env.reset_separate()
-                    obs = obs_dict['proprioception']
-                    obs_vgf = obs_dict['privileged']
-                    obs_terrain = obs_dict['terrain']
                     # reset 后同步清空 history，避免把上一局残留带入下一局
                     if hasattr(ppo_runner.alg, "storage") and ppo_runner.alg.storage is not None:
                         storage = ppo_runner.alg.storage
@@ -689,8 +755,6 @@ def play(args):
                             storage.dones.zero_()
                         if hasattr(storage, "num_transitions_per_env") and hasattr(storage, "num_hist"):
                             storage.valid_hist_index = storage.num_transitions_per_env + storage.num_hist - 1
-                else:
-                    obs, _ = env.reset()
 
             if god_enabled and god_active:
                 actions = torch.zeros(env.num_envs, env.num_actions, device=env.device)
