@@ -739,7 +739,7 @@ def play(args):
                 obs, _, rews, dones, infos = env.step(actions.detach())
 
 
-            if camera_active and (i % camera_interval == 0):
+            if camera_active and (step_idx % camera_interval == 0):
                 capture_env = camera_env
                 if camera_env_random:
                     capture_env = int(np.random.randint(0, env.num_envs))
