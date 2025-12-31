@@ -73,7 +73,7 @@ def play(args):
     camera_eval = bool(getattr(args, "camera_eval", False))
     eval_cmd_time = 5.0
     eval_cmd_scale = 0.6
-    eval_order = ["stop", "forward", "backward", "left", "right", "yaw_left", "yaw_right", "stop"]
+    eval_order = ["stop", "forward", "backward", "left", "right", "yaw_left", "yaw_right"]
     if camera_eval:
         camera_mode = "depth"
         camera_active = True
@@ -282,6 +282,9 @@ def play(args):
     camera_cfg = getattr(env, "camera_cfg", None)
     camera_cv2 = None
     camera_warned = False
+    feature_cv2 = None
+    orb_detector = None
+    edge_density_threshold = 0.02
 
     if camera_active:
         if camera_env_random:
@@ -314,6 +317,17 @@ def play(args):
                 camera_cv2.namedWindow("camera_depth", camera_cv2.WINDOW_NORMAL)
                 camera_cv2.resizeWindow("camera_depth", show_w, show_h)
 
+    if camera_eval:
+        feature_cv2 = camera_cv2
+        if feature_cv2 is None:
+            try:
+                import cv2 as _cv2
+                feature_cv2 = _cv2
+            except Exception:
+                feature_cv2 = None
+        if feature_cv2 is not None:
+            orb_detector = feature_cv2.ORB_create(nfeatures=300)
+
     if camera_save and camera_dir is None:
         camera_dir = os.path.join(
             LEGGED_GYM_ROOT_DIR,
@@ -333,6 +347,14 @@ def play(args):
             denom = max(far - near, 1e-6)
             depth_norm = (depth_np - near) / denom
         return np.clip(depth_norm, 0.0, 1.0)
+
+    def _quat_to_roll_pitch(quat):
+        x, y, z, w = quat
+        roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        sinp = 2.0 * (w * y - z * x)
+        sinp = min(1.0, max(-1.0, sinp))
+        pitch = math.asin(sinp)
+        return roll, pitch
 
     def _write_image(path, img):
         if camera_cv2 is not None:
@@ -534,6 +556,21 @@ def play(args):
             "diff_rms": [],
             "grad_diff_mean": [],
             "depth_std": [],
+            "cmd_speed": [],
+            "base_speed": [],
+            "track_err_lin": [],
+            "track_err_yaw": [],
+            "speed_ratio": [],
+            "energy": [],
+            "base_ang_vel_xy_rms": [],
+            "base_ang_acc_xy_rms": [],
+            "roll": [],
+            "pitch": [],
+            "depth_invalid_ratio": [],
+            "depth_clip_ratio": [],
+            "depth_grad_mean": [],
+            "feature_count": [],
+            "edge_density": [],
         }
         last_depth = None
         last_grad = None
@@ -549,16 +586,48 @@ def play(args):
             return
         csv_path = os.path.join(out_dir, "camera_eval_metrics.csv")
         with open(csv_path, "w", encoding="ascii") as f:
-            f.write("time_s,cmd,diff_mean,diff_rms,grad_diff_mean,depth_std\n")
-            for t, cmd, d0, d1, g0, s0 in zip(
-                metrics["time_s"],
-                metrics["cmd"],
-                metrics["diff_mean"],
-                metrics["diff_rms"],
-                metrics["grad_diff_mean"],
-                metrics["depth_std"],
-            ):
-                f.write(f"{t:.4f},{cmd},{d0:.6f},{d1:.6f},{g0:.6f},{s0:.6f}\n")
+            fields = [
+                "time_s",
+                "cmd",
+                "diff_mean",
+                "diff_rms",
+                "grad_diff_mean",
+                "depth_std",
+                "cmd_speed",
+                "base_speed",
+                "track_err_lin",
+                "track_err_yaw",
+                "speed_ratio",
+                "energy",
+                "base_ang_vel_xy_rms",
+                "base_ang_acc_xy_rms",
+                "roll",
+                "pitch",
+                "depth_invalid_ratio",
+                "depth_clip_ratio",
+                "depth_grad_mean",
+                "feature_count",
+                "edge_density",
+            ]
+
+            def _fmt_val(val):
+                if isinstance(val, str):
+                    return val
+                if val is None or not math.isfinite(val):
+                    return "nan"
+                return f"{val:.6f}"
+
+            f.write(",".join(fields) + "\n")
+            num_rows = len(metrics["time_s"])
+            for idx in range(num_rows):
+                row_vals = []
+                for key in fields:
+                    vals = metrics.get(key, [])
+                    if key == "cmd":
+                        row_vals.append(vals[idx] if idx < len(vals) else "")
+                    else:
+                        row_vals.append(_fmt_val(vals[idx] if idx < len(vals) else float("nan")))
+                f.write(",".join(row_vals) + "\n")
         try:
             import matplotlib.pyplot as plt
             times = np.array(metrics["time_s"])
@@ -853,14 +922,28 @@ def play(args):
                     depth_mask = np.isfinite(depth)
                     depth_valid = depth[depth_mask]
                     depth_std = float(depth_valid.std()) if depth_valid.size else 0.0
+                    depth_invalid_ratio = float(1.0 - depth_mask.mean()) if depth_mask.size else 0.0
+                    depth_clip_ratio = float("nan")
+                    if camera_cfg is not None:
+                        near = float(getattr(camera_cfg, "near_clip", 0.0))
+                        far = float(getattr(camera_cfg, "far_clip", 0.0))
+                        if far > near and depth_mask.size:
+                            clip_eps = 1e-3
+                            depth_clip_ratio = float(
+                                np.mean((depth <= near + clip_eps) | (depth >= far - clip_eps))
+                            )
                     diff_mean = 0.0
                     diff_rms = 0.0
                     grad_diff_mean = 0.0
+                    depth_grad_mean = float("nan")
+                    edge_density = float("nan")
                     grad = None
                     if depth_valid.size:
                         depth_safe = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
                         gy, gx = np.gradient(depth_safe)
                         grad = np.sqrt(gx ** 2 + gy ** 2)
+                        depth_grad_mean = float(np.mean(grad))
+                        edge_density = float(np.mean(grad > edge_density_threshold))
                     if last_depth is not None:
                         diff = np.abs(depth - last_depth)
                         diff_mask = np.isfinite(diff)
@@ -874,6 +957,61 @@ def play(args):
                         gdiff_valid = gdiff[gdiff_mask]
                         if gdiff_valid.size:
                             grad_diff_mean = float(gdiff_valid.mean())
+                    feature_count = float("nan")
+                    if orb_detector is not None:
+                        try:
+                            depth_norm = _normalize_depth(depth)
+                            depth_u8 = (depth_norm * 255.0).astype(np.uint8)
+                            keypoints = orb_detector.detect(depth_u8, None)
+                            feature_count = float(len(keypoints))
+                        except Exception:
+                            feature_count = float("nan")
+
+                    cmd_vec = None
+                    if hasattr(env, "commands"):
+                        cmd_vec = env.commands[capture_env, :3]
+                    if cmd_vec is None:
+                        cmd_vec = torch.tensor([cmd_vx, cmd_vy, cmd_yaw], device=env.device)
+                    cmd_lin = cmd_vec[:2]
+                    cmd_yaw = cmd_vec[2]
+
+                    base_lin = env.base_lin_vel[capture_env, :2] if hasattr(env, "base_lin_vel") else None
+                    base_ang = env.base_ang_vel[capture_env, 2] if hasattr(env, "base_ang_vel") else None
+                    base_lin_speed = float(torch.norm(base_lin).item()) if base_lin is not None else float("nan")
+                    cmd_lin_speed = float(torch.norm(cmd_lin).item())
+                    track_err_lin = (
+                        float(torch.norm(cmd_lin - base_lin).item()) if base_lin is not None else float("nan")
+                    )
+                    track_err_yaw = (
+                        float(torch.abs(cmd_yaw - base_ang).item()) if base_ang is not None else float("nan")
+                    )
+                    speed_ratio = (
+                        base_lin_speed / (cmd_lin_speed + 1e-6)
+                        if math.isfinite(base_lin_speed)
+                        else float("nan")
+                    )
+
+                    base_ang_vel_xy_rms = float("nan")
+                    if hasattr(env, "base_ang_vel"):
+                        ang_xy = env.base_ang_vel[capture_env, :2]
+                        base_ang_vel_xy_rms = float(torch.sqrt(torch.sum(ang_xy ** 2)).item())
+
+                    base_ang_acc_xy_rms = float("nan")
+                    if hasattr(env, "base_ang_acc"):
+                        ang_acc_xy = env.base_ang_acc[capture_env, :2]
+                        base_ang_acc_xy_rms = float(torch.sqrt(torch.sum(ang_acc_xy ** 2)).item())
+
+                    roll = float("nan")
+                    pitch = float("nan")
+                    if hasattr(env, "base_quat"):
+                        quat = env.base_quat[capture_env].detach().cpu().numpy()
+                        roll, pitch = _quat_to_roll_pitch(quat)
+
+                    energy = float("nan")
+                    if hasattr(env, "torques") and hasattr(env, "dof_vel"):
+                        torques = env.torques[capture_env]
+                        dof_vel = env.dof_vel[capture_env]
+                        energy = float(torch.sum(torch.abs(torques * dof_vel)).item())
                     last_depth = depth
                     last_grad = grad
                     metrics["time_s"].append(step_idx * env.dt)
@@ -882,6 +1020,21 @@ def play(args):
                     metrics["diff_rms"].append(diff_rms)
                     metrics["grad_diff_mean"].append(grad_diff_mean)
                     metrics["depth_std"].append(depth_std)
+                    metrics["cmd_speed"].append(cmd_lin_speed)
+                    metrics["base_speed"].append(base_lin_speed)
+                    metrics["track_err_lin"].append(track_err_lin)
+                    metrics["track_err_yaw"].append(track_err_yaw)
+                    metrics["speed_ratio"].append(speed_ratio)
+                    metrics["energy"].append(energy)
+                    metrics["base_ang_vel_xy_rms"].append(base_ang_vel_xy_rms)
+                    metrics["base_ang_acc_xy_rms"].append(base_ang_acc_xy_rms)
+                    metrics["roll"].append(roll)
+                    metrics["pitch"].append(pitch)
+                    metrics["depth_invalid_ratio"].append(depth_invalid_ratio)
+                    metrics["depth_clip_ratio"].append(depth_clip_ratio)
+                    metrics["depth_grad_mean"].append(depth_grad_mean)
+                    metrics["feature_count"].append(feature_count)
+                    metrics["edge_density"].append(edge_density)
 
             if RECORD_FRAMES:
                 if step_idx % 2:

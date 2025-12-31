@@ -827,7 +827,8 @@ class HexGround(LeggedRobot):
         # print("feet_air_time=",self.feet_air_time[0])
         # print("first_contact=",first_contact[0])
         rew_airTime = torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1) # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.2 #no reward for zero command
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.2)
+        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > cmd_threshold # no reward for zero command
         self.feet_air_time *= ~contact_filt
         return rew_airTime
     
@@ -878,7 +879,8 @@ class HexGround(LeggedRobot):
         # xy_dist[xy_dist<0.2]=0.2
         # print("xy_dist=",xy_dist[0])
         # rew=(torch.exp(-xy_dist/0.12)*(~contact_filt))/(torch.sum(~contact_filt,dim=1)+1e-6)
-        return torch.exp(-xy_dist/(0.4*0.5))
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.2)
+        return torch.exp(-xy_dist/(0.4*0.5)) * (torch.norm(self.commands[:, :3], dim=1) > cmd_threshold)
 
     def _reward_swing(self):
         #估计摆动时，靠近设置的初始点，来避免长期运动带来的累计误差
@@ -913,7 +915,8 @@ class HexGround(LeggedRobot):
         smooth_rew=weight*reaching_rew+(1.0-weight)*leaving_rew
         smooth_rew[contact_filt]=0.0
         smooth_rew=torch.sum(smooth_rew,dim=1)/(torch.sum(~contact_filt,dim=1)+1e-6)
-        smooth_rew *= torch.norm(self.commands[:,:3],dim=1)>0.2
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.2)
+        smooth_rew *= torch.norm(self.commands[:,:3],dim=1) > cmd_threshold
         return smooth_rew
         
         # print("valid_mask=",reaching_mask[0])
@@ -923,7 +926,8 @@ class HexGround(LeggedRobot):
         rew[reached_mask]=math.exp(-0.15/0.8)
         # print("rew\n",rew[0])
         leg_rew=torch.sum(rew,dim=1)/(torch.sum(~contact_filt,dim=1)+1e-6)
-        leg_rew *= torch.norm(self.commands[:,:3],dim=1)>0.2
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.2)
+        leg_rew *= torch.norm(self.commands[:,:3],dim=1) > cmd_threshold
         #命令为0时，设置静止
 
         # print("leg_rew=",leg_rew[0])
@@ -944,8 +948,54 @@ class HexGround(LeggedRobot):
         # print("self.dof_pos\n",self.dof_pos[0])
         # print("err=",torch.abs(self.dof_pos-self.default_dof_pos)[0])
         # print("err sum=",torch.sum(torch.abs(self.dof_pos-self.default_dof_pos),dim=1)[0])
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.2)
         return torch.sum(torch.abs(self.dof_pos-self.default_dof_pos),dim=1)\
-            *(torch.norm(self.commands[:,:3],dim=1)<0.2)
+            *(torch.norm(self.commands[:,:3],dim=1) < cmd_threshold)
+
+    def _zero_cmd_mask(self):
+        cmd_threshold = getattr(self.cfg.rewards, "zero_cmd_threshold", 0.1)
+        return torch.norm(self.commands[:, :3], dim=1) < cmd_threshold
+
+    def _reward_zero_cmd_feet_contact(self):
+        mask = self._zero_cmd_mask()
+        if not torch.any(mask):
+            return torch.zeros_like(mask, dtype=torch.float)
+        contact_threshold = getattr(self.cfg.rewards, "zero_cmd_contact_force_threshold", 1.0)
+        contact = self.contact_forces[:, self.feet_indices, 2] > contact_threshold
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        all_contact = contact_filt.all(dim=1)
+        penalty = (~all_contact).float()
+        return penalty * mask.float()
+
+    def _reward_zero_cmd_dof_vel(self):
+        mask = self._zero_cmd_mask()
+        if not torch.any(mask):
+            return torch.zeros_like(mask, dtype=torch.float)
+        eps = getattr(self.cfg.rewards, "zero_cmd_dof_vel_eps", 0.05)
+        excess = torch.clamp(torch.abs(self.dof_vel) - eps, min=0.0)
+        penalty = torch.max(excess, dim=1).values
+        return penalty * mask.float()
+
+    def _reward_zero_cmd_action_rate(self):
+        mask = self._zero_cmd_mask()
+        if not torch.any(mask):
+            return torch.zeros_like(mask, dtype=torch.float)
+        eps = getattr(self.cfg.rewards, "zero_cmd_action_rate_eps", 0.05)
+        excess = torch.clamp(torch.abs(self.actions - self.last_actions) - eps, min=0.0)
+        penalty = torch.max(excess, dim=1).values
+        return penalty * mask.float()
+
+    def _reward_zero_cmd_base_vel(self):
+        mask = self._zero_cmd_mask()
+        if not torch.any(mask):
+            return torch.zeros_like(mask, dtype=torch.float)
+        lin_eps = getattr(self.cfg.rewards, "zero_cmd_base_lin_vel_eps", 0.05)
+        ang_eps = getattr(self.cfg.rewards, "zero_cmd_base_ang_vel_eps", 0.05)
+        lin_speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
+        ang_speed = torch.abs(self.base_ang_vel[:, 2])
+        lin_excess = torch.clamp(lin_speed - lin_eps, min=0.0)
+        ang_excess = torch.clamp(ang_speed - ang_eps, min=0.0)
+        return (lin_excess + ang_excess) * mask.float()
 
     def _reward_base_height(self):
         #修改成正的奖励，越靠近目标值，奖励越高

@@ -184,12 +184,18 @@ class HexGroundCfg(LeggedRobotCfg):
         low_height_penalty_threshold = 0.05
         low_height_penalty_value = -1.0
         feet_contact_force_threshold = 1.0
+        zero_cmd_threshold = 0.1
+        zero_cmd_contact_force_threshold = 1.0
+        zero_cmd_dof_vel_eps = 0.05
+        zero_cmd_action_rate_eps = 0.05
+        zero_cmd_base_lin_vel_eps = 0.05
+        zero_cmd_base_ang_vel_eps = 0.05
         class scales(LeggedRobotCfg.rewards.scales):
-            action_rate = -0.045#-0.04
+            action_rate = -0.043#-0.04
             tracking_ang_vel = 2.0
             tracking_lin_vel = 3.0
             lin_vel_z = -1.5
-            ang_vel_xy = -0.2#-0.15
+            ang_vel_xy = -0.18#-0.15
             camera_wobble_y = -0.05
             base_height = 1.0#0.8
             orientation = -8.8#-0.80
@@ -201,6 +207,10 @@ class HexGroundCfg(LeggedRobotCfg):
 
             stand_still = -2.0
             # feet_contact_forces = -0.004
+            zero_cmd_feet_contact = -5.0
+            zero_cmd_dof_vel = -2.0
+            zero_cmd_action_rate = -1.0
+            zero_cmd_base_vel = -2.0
 
             CoT = -0.001
             pass
@@ -229,7 +239,7 @@ class HexGroundCfg(LeggedRobotCfg):
             # feet_contact_forces = 0.0
             # footend_pos_xy = 0.0
             # tracking_dof = -0.0
-            # CoT = -0.001
+            #CoT = -0.001
             # torques = 0.0
 
 
