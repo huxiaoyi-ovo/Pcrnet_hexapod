@@ -72,7 +72,7 @@ def play(args):
     camera_active = camera_mode in ("depth", "rgb", "both")
     camera_eval = bool(getattr(args, "camera_eval", False))
     eval_cmd_time = 5.0
-    eval_cmd_scale = 0.6
+    eval_cmd_scale = 1.0 #0.6
     eval_order = ["stop", "forward", "backward", "left", "right", "yaw_left", "yaw_right", "stop"]
     if camera_eval:
         camera_mode = "depth"
