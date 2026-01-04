@@ -18,7 +18,6 @@ datasets/affordance_dataset.py - Affordance 数据集生成与加载脚本（第
 
 import os
 import math
-import importlib.util
 import torch
 import numpy as np
 import argparse
@@ -35,12 +34,44 @@ MAP_SIZE = 16
 
 def load_hex_ground_cfg():
     try:
-        cfg_path = os.path.join(os.path.dirname(__file__), '..', 'envs', 'hex_v4', 'hex_ground_config.py')
-        cfg_path = os.path.abspath(cfg_path)
-        spec = importlib.util.spec_from_file_location("hex_ground_config", cfg_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.HexGroundCfg()
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        exec_globals = {
+            "LEGGED_GYM_ROOT_DIR": base_path,
+            "LEGGED_GYM_ENVS_DIR": os.path.join(base_path, "legged_gym", "envs"),
+        }
+
+        def _load_code(path, skip_prefixes):
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            filtered = []
+            for line in lines:
+                stripped = line.strip()
+                if any(stripped.startswith(prefix) for prefix in skip_prefixes):
+                    continue
+                filtered.append(line)
+            return "".join(filtered)
+
+        base_cfg_path = os.path.join(os.path.dirname(__file__), '..', 'envs', 'base', 'base_config.py')
+        robot_cfg_path = os.path.join(os.path.dirname(__file__), '..', 'envs', 'base', 'legged_robot_config.py')
+        hex_cfg_path = os.path.join(os.path.dirname(__file__), '..', 'envs', 'hex_v4', 'hex_ground_config.py')
+
+        base_cfg_path = os.path.abspath(base_cfg_path)
+        robot_cfg_path = os.path.abspath(robot_cfg_path)
+        hex_cfg_path = os.path.abspath(hex_cfg_path)
+
+        base_code = _load_code(base_cfg_path, skip_prefixes=())
+        exec(base_code, exec_globals)
+
+        robot_code = _load_code(robot_cfg_path, skip_prefixes=("from .base_config", "from legged_gym"))
+        exec(robot_code, exec_globals)
+
+        hex_code = _load_code(hex_cfg_path, skip_prefixes=("from legged_gym",))
+        exec(hex_code, exec_globals)
+
+        cfg_cls = exec_globals.get("HexGroundCfg")
+        if cfg_cls is None:
+            raise RuntimeError("HexGroundCfg not found after exec")
+        return cfg_cls()
     except Exception as exc:
         print(f"[Dataset] Warning: load HexGroundCfg failed: {exc}")
         return None
@@ -82,14 +113,17 @@ def _get_terrain_cfg(cfg):
         "fixed_layout_ring_half_size": getattr(terrain, "fixed_layout_ring_half_size", 2.2),
         "fixed_layout_gap_min": getattr(terrain, "fixed_layout_gap_min", 0.3),
         "fixed_layout_gap_max": getattr(terrain, "fixed_layout_gap_max", 0.7),
+        "fixed_layout_gap_buffer": getattr(terrain, "fixed_layout_gap_buffer", 0.1),
+        "fixed_layout_robot_clearance": getattr(terrain, "fixed_layout_robot_clearance", 0.27),
         "fixed_layout_wall_thickness": getattr(terrain, "fixed_layout_wall_thickness", 0.25),
         "fixed_layout_center_clearance": getattr(terrain, "fixed_layout_center_clearance", 0.6),
         "fixed_layout_high_height_min": getattr(terrain, "fixed_layout_high_height_min", 0.25),
         "fixed_layout_high_height_max": getattr(terrain, "fixed_layout_high_height_max", 0.35),
         "fixed_layout_low_height_min": getattr(terrain, "fixed_layout_low_height_min", 0.08),
         "fixed_layout_low_height_max": getattr(terrain, "fixed_layout_low_height_max", 0.12),
-        "fixed_layout_low_size_min": getattr(terrain, "fixed_layout_low_size_min", 0.3),
-        "fixed_layout_low_size_max": getattr(terrain, "fixed_layout_low_size_max", 0.5),
+        "fixed_layout_cyl_radius_min": getattr(terrain, "fixed_layout_cyl_radius_min", 0.15),
+        "fixed_layout_cyl_radius_max": getattr(terrain, "fixed_layout_cyl_radius_max", 0.25),
+        "fixed_layout_cyl_offset": getattr(terrain, "fixed_layout_cyl_offset", 0.6),
     }
 
 
@@ -97,6 +131,7 @@ def _get_nav_cfg(cfg):
     nav = getattr(cfg, "navigation", None) if cfg is not None else None
     return {
         "spawn_edge_margin": getattr(nav, "spawn_edge_margin", 0.3),
+        "spawn_outside_margin": getattr(nav, "spawn_outside_margin", 0.2),
         "spawn_yaw_jitter_deg": getattr(nav, "spawn_yaw_jitter_deg", 30.0),
         "goal_obstacle_height_threshold": getattr(nav, "goal_obstacle_height_threshold", 0.2),
     }
@@ -158,8 +193,11 @@ def _sample_robot_pose(terrain_cfg: Dict[str, float], nav_cfg: Dict[str, float])
     half_len = 0.5 * terrain_cfg["terrain_length"]
     half_wid = 0.5 * terrain_cfg["terrain_width"]
     margin = nav_cfg["spawn_edge_margin"]
-    edge_x = max(0.0, half_len - margin)
-    edge_y = max(0.0, half_wid - margin)
+    ring_half = terrain_cfg.get("fixed_layout_ring_half_size", 0.0)
+    outside_margin = nav_cfg.get("spawn_outside_margin", 0.2)
+    min_dist = ring_half + outside_margin
+    edge_x = max(0.0, half_len - margin, min_dist)
+    edge_y = max(0.0, half_wid - margin, min_dist)
 
     edge = random.randint(0, 3)
     if edge == 0:
@@ -182,21 +220,30 @@ def _sample_robot_pose(terrain_cfg: Dict[str, float], nav_cfg: Dict[str, float])
     return np.array([x, y, 0.0], dtype=np.float32), yaw
 
 
-def _build_fixed_layout_obstacles(terrain_cfg: Dict[str, float], difficulty: float) -> List[Dict[str, float]]:
+def _build_fixed_layout_obstacles(
+    terrain_cfg: Dict[str, float],
+    difficulty: float,
+    clearance: float,
+) -> List[Dict[str, float]]:
     ring_half = terrain_cfg["fixed_layout_ring_half_size"]
     wall_thickness = terrain_cfg["fixed_layout_wall_thickness"]
     gap_min = terrain_cfg["fixed_layout_gap_min"]
     gap_max = terrain_cfg["fixed_layout_gap_max"]
+    gap_buffer = terrain_cfg.get("fixed_layout_gap_buffer", 0.1)
+    robot_clearance = max(terrain_cfg.get("fixed_layout_robot_clearance", 0.27), clearance)
     high_min = terrain_cfg["fixed_layout_high_height_min"]
     high_max = terrain_cfg["fixed_layout_high_height_max"]
     low_min = terrain_cfg["fixed_layout_low_height_min"]
     low_max = terrain_cfg["fixed_layout_low_height_max"]
-    low_size_min = terrain_cfg["fixed_layout_low_size_min"]
-    low_size_max = terrain_cfg["fixed_layout_low_size_max"]
+    cyl_radius_min = terrain_cfg.get("fixed_layout_cyl_radius_min", 0.15)
+    cyl_radius_max = terrain_cfg.get("fixed_layout_cyl_radius_max", 0.25)
+    cyl_offset = terrain_cfg.get("fixed_layout_cyl_offset", 0.6)
 
     gap = gap_max - (gap_max - gap_min) * difficulty
-    high_h = high_min + (high_max - high_min) * difficulty
-    low_h = low_min + (low_max - low_min) * difficulty
+    min_gap = 2.0 * robot_clearance + gap_buffer
+    gap = max(gap, min_gap)
+    high_h = random.uniform(high_min, high_max)
+    low_h = random.uniform(low_min, low_max)
 
     obstacles = []
 
@@ -206,24 +253,33 @@ def _build_fixed_layout_obstacles(terrain_cfg: Dict[str, float], difficulty: flo
 
     # 上下围挡
     for y0, y1 in [(y_max - wall_thickness, y_max), (y_min, y_min + wall_thickness)]:
-        obstacles.append({"xmin": x_min, "xmax": -gap_half, "ymin": y0, "ymax": y1, "height": high_h})
-        obstacles.append({"xmin": gap_half, "xmax": x_max, "ymin": y0, "ymax": y1, "height": high_h})
+        obstacles.append({"type": "box", "xmin": x_min, "xmax": -gap_half, "ymin": y0, "ymax": y1, "height": high_h})
+        obstacles.append({"type": "box", "xmin": gap_half, "xmax": x_max, "ymin": y0, "ymax": y1, "height": high_h})
 
     # 左右围挡
     for x0, x1 in [(x_min, x_min + wall_thickness), (x_max - wall_thickness, x_max)]:
-        obstacles.append({"xmin": x0, "xmax": x1, "ymin": y_min, "ymax": -gap_half, "height": high_h})
-        obstacles.append({"xmin": x0, "xmax": x1, "ymin": gap_half, "ymax": y_max, "height": high_h})
+        obstacles.append({"type": "box", "xmin": x0, "xmax": x1, "ymin": y_min, "ymax": -gap_half, "height": high_h})
+        obstacles.append({"type": "box", "xmin": x0, "xmax": x1, "ymin": gap_half, "ymax": y_max, "height": high_h})
 
-    low_offsets = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
-    for dx, dy in low_offsets:
-        size = random.uniform(low_size_min, low_size_max)
-        half = 0.5 * size
+    cyl_radius = random.uniform(cyl_radius_min, cyl_radius_max)
+    max_radius = max(0.05, ring_half - wall_thickness - cyl_offset - robot_clearance)
+    cyl_radius = min(cyl_radius, max_radius)
+    cyl_offset = max(cyl_offset, cyl_radius + robot_clearance)
+
+    gap_centers = [
+        (0.0, ring_half - wall_thickness - cyl_offset),   # north
+        (0.0, -ring_half + wall_thickness + cyl_offset),  # south
+        (ring_half - wall_thickness - cyl_offset, 0.0),   # east
+        (-ring_half + wall_thickness + cyl_offset, 0.0),  # west
+    ]
+    gap_heights = [high_h, low_h, high_h, low_h]
+    for (cx, cy), h in zip(gap_centers, gap_heights):
         obstacles.append({
-            "xmin": dx - half,
-            "xmax": dx + half,
-            "ymin": dy - half,
-            "ymax": dy + half,
-            "height": low_h,
+            "type": "cylinder",
+            "cx": cx,
+            "cy": cy,
+            "radius": cyl_radius,
+            "height": h,
         })
 
     return obstacles
@@ -246,6 +302,47 @@ def _ray_box_intersect(origin: np.ndarray, direction: np.ndarray, box: Dict[str,
     hit = tmax >= np.maximum(tmin, 0.0)
     t_hit = np.where(hit, tmin, np.inf)
     return t_hit
+
+
+def _ray_cylinder_intersect(origin: np.ndarray, direction: np.ndarray, cyl: Dict[str, float]) -> np.ndarray:
+    cx = cyl["cx"]
+    cy = cyl["cy"]
+    r = cyl["radius"]
+    h = cyl["height"]
+
+    ox = origin[0] - cx
+    oy = origin[1] - cy
+    dx = direction[:, 0]
+    dy = direction[:, 1]
+    dz = direction[:, 2]
+
+    a = dx * dx + dy * dy
+    b = 2.0 * (ox * dx + oy * dy)
+    c = ox * ox + oy * oy - r * r
+
+    disc = b * b - 4.0 * a * c
+    disc = np.where(disc >= 0.0, disc, -1.0)
+    sqrt_disc = np.sqrt(np.maximum(disc, 0.0))
+
+    denom = np.where(np.abs(a) < 1e-6, 1e-6, a * 2.0)
+    t1 = (-b - sqrt_disc) / denom
+    t2 = (-b + sqrt_disc) / denom
+
+    t_side = np.where(t1 > 0.0, t1, t2)
+    z_side = origin[2] + t_side * dz
+    valid_side = (t_side > 0.0) & (z_side >= 0.0) & (z_side <= h)
+    t_side = np.where(valid_side, t_side, np.inf)
+
+    t_top = np.full_like(t_side, np.inf)
+    valid_top = dz < -1e-6
+    if np.any(valid_top):
+        t_cap = (h - origin[2]) / dz
+        x_cap = origin[0] + t_cap * dx - cx
+        y_cap = origin[1] + t_cap * dy - cy
+        inside = (x_cap * x_cap + y_cap * y_cap) <= r * r
+        t_top = np.where((t_cap > 0.0) & inside, t_cap, np.inf)
+
+    return np.minimum(t_side, t_top)
 
 
 def _render_depth(
@@ -276,8 +373,11 @@ def _render_depth(
 
     # 与障碍相交
     t_min = np.full(dirs_world.shape[0], np.inf, dtype=np.float32)
-    for box in obstacles:
-        t_hit = _ray_box_intersect(cam_pos, dirs_world, box)
+    for obs in obstacles:
+        if obs.get("type") == "cylinder":
+            t_hit = _ray_cylinder_intersect(cam_pos, dirs_world, obs)
+        else:
+            t_hit = _ray_box_intersect(cam_pos, dirs_world, obs)
         t_min = np.minimum(t_min, t_hit)
 
     depth = np.minimum(t_min, plane_t)
@@ -321,33 +421,44 @@ def _obstacles_to_map(
     cy = math.cos(-robot_yaw)
     sy = math.sin(-robot_yaw)
 
-    for box in obstacles:
-        if box["height"] < height_threshold:
-            continue
-        corners = np.array([
-            [box["xmin"], box["ymin"]],
-            [box["xmin"], box["ymax"]],
-            [box["xmax"], box["ymin"]],
-            [box["xmax"], box["ymax"]],
-        ], dtype=np.float32)
-        corners -= robot_pos[:2]
-        rot = np.array([[cy, -sy], [sy, cy]], dtype=np.float32)
-        corners = corners @ rot.T
-        bx_min, by_min = corners.min(axis=0)
-        bx_max, by_max = corners.max(axis=0)
+    x_centers = x_min + (np.arange(map_size) + 0.5) * cell_x
+    y_centers = y_min + (np.arange(map_size) + 0.5) * cell_y
+    grid_x, grid_y = np.meshgrid(x_centers, y_centers)
 
-        i0 = int(math.floor((bx_min - x_min) / cell_x))
-        i1 = int(math.ceil((bx_max - x_min) / cell_x))
-        j0 = int(math.floor((by_min - y_min) / cell_y))
-        j1 = int(math.ceil((by_max - y_min) / cell_y))
+    rot = np.array([[cy, -sy], [sy, cy]], dtype=np.float32)
 
-        i0 = max(0, min(map_size, i0))
-        i1 = max(0, min(map_size, i1))
-        j0 = max(0, min(map_size, j0))
-        j1 = max(0, min(map_size, j1))
-        if i1 <= i0 or j1 <= j0:
+    for obs in obstacles:
+        if obs["height"] < height_threshold:
             continue
-        occ[j0:j1, i0:i1] = 1.0
+        if obs.get("type") == "cylinder":
+            center = np.array([obs["cx"], obs["cy"]], dtype=np.float32) - robot_pos[:2]
+            center = center @ rot.T
+            dist = (grid_x - center[0]) ** 2 + (grid_y - center[1]) ** 2
+            occ[dist <= obs["radius"] ** 2] = 1.0
+        else:
+            corners = np.array([
+                [obs["xmin"], obs["ymin"]],
+                [obs["xmin"], obs["ymax"]],
+                [obs["xmax"], obs["ymin"]],
+                [obs["xmax"], obs["ymax"]],
+            ], dtype=np.float32)
+            corners -= robot_pos[:2]
+            corners = corners @ rot.T
+            bx_min, by_min = corners.min(axis=0)
+            bx_max, by_max = corners.max(axis=0)
+
+            i0 = int(math.floor((bx_min - x_min) / cell_x))
+            i1 = int(math.ceil((bx_max - x_min) / cell_x))
+            j0 = int(math.floor((by_min - y_min) / cell_y))
+            j1 = int(math.ceil((by_max - y_min) / cell_y))
+
+            i0 = max(0, min(map_size, i0))
+            i1 = max(0, min(map_size, i1))
+            j0 = max(0, min(map_size, j0))
+            j1 = max(0, min(map_size, j1))
+            if i1 <= i0 or j1 <= j0:
+                continue
+            occ[j0:j1, i0:i1] = 1.0
 
     return occ
 
@@ -422,7 +533,7 @@ def generate_synthetic_sample(
     difficulty = random.random()
 
     robot_pos, robot_yaw = _sample_robot_pose(terrain_cfg, nav_cfg)
-    obstacles = _build_fixed_layout_obstacles(terrain_cfg, difficulty)
+    obstacles = _build_fixed_layout_obstacles(terrain_cfg, difficulty, clearance)
 
     depth = _render_depth(cam_cfg, base_dirs, obstacles, robot_pos, robot_yaw)
 

@@ -58,6 +58,7 @@ class HexGroundCfg(LeggedRobotCfg):
         # 出生点采样：边缘随机，朝向中心并加随机扰动
         spawn_edge_enable = True
         spawn_edge_margin = 0.3
+        spawn_outside_margin = 0.2
         spawn_yaw_jitter_deg = 30.0
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
@@ -97,16 +98,19 @@ class HexGroundCfg(LeggedRobotCfg):
         # 固定布局开关与参数
         fixed_layout_enable = True
         fixed_layout_ring_half_size = 2.2
-        fixed_layout_gap_min = 0.3
-        fixed_layout_gap_max = 0.7
+        fixed_layout_gap_min = 0.45
+        fixed_layout_gap_max = 1.0
+        fixed_layout_gap_buffer = 0.1
+        fixed_layout_robot_clearance = 0.27
         fixed_layout_wall_thickness = 0.25
         fixed_layout_center_clearance = 0.6
         fixed_layout_high_height_min = 0.25
         fixed_layout_high_height_max = 0.35
         fixed_layout_low_height_min = 0.08
         fixed_layout_low_height_max = 0.12
-        fixed_layout_low_size_min = 0.3
-        fixed_layout_low_size_max = 0.5
+        fixed_layout_cyl_radius_min = 0.15
+        fixed_layout_cyl_radius_max = 0.25
+        fixed_layout_cyl_offset = 0.6
         # mixed terrain placeholders (disabled by default)
         mixed_enable = False
         mixed_roughness_enable = False

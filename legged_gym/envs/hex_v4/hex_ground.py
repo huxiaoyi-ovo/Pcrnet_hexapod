@@ -318,8 +318,13 @@ class HexGround(LeggedRobot):
             half_len = 0.5 * self.cfg.terrain.terrain_length
             half_wid = 0.5 * self.cfg.terrain.terrain_width
             margin = getattr(self.nav_cfg, "spawn_edge_margin", 0.3)
-            edge_x = max(0.0, half_len - margin)
-            edge_y = max(0.0, half_wid - margin)
+            ring_half = getattr(self.cfg.terrain, "fixed_layout_ring_half_size", 0.0)
+            outside_margin = getattr(self.nav_cfg, "spawn_outside_margin", 0.2)
+            min_dist = ring_half + outside_margin
+            edge_x = max(0.0, half_len - margin, min_dist)
+            edge_y = max(0.0, half_wid - margin, min_dist)
+            edge_x = min(edge_x, half_len)
+            edge_y = min(edge_y, half_wid)
 
             num = len(env_ids)
             edges = torch.randint(0, 4, (num,), device=self.device)

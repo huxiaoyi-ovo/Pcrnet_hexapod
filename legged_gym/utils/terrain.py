@@ -50,21 +50,26 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     # 结构参数（米）
     ring_half = getattr(cfg, "fixed_layout_ring_half_size", 2.2)
     wall_thickness = getattr(cfg, "fixed_layout_wall_thickness", 0.25)
-    gap_min = getattr(cfg, "fixed_layout_gap_min", 0.3)
-    gap_max = getattr(cfg, "fixed_layout_gap_max", 0.7)
+    gap_min = getattr(cfg, "fixed_layout_gap_min", 0.45)
+    gap_max = getattr(cfg, "fixed_layout_gap_max", 1.0)
+    gap_buffer = getattr(cfg, "fixed_layout_gap_buffer", 0.1)
+    robot_clearance = getattr(cfg, "fixed_layout_robot_clearance", 0.27)
     center_clearance = getattr(cfg, "fixed_layout_center_clearance", 0.6)
 
     high_min = getattr(cfg, "fixed_layout_high_height_min", 0.25)
     high_max = getattr(cfg, "fixed_layout_high_height_max", 0.35)
     low_min = getattr(cfg, "fixed_layout_low_height_min", 0.08)
     low_max = getattr(cfg, "fixed_layout_low_height_max", 0.12)
-    low_size_min = getattr(cfg, "fixed_layout_low_size_min", 0.3)
-    low_size_max = getattr(cfg, "fixed_layout_low_size_max", 0.5)
+    cyl_radius_min = getattr(cfg, "fixed_layout_cyl_radius_min", 0.15)
+    cyl_radius_max = getattr(cfg, "fixed_layout_cyl_radius_max", 0.25)
+    cyl_offset = getattr(cfg, "fixed_layout_cyl_offset", 0.6)
 
     # 难度映射
     gap_width = gap_max - (gap_max - gap_min) * difficulty
-    high_h = high_min + (high_max - high_min) * difficulty
-    low_h = low_min + (low_max - low_min) * difficulty
+    min_gap = 2.0 * robot_clearance + gap_buffer
+    gap_width = max(gap_width, min_gap)
+    high_h = np.random.uniform(high_min, high_max)
+    low_h = np.random.uniform(low_min, low_max)
 
     # 转为离散单位
     ring_half_cells = max(1, int(round(ring_half / h_scale)))
@@ -121,19 +126,40 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
         c_y2 = min(length, cy + clearance_cells)
         height_field[c_x1:c_x2, c_y1:c_y2] = 0
 
-    # 低障碍：四个固定位置，大小不同
-    low_offsets = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
-    low_sizes = [low_size_min, low_size_max, low_size_max, low_size_min]
-    for (dx, dy), size in zip(low_offsets, low_sizes):
-        size_cells = max(1, int(round(size / h_scale)))
-        half = max(1, size_cells // 2)
-        bx = int(round(cx + dx / h_scale))
-        by = int(round(cy + dy / h_scale))
-        x1 = max(0, bx - half)
-        x2 = min(width, bx + half)
-        y1 = max(0, by - half)
-        y2 = min(length, by + half)
-        fill_rect(x1, x2, y1, y2, low_cells)
+    def fill_cylinder(center_x: float, center_y: float, radius_m: float, height_cells: int):
+        rad_cells = max(1, int(round(radius_m / h_scale)))
+        cx_i = int(round(cx + center_x / h_scale))
+        cy_i = int(round(cy + center_y / h_scale))
+        x1 = max(0, cx_i - rad_cells)
+        x2 = min(width, cx_i + rad_cells + 1)
+        y1 = max(0, cy_i - rad_cells)
+        y2 = min(length, cy_i + rad_cells + 1)
+        xs = np.arange(x1, x2)
+        ys = np.arange(y1, y2)
+        grid_x, grid_y = np.meshgrid(xs, ys, indexing="ij")
+        dist = (grid_x - cx_i) ** 2 + (grid_y - cy_i) ** 2
+        mask = dist <= rad_cells * rad_cells
+        patch = height_field[x1:x2, y1:y2]
+        patch[mask] = np.maximum(patch[mask], height_cells)
+        height_field[x1:x2, y1:y2] = patch
+
+    def sample_radius():
+        radius = np.random.uniform(cyl_radius_min, cyl_radius_max)
+        max_radius = max(0.05, ring_half - wall_thickness - cyl_offset - robot_clearance)
+        return min(radius, max_radius)
+
+    cyl_radius = sample_radius()
+    cyl_offset_use = max(cyl_offset, cyl_radius + robot_clearance)
+
+    gap_centers = [
+        (0.0, ring_half - wall_thickness - cyl_offset_use),   # north
+        (0.0, -ring_half + wall_thickness + cyl_offset_use),  # south
+        (ring_half - wall_thickness - cyl_offset_use, 0.0),   # east
+        (-ring_half + wall_thickness + cyl_offset_use, 0.0),  # west
+    ]
+    gap_heights = [high_cells, low_cells, high_cells, low_cells]
+    for (gx, gy), h_cells in zip(gap_centers, gap_heights):
+        fill_cylinder(gx, gy, cyl_radius, h_cells)
 
     _apply_mixed_overlays(terrain, difficulty, cfg)
     return terrain
