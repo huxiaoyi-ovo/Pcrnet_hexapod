@@ -1,5 +1,5 @@
 legged_gym/outputs/train_v4_fix/run_20251208_145643/best_model.pt
-legged_gym/data/processed/affordance_data.pt
+legged_gym/data/*
 legged_gym/outputs/train_v3/run_20251208_141012/best_model.pt
 legged_gym/outputs/train_v4/run_20251208_145234/best_model.pt
 legged_gym/data/processed/affordance_data.pt
