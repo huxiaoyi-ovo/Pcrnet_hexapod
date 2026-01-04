@@ -51,7 +51,15 @@ sys.path.insert(0, PROJECT_ROOT)
 # V3.6 状态维度定义 (匹配 hex_terrain.py robot_state_buf)
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
-AFFORDANCE_CHANNELS = 2  # [occupancy, traversability]
+AFFORDANCE_CHANNELS = 2  # [occupancy, passable_gap]
+
+
+def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
+    if aff_map.ndim != 4 or aff_map.size(1) < 2:
+        return torch.zeros(aff_map.shape[0], device=aff_map.device)
+    gap = aff_map[:, 1]
+    difficulty = 1.0 - gap.mean(dim=(1, 2))
+    return torch.clamp(difficulty, 0.0, 1.0)
 
 
 def import_modules():
@@ -198,7 +206,7 @@ class HierarchicalHexapodEnv:
     状态空间 (V3.6):
         robot_state: (N, 9) = [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
         goal: (N, 2) = [goal_x, goal_y]
-        affordance: (N, 2, 16, 16) = [occupancy, traversability]
+        affordance: (N, 2, 16, 16) = [occupancy, passable_gap]
         terrain_difficulty: (N,)
     """
     
@@ -314,7 +322,7 @@ class HierarchicalHexapodEnv:
             - state: (N, 9) robot state
             - goal: (N, 2) relative goal
             - gt_affordance: (N, 2, 16, 16) ground truth affordance
-            - gt_difficulty: (N,) terrain difficulty
+            - gt_difficulty: (N,) difficulty derived from passable_gap
             - depth: (N, 1, H, W) depth image
         """
         obs_dict = {}
@@ -347,7 +355,6 @@ class HierarchicalHexapodEnv:
         if hasattr(self.env, 'get_affordance_data'):
             aff_data = self.env.get_affordance_data()
             obs_dict['gt_affordance'] = aff_data['local_affordance']
-            obs_dict['gt_difficulty'] = aff_data['terrain_difficulty']
         elif hasattr(self.env, 'measured_heights'):
             heights = self.env.measured_heights
             side_len = int(np.sqrt(heights.shape[1]))
@@ -356,13 +363,11 @@ class HierarchicalHexapodEnv:
                 h_map = heights.view(self.num_envs, 1, side_len, side_len)
                 h_map = torch.nn.functional.interpolate(h_map, size=(16, 16), mode='bilinear')
                 obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map)], dim=1)
-                obs_dict['gt_difficulty'] = torch.std(heights, dim=1).clamp(0, 1)
             else:
                 obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
-                obs_dict['gt_difficulty'] = torch.zeros(self.num_envs, device=self.device)
         else:
             obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
-            obs_dict['gt_difficulty'] = torch.zeros(self.num_envs, device=self.device)
+        obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
         
         # 4. Depth Image
         if hasattr(self.env, 'depth_buffer'):
@@ -579,9 +584,9 @@ def train(args):
                         vis_out = vision_model(obs_dict['depth'], normalize=True)
                         aff_map = torch.stack([
                             vis_out['occupancy'], 
-                            vis_out['traversability']
+                            vis_out['passable_gap']
                         ], dim=1)
-                        difficulty = vis_out['terrain_difficulty']
+                        difficulty = difficulty_from_gap(aff_map)
                 else:
                     aff_map = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']
@@ -640,8 +645,8 @@ def train(args):
             else:
                 if vision_model is not None:
                     vis_out = vision_model(obs_dict['depth'], normalize=True)
-                    aff_map = torch.stack([vis_out['occupancy'], vis_out['traversability']], dim=1)
-                    difficulty = vis_out['terrain_difficulty']
+                    aff_map = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
+                    difficulty = difficulty_from_gap(aff_map)
                 else:
                     aff_map = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']

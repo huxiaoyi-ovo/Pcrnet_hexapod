@@ -1,14 +1,11 @@
 """
-Affordance 感知网络 (V3 版本)
+Affordance 感知网络（双通道版本）
 
 功能:
 1. Depth Encoder: ResNet-18 风格的共享特征提取器。
 2. Multi-Head Decoders:
    - Occupancy Head: 预测障碍物占用 (16x16)
-   - Traversability Head: 预测可通行性 (16x16)
-   - Terrain Difficulty Head (V3): 预测地形综合难度标量 (d ∈ [0, 1])
-3. V3 Optimization: 内置输入归一化与空间注意力机制。
-
+   - Passable Gap Head: 预测可通行间距 (16x16)
 """
 
 import torch
@@ -121,9 +118,9 @@ class OccupancyHead(nn.Module):
         return out.squeeze(1)
 
 
-class TraversabilityHead(nn.Module):
+class PassableGapHead(nn.Module):
     """
-    可通行性预测头
+    可通行间距预测头
     Input: (B, 256, 8, 8)
     Output: (B, 16, 16) Score [0,1]
     """
@@ -148,85 +145,24 @@ class TraversabilityHead(nn.Module):
         return out.squeeze(1)
 
 
-class TerrainDifficultyHead(nn.Module):
-    """
-    地形难度预测头
-    包含空间注意力机制，综合全局和局部特征预测标量难度 d。
-    
-    Input: (B, 256, 8, 8)
-    Output: (B,) Scalar [0,1]
-    """
-    def __init__(self, in_channels: int = 256):
-        super().__init__()
-        
-        # 1. 全局特征分支 (Global Context)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-
-        # 2. 空间注意力分支 (Focus on Obstacles)
-        self.attention = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-        self.local_pool = nn.AdaptiveAvgPool2d(1)
-
-        # 3. 回归器 (Regressor)
-        # 输入维度: 全局(256) + 局部(256) = 512
-        self.regressor = nn.Sequential(
-            nn.Linear(in_channels * 2, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 1),
-            nn.Sigmoid() # 确保输出在 [0, 1]
-        )
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        batch_size = features.shape[0]
-
-        # Global Features
-        global_feat = self.global_pool(features).view(batch_size, -1) # (B, 256)
-
-        # Attention Mechanism
-        attn_map = self.attention(features)             # (B, 1, 8, 8)
-        attended_feat = features * attn_map             # (B, 256, 8, 8)
-        local_feat = self.local_pool(attended_feat).view(batch_size, -1) # (B, 256)
-
-        # Fusion
-        combined = torch.cat([global_feat, local_feat], dim=1) # (B, 512)
-
-        # Regression
-        difficulty = self.regressor(combined) # (B, 1)
-
-        return difficulty.squeeze(-1) # (B,)
-
-
 # 主网络
 
 class AffordanceEstimator(nn.Module):
     """
-    Affordance Estimator V3 (Main Module)
+    Affordance Estimator (Main Module)
     """
-    def __init__(self, depth_channels: int = 1, max_depth_range: float = 5.0):
+    def __init__(self, depth_channels: int = 1, max_depth_range: float = 5.0, output_size: int = 16):
         super().__init__()
         self.max_depth_range = max_depth_range
+        if output_size != 16:
+            raise ValueError(f"Only output_size=16 is supported, got {output_size}.")
 
         # Encoder
         self.encoder = DepthEncoder(in_channels=depth_channels)
         
         # Heads
         self.occupancy_head = OccupancyHead(self.encoder.out_channels)
-        self.traversability_head = TraversabilityHead(self.encoder.out_channels)
-        self.terrain_difficulty_head = TerrainDifficultyHead(self.encoder.out_channels)
+        self.passable_gap_head = PassableGapHead(self.encoder.out_channels)
 
     def forward(
         self, 
@@ -241,7 +177,7 @@ class AffordanceEstimator(nn.Module):
             normalize: 是否执行 V3 的输入归一化 (Input Normalization)
         
         Returns:
-            Dict containing 'occupancy', 'traversability', 'terrain_difficulty'
+            Dict containing 'occupancy', 'passable_gap'
         """
         
         # V3 CODE OPTIMIZATION: Input Normalization
@@ -259,18 +195,11 @@ class AffordanceEstimator(nn.Module):
 
         # Decode
         occupancy = self.occupancy_head(features)
-        traversability = self.traversability_head(features)
-        difficulty = self.terrain_difficulty_head(features)
-
-        # Suggested Intensity (Auxiliary Output)
-        # 仅供参考或 Visualization，不直接用于 Loss
-        suggested_intensity = 1.0 - difficulty
+        passable_gap = self.passable_gap_head(features)
 
         outputs = {
             'occupancy': occupancy,             # (B, 16, 16)
-            'traversability': traversability,   # (B, 16, 16)
-            'terrain_difficulty': difficulty,   # (B,)
-            'suggested_intensity': suggested_intensity # (B,)
+            'passable_gap': passable_gap,       # (B, 16, 16)
         }
 
         if return_features:
@@ -283,25 +212,22 @@ class AffordanceEstimator(nn.Module):
 
 class AffordanceLoss(nn.Module):
     """
-    V3 多任务损失函数
-    L_total = w1 * L_occ + w2 * L_trav + w3 * L_diff
+    双通道损失函数
+    L_total = w1 * L_occ + w2 * L_gap
     """
     def __init__(
         self,
         occupancy_weight: float = 1.0,
-        traversability_weight: float = 1.0,
-        difficulty_weight: float = 1.0,
+        passable_gap_weight: float = 1.0,
     ):
         super().__init__()
         self.weights = {
             'occupancy': occupancy_weight,
-            'traversability': traversability_weight,
-            'difficulty': difficulty_weight
+            'passable_gap': passable_gap_weight
         }
         
         # Loss Criteria
-        self.bce_loss = nn.BCELoss()  # For Occupancy (0/1 probability)
-        self.mse_loss = nn.MSELoss()  # For Traversability & Difficulty (Regression)
+        self.bce_loss = nn.BCELoss()  # For Occupancy & Passable Gap (0/1 probability)
 
     def forward(
         self, 
@@ -312,24 +238,19 @@ class AffordanceLoss(nn.Module):
         # 1. Occupancy Loss
         l_occ = self.bce_loss(predictions['occupancy'], targets['occupancy'])
         
-        # 2. Traversability Loss
-        l_trav = self.mse_loss(predictions['traversability'], targets['traversability'])
-        
-        # 3. Terrain Difficulty Loss (V3 Critical)
-        l_diff = self.mse_loss(predictions['terrain_difficulty'], targets['terrain_difficulty'])
+        # 2. Passable Gap Loss
+        l_gap = self.bce_loss(predictions['passable_gap'], targets['passable_gap'])
         
         # Weighted Sum
         total_loss = (
             self.weights['occupancy'] * l_occ +
-            self.weights['traversability'] * l_trav +
-            self.weights['difficulty'] * l_diff
+            self.weights['passable_gap'] * l_gap
         )
         
         return {
             'total': total_loss,
             'loss_occupancy': l_occ,
-            'loss_traversability': l_trav,
-            'loss_difficulty': l_diff
+            'loss_passable_gap': l_gap
         }
 
 
@@ -337,7 +258,7 @@ class AffordanceLoss(nn.Module):
 
 
 if __name__ == "__main__":
-    print("[Test] Initializing AffordanceEstimator V3...")
+    print("[Test] Initializing AffordanceEstimator...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. Instantiate Model
@@ -358,15 +279,14 @@ if __name__ == "__main__":
         print(f"       {k:<20}: {list(v.shape)}")
         
     assert outputs['occupancy'].shape == (batch_size, 16, 16)
-    assert outputs['terrain_difficulty'].shape == (batch_size,)
+    assert outputs['passable_gap'].shape == (batch_size, 16, 16)
     
     # 5. Test Loss
     print("\n[Test] Calculating loss...")
     criterion = AffordanceLoss()
     targets = {
         'occupancy': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device),
-        'traversability': torch.rand(batch_size, 16, 16).to(device),
-        'terrain_difficulty': torch.rand(batch_size).to(device)
+        'passable_gap': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device)
     }
     
     losses = criterion(outputs, targets)

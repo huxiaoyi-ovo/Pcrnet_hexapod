@@ -3,8 +3,8 @@ Affordance Estimator 训练脚本 (V3)
 
 功能:
 1. 加载合成数据集 (AffordanceDataset).
-2. 训练 AffordanceEstimator 网络 (ResNet-18 Encoder + 3 Heads).
-3. 监控 V3 核心指标: Occupancy BCE, Difficulty MSE.
+2. 训练 AffordanceEstimator 网络 (ResNet-18 Encoder + 2 Heads).
+3. 监控核心指标: Occupancy BCE, Passable Gap BCE.
 4. 可视化验证: 自动保存每个 Epoch 的预测对比图.
 
 用法:
@@ -70,11 +70,10 @@ class TrainConfig:
         self.num_workers = args.num_workers
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # V3 损失权重配置
+        # 损失权重配置
         self.loss_weights = {
             'occupancy': 10.0,      # 占用预测比较稀疏，权重加大
-            'traversability': 5.0,  
-            'difficulty': 1.0       # V3 核心标量
+            'passable_gap': 5.0,
         }
         
         # 数据参数 (对应合成数据脚本)
@@ -94,7 +93,7 @@ def save_visualization(
 ):
     """
     生成验证集的可视化对比图 (V3 视觉一致性检查)
-    展示: Depth | GT Occ | Pred Occ | GT Trav | Pred Trav
+    展示: Depth | GT Occ | Pred Occ | GT Gap | Pred Gap
     """
     os.makedirs(save_dir, exist_ok=True)
     
@@ -102,11 +101,8 @@ def save_visualization(
     img_depth = depth[0, 0].cpu().numpy()
     gt_occ = targets['occupancy'][0].cpu().numpy()
     pred_occ = preds['occupancy'][0].detach().cpu().numpy()
-    gt_trav = targets['traversability'][0].cpu().numpy()
-    pred_trav = preds['traversability'][0].detach().cpu().numpy()
-    
-    gt_diff = targets['terrain_difficulty'][0].item()
-    pred_diff = preds['terrain_difficulty'][0].item()
+    gt_gap = targets['passable_gap'][0].cpu().numpy()
+    pred_gap = preds['passable_gap'][0].detach().cpu().numpy()
 
     # 绘图
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -114,7 +110,7 @@ def save_visualization(
     # 1. Depth Input
     ax = axes[0, 0]
     im = ax.imshow(img_depth, cmap='viridis', vmin=0, vmax=1)
-    ax.set_title(f"Input Depth\nGT Diff: {gt_diff:.2f}")
+    ax.set_title("Input Depth")
     plt.colorbar(im, ax=ax)
     
     # 2. Occupancy (GT vs Pred)
@@ -126,21 +122,23 @@ def save_visualization(
     ax.imshow(pred_occ, cmap='gray', vmin=0, vmax=1)
     ax.set_title("Pred Occupancy")
     
-    # 3. Traversability (GT vs Pred)
+    # 3. Passable Gap (GT vs Pred)
     ax = axes[1, 1]
-    ax.imshow(gt_trav, cmap='RdYlGn', vmin=0, vmax=1)
-    ax.set_title("GT Traversability")
+    ax.imshow(gt_gap, cmap='Greens', vmin=0, vmax=1)
+    ax.set_title("GT Passable Gap")
     
     ax = axes[1, 2]
-    ax.imshow(pred_trav, cmap='RdYlGn', vmin=0, vmax=1)
-    ax.set_title("Pred Traversability")
+    ax.imshow(pred_gap, cmap='Greens', vmin=0, vmax=1)
+    ax.set_title("Pred Passable Gap")
     
     # 4. Info Panel
     ax = axes[1, 0]
+    occ_err = float(np.mean(np.abs(gt_occ - pred_occ)))
+    gap_err = float(np.mean(np.abs(gt_gap - pred_gap)))
     text_info = (
         f"Epoch: {epoch}\n"
-        f"Diff Error: {abs(gt_diff - pred_diff):.4f}\n"
-        f"Pred Diff: {pred_diff:.2f}"
+        f"Occ MAE: {occ_err:.4f}\n"
+        f"Gap MAE: {gap_err:.4f}"
     )
     ax.text(0.5, 0.5, text_info, ha='center', va='center', fontsize=14)
     ax.axis('off')
@@ -164,15 +162,14 @@ def train_one_epoch(
     
     model.train()
     total_loss = 0
-    metrics = {'loss_occ': 0, 'loss_trav': 0, 'loss_diff': 0}
+    metrics = {'loss_occ': 0, 'loss_gap': 0}
     
     for batch_idx, batch in enumerate(loader):
         # 1. 数据搬运
         depth = batch['depth'].to(cfg.device)
         targets = {
             'occupancy': batch['occupancy'].to(cfg.device),
-            'traversability': batch['traversability'].to(cfg.device),
-            'terrain_difficulty': batch['terrain_difficulty'].squeeze(-1).to(cfg.device)  # (B,1) -> (B,)
+            'passable_gap': batch['passable_gap'].to(cfg.device),
         }
         
         # 2. 前向传播
@@ -191,16 +188,14 @@ def train_one_epoch(
         # 5. 记录
         total_loss += loss.item()
         metrics['loss_occ'] += loss_dict['loss_occupancy'].item()
-        metrics['loss_trav'] += loss_dict['loss_traversability'].item()
-        metrics['loss_diff'] += loss_dict['loss_difficulty'].item()
+        metrics['loss_gap'] += loss_dict['loss_passable_gap'].item()
     
     # 平均化
     num_batches = len(loader)
     return {
         'total': total_loss / num_batches,
         'loss_occ': metrics['loss_occ'] / num_batches,
-        'loss_trav': metrics['loss_trav'] / num_batches,
-        'loss_diff': metrics['loss_diff'] / num_batches
+        'loss_gap': metrics['loss_gap'] / num_batches,
     }
 
 @torch.no_grad()
@@ -215,7 +210,8 @@ def validate(
     
     model.eval()
     total_loss = 0
-    diff_mae = 0 # Mean Absolute Error for Difficulty
+    gap_ratio_sum = 0
+    occ_ratio_sum = 0
     
     # 收集所有样本用于筛选最高难度
     all_samples = [] if visualize else None
@@ -224,17 +220,15 @@ def validate(
         depth = batch['depth'].to(cfg.device)
         targets = {
             'occupancy': batch['occupancy'].to(cfg.device),
-            'traversability': batch['traversability'].to(cfg.device),
-            'terrain_difficulty': batch['terrain_difficulty'].squeeze(-1).to(cfg.device)  # (B,1) -> (B,)
+            'passable_gap': batch['passable_gap'].to(cfg.device),
         }
         
         preds = model(depth, normalize=False)
         loss_dict = criterion(preds, targets)
         
         total_loss += loss_dict['total'].item()
-        
-        # 计算额外的评估指标: Difficulty MAE
-        diff_mae += torch.abs(preds['terrain_difficulty'] - targets['terrain_difficulty']).mean().item()
+        gap_ratio_sum += targets['passable_gap'].mean().item()
+        occ_ratio_sum += targets['occupancy'].mean().item()
         
         # 收集样本信息用于后续筛选最高难度
         if visualize:
@@ -243,48 +237,47 @@ def validate(
                     'depth': depth[i:i+1],
                     'targets': {
                         'occupancy': targets['occupancy'][i:i+1],
-                        'traversability': targets['traversability'][i:i+1],
-                        'terrain_difficulty': targets['terrain_difficulty'][i:i+1]
+                        'passable_gap': targets['passable_gap'][i:i+1],
                     },
                     'preds': {
                         'occupancy': preds['occupancy'][i:i+1],
-                        'traversability': preds['traversability'][i:i+1],
-                        'terrain_difficulty': preds['terrain_difficulty'][i:i+1]
+                        'passable_gap': preds['passable_gap'][i:i+1],
                     },
-                    'difficulty': targets['terrain_difficulty'][i].item()
+                    'gap_ratio': targets['passable_gap'][i].mean().item()
                 })
     
     # 可视化: 保存平地和最高难度的样本
     if visualize and all_samples:
-        # 按难度排序
-        all_samples.sort(key=lambda x: x['difficulty'])
+        # 按可通行间距比例排序
+        all_samples.sort(key=lambda x: x['gap_ratio'])
         
-        # 最低难度 (平地)
-        flat_sample = all_samples[0]
+        # 间距最少 (更拥挤)
+        tight_sample = all_samples[0]
         save_visualization(
-            flat_sample['depth'], 
-            flat_sample['targets'], 
-            flat_sample['preds'], 
+            tight_sample['depth'], 
+            tight_sample['targets'], 
+            tight_sample['preds'], 
             epoch, 
             os.path.join(cfg.output_dir, "viz_val"),
-            suffix="flat"
+            suffix="tight"
         )
         
-        # 最高难度
-        hard_sample = all_samples[-1]
+        # 间距最多
+        open_sample = all_samples[-1]
         save_visualization(
-            hard_sample['depth'], 
-            hard_sample['targets'], 
-            hard_sample['preds'], 
+            open_sample['depth'], 
+            open_sample['targets'], 
+            open_sample['preds'], 
             epoch, 
             os.path.join(cfg.output_dir, "viz_val"),
-            suffix="hard"
+            suffix="open"
         )
             
     num_batches = len(loader)
     return {
         'val_loss': total_loss / num_batches,
-        'val_diff_mae': diff_mae / num_batches
+        'val_gap_ratio': gap_ratio_sum / num_batches,
+        'val_occ_ratio': occ_ratio_sum / num_batches,
     }
 
 # ==========================================
@@ -292,7 +285,7 @@ def validate(
 # ==========================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Affordance Estimator V3")
+    parser = argparse.ArgumentParser(description="Train Affordance Estimator (Occ + Gap)")
     parser.add_argument('--data_path', type=str, required=True, help='Path to .pt dataset file')
     parser.add_argument('--output_dir', type=str, default='outputs/train_v3', help='Output directory')
     parser.add_argument('--batch_size', type=int, default=64)
@@ -343,8 +336,7 @@ def main():
     # 4. 损失函数与优化器
     criterion = AffordanceLoss(
         occupancy_weight=cfg.loss_weights['occupancy'],
-        traversability_weight=cfg.loss_weights['traversability'],
-        difficulty_weight=cfg.loss_weights['difficulty']
+        passable_gap_weight=cfg.loss_weights['passable_gap'],
     ).to(cfg.device)
     
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -380,13 +372,14 @@ def main():
         print(f"Epoch [{epoch}/{cfg.epochs}] "
               f"Train Loss: {train_metrics['total']:.4f} (Occ: {train_metrics['loss_occ']:.3f}) | "
               f"Val Loss: {val_metrics['val_loss']:.4f} | "
-              f"Diff MAE: {val_metrics['val_diff_mae']:.4f} | "
+              f"Gap Ratio: {val_metrics['val_gap_ratio']:.3f} | "
               f"LR: {current_lr:.2e}")
         
         # Tensorboard
         writer.add_scalar('Loss/Train', train_metrics['total'], epoch)
         writer.add_scalar('Loss/Val', val_metrics['val_loss'], epoch)
-        writer.add_scalar('Metric/Diff_MAE', val_metrics['val_diff_mae'], epoch)
+        writer.add_scalar('Metric/Gap_Ratio', val_metrics['val_gap_ratio'], epoch)
+        writer.add_scalar('Metric/Occ_Ratio', val_metrics['val_occ_ratio'], epoch)
         writer.add_scalar('LR', current_lr, epoch)
         
         # --- Checkpoint ---
@@ -409,7 +402,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 

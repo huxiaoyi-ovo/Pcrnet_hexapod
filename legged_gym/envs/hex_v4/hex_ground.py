@@ -314,6 +314,45 @@ class HexGround(LeggedRobot):
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
+        if self.nav_cfg is not None and getattr(self.nav_cfg, "spawn_edge_enable", False):
+            half_len = 0.5 * self.cfg.terrain.terrain_length
+            half_wid = 0.5 * self.cfg.terrain.terrain_width
+            margin = getattr(self.nav_cfg, "spawn_edge_margin", 0.3)
+            edge_x = max(0.0, half_len - margin)
+            edge_y = max(0.0, half_wid - margin)
+
+            num = len(env_ids)
+            edges = torch.randint(0, 4, (num,), device=self.device)
+            rand_x = torch_rand_float(-edge_x, edge_x, (num, 1), device=self.device).squeeze(1)
+            rand_y = torch_rand_float(-edge_y, edge_y, (num, 1), device=self.device).squeeze(1)
+
+            local_x = rand_x.clone()
+            local_y = rand_y.clone()
+            mask_left = edges == 0
+            mask_right = edges == 1
+            mask_bottom = edges == 2
+            mask_top = edges == 3
+            local_x[mask_left] = -edge_x
+            local_x[mask_right] = edge_x
+            local_y[mask_bottom] = -edge_y
+            local_y[mask_top] = edge_y
+
+            self.root_states[env_ids, 0] = self.env_origins[env_ids, 0] + local_x
+            self.root_states[env_ids, 1] = self.env_origins[env_ids, 1] + local_y
+
+            yaw_to_center = torch.atan2(-local_y, -local_x)
+            jitter_deg = getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 30.0)
+            jitter = torch_rand_float(
+                -math.radians(jitter_deg),
+                math.radians(jitter_deg),
+                (num, 1),
+                device=self.device,
+            ).squeeze(1)
+            yaw = yaw_to_center + jitter
+            qz = torch.sin(0.5 * yaw)
+            qw = torch.cos(0.5 * yaw)
+            quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+            self.root_states[env_ids, 3:7] = quat
         # base velocities
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.1, 0.1, (len(env_ids), 6), device=self.device

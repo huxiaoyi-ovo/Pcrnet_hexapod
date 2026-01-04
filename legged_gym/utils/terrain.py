@@ -34,6 +34,162 @@ from scipy import interpolate
 import isaacgym.terrain_utils as terrain_utils
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
+
+def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain):
+    """固定布局地形：中心围挡+通道+低障碍"""
+    # 基础网格信息
+    width = terrain.width
+    length = terrain.length
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = terrain.height_field_raw
+
+    # 清空地形
+    height_field[:] = 0
+
+    # 结构参数（米）
+    ring_half = getattr(cfg, "fixed_layout_ring_half_size", 2.2)
+    wall_thickness = getattr(cfg, "fixed_layout_wall_thickness", 0.25)
+    gap_min = getattr(cfg, "fixed_layout_gap_min", 0.3)
+    gap_max = getattr(cfg, "fixed_layout_gap_max", 0.7)
+    center_clearance = getattr(cfg, "fixed_layout_center_clearance", 0.6)
+
+    high_min = getattr(cfg, "fixed_layout_high_height_min", 0.25)
+    high_max = getattr(cfg, "fixed_layout_high_height_max", 0.35)
+    low_min = getattr(cfg, "fixed_layout_low_height_min", 0.08)
+    low_max = getattr(cfg, "fixed_layout_low_height_max", 0.12)
+    low_size_min = getattr(cfg, "fixed_layout_low_size_min", 0.3)
+    low_size_max = getattr(cfg, "fixed_layout_low_size_max", 0.5)
+
+    # 难度映射
+    gap_width = gap_max - (gap_max - gap_min) * difficulty
+    high_h = high_min + (high_max - high_min) * difficulty
+    low_h = low_min + (low_max - low_min) * difficulty
+
+    # 转为离散单位
+    ring_half_cells = max(1, int(round(ring_half / h_scale)))
+    wall_cells = max(1, int(round(wall_thickness / h_scale)))
+    gap_cells = max(1, int(round(gap_width / h_scale)))
+    clearance_cells = max(0, int(round(center_clearance / h_scale)))
+    high_cells = max(1, int(round(high_h / v_scale)))
+    low_cells = max(1, int(round(low_h / v_scale)))
+
+    cx = width // 2
+    cy = length // 2
+    x_min = max(0, cx - ring_half_cells)
+    x_max = min(width, cx + ring_half_cells)
+    y_min = max(0, cy - ring_half_cells)
+    y_max = min(length, cy + ring_half_cells)
+
+    max_gap = max(1, (x_max - x_min) - 2 * wall_cells - 2)
+    gap_cells = min(gap_cells, max_gap)
+    gap_half = max(1, gap_cells // 2)
+
+    def fill_rect(x1, x2, y1, y2, height):
+        if x2 > x1 and y2 > y1:
+            height_field[x1:x2, y1:y2] = height
+
+    # 上下围挡（留通道）
+    top_y1 = max(y_min, y_max - wall_cells)
+    top_y2 = y_max
+    bot_y1 = y_min
+    bot_y2 = min(y_max, y_min + wall_cells)
+    left_x2 = max(x_min, cx - gap_half)
+    right_x1 = min(x_max, cx + gap_half)
+    fill_rect(x_min, left_x2, top_y1, top_y2, high_cells)
+    fill_rect(right_x1, x_max, top_y1, top_y2, high_cells)
+    fill_rect(x_min, left_x2, bot_y1, bot_y2, high_cells)
+    fill_rect(right_x1, x_max, bot_y1, bot_y2, high_cells)
+
+    # 左右围挡（留通道）
+    left_x1 = x_min
+    left_x2 = min(x_max, x_min + wall_cells)
+    right_x1 = max(x_min, x_max - wall_cells)
+    right_x2 = x_max
+    lower_y2 = max(y_min, cy - gap_half)
+    upper_y1 = min(y_max, cy + gap_half)
+    fill_rect(left_x1, left_x2, y_min, lower_y2, high_cells)
+    fill_rect(left_x1, left_x2, upper_y1, y_max, high_cells)
+    fill_rect(right_x1, right_x2, y_min, lower_y2, high_cells)
+    fill_rect(right_x1, right_x2, upper_y1, y_max, high_cells)
+
+    # 中心清空区
+    if clearance_cells > 0:
+        c_x1 = max(0, cx - clearance_cells)
+        c_x2 = min(width, cx + clearance_cells)
+        c_y1 = max(0, cy - clearance_cells)
+        c_y2 = min(length, cy + clearance_cells)
+        height_field[c_x1:c_x2, c_y1:c_y2] = 0
+
+    # 低障碍：四个固定位置，大小不同
+    low_offsets = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+    low_sizes = [low_size_min, low_size_max, low_size_max, low_size_min]
+    for (dx, dy), size in zip(low_offsets, low_sizes):
+        size_cells = max(1, int(round(size / h_scale)))
+        half = max(1, size_cells // 2)
+        bx = int(round(cx + dx / h_scale))
+        by = int(round(cy + dy / h_scale))
+        x1 = max(0, bx - half)
+        x2 = min(width, bx + half)
+        y1 = max(0, by - half)
+        y2 = min(length, by + half)
+        fill_rect(x1, x2, y1, y2, low_cells)
+
+    _apply_mixed_overlays(terrain, difficulty, cfg)
+    return terrain
+
+
+def _apply_mixed_overlays(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain):
+    if not getattr(cfg, "mixed_enable", False):
+        return terrain
+
+    if getattr(cfg, "mixed_roughness_enable", False):
+        rough_scale = getattr(cfg, "mixed_roughness_scale", 0.0)
+        if rough_scale > 0.0:
+            rough_amp = rough_scale * (0.5 + 0.5 * difficulty)
+            rough_downsample = getattr(cfg, "mixed_roughness_downsampled_scale", cfg.noise_downsampled_scale)
+            terrain_utils.random_uniform_terrain(
+                terrain,
+                min_height=-rough_amp,
+                max_height=rough_amp,
+                step=0.005,
+                downsampled_scale=rough_downsample,
+            )
+
+    if getattr(cfg, "mixed_obstacle_enable", False):
+        num_min = getattr(cfg, "mixed_obstacle_num_rects_min", 4)
+        num_max = getattr(cfg, "mixed_obstacle_num_rects_max", 12)
+        num_rects = int(round(num_min + (num_max - num_min) * difficulty))
+
+        min_size = getattr(cfg, "mixed_obstacle_min_size", 0.3)
+        max_size = getattr(cfg, "mixed_obstacle_max_size", 0.6)
+        h_min = getattr(cfg, "mixed_obstacle_height_min", 0.12)
+        h_max = getattr(cfg, "mixed_obstacle_height_max", 0.28)
+
+        h_scale = terrain.horizontal_scale
+        v_scale = terrain.vertical_scale
+        width, length = terrain.height_field_raw.shape
+
+        min_cells = max(1, int(round(min_size / h_scale)))
+        max_cells = max(min_cells, int(round(max_size / h_scale)))
+        height_cells = max(1, int(round((h_min + (h_max - h_min) * difficulty) / v_scale)))
+
+        for _ in range(num_rects):
+            rect_w = np.random.randint(min_cells, max_cells + 1)
+            rect_h = np.random.randint(min_cells, max_cells + 1)
+            if rect_w >= width or rect_h >= length:
+                continue
+            x1 = np.random.randint(0, width - rect_w)
+            y1 = np.random.randint(0, length - rect_h)
+            x2 = x1 + rect_w
+            y2 = y1 + rect_h
+            terrain.height_field_raw[x1:x2, y1:y2] = np.maximum(
+                terrain.height_field_raw[x1:x2, y1:y2],
+                height_cells,
+            )
+
+    return terrain
+
 class Terrain:
     def __init__(self, cfg: LeggedRobotCfg.terrain, num_robots) -> None:
 
@@ -111,6 +267,8 @@ class Terrain:
                                 length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        if getattr(self.cfg, "fixed_layout_enable", False):
+            return fixed_layout_terrain(terrain, difficulty, self.cfg)
         #核心参数
         slope = difficulty * 0.35
         # step_height = 0.05 + 0.18 * difficulty #这个递增对六足来说太快了

@@ -41,7 +41,7 @@ class HexGroundCfg(LeggedRobotCfg):
     class navigation:
         """固定目标避障（Phase 2 基础任务）"""
         # 目标生成模式
-        goal_mode = 'random'  # random / fixed
+        goal_mode = 'fixed'  # random / fixed
         # random 模式：相对 env origin 的范围
         goal_range_x = [2.0, 5.0]
         goal_range_y = [-3.0, 3.0]
@@ -50,11 +50,15 @@ class HexGroundCfg(LeggedRobotCfg):
         # 采样控制：确保直线路径被障碍物阻挡（需要绕行）
         goal_sample_max_tries = 20
         goal_line_samples = 16
-        goal_obstacle_height_threshold = 0.08
+        goal_obstacle_height_threshold = 0.2
         goal_allow_fallback = True
         # fixed 模式：相对 env origin 的固定目标
-        fixed_goal = [4.0, 0.0]
+        fixed_goal = [0.0, 0.0]
         resample_on_reach = False
+        # 出生点采样：边缘随机，朝向中心并加随机扰动
+        spawn_edge_enable = True
+        spawn_edge_margin = 0.3
+        spawn_yaw_jitter_deg = 30.0
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
         #mesh_type = 'plane'
@@ -90,9 +94,34 @@ class HexGroundCfg(LeggedRobotCfg):
         noise_amplitude_min = 0.0
         noise_amplitude_max = 0.0
         noise_downsampled_scale = 0.3
+        # 固定布局开关与参数
+        fixed_layout_enable = True
+        fixed_layout_ring_half_size = 2.2
+        fixed_layout_gap_min = 0.3
+        fixed_layout_gap_max = 0.7
+        fixed_layout_wall_thickness = 0.25
+        fixed_layout_center_clearance = 0.6
+        fixed_layout_high_height_min = 0.25
+        fixed_layout_high_height_max = 0.35
+        fixed_layout_low_height_min = 0.08
+        fixed_layout_low_height_max = 0.12
+        fixed_layout_low_size_min = 0.3
+        fixed_layout_low_size_max = 0.5
+        # mixed terrain placeholders (disabled by default)
+        mixed_enable = False
+        mixed_roughness_enable = False
+        mixed_roughness_scale = 0.02
+        mixed_roughness_downsampled_scale = 0.3
+        mixed_obstacle_enable = False
+        mixed_obstacle_num_rects_min = 4
+        mixed_obstacle_num_rects_max = 12
+        mixed_obstacle_min_size = 0.3
+        mixed_obstacle_max_size = 0.6
+        mixed_obstacle_height_min = 0.12
+        mixed_obstacle_height_max = 0.28
         # 离散障碍参数（用于 curriculum 地形）
-        discrete_obstacles_height_min = 0.08
-        discrete_obstacles_height_max = 0.18
+        discrete_obstacles_height_min = 0.12
+        discrete_obstacles_height_max = 0.28
         discrete_obstacles_min_size = 0.3
         discrete_obstacles_max_size = 0.8
         discrete_obstacles_num_rects_min = 6
