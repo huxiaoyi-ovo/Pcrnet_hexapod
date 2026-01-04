@@ -18,6 +18,7 @@ datasets/affordance_dataset.py - Affordance 数据集生成与加载脚本（第
 
 import os
 import math
+import importlib.util
 import torch
 import numpy as np
 import argparse
@@ -34,8 +35,12 @@ MAP_SIZE = 16
 
 def load_hex_ground_cfg():
     try:
-        from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg
-        return HexGroundCfg()
+        cfg_path = os.path.join(os.path.dirname(__file__), '..', 'envs', 'hex_v4', 'hex_ground_config.py')
+        cfg_path = os.path.abspath(cfg_path)
+        spec = importlib.util.spec_from_file_location("hex_ground_config", cfg_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.HexGroundCfg()
     except Exception as exc:
         print(f"[Dataset] Warning: load HexGroundCfg failed: {exc}")
         return None
