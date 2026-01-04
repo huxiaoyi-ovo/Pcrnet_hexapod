@@ -324,13 +324,44 @@ class HierarchicalHexapodEnv:
         num_obs = self.env.num_obs
         num_actions = self.env.num_actions
         num_priv_obs = getattr(self.env, 'num_privileged_obs', num_obs)
-        
+
+        def _infer_hidden_dims(state_dict, prefix: str) -> Optional[list]:
+            dims = []
+            idx = 0
+            while True:
+                weight_key = f"{prefix}.{idx}.weight"
+                if weight_key not in state_dict:
+                    break
+                out_dim = state_dict[weight_key].shape[0]
+                dims.append(out_dim)
+                idx += 2
+            if len(dims) <= 1:
+                return None
+            return dims[:-1]
+
+        state_dict = None
+        if isinstance(ckpt, dict):
+            if 'model_state_dict' in ckpt:
+                state_dict = ckpt['model_state_dict']
+            elif 'actor_state_dict' in ckpt:
+                state_dict = ckpt['actor_state_dict']
+        if state_dict is None and isinstance(ckpt, dict):
+            state_dict = ckpt
+
+        actor_hidden_dims = _infer_hidden_dims(state_dict, "actor") if state_dict else None
+        critic_hidden_dims = _infer_hidden_dims(state_dict, "critic") if state_dict else None
+        if actor_hidden_dims is None:
+            actor_hidden_dims = [256, 256, 256]
+            print("[Warning] 未能推断 actor hidden dims，使用默认 [256, 256, 256]")
+        if critic_hidden_dims is None:
+            critic_hidden_dims = actor_hidden_dims
+
         self.low_level_policy = ActorCritic(
             num_actor_obs=num_obs,
             num_critic_obs=num_priv_obs,
             num_actions=num_actions,
-            actor_hidden_dims=[256, 256, 256],
-            critic_hidden_dims=[256, 256, 256],
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
         ).to(self.device)
         
         # 加载权重
