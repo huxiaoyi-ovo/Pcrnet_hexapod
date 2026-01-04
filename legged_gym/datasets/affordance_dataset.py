@@ -148,7 +148,8 @@ def _build_base_rays(cam_cfg: Dict[str, float]) -> np.ndarray:
     x_dist = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
     y_dist = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
 
-    dirs = np.stack([x_dist, np.ones_like(x_dist), y_dist], axis=-1)
+    # Isaac camera convention: +X forward, +Y left, +Z up
+    dirs = np.stack([np.ones_like(x_dist), -x_dist, y_dist], axis=-1)
     norms = np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-6
     return dirs / norms
 
@@ -174,7 +175,7 @@ def _sample_robot_pose(terrain_cfg: Dict[str, float], nav_cfg: Dict[str, float])
         x = random.uniform(-edge_x, edge_x)
         y = edge_y
 
-    yaw_to_center = math.atan2(-y, -x)
+    yaw_to_center = math.atan2(-x, -y)
     jitter = math.radians(nav_cfg["spawn_yaw_jitter_deg"]) * random.uniform(-1.0, 1.0)
     yaw = yaw_to_center + jitter
 
