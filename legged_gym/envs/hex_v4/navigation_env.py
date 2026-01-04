@@ -32,6 +32,8 @@ class NavigationRewardConfig:
 
     # 朝向奖励
     heading_scale: float = 0.5            # 朝向目标的奖励
+    heading_use_difficulty_gate: bool = False  # 根据地形难度弱化朝向奖励
+    heading_min_weight: float = 0.2       # 朝向奖励最小权重 (仅门控开启时生效)
 
     # ★运动强度奖励 (替代步态效率)★
     intensity_match_bonus: float = 0.2    # 强度匹配地形的奖励
@@ -122,7 +124,14 @@ class NavigationRewardFunction:
             goal_pos[:, 0] - robot_pos[:, 0]
         )
         heading_error = self._angle_diff(heading, goal_direction)
-        heading_reward = torch.cos(heading_error) * self.cfg.heading_scale
+        heading_weight = 1.0
+        if self.cfg.heading_use_difficulty_gate:
+            heading_weight = torch.clamp(
+                1.0 - terrain_difficulty,
+                min=self.cfg.heading_min_weight,
+                max=1.0,
+            )
+        heading_reward = torch.cos(heading_error) * self.cfg.heading_scale * heading_weight
         rewards['heading'] = heading_reward
 
         # 3. 运动强度适配奖励 ★新增★

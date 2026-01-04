@@ -35,10 +35,13 @@ import os
 import sys
 import time
 import argparse
+import math
+import types
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import torch.nn.functional as F
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from typing import Tuple, Dict, Optional
@@ -218,13 +221,41 @@ class HierarchicalHexapodEnv:
         # 初始化 Isaac Gym 环境
         print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
         env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-        
+
+        if args.task == "hex_ground" and hasattr(env_cfg, "navigation"):
+            env_cfg.navigation.goal_reached_threshold = 0.1
+
         # 覆盖配置以适配高层训练
         env_cfg.env.num_envs = min(env_cfg.env.num_envs, args.num_envs)
         
         self.env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
         self.num_envs = self.env.num_envs
         self.max_episode_length = self.env.max_episode_length
+
+        cam_cfg = getattr(getattr(env_cfg, "sensor", None), "depth_camera", None)
+        nav_cfg = getattr(env_cfg, "navigation", None)
+        map_size = getattr(nav_cfg, "affordance_grid_size", None)
+        if map_size is None:
+            map_size = getattr(env_cfg.terrain, "affordance_grid_size", 16)
+        map_size = int(map_size)
+        cell_size = getattr(nav_cfg, "affordance_cell_size", None)
+        if cell_size is None:
+            cell_size = getattr(env_cfg.terrain, "affordance_cell_size", None)
+        if cell_size is not None:
+            map_extent = float(map_size * cell_size)
+        elif cam_cfg is not None and hasattr(cam_cfg, "far_clip"):
+            map_extent = float(cam_cfg.far_clip)
+        else:
+            map_extent = 5.0
+        self.affordance_map_size = map_size
+        self.affordance_map_extent = map_extent
+        self.affordance_clearance = float(getattr(env_cfg.terrain, "fixed_layout_robot_clearance", 0.27))
+        self.affordance_blocking_height = float(getattr(env_cfg.navigation, "goal_obstacle_height_threshold", 0.2))
+
+        if hasattr(self.env, "_resample_commands"):
+            def _no_resample(self, env_ids):
+                return
+            self.env._resample_commands = types.MethodType(_no_resample, self.env)
         
         # 加载 Low-Level Controller
         self._load_low_level_policy(args.low_level_ckpt)
@@ -240,12 +271,23 @@ class HierarchicalHexapodEnv:
         
         # 初始化 Reward Function
         if NavigationRewardConfig is not None:
-            self.reward_cfg = NavigationRewardConfig(
+            reward_kwargs = dict(
                 goal_approach_scale=2.0,
                 goal_reach_bonus=10.0,
                 intensity_match_bonus=0.2,
                 intensity_smooth_penalty=-0.05,
             )
+            if args.task == "hex_ground":
+                reward_kwargs.update(
+                    goal_approach_scale=3.0,
+                    goal_reach_threshold=0.1,
+                    heading_scale=0.2,
+                    heading_use_difficulty_gate=True,
+                    heading_min_weight=0.2,
+                    stability_scale=0.01,
+                    time_penalty=-0.03,
+                )
+            self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
         else:
             self.reward_func = None
@@ -303,15 +345,105 @@ class HierarchicalHexapodEnv:
     def reset(self) -> Dict[str, torch.Tensor]:
         """复位环境"""
         obs, _ = self.env.reset()
+
+        if hasattr(self.env, "commands"):
+            self.env.commands[:, :3] = 0.0
+            if hasattr(self.env, "commands_scale") and hasattr(self.env, "obs_buf"):
+                if self.env.obs_buf.shape[1] >= 3:
+                    self.env.obs_buf[:, -3:] = 0.0
         
         self.episode_length_buf.zero_()
         self.prev_intensity.zero_()
         self.adapter.reset(self.num_envs, self.device)
-        
+
+        self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
         self.prev_robot_pos = self.env.root_states[:, :3].clone()
         
         return obs_dict
+
+    def _refresh_depth_images(self, force: bool = False) -> None:
+        if not hasattr(self.env, "camera_cfg"):
+            return
+        if self.env.camera_cfg is None:
+            return
+        if not hasattr(self.env, "depth_images"):
+            return
+
+        if not getattr(self.env, "enable_camera", False):
+            if hasattr(self.env, "depth_raw") and hasattr(self.env, "_process_depth_for_network"):
+                self.env.depth_raw.fill_(self.env.camera_cfg.far_clip)
+                processed = self.env._process_depth_for_network(self.env.depth_raw)
+                self.env.depth_images[:] = processed
+            else:
+                self.env.depth_images.fill_(self.env.camera_cfg.far_clip)
+            return
+
+        if not force and self.env.common_step_counter % self.env.camera_cfg.capture_interval != 0:
+            return
+
+        if hasattr(self.env, "_get_depth_images") and hasattr(self.env, "_process_depth_for_network"):
+            depth_raw = self.env._get_depth_images()
+            processed = self.env._process_depth_for_network(depth_raw)
+            self.env.depth_images[:] = processed
+
+    def _compute_gt_affordance_from_heightfield(self) -> Optional[torch.Tensor]:
+        if getattr(self.env, "height_samples", None) is None:
+            return None
+        map_size = self.affordance_map_size
+        map_extent = self.affordance_map_extent
+        cell = map_extent / map_size
+
+        x_centers = torch.linspace(
+            -map_extent * 0.5 + cell * 0.5,
+            map_extent * 0.5 - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        y_centers = torch.linspace(
+            0.0 + cell * 0.5,
+            map_extent - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        x_body = grid_x.reshape(-1).unsqueeze(0)
+        y_body = grid_y.reshape(-1).unsqueeze(0)
+
+        robot_xy = self.env.root_states[:, :2]
+        if hasattr(self.env, "robot_state_buf"):
+            yaw = self.env.robot_state_buf[:, 2]
+        else:
+            yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        cos_h = torch.cos(yaw).unsqueeze(1)
+        sin_h = torch.sin(yaw).unsqueeze(1)
+
+        x_world = robot_xy[:, 0:1] + cos_h * x_body - sin_h * y_body
+        y_world = robot_xy[:, 1:2] + sin_h * x_body + cos_h * y_body
+
+        border = self.env.cfg.terrain.border_size
+        scale = self.env.cfg.terrain.horizontal_scale
+        max_x = self.env.height_samples.shape[0] - 2
+        max_y = self.env.height_samples.shape[1] - 2
+        idx_x = torch.clamp(((x_world + border) / scale).long(), 0, max_x)
+        idx_y = torch.clamp(((y_world + border) / scale).long(), 0, max_y)
+
+        heights = self.env.height_samples[idx_x, idx_y] * self.env.cfg.terrain.vertical_scale
+        heights = heights.view(self.num_envs, map_size, map_size)
+
+        occ_all = (heights > 1e-6).float()
+        occ_block = (heights >= self.affordance_blocking_height).float().unsqueeze(1)
+
+        radius_cells = int(math.ceil(self.affordance_clearance / cell))
+        if radius_cells > 0:
+            kernel = 2 * radius_cells + 1
+            pooled = F.max_pool2d(occ_block, kernel_size=kernel, stride=1, padding=radius_cells)
+            passable = (pooled <= 0.5) & (occ_block < 0.5)
+        else:
+            passable = occ_block < 0.5
+        passable_gap = passable.float().squeeze(1)
+
+        return torch.cat([occ_all.unsqueeze(1), passable_gap.unsqueeze(1)], dim=1)
 
     def _get_high_level_obs(self) -> Dict[str, torch.Tensor]:
         """
@@ -355,22 +487,28 @@ class HierarchicalHexapodEnv:
         if hasattr(self.env, 'get_affordance_data'):
             aff_data = self.env.get_affordance_data()
             obs_dict['gt_affordance'] = aff_data['local_affordance']
-        elif hasattr(self.env, 'measured_heights'):
-            heights = self.env.measured_heights
-            side_len = int(np.sqrt(heights.shape[1]))
-            
-            if side_len ** 2 == heights.shape[1]:
-                h_map = heights.view(self.num_envs, 1, side_len, side_len)
-                h_map = torch.nn.functional.interpolate(h_map, size=(16, 16), mode='bilinear')
-                obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map)], dim=1)
+        else:
+            aff_map = self._compute_gt_affordance_from_heightfield()
+            if aff_map is not None:
+                obs_dict['gt_affordance'] = aff_map
+            elif hasattr(self.env, 'measured_heights'):
+                heights = self.env.measured_heights
+                side_len = int(np.sqrt(heights.shape[1]))
+                
+                if side_len ** 2 == heights.shape[1]:
+                    h_map = heights.view(self.num_envs, 1, side_len, side_len)
+                    h_map = torch.nn.functional.interpolate(h_map, size=(16, 16), mode='bilinear')
+                    obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map)], dim=1)
+                else:
+                    obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
             else:
                 obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
-        else:
-            obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
         obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
         
         # 4. Depth Image
-        if hasattr(self.env, 'depth_buffer'):
+        if hasattr(self.env, 'depth_images'):
+            obs_dict['depth'] = self.env.depth_images.clone()
+        elif hasattr(self.env, 'depth_buffer'):
             obs_dict['depth'] = self.env.depth_buffer.unsqueeze(1).clone()
         else:
             obs_dict['depth'] = torch.zeros(self.num_envs, 1, 128, 128, device=self.device)
@@ -391,12 +529,18 @@ class HierarchicalHexapodEnv:
         """
         # 1. Adapter: 动作映射 (带 Slew Rate Limiting)
         velocity_cmd, adapter_info = self.adapter.convert(subgoal, intensity)
-        
+
         # 2. Low-Level 控制循环 (50Hz)
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
         done_any = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         
         for _ in range(self.decimation):
+            if hasattr(self.env, "commands"):
+                self.env.commands[:, :3] = velocity_cmd.detach()
+                if hasattr(self.env, "commands_scale") and hasattr(self.env, "obs_buf"):
+                    if self.env.obs_buf.shape[1] >= 3:
+                        self.env.obs_buf[:, -3:] = velocity_cmd.detach() * self.env.commands_scale
+
             low_level_obs = self.env.obs_buf
             
             with torch.no_grad():
@@ -409,13 +553,31 @@ class HierarchicalHexapodEnv:
         self.episode_length_buf += 1
         
         # 3. 计算高层奖励
+        self._refresh_depth_images()
         current_obs = self._get_high_level_obs()
         robot_pos = self.env.root_states[:, :3]
         
+        collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if hasattr(self.env, "contact_forces") and hasattr(self.env, "termination_contact_indices"):
+            contact_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
+            collision_mask = torch.any(
+                torch.norm(self.env.contact_forces[:, self.env.termination_contact_indices, :], dim=-1) > contact_threshold,
+                dim=1,
+            )
+
         if self.reward_func is not None:
             robot_vel = self.env.base_lin_vel
             robot_quat = self.env.root_states[:, 3:7]
-            goal_pos = current_obs['goal'] + robot_pos[:, :2]
+            if hasattr(self.env, "goal_world"):
+                goal_pos = self.env.goal_world.clone()
+            else:
+                yaw = current_obs['state'][:, 2]
+                cos_h = torch.cos(yaw)
+                sin_h = torch.sin(yaw)
+                goal_local = current_obs['goal']
+                goal_x = robot_pos[:, 0] + cos_h * goal_local[:, 0] - sin_h * goal_local[:, 1]
+                goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
+                goal_pos = torch.stack([goal_x, goal_y], dim=1)
             filtered_intensity = adapter_info['filtered_intensity'].squeeze(-1)
             
             reward_dict = self.reward_func.compute_reward(
@@ -427,7 +589,7 @@ class HierarchicalHexapodEnv:
                 intensity=filtered_intensity,
                 prev_intensity=self.prev_intensity,
                 terrain_difficulty=current_obs['gt_difficulty'],
-                collision_mask=done_any,
+                collision_mask=collision_mask,
             )
             total_reward = reward_dict['total']
         else:

@@ -110,7 +110,7 @@ class HexGroundCfg(LeggedRobotCfg):
         fixed_layout_low_height_max = 0.12
         fixed_layout_cyl_radius_min = 0.12
         fixed_layout_cyl_radius_max = 0.12
-        fixed_layout_cyl_offset = 0.6
+        fixed_layout_cyl_offset = 0.7
         # mixed terrain placeholders (disabled by default)
         mixed_enable = False
         mixed_roughness_enable = False
