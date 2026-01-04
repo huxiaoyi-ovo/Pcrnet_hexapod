@@ -70,7 +70,7 @@ def Expert_Play(env:HexGround,cfg:HexGroundCfg,mode):
     if mode=='expert_ground':
         _,_ = env.reset()
     elif mode=='expert_terrain':
-        _,_ ,_= env.reset_separate()
+        env.reset_separate()
 
     reset=False
     time_steps=0
@@ -130,7 +130,7 @@ def Expert_Play(env:HexGround,cfg:HexGroundCfg,mode):
             if mode == 'expert_ground':
                 _,_,reward,dones,infos = env.step(expert_actions)
             elif mode =='expert_terrain':
-                _,_,_,reward,dones,infos = env.step_separate(expert_actions)
+                _, reward, dones, infos = env.step_separate(expert_actions)
             # dof_pos_cur=env.dof_pos
 
             #统计专家能获取多少奖励
@@ -387,7 +387,10 @@ def Hex_Terrain_Play(env:HexGround, env_cfg:HexGroundCfg,train_cfg_dict,device='
     storage=RolloutStorageMemory(env_cfg.env.num_envs,
                                  train_cfg.runner.num_steps_per_env,
                                  10,[env_cfg.env.num_observations+30],[11*13],[env_cfg.env.num_actions],device)
-    obs,obs_vgf,obs_terrain = env.reset_separate()
+    obs_dict = env.reset_separate()
+    obs = obs_dict['proprioception']
+    obs_vgf = obs_dict['privileged']
+    obs_terrain = obs_dict['terrain']
     joystick = JoyStick()
     # env.foot_traj_viz=True
 
@@ -408,7 +411,10 @@ def Hex_Terrain_Play(env:HexGround, env_cfg:HexGroundCfg,train_cfg_dict,device='
 
             reset,vx,vy,vz,yaw =joystick.get_commands()
             if reset:
-                obs,obs_vgf,obs_terrain = env.reset_separate()
+                obs_dict = env.reset_separate()
+                obs = obs_dict['proprioception']
+                obs_vgf = obs_dict['privileged']
+                obs_terrain = obs_dict['terrain']
             else:
 
                 # vx,vy,yaw=GenCommand(time_steps)
@@ -429,7 +435,10 @@ def Hex_Terrain_Play(env:HexGround, env_cfg:HexGroundCfg,train_cfg_dict,device='
                 # obs_terrain_lstm_latent.fill_(0.0)
                 actions = actor_critic.act_inference(obs_splice,obs_terrain_lstm_latent)
 
-                obs,obs_vgf,obs_terrain,reward,dones,infos = env.step_separate(actions)
+                obs_dict, reward, dones, infos = env.step_separate(actions)
+                obs = obs_dict['proprioception']
+                obs_vgf = obs_dict['privileged']
+                obs_terrain = obs_dict['terrain']
                 storage.update_dones_hist(dones)
                 
 

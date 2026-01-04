@@ -38,6 +38,23 @@ class HexGroundCfg(LeggedRobotCfg):
             noise_level = 0.02
             hole_ratio = 0.05
             edge_blur_strength = 0.05
+    class navigation:
+        """固定目标避障（Phase 2 基础任务）"""
+        # 目标生成模式
+        goal_mode = 'random'  # random / fixed
+        # random 模式：相对 env origin 的范围
+        goal_range_x = [2.0, 5.0]
+        goal_range_y = [-3.0, 3.0]
+        goal_min_distance = 2.0
+        goal_reached_threshold = 0.5
+        # 采样控制：确保直线路径被障碍物阻挡（需要绕行）
+        goal_sample_max_tries = 20
+        goal_line_samples = 16
+        goal_obstacle_height_threshold = 0.08
+        goal_allow_fallback = True
+        # fixed 模式：相对 env origin 的固定目标
+        fixed_goal = [4.0, 0.0]
+        resample_on_reach = False
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
         #mesh_type = 'plane'
@@ -52,7 +69,8 @@ class HexGroundCfg(LeggedRobotCfg):
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
         measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap, pit, gate, slalom]
-        terrain_proportions = [0.7, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # 仅使用离散障碍地形，难度随 curriculum 行递增
+        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         #开启了地形选择，就按照参数中的地形生成
         selected=False
         num_sub_terrains=1
@@ -72,6 +90,14 @@ class HexGroundCfg(LeggedRobotCfg):
         noise_amplitude_min = 0.0
         noise_amplitude_max = 0.0
         noise_downsampled_scale = 0.3
+        # 离散障碍参数（用于 curriculum 地形）
+        discrete_obstacles_height_min = 0.08
+        discrete_obstacles_height_max = 0.18
+        discrete_obstacles_min_size = 0.3
+        discrete_obstacles_max_size = 0.8
+        discrete_obstacles_num_rects_min = 6
+        discrete_obstacles_num_rects_max = 14
+        discrete_obstacles_platform_size = 2.0
         # slalom走廊加宽（相对默认2.8扩大1.5倍）
         slalom_corridor_width_scale = 4.2
         slope_treshold=0.1

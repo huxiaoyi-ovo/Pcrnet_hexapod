@@ -119,7 +119,9 @@ class Terrain:
         # discrete_obstacles_height = 0.05 + difficulty * 0.2
         # discrete_obstacles_height = 0.05 + difficulty * 0.125  # 原值: 5cm→17.5cm 太高
         # 六足实际尺寸: 腿长20.2cm, 身高10cm, 合理障碍物应 <= 6cm
-        discrete_obstacles_height = 0.02 + difficulty * 0.04  # 优化: 2cm→6cm
+        height_min = getattr(self.cfg, "discrete_obstacles_height_min", 0.02)
+        height_max = getattr(self.cfg, "discrete_obstacles_height_max", 0.06)
+        discrete_obstacles_height = height_min + (height_max - height_min) * difficulty
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1
         gap_size = 1. * difficulty
@@ -161,7 +163,23 @@ class Terrain:
 
         elif choice < self.proportions[4]:
             # === P2.1: 添加渐进式底噪 ===
-            terrain_utils.discrete_obstacles_terrain(terrain, discrete_obstacles_height, 1., 2., 20, platform_size=2)
+            min_size = getattr(self.cfg, "discrete_obstacles_min_size", 1.0)
+            max_size = getattr(self.cfg, "discrete_obstacles_max_size", 2.0)
+            num_rects_min = getattr(self.cfg, "discrete_obstacles_num_rects_min", None)
+            num_rects_max = getattr(self.cfg, "discrete_obstacles_num_rects_max", None)
+            if num_rects_min is not None and num_rects_max is not None:
+                num_rects = int(round(num_rects_min + (num_rects_max - num_rects_min) * difficulty))
+            else:
+                num_rects = getattr(self.cfg, "discrete_obstacles_num_rects", 20)
+            platform_size = getattr(self.cfg, "discrete_obstacles_platform_size", 2.0)
+            terrain_utils.discrete_obstacles_terrain(
+                terrain,
+                discrete_obstacles_height,
+                min_size,
+                max_size,
+                num_rects,
+                platform_size=platform_size,
+            )
             
             # 获取底噪参数 (从cfg读取)
             noise_min = getattr(self.cfg, 'noise_amplitude_min', 0.005)  # 0.5cm

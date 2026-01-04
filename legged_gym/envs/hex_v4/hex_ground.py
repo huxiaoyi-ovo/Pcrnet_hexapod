@@ -27,6 +27,7 @@ class HexGround(LeggedRobot):
             self._use_camera_in_headless = headless and self.enable_camera
         super().__init__(cfg,sim_params,physics_engine,sim_device,headless)
         self.cfg:HexGroundCfg = cfg
+        self.nav_cfg = getattr(cfg, "navigation", None)
         self.debug_viz = False
         self.foot_traj_viz=False
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
@@ -55,8 +56,8 @@ class HexGround(LeggedRobot):
     #     return obs,obs_vfg,obs_terrain
     def reset_separate(self):
         self.reset_idx(torch.arange(self.num_envs,device=self.device))
-        obs,obs_vfg,obs_terrain,_,_,_=self.step_separate(torch.zeros_like(self.actions))
-        return obs, obs_vfg, obs_terrain
+        obs_dict, _, _, _ = self.step_separate(torch.zeros_like(self.actions))
+        return obs_dict
     
     def _create_envs(self):
         super()._create_envs()
@@ -262,6 +263,21 @@ class HexGround(LeggedRobot):
             self.rgb_images = torch.stack(rgb_list, dim=0)
         return self.rgb_images
 
+    def _process_depth_for_network(self, depth_images):
+        """预处理深度图，用于神经网络输入"""
+        depth_normalized = (depth_images - self.camera_cfg.near_clip) / (
+            self.camera_cfg.far_clip - self.camera_cfg.near_clip
+        )
+        depth_normalized = depth_normalized.unsqueeze(1)
+        if hasattr(self.camera_cfg, 'output_size'):
+            depth_normalized = torch.nn.functional.interpolate(
+                depth_normalized,
+                size=(self.camera_cfg.output_size, self.camera_cfg.output_size),
+                mode='bilinear',
+                align_corners=False
+            )
+        return depth_normalized
+
     def _reset_root_states(self, env_ids):
         """重置root状态，slalom地形时固定入口位姿"""
         if len(env_ids) == 0:
@@ -366,7 +382,21 @@ class HexGround(LeggedRobot):
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
-        return self.obs_buf, self.obs_vgf_buf, self.obs_terrain_buf, self.rew_buf, self.reset_buf, self.extras
+        self.obs_vgf_buf = torch.clip(self.obs_vgf_buf, -clip_obs, clip_obs)
+        self.obs_terrain_buf = torch.clip(self.obs_terrain_buf, -clip_obs, clip_obs)
+
+        if self.camera_cfg is not None:
+            if not self.enable_camera:
+                self.depth_raw.fill_(self.camera_cfg.far_clip)
+                processed = self._process_depth_for_network(self.depth_raw)
+                self.depth_images[:] = processed
+            elif self.common_step_counter % self.camera_cfg.capture_interval == 0:
+                depth_raw = self._get_depth_images()
+                processed = self._process_depth_for_network(depth_raw)
+                self.depth_images[:] = processed
+
+        obs_dict = self._build_obs_dict()
+        return obs_dict, self.rew_buf, self.reset_buf, self.extras
 
     # def _create_envs(self):
     #     super()._create_envs()
@@ -524,6 +554,7 @@ class HexGround(LeggedRobot):
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
+            self._resample_nav_goals(env_ids)
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:
@@ -624,6 +655,9 @@ class HexGround(LeggedRobot):
         #     if self.privileged_obs_buf is not None:
         #         self.privileged_obs_buf += (2*torch.rand_like(self.privileged_obs_buf)-1)*self.noise_scale_vec
 
+        self._extract_robot_state()
+        self._update_goal_buffer()
+
     def compute_observations_separated(self):
         #返回分为 obs(机器人本体可以获取的观测), obs_vgf(特权信息， 基座线速度，重力加速度，足端z方向力), obs_terrain(地形高度信息)
         height=torch.clip((self.root_states[:,2].unsqueeze(1)-0.025-self.measured_heights),min=-1.0,max=1.0)
@@ -657,8 +691,149 @@ class HexGround(LeggedRobot):
             self.obs_vgf_buf += (2*torch.rand_like(self.obs_vgf_buf)-1)*self.noise_scale_vec[self.num_obs : self.num_obs+12]
             self.obs_terrain_buf += (2*torch.rand_like(self.obs_terrain_buf)-1)*self.noise_scale_vec[self.num_obs+12:]
 
+        self._extract_robot_state()
+        self._update_goal_buffer()
+
+    def _build_obs_dict(self):
+        depth_images = self.depth_images if hasattr(self, "depth_images") else None
+        return {
+            'proprioception': self.obs_buf,
+            'privileged': self.obs_vgf_buf,
+            'terrain': self.obs_terrain_buf,
+            'depth': depth_images,
+            'robot_state': self.robot_state_buf,
+            'goal': self.goal_buf,
+        }
+
     def get_observations_separated(self):
-        return self.obs_buf, self.obs_vgf_buf, self.obs_terrain_buf
+        return self._build_obs_dict()
+
+    def _extract_robot_state(self):
+        """提取高层使用的机器人状态 (num_envs, 9)"""
+        quat = self.base_quat
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+
+        yaw = torch.atan2(
+            2.0 * (w*z + x*y),
+            1.0 - 2.0 * (y*y + z*z)
+        )
+        roll = torch.atan2(
+            2.0 * (w*x + y*z),
+            1.0 - 2.0 * (x*x + y*y)
+        )
+        pitch = torch.asin(torch.clamp(2.0 * (w*y - z*x), -1.0, 1.0))
+
+        pos_x = self.root_states[:, 0] - self.env_origins[:, 0]
+        pos_y = self.root_states[:, 1] - self.env_origins[:, 1]
+
+        if isinstance(self.measured_heights, torch.Tensor) and self.measured_heights.numel() > 0:
+            height = self.root_states[:, 2] - torch.mean(self.measured_heights, dim=1)
+        else:
+            height = self.root_states[:, 2]
+
+        self.robot_state_buf = torch.stack([
+            pos_x,
+            pos_y,
+            yaw,
+            self.base_lin_vel[:, 0],
+            self.base_lin_vel[:, 1],
+            self.base_ang_vel[:, 2],
+            height,
+            roll,
+            pitch
+        ], dim=1)
+
+    def _update_goal_buffer(self):
+        if self.nav_cfg is None:
+            return
+        if not hasattr(self, "goal_world"):
+            return
+        goal_world = self.goal_world
+        delta_world = goal_world - self.root_states[:, :2]
+        heading = self.robot_state_buf[:, 2]
+        cos_h = torch.cos(heading)
+        sin_h = torch.sin(heading)
+        dx_body = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]
+        dy_body = -sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
+        self.goal_buf[:] = torch.stack([dx_body, dy_body], dim=1)
+
+        if getattr(self.nav_cfg, "resample_on_reach", False):
+            dist = torch.norm(delta_world, dim=1)
+            reached = dist < getattr(self.nav_cfg, "goal_reached_threshold", 0.5)
+            if reached.any():
+                self._resample_nav_goals(reached.nonzero(as_tuple=False).flatten())
+
+    def _line_has_obstacle(self, start_xy: torch.Tensor, goal_xy: torch.Tensor) -> torch.Tensor:
+        if self.height_samples is None:
+            return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
+        samples = int(getattr(self.nav_cfg, "goal_line_samples", 16))
+        if samples <= 0:
+            return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
+
+        t = torch.linspace(0.0, 1.0, samples, device=self.device).view(1, -1, 1)
+        points = start_xy.unsqueeze(1) + (goal_xy - start_xy).unsqueeze(1) * t
+
+        border = self.cfg.terrain.border_size
+        scale = self.cfg.terrain.horizontal_scale
+        pts = points + border
+        idx = (pts / scale).long()
+        px = torch.clamp(idx[..., 0], 0, self.height_samples.shape[0] - 2)
+        py = torch.clamp(idx[..., 1], 0, self.height_samples.shape[1] - 2)
+        heights = self.height_samples[px, py] * self.cfg.terrain.vertical_scale
+
+        threshold = getattr(self.nav_cfg, "goal_obstacle_height_threshold", 0.08)
+        return (heights >= threshold).any(dim=1)
+
+    def _resample_nav_goals(self, env_ids: torch.Tensor):
+        if self.nav_cfg is None or env_ids.numel() == 0:
+            return
+        goal_mode = getattr(self.nav_cfg, "goal_mode", "random")
+        if goal_mode == "fixed":
+            fixed_goal = torch.tensor(self.nav_cfg.fixed_goal, device=self.device)
+            self.goal_world[env_ids] = fixed_goal.unsqueeze(0) + self.env_origins[env_ids, :2]
+            return
+        if goal_mode != "random":
+            return
+        self._sample_random_goals(env_ids)
+
+    def _sample_random_goals(self, env_ids: torch.Tensor):
+        max_tries = int(getattr(self.nav_cfg, "goal_sample_max_tries", 20))
+        min_dist = float(getattr(self.nav_cfg, "goal_min_distance", 2.0))
+        range_x = getattr(self.nav_cfg, "goal_range_x", [2.0, 5.0])
+        range_y = getattr(self.nav_cfg, "goal_range_y", [-3.0, 3.0])
+        allow_fallback = bool(getattr(self.nav_cfg, "goal_allow_fallback", True))
+
+        pending = env_ids.clone()
+        for _ in range(max_tries):
+            if pending.numel() == 0:
+                break
+            num = pending.shape[0]
+            rand_x = torch_rand_float(range_x[0], range_x[1], (num, 1), device=self.device).squeeze(1)
+            rand_y = torch_rand_float(range_y[0], range_y[1], (num, 1), device=self.device).squeeze(1)
+            goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, rand_y], dim=1)
+            pos = self.root_states[pending, :2]
+            dist = torch.norm(goal_world - pos, dim=1)
+            dist_ok = dist >= min_dist
+            blocked = self._line_has_obstacle(pos, goal_world)
+            ok = dist_ok & blocked
+            if ok.any():
+                self.goal_world[pending[ok]] = goal_world[ok]
+            pending = pending[~ok]
+
+        if pending.numel() > 0 and allow_fallback:
+            for _ in range(max_tries):
+                if pending.numel() == 0:
+                    break
+                num = pending.shape[0]
+                rand_x = torch_rand_float(range_x[0], range_x[1], (num, 1), device=self.device).squeeze(1)
+                rand_y = torch_rand_float(range_y[0], range_y[1], (num, 1), device=self.device).squeeze(1)
+                goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, rand_y], dim=1)
+                pos = self.root_states[pending, :2]
+                dist = torch.norm(goal_world - pos, dim=1)
+                dist_ok = dist >= min_dist
+                if dist_ok.any():
+                    self.goal_world[pending[dist_ok]] = goal_world[dist_ok]
+                pending = pending[~dist_ok]
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -674,6 +849,16 @@ class HexGround(LeggedRobot):
         self.base_ang_acc = torch.zeros_like(self.base_ang_vel)
         #额外添加上一次的接触力
         self.last_contact_forces = torch.zeros_like(self.contact_forces)
+        # 高层导航缓冲
+        self.robot_state_buf = torch.zeros(
+            self.num_envs, 9, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.goal_buf = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.goal_world = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
 
         #设置记录观测的最大和最小和平均值，用于判断观测归一化合理程度
         # self.priv_obs_min = torch.zeros_like(self.privileged_obs_buf[0])

@@ -525,7 +525,10 @@ def play(args):
             env.episode_debug_stats.zero_()
         if use_separated_obs and hasattr(env, "compute_observations_separated"):
             env.compute_observations_separated()
-            return env.get_observations_separated()
+            obs_sep = env.get_observations_separated()
+            if isinstance(obs_sep, dict):
+                return obs_sep['proprioception'], obs_sep['privileged'], obs_sep['terrain']
+            return obs_sep
         env.compute_observations()
         return env.get_observations(), None, None
 
@@ -763,7 +766,15 @@ def play(args):
                 # 刷新观测以反映最新 commands（严格使用 env 自身的观测函数，避免覆盖 obs_buf 结构）
                 if use_separated_obs and hasattr(env, "compute_observations_separated"):
                     env.compute_observations_separated()
-                    obs, obs_vgf, obs_terrain = env.get_observations_separated()
+                    obs_sep = env.get_observations_separated()
+                    if isinstance(obs_sep, dict):
+                        obs, obs_vgf, obs_terrain = (
+                            obs_sep['proprioception'],
+                            obs_sep['privileged'],
+                            obs_sep['terrain'],
+                        )
+                    else:
+                        obs, obs_vgf, obs_terrain = obs_sep
                 else:
                     env.compute_observations()
                     obs = env.get_observations()
@@ -973,7 +984,7 @@ def play(args):
                     if cmd_vec is None:
                         cmd_vec = torch.tensor([cmd_vx, cmd_vy, cmd_yaw], device=env.device)
                     cmd_lin = cmd_vec[:2]
-                    cmd_yaw = cmd_vec[2]
+                    cmd_yaw_tensor = cmd_vec[2]
 
                     base_lin = env.base_lin_vel[capture_env, :2] if hasattr(env, "base_lin_vel") else None
                     base_ang = env.base_ang_vel[capture_env, 2] if hasattr(env, "base_ang_vel") else None
@@ -983,7 +994,7 @@ def play(args):
                         float(torch.norm(cmd_lin - base_lin).item()) if base_lin is not None else float("nan")
                     )
                     track_err_yaw = (
-                        float(torch.abs(cmd_yaw - base_ang).item()) if base_ang is not None else float("nan")
+                        float(torch.abs(cmd_yaw_tensor - base_ang).item()) if base_ang is not None else float("nan")
                     )
                     speed_ratio = (
                         base_lin_speed / (cmd_lin_speed + 1e-6)
