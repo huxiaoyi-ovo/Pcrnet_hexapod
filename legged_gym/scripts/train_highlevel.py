@@ -52,6 +52,8 @@ from collections import deque
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from legged_gym.utils import get_args as get_isaac_args
+
 # V3.6 状态维度定义 (匹配 hex_terrain.py robot_state_buf)
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
@@ -218,6 +220,11 @@ class HierarchicalHexapodEnv:
         self.args = args
         self.device = device
         self.mode = args.mode
+
+        isaac_args = get_isaac_args()
+        for key, value in vars(isaac_args).items():
+            if not hasattr(self.args, key):
+                setattr(self.args, key, value)
         
         # 初始化 Isaac Gym 环境
         print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
