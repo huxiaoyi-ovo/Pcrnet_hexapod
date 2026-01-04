@@ -128,8 +128,8 @@ def play(args):
                 return
             env.update_command_curriculum = types.MethodType(_no_cmd_update, env)
 
-    # play模式下固定出生位姿（禁用随机偏移与随机初始速度）
-    if hasattr(env, "_reset_root_states"):
+    # play模式下可选固定出生位姿（默认关闭，保持训练配置的出生逻辑）
+    if getattr(args, "play_fixed_spawn", False) and hasattr(env, "_reset_root_states"):
         def _reset_root_states_fixed(self, env_ids):
             if len(env_ids) == 0:
                 return

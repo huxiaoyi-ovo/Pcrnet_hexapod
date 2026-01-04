@@ -174,6 +174,7 @@ def get_args():
 
         # play.py 专用选项（默认严格复现训练配置）
         {"name": "--play_overrides", "action": "store_true", "default": False, "help": "Enable play-time overrides (rows/cols, disable curriculum/noise/domain_rand). Default: off for exact training cfg."},
+        {"name": "--play_fixed_spawn", "action": "store_true", "default": False, "help": "Play-only: force fixed spawn pose (disable spawn_edge/random init). Default: off."},
         {"name": "--train_iter", "type": int, "help": "Training iteration used to sync env curriculum state in play (defaults to --checkpoint when available)."},
         {"name": "--keyboard_cmds", "action": "store_true", "default": False, "help": "Use keyboard to override commands (vx/vy/yaw) in play."},
         {"name": "--allow_fallback", "action": "store_true", "default": False, "help": "Allow play fallback path when encode_obs fails (not recommended)."},
