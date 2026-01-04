@@ -37,6 +37,7 @@ import time
 import argparse
 import math
 import types
+import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 import torch
 import torch.nn as nn
 import torch.optim as optim
