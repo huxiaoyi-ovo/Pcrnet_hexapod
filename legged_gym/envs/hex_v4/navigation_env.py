@@ -34,12 +34,18 @@ class NavigationRewardConfig:
     heading_scale: float = 0.5            # 朝向目标的奖励
     heading_use_difficulty_gate: bool = False  # 根据地形难度弱化朝向奖励
     heading_min_weight: float = 0.2       # 朝向奖励最小权重 (仅门控开启时生效)
+    heading_gate_use: bool = False        # 速度/进度门控
+    heading_gate_min_speed: float = 0.05  # 低速门控阈值
+    heading_gate_min_approach: float = 0.0  # 进度门控阈值
 
     # ★运动强度奖励 (替代步态效率)★
     intensity_match_bonus: float = 0.2    # 强度匹配地形的奖励
     intensity_mismatch_penalty: float = -0.1  # 强度不匹配的惩罚
     intensity_smooth_penalty: float = -0.05   # 强度变化惩罚
     max_intensity_change: float = 0.2     # 每步最大强度变化
+    intensity_gate_use: bool = False      # 强度匹配门控
+    intensity_gate_min_speed: float = 0.05  # 强度门控速度阈值
+    intensity_gate_min_approach: float = 0.0  # 强度门控进度阈值
 
     # 时间惩罚
     time_penalty: float = -0.01           # 每步时间惩罚
@@ -48,6 +54,9 @@ class NavigationRewardConfig:
     stability_scale: float = 0.1
     pitch_threshold: float = 0.3          # rad, 约17度
     roll_threshold: float = 0.3
+
+    # 速度奖励
+    velocity_scale: float = 0.1
 
 
 class NavigationRewardFunction:
@@ -132,12 +141,22 @@ class NavigationRewardFunction:
                 max=1.0,
             )
         heading_reward = torch.cos(heading_error) * self.cfg.heading_scale * heading_weight
+        if self.cfg.heading_gate_use:
+            speed = torch.norm(robot_vel[:, :2], dim=-1)
+            progress = prev_dist - dist_to_goal
+            gate = (speed > self.cfg.heading_gate_min_speed) | (progress > self.cfg.heading_gate_min_approach)
+            heading_reward = heading_reward * gate.float()
         rewards['heading'] = heading_reward
 
         # 3. 运动强度适配奖励 ★新增★
         intensity_rewards = self._compute_intensity_reward(
             intensity, prev_intensity, terrain_difficulty
         )
+        if self.cfg.intensity_gate_use:
+            speed = torch.norm(robot_vel[:, :2], dim=-1)
+            progress = prev_dist - dist_to_goal
+            gate = (speed > self.cfg.intensity_gate_min_speed) | (progress > self.cfg.intensity_gate_min_approach)
+            intensity_rewards['intensity_match'] = intensity_rewards['intensity_match'] * gate.float()
         rewards.update(intensity_rewards)
 
         # 4. 碰撞惩罚
@@ -150,7 +169,7 @@ class NavigationRewardFunction:
 
         # 6. 速度奖励
         vel_towards_goal = self._compute_vel_towards_goal(robot_vel, robot_pos, goal_pos)
-        velocity_reward = vel_towards_goal * 0.1
+        velocity_reward = vel_towards_goal * self.cfg.velocity_scale
         rewards['velocity'] = velocity_reward
 
         # 7. 时间惩罚

@@ -177,7 +177,8 @@ class TerrainAdaptivePlanner(nn.Module):
         )
 
         # 物理量缩放 (m, m, rad)
-        self.register_buffer('subgoal_scale', torch.tensor([0.5, 0.5, 0.5]))
+        # subgoal 范围：xy 用于线速度命令，yaw 保持相对保守
+        self.register_buffer('subgoal_scale', torch.tensor([1.0, 1.0, 0.5]))
         
         self._init_weights()
 

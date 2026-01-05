@@ -60,7 +60,7 @@ def parse_args():
         action="store_false",
         help="Disable debug output",
     )
-    parser.add_argument("--debug_interval", type=int, default=50, help="Debug print interval (steps)")
+    parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0]] + unknown
@@ -130,23 +130,24 @@ def main():
     if args.camera_env >= env.num_envs:
         print(f"[PlayHigh] ⚠ camera_env={args.camera_env} out of range; clamping to {env.num_envs - 1}.")
         args.camera_env = env.num_envs - 1
+    obs = env.reset()
+    aff_shape = obs["gt_affordance"].shape[1:]
     # Use clearer alias; implementation is identical to TerrainAdaptivePlanner.
     planner = th.HighLevelPlanner(
-        affordance_channels=th.AFFORDANCE_CHANNELS,
-        state_dim=th.STATE_DIM,
-        goal_dim=th.GOAL_DIM,
+        affordance_channels=aff_shape[0],
+        state_dim=obs["state"].shape[1],
+        goal_dim=obs["goal"].shape[1],
     ).to(device)
 
     ckpt = torch.load(args.teacher_ckpt, map_location=device)
     state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     planner.load_state_dict(state_dict)
     planner.eval()
-
-    obs = env.reset()
     step_idx = 0
     deterministic = not args.stochastic
     camera_frame_idx = 0
 
+    prev_dist = None
     while True:
         with torch.no_grad():
             subgoal, intensity, _ = planner.get_action(
@@ -156,23 +157,50 @@ def main():
                 obs["gt_difficulty"],
                 deterministic=deterministic,
             )
-        obs, _, _, _ = env.step(subgoal, intensity)
+        obs, rewards, dones, info = env.step(subgoal, intensity)
+
+        env_idx = 0
+        goal = obs["goal"][env_idx].detach().cpu().numpy()
+        goal_dist = float(np.linalg.norm(goal))
+        progress = 0.0 if prev_dist is None else float(prev_dist - goal_dist)
+        prev_dist = goal_dist
 
         if args.debug_cmd and step_idx % args.debug_interval == 0:
             env_idx = 0
             sub = subgoal[env_idx].detach().cpu().numpy()
             inten = float(intensity[env_idx].detach().cpu())
-            goal = obs["goal"][env_idx].detach().cpu().numpy()
-            goal_dist = float(np.linalg.norm(goal))
             cmd = None
             if hasattr(env.env, "commands"):
                 cmd = env.env.commands[env_idx, :3].detach().cpu().numpy()
             cmd_str = "None" if cmd is None else np.array2string(cmd, precision=3, floatmode="fixed")
+            cmd_speed = 0.0 if cmd is None else float(np.linalg.norm(cmd[:2]))
+            filtered_intensity = None
+            if info is not None and "filtered_intensity" in info:
+                filtered_intensity = float(info["filtered_intensity"][env_idx].detach().cpu())
+            reward_total = float(rewards[env_idx].detach().cpu()) if rewards is not None else 0.0
+            reward_terms = info.get("reward_terms") if info is not None else None
+            reward_approach = 0.0
+            reward_heading = 0.0
+            reward_time = 0.0
+            reward_intensity = 0.0
+            if reward_terms is not None:
+                reward_approach = float(reward_terms.get("approach", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                reward_heading = float(reward_terms.get("heading", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                reward_time = float(reward_terms.get("time", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                reward_intensity = float(reward_terms.get("intensity_match", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
             print(
-                "[PlayHigh] step={} subgoal={} intensity={:.3f} goal={} dist={:.3f} cmd={}".format(
+                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) subgoal={} goal={} dist={:.3f} cmd={}".format(
                     step_idx,
-                    np.array2string(sub, precision=3, floatmode="fixed"),
+                    cmd_speed,
+                    progress,
                     inten,
+                    filtered_intensity if filtered_intensity is not None else 0.0,
+                    reward_total,
+                    reward_approach,
+                    reward_heading,
+                    reward_time,
+                    reward_intensity,
+                    np.array2string(sub, precision=3, floatmode="fixed"),
                     np.array2string(goal, precision=3, floatmode="fixed"),
                     goal_dist,
                     cmd_str,

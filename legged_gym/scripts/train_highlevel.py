@@ -52,7 +52,7 @@ from collections import deque
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-# V3.6 状态维度定义 (匹配 hex_terrain.py robot_state_buf)
+# 默认维度定义（实际训练时以环境观测维度为准）
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
 AFFORDANCE_CHANNELS = 2  # [occupancy, passable_gap]
@@ -123,15 +123,26 @@ class RolloutBuffer:
     """
     PPO Rollout Buffer - 存储一个 rollout 周期内的所有数据
     """
-    def __init__(self, num_envs: int, num_steps: int, device: torch.device):
+    def __init__(
+        self,
+        num_envs: int,
+        num_steps: int,
+        state_dim: int,
+        goal_dim: int,
+        aff_map_shape: Tuple[int, int, int],
+        device: torch.device,
+    ):
         self.num_envs = num_envs
         self.num_steps = num_steps
         self.device = device
         self.step = 0
-        
-        # 观测 (存储字典的列表)
-        self.obs_list = []
-        
+
+        # 观测（仅保留 PPO 更新所需张量）
+        self.states = torch.zeros(num_steps, num_envs, state_dim, device=device)
+        self.goals = torch.zeros(num_steps, num_envs, goal_dim, device=device)
+        self.aff_maps = torch.zeros(num_steps, num_envs, *aff_map_shape, device=device)
+        self.difficulties = torch.zeros(num_steps, num_envs, device=device)
+
         # 动作
         self.subgoals = torch.zeros(num_steps, num_envs, 3, device=device)
         self.intensities = torch.zeros(num_steps, num_envs, device=device)
@@ -146,10 +157,26 @@ class RolloutBuffer:
         self.teacher_subgoals = torch.zeros(num_steps, num_envs, 3, device=device)
         self.teacher_intensities = torch.zeros(num_steps, num_envs, device=device)
 
-    def add(self, obs_dict, subgoal, intensity, log_prob, value, reward, done,
-            teacher_subgoal=None, teacher_intensity=None):
+    def add(
+        self,
+        state,
+        goal,
+        aff_map,
+        difficulty,
+        subgoal,
+        intensity,
+        log_prob,
+        value,
+        reward,
+        done,
+        teacher_subgoal=None,
+        teacher_intensity=None,
+    ):
         """添加一步数据"""
-        self.obs_list.append({k: v.clone() for k, v in obs_dict.items()})
+        self.states[self.step] = state
+        self.goals[self.step] = goal
+        self.aff_maps[self.step] = aff_map
+        self.difficulties[self.step] = difficulty
         self.subgoals[self.step] = subgoal
         self.intensities[self.step] = intensity
         self.log_probs[self.step] = log_prob
@@ -186,7 +213,10 @@ class RolloutBuffer:
     def reset(self):
         """重置 buffer"""
         self.step = 0
-        self.obs_list = []
+        self.states.zero_()
+        self.goals.zero_()
+        self.aff_maps.zero_()
+        self.difficulties.zero_()
         self.subgoals.zero_()
         self.intensities.zero_()
         self.log_probs.zero_()
@@ -277,7 +307,7 @@ class HierarchicalHexapodEnv:
         
         # 初始化 Locomotion Adapter (V3.6 with Slew Rate Limiting)
         self.adapter = LocomotionAdapter(
-            max_linear_vel=0.5,
+            max_linear_vel=1.0,
             max_angular_vel=0.8,
             min_speed_factor=0.4,
             max_intensity_change=0.1  # V3.6 关键参数
@@ -301,6 +331,14 @@ class HierarchicalHexapodEnv:
                     heading_min_weight=0.2,
                     stability_scale=0.01,
                     time_penalty=-0.03,
+                    intensity_smooth_penalty=0.0,
+                    intensity_gate_use=True,
+                    intensity_gate_min_speed=0.05,
+                    intensity_gate_min_approach=0.0,
+                    heading_gate_use=True,
+                    heading_gate_min_speed=0.05,
+                    heading_gate_min_approach=0.0,
+                    velocity_scale=0.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -311,6 +349,9 @@ class HierarchicalHexapodEnv:
         # 状态缓冲区
         self.prev_robot_pos = torch.zeros(self.num_envs, 3, device=device)
         self.prev_intensity = torch.zeros(self.num_envs, device=device)
+        self.reach_given = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.goal_change_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
+        self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
@@ -400,11 +441,15 @@ class HierarchicalHexapodEnv:
         
         self.episode_length_buf.zero_()
         self.prev_intensity.zero_()
+        self.reach_given.zero_()
+        self.goal_change_count.zero_()
         self.adapter.reset(self.num_envs, self.device)
 
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
         self.prev_robot_pos = self.env.root_states[:, :3].clone()
+        if hasattr(self.env, "goal_world"):
+            self.prev_goal_world = self.env.goal_world.clone()
         
         return obs_dict
 
@@ -497,7 +542,7 @@ class HierarchicalHexapodEnv:
         
         Returns:
             Dict with keys:
-            - state: (N, 9) robot state
+            - state: (N, 9+1) robot state + prev_filtered_intensity
             - goal: (N, 2) relative goal
             - gt_affordance: (N, 2, 16, 16) ground truth affordance
             - gt_difficulty: (N,) difficulty derived from passable_gap
@@ -523,6 +568,11 @@ class HierarchicalHexapodEnv:
                 height, roll.unsqueeze(-1), pitch.unsqueeze(-1)
             ], dim=-1)
         
+        # 1.5 添加上一时刻强度（解决强度滤波的非马尔可夫性）
+        if hasattr(self, "prev_intensity"):
+            prev_intensity = self.prev_intensity.unsqueeze(1)
+            obs_dict['state'] = torch.cat([obs_dict['state'], prev_intensity], dim=1)
+
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
             obs_dict['goal'] = self.env.goal_buf.clone()
@@ -579,29 +629,54 @@ class HierarchicalHexapodEnv:
         # 2. Low-Level 控制循环 (50Hz)
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
         done_any = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        
+        active_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
         for _ in range(self.decimation):
+            if not active_mask.any():
+                break
             if hasattr(self.env, "commands"):
-                self.env.commands[:, :3] = velocity_cmd.detach()
+                velocity_cmd_step = velocity_cmd.detach()
+                if (~active_mask).any():
+                    velocity_cmd_step = velocity_cmd_step.clone()
+                    velocity_cmd_step[~active_mask] = 0.0
+                self.env.commands[:, :3] = velocity_cmd_step
                 if hasattr(self.env, "commands_scale") and hasattr(self.env, "obs_buf"):
                     if self.env.obs_buf.shape[1] >= 3:
-                        self.env.obs_buf[:, -3:] = velocity_cmd.detach() * self.env.commands_scale
+                        self.env.obs_buf[:, -3:] = velocity_cmd_step * self.env.commands_scale
 
             low_level_obs = self.env.obs_buf
-            
+
             with torch.no_grad():
                 actions = self.low_level_policy.act_inference(low_level_obs)
-            
+            if (~active_mask).any():
+                actions = actions.clone()
+                actions[~active_mask] = 0.0
+
             obs, _, rewards, dones, infos = self.env.step(actions)
+            rewards = rewards * active_mask.float()
             accumulated_reward += rewards
             done_any |= dones
+            active_mask &= ~dones
         
         self.episode_length_buf += 1
         length_snapshot = self.episode_length_buf.clone()
+
+        done_during = done_any.clone()
+
+        if hasattr(self.env, "goal_world"):
+            current_goal_world = self.env.goal_world.clone()
+            if self.prev_goal_world is None:
+                self.prev_goal_world = current_goal_world.clone()
+            goal_delta = torch.norm(current_goal_world - self.prev_goal_world, dim=1)
+            goal_changed = goal_delta > 1e-3
+            if done_during.any():
+                goal_changed = goal_changed & (~done_during)
+            self.goal_change_count += goal_changed.long()
+            self.prev_goal_world = current_goal_world
         
         # 3. 计算高层奖励
         self._refresh_depth_images()
-        current_obs = self._get_high_level_obs()
+        reward_obs = self._get_high_level_obs()
         robot_pos = self.env.root_states[:, :3]
         
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -612,16 +687,17 @@ class HierarchicalHexapodEnv:
                 dim=1,
             )
 
+        reward_terms = None
         if self.reward_func is not None:
             robot_vel = self.env.base_lin_vel
             robot_quat = self.env.root_states[:, 3:7]
             if hasattr(self.env, "goal_world"):
                 goal_pos = self.env.goal_world.clone()
             else:
-                yaw = current_obs['state'][:, 2]
+                yaw = reward_obs['state'][:, 2]
                 cos_h = torch.cos(yaw)
                 sin_h = torch.sin(yaw)
-                goal_local = current_obs['goal']
+                goal_local = reward_obs['goal']
                 goal_x = robot_pos[:, 0] + cos_h * goal_local[:, 0] - sin_h * goal_local[:, 1]
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
                 goal_pos = torch.stack([goal_x, goal_y], dim=1)
@@ -635,17 +711,38 @@ class HierarchicalHexapodEnv:
                 robot_quat=robot_quat,
                 intensity=filtered_intensity,
                 prev_intensity=self.prev_intensity,
-                terrain_difficulty=current_obs['gt_difficulty'],
+                terrain_difficulty=reward_obs['gt_difficulty'],
                 collision_mask=collision_mask,
             )
             total_reward = reward_dict['total']
+
+            # reach_bonus 只在每个 episode 内生效一次
+            if self.reward_cfg is not None:
+                dist_to_goal = torch.norm(robot_pos[:, :2] - goal_pos, dim=-1)
+                reach_now = dist_to_goal < self.reward_cfg.goal_reach_threshold
+                reach_mask = reach_now & (~self.reach_given)
+                if reach_now.any():
+                    repeated = reach_now & self.reach_given
+                    total_reward = total_reward - repeated.float() * self.reward_cfg.goal_reach_bonus
+                    reward_dict['reach'] = reach_mask.float() * self.reward_cfg.goal_reach_bonus
+                    reward_dict['total'] = total_reward
+                self.reach_given |= reach_mask
+            reward_terms = reward_dict
         else:
             total_reward = accumulated_reward / self.decimation
+            reward_terms = {"total": total_reward}
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
         self.prev_intensity = adapter_info['filtered_intensity'].squeeze(-1).clone()
         
+        # done 的环境避免跨 episode 的 shaped reward 污染
+        if done_during.any():
+            safe_reward = accumulated_reward / self.decimation
+            total_reward = torch.where(done_during, safe_reward, total_reward)
+            if reward_terms is not None:
+                reward_terms["total"] = total_reward
+
         # 5. 处理超时
         timeout = self.episode_length_buf >= self.max_episode_length
         done_any |= timeout
@@ -653,16 +750,25 @@ class HierarchicalHexapodEnv:
         if done_any.any():
             self.episode_length_buf[done_any] = 0
             self.prev_intensity[done_any] = 0
+            self.reach_given[done_any] = False
+            self.goal_change_count[done_any] = 0
+            if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
+                self.prev_goal_world[done_any] = self.env.goal_world[done_any]
             # ★ 修复幽灵动量问题: 重置 Adapter 的变化率限制记忆
             # 防止 Reset 后机器人因残留的 last_intensity 记忆而"猛冲"
             self.adapter.last_intensity[done_any] = 0.0
-        
+
+        next_obs = self._get_high_level_obs()
+
         info = {
             'adapter_info': adapter_info,
             'episode_length': length_snapshot,
+            'reward_terms': reward_terms,
+            'filtered_intensity': adapter_info['filtered_intensity'].squeeze(-1),
+            'goal_change_count': self.goal_change_count.clone(),
         }
-        
-        return current_obs, total_reward, done_any, info
+
+        return next_obs, total_reward, done_any, info
 
     def _quat_to_yaw(self, quat: torch.Tensor) -> torch.Tensor:
         """四元数转 yaw 角"""
@@ -695,44 +801,50 @@ def train(args):
     env = HierarchicalHexapodEnv(args, device)
     print(f"[Main] 环境初始化完成: {env.num_envs} envs")
     
+    # 初始 reset（用于确定观测维度）
+    obs_dict = env.reset()
+    state_dim = obs_dict['state'].shape[1]
+    goal_dim = obs_dict['goal'].shape[1]
+    aff_shape = obs_dict['gt_affordance'].shape[1:]
+
     # 创建 Planner (V3.6)
     planner = HighLevelPlanner(
-        affordance_channels=AFFORDANCE_CHANNELS,
-        state_dim=STATE_DIM,
-        goal_dim=GOAL_DIM,
+        affordance_channels=aff_shape[0],
+        state_dim=state_dim,
+        goal_dim=goal_dim,
     ).to(device)
-    
+
     optimizer = optim.Adam(planner.parameters(), lr=args.lr)
-    
+
     # 加载 Teacher/Vision 模型 (Student 模式)
     teacher_model = None
     vision_model = None
-    
+
     if args.mode == 'teacher':
         print("[Main] Mode: TEACHER. Training from scratch with GT.")
-        
+
     elif args.mode == 'student':
         print("\n[Student] 加载 Teacher 和 Vision 模型...")
-        
+
         # 加载 Teacher
         if args.teacher_ckpt:
             teacher_model = HighLevelPlanner(
-                affordance_channels=AFFORDANCE_CHANNELS,
-                state_dim=STATE_DIM,
-                goal_dim=GOAL_DIM,
+                affordance_channels=aff_shape[0],
+                state_dim=state_dim,
+                goal_dim=goal_dim,
             ).to(device)
-            
+
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             if 'model_state_dict' in ckpt:
                 teacher_model.load_state_dict(ckpt['model_state_dict'])
             else:
                 teacher_model.load_state_dict(ckpt)
             teacher_model.eval()
-            
+
             # 用 Teacher 权重初始化 Student
             planner.load_state_dict(teacher_model.state_dict())
             print(f"[Student] ✓ Teacher 加载成功: {args.teacher_ckpt}")
-        
+
         # 加载 Vision (AffordanceEstimator)
         if args.vision_ckpt and AffordanceEstimator is not None:
             vision_model = AffordanceEstimator(
@@ -740,7 +852,7 @@ def train(args):
                 output_size=16,
                 max_depth_range=5.0
             ).to(device)
-            
+
             ckpt = torch.load(args.vision_ckpt, map_location=device)
             if 'model_state_dict' in ckpt:
                 vision_model.load_state_dict(ckpt['model_state_dict'])
@@ -748,7 +860,7 @@ def train(args):
                 vision_model.load_state_dict(ckpt)
             vision_model.eval()
             print(f"[Student] ✓ Vision 加载成功: {args.vision_ckpt}")
-    
+
     # 创建日志目录
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_dir = os.path.join(args.output_dir, f"{args.mode}_{timestamp}")
@@ -757,15 +869,16 @@ def train(args):
     print(f"[Main] 日志目录: {log_dir}")
     
     # 创建 Rollout Buffer
-    buffer = RolloutBuffer(env.num_envs, args.num_steps, device)
+    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_shape, device)
     
     # 训练统计
     episode_rewards = deque(maxlen=100)
     episode_lengths = deque(maxlen=100)
+    goal_change_counts = deque(maxlen=100)
     best_reward = float('-inf')
     
-    # 初始 reset
-    obs_dict = env.reset()
+    # 训练内的 episode 回报统计
+    running_returns = torch.zeros(env.num_envs, device=device)
     
     print(f"\n[Main] 开始训练 ({args.num_iterations} iterations)...")
     print(f"  - Steps per iteration: {args.num_steps}")
@@ -777,6 +890,26 @@ def train(args):
         
         # ============ Rollout Phase ============
         buffer.reset()
+        rollout_start = time.time()
+
+        reward_term_keys = [
+            'approach',
+            'reach',
+            'heading',
+            'intensity_match',
+            'intensity_smooth',
+            'collision',
+            'stability',
+            'velocity',
+            'time',
+            'total',
+        ]
+        reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
+        subgoal_norm_sum = torch.zeros((), device=device)
+        intensity_sum = torch.zeros((), device=device)
+        filtered_intensity_sum = torch.zeros((), device=device)
+        cmd_speed_sum = torch.zeros((), device=device)
+        goal_dist_sum = torch.zeros((), device=device)
         
         for step in range(args.num_steps):
             # 准备输入
@@ -826,21 +959,53 @@ def train(args):
             
             # 环境步进
             next_obs, rewards, dones, env_info = env.step(subgoal, intensity)
-            
+
             # 存储数据
             buffer.add(
-                obs_dict, subgoal, intensity, log_prob.sum(dim=-1), value,
-                rewards, dones, teacher_subgoal, teacher_intensity
+                state.detach(),
+                goal.detach(),
+                aff_map.detach(),
+                difficulty.detach(),
+                subgoal.detach(),
+                intensity.detach(),
+                log_prob.detach(),
+                value.detach(),
+                rewards.detach(),
+                dones.detach(),
+                teacher_subgoal.detach() if teacher_subgoal is not None else None,
+                teacher_intensity.detach() if teacher_intensity is not None else None,
             )
-            
+
+            # 统计分量与行为
+            goal_dist_sum += torch.norm(goal, dim=1).sum()
+            subgoal_norm_sum += torch.norm(subgoal[:, :2], dim=1).sum()
+            intensity_sum += intensity.sum()
+            filtered = env_info.get('filtered_intensity', None)
+            if filtered is not None:
+                filtered_intensity_sum += filtered.sum()
+            if hasattr(env.env, "commands"):
+                cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
+            reward_terms = env_info.get('reward_terms', None)
+            if reward_terms is not None:
+                for key in reward_term_keys:
+                    if key in reward_terms:
+                        reward_term_sums[key] += reward_terms[key].sum()
+
             # 统计完成的 episode
-            for i in range(env.num_envs):
-                if dones[i]:
-                    ep_len = env_info['episode_length'][i].item()
-                    episode_lengths.append(ep_len)
-                    episode_rewards.append(rewards[i].item() * max(ep_len, 1))
+            running_returns += rewards
+            done_ids = dones.nonzero(as_tuple=False).flatten()
+            if done_ids.numel() > 0:
+                ep_len = env_info['episode_length'][done_ids].detach().cpu().tolist()
+                episode_lengths.extend(ep_len)
+                episode_rewards.extend(running_returns[done_ids].detach().cpu().tolist())
+                running_returns[done_ids] = 0.0
+                goal_changes = env_info.get('goal_change_count', None)
+                if goal_changes is not None:
+                    goal_change_counts.extend(goal_changes[done_ids].detach().cpu().tolist())
             
             obs_dict = next_obs
+
+        rollout_time = time.time() - rollout_start
         
         # ============ Update Phase ============
         # 计算最后一步的 value (Bootstrap)
@@ -853,9 +1018,10 @@ def train(args):
                 difficulty = obs_dict['gt_difficulty']
             else:
                 if vision_model is not None:
-                    vis_out = vision_model(obs_dict['depth'], normalize=True)
-                    aff_map = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
-                    difficulty = difficulty_from_gap(aff_map)
+                    with torch.no_grad():
+                        vis_out = vision_model(obs_dict['depth'], normalize=True)
+                        aff_map = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
+                        difficulty = difficulty_from_gap(aff_map)
                 else:
                     aff_map = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']
@@ -875,6 +1041,8 @@ def train(args):
         value_loss_sum = 0
         entropy_sum = 0
         distill_loss_sum = 0
+        approx_kl_sum = 0
+        clip_frac_sum = 0
         num_updates = 0
         
         batch_size = env.num_envs * args.num_steps
@@ -896,36 +1064,28 @@ def train(args):
                 mb_advantages = advantages[step_idx, env_idx]
                 mb_returns = returns[step_idx, env_idx]
                 
-                # 重新构造观测
-                mb_states = torch.stack([
-                    buffer.obs_list[s.item()]['state'][e.item()] 
-                    for s, e in zip(step_idx, env_idx)
-                ])
-                mb_goals = torch.stack([
-                    buffer.obs_list[s.item()]['goal'][e.item()] 
-                    for s, e in zip(step_idx, env_idx)
-                ])
-                mb_aff_maps = torch.stack([
-                    buffer.obs_list[s.item()]['gt_affordance'][e.item()] 
-                    for s, e in zip(step_idx, env_idx)
-                ])
-                mb_difficulties = torch.stack([
-                    buffer.obs_list[s.item()]['gt_difficulty'][e.item()] 
-                    for s, e in zip(step_idx, env_idx)
-                ])
+                # 读取 rollout 缓冲区
+                mb_states = buffer.states[step_idx, env_idx]
+                mb_goals = buffer.goals[step_idx, env_idx]
+                mb_aff_maps = buffer.aff_maps[step_idx, env_idx]
+                mb_difficulties = buffer.difficulties[step_idx, env_idx]
                 
                 # 评估当前策略
                 new_log_probs, new_values, entropy, _ = planner.evaluate_actions(
                     mb_aff_maps, mb_states, mb_goals, mb_difficulties,
                     mb_subgoals, mb_intensities
                 )
-                new_log_probs = new_log_probs.sum(dim=-1)
                 
                 # PPO Clipped Loss
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
                 surr1 = ratio * mb_advantages
                 surr2 = torch.clamp(ratio, 1 - args.clip_range, 1 + args.clip_range) * mb_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
+
+                # Diagnostics
+                log_ratio = new_log_probs - mb_old_log_probs
+                approx_kl_sum += (0.5 * (log_ratio ** 2).mean()).item()
+                clip_frac_sum += (torch.abs(ratio - 1.0) > args.clip_range).float().mean().item()
                 
                 # Value Loss
                 value_loss = 0.5 * ((new_values.squeeze(-1) - mb_returns) ** 2).mean()
@@ -965,13 +1125,30 @@ def train(args):
                 distill_loss_sum += distill_loss.item()
                 num_updates += 1
         
+        update_time = time.time() - start_time - rollout_time
+
+        # Explained variance (基于 rollout value 估计)
+        returns_flat = returns.view(-1)
+        values_flat = buffer.values.view(-1)
+        var_returns = returns_flat.var()
+        explained_var = 1.0 - (returns_flat - values_flat).var() / (var_returns + 1e-8)
+
         # ============ Logging ============
         iter_time = time.time() - start_time
         fps = batch_size / iter_time
         
         mean_reward = np.mean(episode_rewards) if episode_rewards else 0
         mean_length = np.mean(episode_lengths) if episode_lengths else 0
+        mean_goal_changes = np.mean(goal_change_counts) if goal_change_counts else 0
         
+        total_samples = env.num_envs * args.num_steps
+        reward_term_means = {k: (v / total_samples).item() for k, v in reward_term_sums.items()}
+        subgoal_norm_mean = (subgoal_norm_sum / total_samples).item()
+        intensity_mean = (intensity_sum / total_samples).item()
+        filtered_intensity_mean = (filtered_intensity_sum / total_samples).item()
+        cmd_speed_mean = (cmd_speed_sum / total_samples).item()
+        goal_dist_mean = (goal_dist_sum / total_samples).item()
+
         # TensorBoard
         writer.add_scalar('Loss/Total', total_loss / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/Policy', policy_loss_sum / max(num_updates, 1), iteration)
@@ -983,14 +1160,45 @@ def train(args):
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
         writer.add_scalar('Perf/FPS', fps, iteration)
+        writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
+        writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
+        writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
+        writer.add_scalar('Perf/DifficultyMax', buffer.difficulties.max().item(), iteration)
+        writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
+        writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
+        writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
+        writer.add_scalar('Stats/SubgoalNorm', subgoal_norm_mean, iteration)
+        writer.add_scalar('Stats/Intensity', intensity_mean, iteration)
+        writer.add_scalar('Stats/FilteredIntensity', filtered_intensity_mean, iteration)
+        writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
+        writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
+        for key, value in reward_term_means.items():
+            writer.add_scalar(f'Reward/{key}', value, iteration)
         
         # Console
         if iteration % args.log_interval == 0:
-            print(f"\nIter {iteration}/{args.num_iterations}")
-            print(f"  Reward: {mean_reward:.2f} | Length: {mean_length:.1f}")
-            print(f"  Loss: {total_loss/max(num_updates,1):.4f} (P:{policy_loss_sum/max(num_updates,1):.4f} "
-                  f"V:{value_loss_sum/max(num_updates,1):.4f} E:{entropy_sum/max(num_updates,1):.4f})")
-            print(f"  FPS: {fps:.0f} | Time: {iter_time:.1f}s")
+            width = 80
+            pad = 32
+            header = f" Learning iteration {iteration}/{args.num_iterations} "
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{header.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {value_loss_sum / max(num_updates, 1):.4f}\n"""
+                          f"""{'Policy loss:':>{pad}} {policy_loss_sum / max(num_updates, 1):.4f}\n"""
+                          f"""{'Entropy loss:':>{pad}} {entropy_sum / max(num_updates, 1):.4f}\n"""
+                          f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
+                          f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
+                          f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
+                          f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
+                          f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
+                          f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
+                          f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
+                          f"""{'-' * width}\n"""
+                          f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
+                          f"""{'Reward(intensity/col/stab):':>{pad}} {reward_term_means.get('intensity_match', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f}\n"""
+                          f"""{'Reward(velocity/time/total):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
+                          f"""{'#' * width}\n""")
+            print(log_string)
         
         # Save checkpoint
         if iteration % args.save_interval == 0 and iteration > 0:
