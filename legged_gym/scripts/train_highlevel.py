@@ -324,20 +324,21 @@ class HierarchicalHexapodEnv:
             )
             if args.task == "hex_ground":
                 reward_kwargs.update(
-                    goal_approach_scale=4.0,
+                    goal_approach_scale=5.0,
                     goal_reach_threshold=0.1,
-                    heading_scale=0.2,
+                    heading_scale=0.1,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
-                    time_penalty=-0.04,
+                    time_penalty=-0.05,
+                    intensity_match_bonus=0.1,
                     intensity_smooth_penalty=0.0,
                     intensity_gate_use=True,
                     intensity_gate_min_speed=0.0,
-                    intensity_gate_min_approach=1e-4,
+                    intensity_gate_min_approach=0.01,
                     heading_gate_use=True,
                     heading_gate_min_speed=0.0,
-                    heading_gate_min_approach=1e-4,
+                    heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
