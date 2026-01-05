@@ -761,10 +761,6 @@ class HexGround(LeggedRobot):
             2.0 * (w*z + x*y),
             1.0 - 2.0 * (y*y + z*z)
         )
-        yaw_raw = yaw
-        yaw_forward = yaw_raw + 0.5 * math.pi
-        yaw_forward = torch.atan2(torch.sin(yaw_forward), torch.cos(yaw_forward))
-        self.yaw_raw = yaw_raw
         roll = torch.atan2(
             2.0 * (w*x + y*z),
             1.0 - 2.0 * (x*x + y*y)
@@ -782,7 +778,7 @@ class HexGround(LeggedRobot):
         self.robot_state_buf = torch.stack([
             pos_x,
             pos_y,
-            yaw_forward,
+            yaw,
             self.base_lin_vel[:, 0],
             self.base_lin_vel[:, 1],
             self.base_ang_vel[:, 2],
@@ -798,7 +794,7 @@ class HexGround(LeggedRobot):
             return
         goal_world = self.goal_world
         delta_world = goal_world - self.root_states[:, :2]
-        heading = self.yaw_raw if hasattr(self, "yaw_raw") else self.robot_state_buf[:, 2]
+        heading = self.robot_state_buf[:, 2]
         cos_h = torch.cos(heading)
         sin_h = torch.sin(heading)
         dx_body = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]

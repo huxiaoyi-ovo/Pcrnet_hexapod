@@ -327,7 +327,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=5.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.1,
-                    heading_offset_rad=0.5 * math.pi,
+                    heading_offset_rad=-0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
@@ -341,7 +341,7 @@ class HierarchicalHexapodEnv:
                     heading_gate_min_speed=0.0,
                     heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
-                    collision_penalty=-20.0,
+                    collision_penalty=-10.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -356,6 +356,8 @@ class HierarchicalHexapodEnv:
         self.goal_change_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.episode_return_buf = torch.zeros(self.num_envs, device=device)
+        self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -570,6 +572,17 @@ class HierarchicalHexapodEnv:
                 pos, yaw.unsqueeze(-1), lin_vel, ang_vel, 
                 height, roll.unsqueeze(-1), pitch.unsqueeze(-1)
             ], dim=-1)
+
+        # Align yaw to policy heading convention (+Y forward) via heading_offset_rad.
+        if self.reward_cfg is not None:
+            offset = float(getattr(self.reward_cfg, "heading_offset_rad", 0.0))
+            if offset != 0.0:
+                state = obs_dict['state']
+                yaw = state[:, 2] + offset
+                yaw = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+                state = state.clone()
+                state[:, 2] = yaw
+                obs_dict['state'] = state
         
         # 1.5 添加上一时刻强度（解决强度滤波的非马尔可夫性）
         if hasattr(self, "prev_intensity"):
@@ -683,18 +696,19 @@ class HierarchicalHexapodEnv:
         robot_pos = self.env.root_states[:, :3]
         
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        collision_force_max = torch.zeros(self.num_envs, device=self.device)
+        collision_threshold = None
         if hasattr(self.env, "contact_forces"):
-            contact_threshold = getattr(self.env.cfg.terrain, "collision_penalty_threshold", None)
-            if contact_threshold is None:
-                contact_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
+            collision_threshold = getattr(self.env.cfg.terrain, "collision_penalty_threshold", None)
+            if collision_threshold is None:
+                collision_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
             indices = getattr(self.env, "penalised_contact_indices", None)
             if indices is None or indices.numel() == 0:
                 indices = getattr(self.env, "termination_contact_indices", None)
             if indices is not None and indices.numel() > 0:
-                collision_mask = torch.any(
-                    torch.norm(self.env.contact_forces[:, indices, :], dim=-1) > contact_threshold,
-                    dim=1,
-                )
+                contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
+                collision_force_max = contact_norm.max(dim=1).values
+                collision_mask = torch.any(contact_norm > collision_threshold, dim=1)
 
         reward_terms = None
         if self.reward_func is not None:
@@ -703,9 +717,9 @@ class HierarchicalHexapodEnv:
             if hasattr(self.env, "goal_world"):
                 goal_pos = self.env.goal_world.clone()
             else:
-                yaw = reward_obs['state'][:, 2]
-                cos_h = torch.cos(yaw)
-                sin_h = torch.sin(yaw)
+                yaw_policy = reward_obs['state'][:, 2]
+                cos_h = torch.cos(yaw_policy)
+                sin_h = torch.sin(yaw_policy)
                 goal_local = reward_obs['goal']
                 goal_x = robot_pos[:, 0] + cos_h * goal_local[:, 0] - sin_h * goal_local[:, 1]
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
@@ -752,15 +766,26 @@ class HierarchicalHexapodEnv:
             if reward_terms is not None:
                 reward_terms["total"] = total_reward
 
+        # 4.5 高层 episode 统计（与 breakdown 口径对齐）
+        self.episode_return_buf += total_reward
+        self.episode_len_buf += 1
+
         # 5. 处理超时
         timeout = self.episode_length_buf >= self.max_episode_length
         done_any |= timeout
         
+        episode_info = None
         if done_any.any():
+            episode_info = {
+                'r': self.episode_return_buf.clone(),
+                'l': self.episode_len_buf.clone(),
+            }
             self.episode_length_buf[done_any] = 0
             self.prev_intensity[done_any] = 0
             self.reach_given[done_any] = False
             self.goal_change_count[done_any] = 0
+            self.episode_return_buf[done_any] = 0.0
+            self.episode_len_buf[done_any] = 0
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[done_any] = self.env.goal_world[done_any]
             # ★ 修复幽灵动量问题: 重置 Adapter 的变化率限制记忆
@@ -775,6 +800,10 @@ class HierarchicalHexapodEnv:
             'reward_terms': reward_terms,
             'filtered_intensity': adapter_info['filtered_intensity'].squeeze(-1),
             'goal_change_count': self.goal_change_count.clone(),
+            'episode': episode_info,
+            'collision_mask': collision_mask,
+            'collision_force_max': collision_force_max,
+            'collision_threshold': collision_threshold,
         }
 
         return next_obs, total_reward, done_any, info
@@ -919,6 +948,9 @@ def train(args):
         filtered_intensity_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
+        collision_rate_sum = torch.zeros((), device=device)
+        collision_force_samples = []
+        collision_threshold_value = None
         
         for step in range(args.num_steps):
             # 准备输入
@@ -999,18 +1031,36 @@ def train(args):
                 for key in reward_term_keys:
                     if key in reward_terms:
                         reward_term_sums[key] += reward_terms[key].sum()
+            collision_mask = env_info.get('collision_mask', None) if env_info is not None else None
+            if collision_mask is not None:
+                collision_rate_sum += collision_mask.float().sum()
+            collision_force_max = env_info.get('collision_force_max', None) if env_info is not None else None
+            if collision_force_max is not None:
+                collision_force_samples.append(collision_force_max.detach().cpu())
+            collision_threshold = env_info.get('collision_threshold', None) if env_info is not None else None
+            if collision_threshold is not None:
+                collision_threshold_value = float(collision_threshold)
 
-            # 统计完成的 episode
-            running_returns += rewards
+            # 统计完成的 episode（优先使用高层累计的 episode_return）
             done_ids = dones.nonzero(as_tuple=False).flatten()
             if done_ids.numel() > 0:
-                ep_len = env_info['episode_length'][done_ids].detach().cpu().tolist()
-                episode_lengths.extend(ep_len)
-                episode_rewards.extend(running_returns[done_ids].detach().cpu().tolist())
-                running_returns[done_ids] = 0.0
+                episode = env_info.get('episode', None) if env_info is not None else None
+                if episode is not None:
+                    ep_len = episode['l'][done_ids].detach().cpu().tolist()
+                    ep_ret = episode['r'][done_ids].detach().cpu().tolist()
+                    episode_lengths.extend(ep_len)
+                    episode_rewards.extend(ep_ret)
+                else:
+                    running_returns += rewards
+                    ep_len = env_info['episode_length'][done_ids].detach().cpu().tolist()
+                    episode_lengths.extend(ep_len)
+                    episode_rewards.extend(running_returns[done_ids].detach().cpu().tolist())
+                    running_returns[done_ids] = 0.0
                 goal_changes = env_info.get('goal_change_count', None)
                 if goal_changes is not None:
                     goal_change_counts.extend(goal_changes[done_ids].detach().cpu().tolist())
+            else:
+                running_returns += rewards
             
             obs_dict = next_obs
 
@@ -1157,6 +1207,16 @@ def train(args):
         filtered_intensity_mean = (filtered_intensity_sum / total_samples).item()
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
+        mean_step_reward = (mean_reward / mean_length) if mean_length > 0 else 0.0
+        breakdown_total_mean = reward_term_means.get('total', 0.0)
+        reward_residual = mean_step_reward - breakdown_total_mean
+        collision_rate_mean = (collision_rate_sum / total_samples).item()
+        collision_force_mean = 0.0
+        collision_force_p95 = 0.0
+        if collision_force_samples:
+            collision_force_all = torch.cat(collision_force_samples, dim=0)
+            collision_force_mean = collision_force_all.mean().item()
+            collision_force_p95 = torch.quantile(collision_force_all, 0.95).item()
 
         # TensorBoard
         writer.add_scalar('Loss/Total', total_loss / max(num_updates, 1), iteration)
@@ -1168,6 +1228,8 @@ def train(args):
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
+        writer.add_scalar('Perf/MeanStepReward', mean_step_reward, iteration)
+        writer.add_scalar('Perf/RewardResidual', reward_residual, iteration)
         writer.add_scalar('Perf/FPS', fps, iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
@@ -1176,6 +1238,11 @@ def train(args):
         writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
+        writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
+        writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
+        writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
+        if collision_threshold_value is not None:
+            writer.add_scalar('Diag/CollisionThreshold', collision_threshold_value, iteration)
         writer.add_scalar('Stats/SubgoalNorm', subgoal_norm_mean, iteration)
         writer.add_scalar('Stats/Intensity', intensity_mean, iteration)
         writer.add_scalar('Stats/FilteredIntensity', filtered_intensity_mean, iteration)
@@ -1189,6 +1256,9 @@ def train(args):
             width = 80
             pad = 32
             header = f" Learning iteration {iteration}/{args.num_iterations} "
+            collision_threshold_str = "n/a"
+            if collision_threshold_value is not None:
+                collision_threshold_str = f"{collision_threshold_value:.3f}"
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -1196,12 +1266,14 @@ def train(args):
                           f"""{'Policy loss:':>{pad}} {policy_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Entropy loss:':>{pad}} {entropy_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
+                          f"""{'Mean step reward:':>{pad}} {mean_step_reward:.3f} (resid {reward_residual:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
+                          f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(intensity/col/stab):':>{pad}} {reward_term_means.get('intensity_match', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f}\n"""

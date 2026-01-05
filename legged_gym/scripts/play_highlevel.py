@@ -6,6 +6,7 @@ Play a high-level (Teacher/Student) planner with Isaac Gym visualization.
 import os
 import sys
 import argparse
+import math
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 from isaacgym import gymapi
@@ -131,6 +132,10 @@ def main():
         print(f"[PlayHigh] ⚠ camera_env={args.camera_env} out of range; clamping to {env.num_envs - 1}.")
         args.camera_env = env.num_envs - 1
     obs = env.reset()
+    heading_offset = 0.0
+    if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
+        heading_offset = float(getattr(env.reward_cfg, "heading_offset_rad", 0.0))
+    print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (from reward_cfg)")
     aff_shape = obs["gt_affordance"].shape[1:]
     # Use clearer alias; implementation is identical to TerrainAdaptivePlanner.
     planner = th.HighLevelPlanner(
@@ -188,8 +193,28 @@ def main():
                 reward_heading = float(reward_terms.get("heading", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_time = float(reward_terms.get("time", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_intensity = float(reward_terms.get("intensity_match", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+            yaw_raw = 0.0
+            yaw_policy = 0.0
+            heading_err_pos = 0.0
+            heading_err_neg = 0.0
+            bearing_y = 0.0
+            if hasattr(env.env, "root_states"):
+                quat = env.env.root_states[env_idx, 3:7].detach().cpu().numpy()
+                x, y, z, w = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+                yaw_raw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+                yaw_policy = math.atan2(math.sin(yaw_raw + heading_offset), math.cos(yaw_raw + heading_offset))
+                if hasattr(env.env, "goal_world"):
+                    pos = env.env.root_states[env_idx, :2].detach().cpu().numpy()
+                    goal_w = env.env.goal_world[env_idx].detach().cpu().numpy()
+                    goal_dir = math.atan2(goal_w[1] - pos[1], goal_w[0] - pos[0])
+                    heading_err_pos = math.atan2(math.sin((yaw_raw + 0.5 * math.pi) - goal_dir),
+                                                math.cos((yaw_raw + 0.5 * math.pi) - goal_dir))
+                    heading_err_neg = math.atan2(math.sin((yaw_raw - 0.5 * math.pi) - goal_dir),
+                                                math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
+            if goal is not None:
+                bearing_y = math.atan2(goal[0], goal[1])
             print(
-                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) subgoal={} goal={} dist={:.3f} cmd={}".format(
+                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                     step_idx,
                     cmd_speed,
                     progress,
@@ -204,6 +229,11 @@ def main():
                     np.array2string(goal, precision=3, floatmode="fixed"),
                     goal_dist,
                     cmd_str,
+                    yaw_raw,
+                    yaw_policy,
+                    bearing_y,
+                    heading_err_pos,
+                    heading_err_neg,
                 )
             )
 
