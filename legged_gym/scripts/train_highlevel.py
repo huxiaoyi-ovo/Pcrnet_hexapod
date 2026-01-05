@@ -324,20 +324,20 @@ class HierarchicalHexapodEnv:
             )
             if args.task == "hex_ground":
                 reward_kwargs.update(
-                    goal_approach_scale=3.0,
+                    goal_approach_scale=4.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.2,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
-                    time_penalty=-0.03,
+                    time_penalty=-0.04,
                     intensity_smooth_penalty=0.0,
                     intensity_gate_use=True,
-                    intensity_gate_min_speed=0.05,
-                    intensity_gate_min_approach=0.0,
+                    intensity_gate_min_speed=0.0,
+                    intensity_gate_min_approach=1e-4,
                     heading_gate_use=True,
-                    heading_gate_min_speed=0.05,
-                    heading_gate_min_approach=0.0,
+                    heading_gate_min_speed=0.0,
+                    heading_gate_min_approach=1e-4,
                     velocity_scale=0.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
@@ -1268,13 +1268,13 @@ if __name__ == "__main__":
                         help='PPO epoch 数')
     parser.add_argument('--mini_batch_size', type=int, default=4096,
                         help='Mini-batch 大小')
-    parser.add_argument('--lr', type=float, default=3e-4,
+    parser.add_argument('--lr', type=float, default=1e-4,
                         help='学习率')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='折扣因子')
     parser.add_argument('--gae_lambda', type=float, default=0.95,
                         help='GAE lambda')
-    parser.add_argument('--clip_range', type=float, default=0.2,
+    parser.add_argument('--clip_range', type=float, default=0.1,
                         help='PPO clip range')
     parser.add_argument('--value_loss_coef', type=float, default=0.5,
                         help='Value loss 系数')

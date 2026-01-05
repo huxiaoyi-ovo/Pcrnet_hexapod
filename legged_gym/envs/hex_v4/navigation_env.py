@@ -142,9 +142,11 @@ class NavigationRewardFunction:
             )
         heading_reward = torch.cos(heading_error) * self.cfg.heading_scale * heading_weight
         if self.cfg.heading_gate_use:
-            speed = torch.norm(robot_vel[:, :2], dim=-1)
             progress = prev_dist - dist_to_goal
-            gate = (speed > self.cfg.heading_gate_min_speed) | (progress > self.cfg.heading_gate_min_approach)
+            gate = progress > self.cfg.heading_gate_min_approach
+            if self.cfg.heading_gate_min_speed > 0:
+                speed = torch.norm(robot_vel[:, :2], dim=-1)
+                gate = gate & (speed > self.cfg.heading_gate_min_speed)
             heading_reward = heading_reward * gate.float()
         rewards['heading'] = heading_reward
 
@@ -153,9 +155,11 @@ class NavigationRewardFunction:
             intensity, prev_intensity, terrain_difficulty
         )
         if self.cfg.intensity_gate_use:
-            speed = torch.norm(robot_vel[:, :2], dim=-1)
             progress = prev_dist - dist_to_goal
-            gate = (speed > self.cfg.intensity_gate_min_speed) | (progress > self.cfg.intensity_gate_min_approach)
+            gate = progress > self.cfg.intensity_gate_min_approach
+            if self.cfg.intensity_gate_min_speed > 0:
+                speed = torch.norm(robot_vel[:, :2], dim=-1)
+                gate = gate & (speed > self.cfg.intensity_gate_min_speed)
             intensity_rewards['intensity_match'] = intensity_rewards['intensity_match'] * gate.float()
         rewards.update(intensity_rewards)
 
