@@ -698,13 +698,16 @@ class HierarchicalHexapodEnv:
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_force_max = torch.zeros(self.num_envs, device=self.device)
         collision_threshold = None
+        collision_threshold_src = None
+        collision_indices_src = None
         if hasattr(self.env, "contact_forces"):
-            collision_threshold = getattr(self.env.cfg.terrain, "collision_penalty_threshold", None)
-            if collision_threshold is None:
-                collision_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
-            indices = getattr(self.env, "penalised_contact_indices", None)
+            collision_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
+            collision_threshold_src = "collision_force_threshold"
+            indices = getattr(self.env, "termination_contact_indices", None)
+            collision_indices_src = "termination_contact_indices"
             if indices is None or indices.numel() == 0:
-                indices = getattr(self.env, "termination_contact_indices", None)
+                indices = getattr(self.env, "penalised_contact_indices", None)
+                collision_indices_src = "penalised_contact_indices"
             if indices is not None and indices.numel() > 0:
                 contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
                 collision_force_max = contact_norm.max(dim=1).values
@@ -804,6 +807,8 @@ class HierarchicalHexapodEnv:
             'collision_mask': collision_mask,
             'collision_force_max': collision_force_max,
             'collision_threshold': collision_threshold,
+            'collision_threshold_src': collision_threshold_src,
+            'collision_indices_src': collision_indices_src,
         }
 
         return next_obs, total_reward, done_any, info
@@ -951,6 +956,8 @@ def train(args):
         collision_rate_sum = torch.zeros((), device=device)
         collision_force_samples = []
         collision_threshold_value = None
+        collision_threshold_src_value = None
+        collision_indices_src_value = None
         
         for step in range(args.num_steps):
             # 准备输入
@@ -1040,6 +1047,12 @@ def train(args):
             collision_threshold = env_info.get('collision_threshold', None) if env_info is not None else None
             if collision_threshold is not None:
                 collision_threshold_value = float(collision_threshold)
+            collision_threshold_src = env_info.get('collision_threshold_src', None) if env_info is not None else None
+            if collision_threshold_src is not None:
+                collision_threshold_src_value = collision_threshold_src
+            collision_indices_src = env_info.get('collision_indices_src', None) if env_info is not None else None
+            if collision_indices_src is not None:
+                collision_indices_src_value = collision_indices_src
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
             done_ids = dones.nonzero(as_tuple=False).flatten()
@@ -1257,8 +1270,14 @@ def train(args):
             pad = 32
             header = f" Learning iteration {iteration}/{args.num_iterations} "
             collision_threshold_str = "n/a"
+            collision_threshold_src_str = "n/a"
+            collision_indices_src_str = "n/a"
             if collision_threshold_value is not None:
                 collision_threshold_str = f"{collision_threshold_value:.3f}"
+            if collision_threshold_src_value is not None:
+                collision_threshold_src_str = str(collision_threshold_src_value)
+            if collision_indices_src_value is not None:
+                collision_indices_src_str = str(collision_indices_src_value)
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -1273,7 +1292,7 @@ def train(args):
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
-                          f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str})\n"""
+                          f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(intensity/col/stab):':>{pad}} {reward_term_means.get('intensity_match', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f}\n"""
