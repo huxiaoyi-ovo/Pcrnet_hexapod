@@ -15,7 +15,6 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-from legged_gym.utils import get_args as get_isaac_args
 from legged_gym.scripts import train_highlevel as th
 
 
@@ -43,6 +42,7 @@ def parse_args():
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0]] + unknown
+    from legged_gym.utils import get_args as get_isaac_args
     isaac_args = get_isaac_args()
     for key, value in vars(isaac_args).items():
         if not hasattr(args, key):
