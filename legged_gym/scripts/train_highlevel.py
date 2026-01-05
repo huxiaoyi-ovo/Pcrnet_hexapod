@@ -327,6 +327,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=5.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.1,
+                    heading_offset_rad=0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
@@ -340,6 +341,7 @@ class HierarchicalHexapodEnv:
                     heading_gate_min_speed=0.0,
                     heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
+                    collision_penalty=-20.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -681,12 +683,18 @@ class HierarchicalHexapodEnv:
         robot_pos = self.env.root_states[:, :3]
         
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        if hasattr(self.env, "contact_forces") and hasattr(self.env, "termination_contact_indices"):
-            contact_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
-            collision_mask = torch.any(
-                torch.norm(self.env.contact_forces[:, self.env.termination_contact_indices, :], dim=-1) > contact_threshold,
-                dim=1,
-            )
+        if hasattr(self.env, "contact_forces"):
+            contact_threshold = getattr(self.env.cfg.terrain, "collision_penalty_threshold", None)
+            if contact_threshold is None:
+                contact_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
+            indices = getattr(self.env, "penalised_contact_indices", None)
+            if indices is None or indices.numel() == 0:
+                indices = getattr(self.env, "termination_contact_indices", None)
+            if indices is not None and indices.numel() > 0:
+                collision_mask = torch.any(
+                    torch.norm(self.env.contact_forces[:, indices, :], dim=-1) > contact_threshold,
+                    dim=1,
+                )
 
         reward_terms = None
         if self.reward_func is not None:

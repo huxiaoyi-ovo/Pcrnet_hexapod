@@ -32,6 +32,7 @@ class NavigationRewardConfig:
 
     # 朝向奖励
     heading_scale: float = 0.5            # 朝向目标的奖励
+    heading_offset_rad: float = 0.0       # 朝向参考偏移 (用于前向轴修正)
     heading_use_difficulty_gate: bool = False  # 根据地形难度弱化朝向奖励
     heading_min_weight: float = 0.2       # 朝向奖励最小权重 (仅门控开启时生效)
     heading_gate_use: bool = False        # 速度/进度门控
@@ -128,6 +129,10 @@ class NavigationRewardFunction:
 
         # 2. 朝向奖励
         heading = self._quat_to_heading(robot_quat)
+        if self.cfg.heading_offset_rad != 0.0:
+            # Align heading reference (e.g., +Y forward) without changing goal frame.
+            heading = heading + self.cfg.heading_offset_rad
+            heading = torch.atan2(torch.sin(heading), torch.cos(heading))
         goal_direction = torch.atan2(
             goal_pos[:, 1] - robot_pos[:, 1],
             goal_pos[:, 0] - robot_pos[:, 0]
