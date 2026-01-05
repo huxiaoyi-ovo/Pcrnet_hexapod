@@ -68,7 +68,7 @@ def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
 
 def import_modules():
     """延迟导入，带容错处理"""
-    global task_registry, TerrainAdaptivePlanner, LocomotionAdapter
+    global task_registry, TerrainAdaptivePlanner, HighLevelPlanner, LocomotionAdapter
     global AffordanceEstimator, NavigationRewardFunction, NavigationRewardConfig
     global ActorCritic
     
@@ -89,7 +89,9 @@ def import_modules():
         from rsl_rl.modules import ActorCritic as AC
         
         # 赋值给全局变量
+        # Keep a clearer name for ground tasks; same implementation.
         globals()['TerrainAdaptivePlanner'] = TAP
+        globals()['HighLevelPlanner'] = TAP
         globals()['LocomotionAdapter'] = LA
         globals()['ActorCritic'] = AC
         print("[Init] ✓ rsl_rl 模块导入成功")
@@ -228,6 +230,12 @@ class HierarchicalHexapodEnv:
         # 初始化 Isaac Gym 环境
         print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
         env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+
+        if getattr(args, "camera_enable", False) and hasattr(env_cfg, "sensor"):
+            if hasattr(env_cfg.sensor, "depth_camera"):
+                env_cfg.sensor.depth_camera.enable = True
+                if getattr(args, "camera_interval", None) is not None:
+                    env_cfg.sensor.depth_camera.capture_interval = args.camera_interval
 
         if args.task == "hex_ground" and hasattr(env_cfg, "navigation"):
             env_cfg.navigation.goal_reached_threshold = 0.1
@@ -589,6 +597,7 @@ class HierarchicalHexapodEnv:
             done_any |= dones
         
         self.episode_length_buf += 1
+        length_snapshot = self.episode_length_buf.clone()
         
         # 3. 计算高层奖励
         self._refresh_depth_images()
@@ -650,7 +659,7 @@ class HierarchicalHexapodEnv:
         
         info = {
             'adapter_info': adapter_info,
-            'episode_length': self.episode_length_buf.clone(),
+            'episode_length': length_snapshot,
         }
         
         return current_obs, total_reward, done_any, info
@@ -687,7 +696,7 @@ def train(args):
     print(f"[Main] 环境初始化完成: {env.num_envs} envs")
     
     # 创建 Planner (V3.6)
-    planner = TerrainAdaptivePlanner(
+    planner = HighLevelPlanner(
         affordance_channels=AFFORDANCE_CHANNELS,
         state_dim=STATE_DIM,
         goal_dim=GOAL_DIM,
@@ -707,7 +716,7 @@ def train(args):
         
         # 加载 Teacher
         if args.teacher_ckpt:
-            teacher_model = TerrainAdaptivePlanner(
+            teacher_model = HighLevelPlanner(
                 affordance_channels=AFFORDANCE_CHANNELS,
                 state_dim=STATE_DIM,
                 goal_dim=GOAL_DIM,
