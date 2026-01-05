@@ -23,6 +23,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Play high-level planner in Isaac Gym")
     parser.add_argument("--task", type=str, default="hex_ground", help="Task name (only hex_ground supported)")
     parser.add_argument(
+        "--mode",
+        type=str,
+        default="teacher",
+        choices=["teacher", "student"],
+        help="Planner mode (teacher or student)",
+    )
+    parser.add_argument(
         "--low_level_ckpt",
         type=str,
         default="logs/hex_ground/Dec31_16-52-59_/model_6000.pt",
@@ -102,6 +109,11 @@ def main():
         os.makedirs(args.camera_dir, exist_ok=True)
 
     env = th.HierarchicalHexapodEnv(args, device)
+    if args.camera_env < 0:
+        args.camera_env = 0
+    if args.camera_env >= env.num_envs:
+        print(f"[PlayHigh] ⚠ camera_env={args.camera_env} out of range; clamping to {env.num_envs - 1}.")
+        args.camera_env = env.num_envs - 1
     # Use clearer alias; implementation is identical to TerrainAdaptivePlanner.
     planner = th.HighLevelPlanner(
         affordance_channels=th.AFFORDANCE_CHANNELS,
