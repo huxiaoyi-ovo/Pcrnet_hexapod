@@ -5,3 +5,4 @@ python ~/RL_GYM_PROJECTS/RL_hexapod_gym/legged_gym/scripts/train.py --task=hex_t
 python legged_gym/scripts/play.py --task=hex_ground --num_envs=1  --load_run=Dec23_20-05-01_ground_wobble_fix --checkpoint=400 --camera_mode=both --camera_show --keyboard_cmds
 
 python legged_gym/scripts/play.py --task=hex_ground --num_envs=1  --load_run=EGPO --checkpoint=2000 --camera_mode=both --camera_show --keyboard_cmds
+python legged_gym/scripts/play_highlevel.py --task hex_ground --teacher_ckpt outputs/planner/teacher_20260104_192531/best_model.pt --camera_show
