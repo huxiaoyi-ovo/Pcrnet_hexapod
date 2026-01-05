@@ -8,6 +8,7 @@ import sys
 import argparse
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
+from isaacgym import gymapi
 import torch
 import numpy as np
 
@@ -42,11 +43,29 @@ def parse_args():
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0]] + unknown
-    from legged_gym.utils import get_args as get_isaac_args
-    isaac_args = get_isaac_args()
-    for key, value in vars(isaac_args).items():
-        if not hasattr(args, key):
-            setattr(args, key, value)
+    if not hasattr(args, "physics_engine"):
+        args.physics_engine = gymapi.SIM_PHYSX
+    if not hasattr(args, "sim_device_type"):
+        args.sim_device_type = "cuda"
+    if not hasattr(args, "compute_device_id"):
+        args.compute_device_id = 0
+    if not hasattr(args, "sim_device_id"):
+        args.sim_device_id = args.compute_device_id
+    if not hasattr(args, "sim_device"):
+        if args.sim_device_type == "cuda":
+            args.sim_device = f"cuda:{args.sim_device_id}"
+        else:
+            args.sim_device = "cpu"
+    if not hasattr(args, "use_gpu"):
+        args.use_gpu = args.sim_device_type == "cuda"
+    if not hasattr(args, "use_gpu_pipeline"):
+        args.use_gpu_pipeline = args.sim_device_type == "cuda"
+    if not hasattr(args, "subscenes"):
+        args.subscenes = 0
+    if not hasattr(args, "num_threads"):
+        args.num_threads = 0
+    if not hasattr(args, "rl_device"):
+        args.rl_device = args.sim_device
 
     if args.camera_interval < 1:
         args.camera_interval = 1
