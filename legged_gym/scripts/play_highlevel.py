@@ -47,6 +47,20 @@ def parse_args():
     parser.add_argument("--camera_dir", type=str, default="outputs/play_highlevel_camera", help="Camera output dir")
     parser.add_argument("--camera_interval", type=int, default=5, help="Camera capture interval")
     parser.add_argument("--camera_env", type=int, default=0, help="Env index for camera output")
+    parser.add_argument(
+        "--debug_cmd",
+        dest="debug_cmd",
+        action="store_true",
+        default=True,
+        help="Print high-level command debug info",
+    )
+    parser.add_argument(
+        "--no_debug_cmd",
+        dest="debug_cmd",
+        action="store_false",
+        help="Disable debug output",
+    )
+    parser.add_argument("--debug_interval", type=int, default=50, help="Debug print interval (steps)")
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0]] + unknown
@@ -76,6 +90,8 @@ def parse_args():
 
     if args.camera_interval < 1:
         args.camera_interval = 1
+    if args.debug_interval < 1:
+        args.debug_interval = 1
 
     return args
 
@@ -141,6 +157,27 @@ def main():
                 deterministic=deterministic,
             )
         obs, _, _, _ = env.step(subgoal, intensity)
+
+        if args.debug_cmd and step_idx % args.debug_interval == 0:
+            env_idx = 0
+            sub = subgoal[env_idx].detach().cpu().numpy()
+            inten = float(intensity[env_idx].detach().cpu())
+            goal = obs["goal"][env_idx].detach().cpu().numpy()
+            goal_dist = float(np.linalg.norm(goal))
+            cmd = None
+            if hasattr(env.env, "commands"):
+                cmd = env.env.commands[env_idx, :3].detach().cpu().numpy()
+            cmd_str = "None" if cmd is None else np.array2string(cmd, precision=3, floatmode="fixed")
+            print(
+                "[PlayHigh] step={} subgoal={} intensity={:.3f} goal={} dist={:.3f} cmd={}".format(
+                    step_idx,
+                    np.array2string(sub, precision=3, floatmode="fixed"),
+                    inten,
+                    np.array2string(goal, precision=3, floatmode="fixed"),
+                    goal_dist,
+                    cmd_str,
+                )
+            )
 
         if not args.headless:
             env.env.render()
