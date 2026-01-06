@@ -134,6 +134,16 @@ def main():
     if args.camera_env >= env.num_envs:
         print(f"[PlayHigh] ⚠ camera_env={args.camera_env} out of range; clamping to {env.num_envs - 1}.")
         args.camera_env = env.num_envs - 1
+    viewer = getattr(env.env, "viewer", None) if hasattr(env, "env") else None
+    input_enabled = viewer is not None and not args.headless
+    if not input_enabled and not args.headless:
+        print("[PlayHigh] ⚠ viewer not available; keyboard controls disabled.")
+    if input_enabled:
+        print("[PlayHigh] 键盘控制: R=重置, [=降级, ]=升级")
+        gym = env.env.gym
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "RESET_ENV")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_LEFT_BRACKET, "LEVEL_DOWN")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_RIGHT_BRACKET, "LEVEL_UP")
     obs = env.reset()
     heading_offset = 0.0
     if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
@@ -159,13 +169,53 @@ def main():
 
     prev_dist = None
     aff_stack_buf = obs["gt_affordance"].repeat(1, aff_stack, 1, 1)
+    aff_stack_fill = torch.ones(env.num_envs, device=device)
     stack_reset_mask = None
     while True:
+        manual_reset = False
+        level_delta = 0
+        if input_enabled:
+            for evt in env.env.gym.get_keyboard_events(viewer):
+                if evt.action == "RESET_ENV" and evt.value > 0:
+                    manual_reset = True
+                elif evt.action == "LEVEL_DOWN" and evt.value > 0:
+                    level_delta -= 1
+                elif evt.action == "LEVEL_UP" and evt.value > 0:
+                    level_delta += 1
+        if manual_reset or level_delta != 0:
+            if level_delta != 0 and hasattr(env.env, "terrain_levels"):
+                env_idx = args.camera_env
+                max_level = int(getattr(env.env, "max_terrain_level", 0))
+                if max_level <= 0 and hasattr(env.env, "cfg"):
+                    max_level = int(getattr(env.env.cfg.terrain, "num_rows", 1))
+                current_level = int(env.env.terrain_levels[env_idx].item())
+                new_level = int(np.clip(current_level + level_delta, 0, max_level - 1))
+                env.env.terrain_levels[env_idx] = new_level
+                if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types"):
+                    env.env.env_origins[env_idx] = env.env.terrain_origins[new_level, env.env.terrain_types[env_idx]]
+                print(f"[PlayHigh] curriculum level -> {new_level}")
+            obs = env.reset()
+            aff_stack_buf = obs["gt_affordance"].repeat(1, aff_stack, 1, 1)
+            aff_stack_fill.fill_(1)
+            stack_reset_mask = None
+            prev_dist = None
+            continue
+        reset_mask = stack_reset_mask
         if stack_reset_mask is not None and stack_reset_mask.any():
             aff_stack_buf[stack_reset_mask] = obs["gt_affordance"][stack_reset_mask].repeat(1, aff_stack, 1, 1)
+            aff_stack_fill[stack_reset_mask] = 1
             stack_reset_mask = None
         aff_stack_buf = torch.roll(aff_stack_buf, shifts=-obs["gt_affordance"].shape[1], dims=1)
         aff_stack_buf[:, -obs["gt_affordance"].shape[1]:, :, :] = obs["gt_affordance"]
+        if aff_stack > 1:
+            if reset_mask is None:
+                aff_stack_fill = torch.clamp(aff_stack_fill + 1, max=aff_stack)
+            else:
+                inc_mask = ~reset_mask
+                if inc_mask.any():
+                    aff_stack_fill[inc_mask] = torch.clamp(aff_stack_fill[inc_mask] + 1, max=aff_stack)
+        else:
+            aff_stack_fill.fill_(1)
         with torch.no_grad():
             subgoal, intensity, _ = planner.get_action(
                 aff_stack_buf,
@@ -235,8 +285,17 @@ def main():
                                                 math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
             if goal is not None:
                 bearing_y = math.atan2(goal[0], goal[1])
+            aff_delta = 0.0
+            aff_std = 0.0
+            aff_filled = float(aff_stack_fill[env_idx].item()) / max(aff_stack, 1)
+            if aff_stack > 1:
+                base_channels = obs["gt_affordance"].shape[1]
+                stack_h, stack_w = obs["gt_affordance"].shape[2], obs["gt_affordance"].shape[3]
+                stack = aff_stack_buf[env_idx].reshape(aff_stack, base_channels, stack_h, stack_w)
+                aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
+                aff_std = stack.std(dim=0, unbiased=False).mean().item()
             print(
-                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) clr={:.3f} fac(g/c)={:.3f}/{:.3f} optI={:.3f} subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) clr={:.3f} fac(g/c)={:.3f}/{:.3f} optI={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                     step_idx,
                     cmd_speed,
                     progress,
@@ -251,6 +310,9 @@ def main():
                     intensity_goal_factor,
                     intensity_clear_factor,
                     optimal_intensity,
+                    aff_delta,
+                    aff_std,
+                    aff_filled,
                     np.array2string(sub, precision=3, floatmode="fixed"),
                     np.array2string(goal, precision=3, floatmode="fixed"),
                     goal_dist,

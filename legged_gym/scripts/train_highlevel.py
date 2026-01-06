@@ -334,14 +334,14 @@ class HierarchicalHexapodEnv:
             )
             if args.task == "hex_ground":
                 reward_kwargs.update(
-                    goal_approach_scale=5.0,
+                    goal_approach_scale=6.0,
                     goal_reach_threshold=0.1,
-                    heading_scale=0.1,
+                    heading_scale=0.08,
                     heading_offset_rad=0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
-                    time_penalty=-0.05,
+                    time_penalty=-0.03,
                     intensity_match_bonus=0.1,
                     intensity_smooth_penalty=0.0,
                     intensity_gate_use=True,
@@ -355,7 +355,7 @@ class HierarchicalHexapodEnv:
                     heading_gate_min_speed=0.0,
                     heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
-                    collision_penalty=-20.0,
+                    collision_penalty=-10.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -992,6 +992,7 @@ def train(args):
     teacher_stack_buf = None
     stack_reset_mask = None
     last_dones = None
+    aff_stack_fill = None
     for iteration in range(args.num_iterations):
         start_time = time.time()
         
@@ -1026,6 +1027,9 @@ def train(args):
         intensity_goal_factor_sum = torch.zeros((), device=device)
         intensity_clear_factor_sum = torch.zeros((), device=device)
         optimal_intensity_sum = torch.zeros((), device=device)
+        aff_stack_delta_sum = torch.zeros((), device=device)
+        aff_stack_std_sum = torch.zeros((), device=device)
+        aff_stack_filled_sum = torch.zeros((), device=device)
         
         for step in range(args.num_steps):
             # 准备输入
@@ -1054,15 +1058,42 @@ def train(args):
             # 初始化/更新 aff 堆叠
             if aff_stack_buf is None:
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
+                aff_stack_fill = torch.ones(env.num_envs, device=device)
             else:
+                reset_mask = stack_reset_mask
                 if stack_reset_mask is not None and stack_reset_mask.any():
                     aff_stack_buf[stack_reset_mask] = aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                    aff_stack_fill[stack_reset_mask] = 1
                     if teacher_stack_buf is not None:
                         teacher_aff = obs_dict['gt_affordance']
                         teacher_stack_buf[stack_reset_mask] = teacher_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     stack_reset_mask = None
                 aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
                 aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
+                if aff_stack > 1:
+                    if reset_mask is None:
+                        aff_stack_fill = torch.clamp(aff_stack_fill + 1, max=aff_stack)
+                    else:
+                        inc_mask = ~reset_mask
+                        if inc_mask.any():
+                            aff_stack_fill[inc_mask] = torch.clamp(aff_stack_fill[inc_mask] + 1, max=aff_stack)
+                else:
+                    aff_stack_fill.fill_(1)
+
+            # 短时记忆诊断：堆叠帧变化/方差/填满比例
+            if aff_stack > 1:
+                base_channels = aff_map.shape[1]
+                stack_h, stack_w = aff_map.shape[2], aff_map.shape[3]
+                stack = aff_stack_buf.reshape(env.num_envs, aff_stack, base_channels, stack_h, stack_w)
+                delta = (stack[:, 1:] - stack[:, :-1]).abs().mean(dim=(1, 2, 3, 4))
+                stack_std = stack.std(dim=1, unbiased=False).mean(dim=(1, 2, 3))
+                aff_stack_delta_sum += delta.mean()
+                aff_stack_std_sum += stack_std.mean()
+                aff_stack_filled_sum += (aff_stack_fill / aff_stack).mean()
+            else:
+                aff_stack_delta_sum += 0.0
+                aff_stack_std_sum += 0.0
+                aff_stack_filled_sum += 1.0
 
             # Planner 决策
             with torch.no_grad():
@@ -1325,6 +1356,8 @@ def train(args):
         
         mean_reward = np.mean(episode_rewards) if episode_rewards else 0
         mean_length = np.mean(episode_lengths) if episode_lengths else 0
+        sum_reward = float(np.sum(episode_rewards)) if episode_rewards else 0.0
+        sum_length = float(np.sum(episode_lengths)) if episode_lengths else 0.0
         mean_goal_changes = np.mean(goal_change_counts) if goal_change_counts else 0
         
         total_samples = env.num_envs * args.num_steps
@@ -1334,7 +1367,7 @@ def train(args):
         filtered_intensity_mean = (filtered_intensity_sum / total_samples).item()
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
-        mean_step_reward = (mean_reward / mean_length) if mean_length > 0 else 0.0
+        mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
         reward_residual = mean_step_reward - breakdown_total_mean
@@ -1350,6 +1383,14 @@ def train(args):
         intensity_goal_factor_mean = (intensity_goal_factor_sum / total_samples).item()
         intensity_clear_factor_mean = (intensity_clear_factor_sum / total_samples).item()
         optimal_intensity_mean = (optimal_intensity_sum / total_samples).item()
+        aff_stack_delta_mean = (aff_stack_delta_sum / args.num_steps).item()
+        aff_stack_std_mean = (aff_stack_std_sum / args.num_steps).item()
+        aff_stack_filled_mean = (aff_stack_filled_sum / args.num_steps).item()
+        terrain_level_mean = None
+        terrain_level_max = None
+        if hasattr(env.env, "terrain_levels"):
+            terrain_level_mean = env.env.terrain_levels.float().mean().item()
+            terrain_level_max = env.env.terrain_levels.max().item()
 
         # TensorBoard
         writer.add_scalar('Loss/Total', total_loss / max(num_updates, 1), iteration)
@@ -1370,12 +1411,19 @@ def train(args):
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
         writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
         writer.add_scalar('Perf/DifficultyMax', buffer.difficulties.max().item(), iteration)
+        if terrain_level_mean is not None:
+            writer.add_scalar('Perf/TerrainLevelMean', terrain_level_mean, iteration)
+        if terrain_level_max is not None:
+            writer.add_scalar('Perf/TerrainLevelMax', terrain_level_max, iteration)
         writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
+        writer.add_scalar('Diag/AffStackDelta', aff_stack_delta_mean, iteration)
+        writer.add_scalar('Diag/AffStackStd', aff_stack_std_mean, iteration)
+        writer.add_scalar('Diag/AffStackFilled', aff_stack_filled_mean, iteration)
         if collision_threshold_value is not None:
             writer.add_scalar('Diag/CollisionThreshold', collision_threshold_value, iteration)
         writer.add_scalar('Stats/ClearanceMin', clearance_mean, iteration)
@@ -1407,6 +1455,9 @@ def train(args):
                 collision_threshold_src_str = str(collision_threshold_src_value)
             if collision_indices_src_value is not None:
                 collision_indices_src_str = str(collision_indices_src_value)
+            terrain_level_str = "n/a"
+            if terrain_level_mean is not None:
+                terrain_level_str = f"{terrain_level_mean:.2f}"
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -1418,11 +1469,13 @@ def train(args):
                           f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
+                          f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
                           f"""{'Clearance / IntensityFac:':>{pad}} {clearance_mean:.3f} / {intensity_goal_factor_mean:.3f} {intensity_clear_factor_mean:.3f} (opt {optimal_intensity_mean:.3f})\n"""
+                          f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""

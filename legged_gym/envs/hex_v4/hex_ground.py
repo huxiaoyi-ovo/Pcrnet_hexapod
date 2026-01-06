@@ -599,6 +599,21 @@ class HexGround(LeggedRobot):
 
         if len(env_ids) !=0:
             self._resample_nav_goals(env_ids)
+            if hasattr(self, "goal_world"):
+                # 出生时朝向目标点（不使用 yaw 扰动）
+                goal_delta = self.goal_world[env_ids] - self.root_states[env_ids, :2]
+                yaw = torch.atan2(goal_delta[:, 1], goal_delta[:, 0])
+                qz = torch.sin(0.5 * yaw)
+                qw = torch.cos(0.5 * yaw)
+                quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+                self.root_states[env_ids, 3:7] = quat
+                env_ids_int32 = env_ids.to(dtype=torch.int32)
+                self.gym.set_actor_root_state_tensor_indexed(
+                    self.sim,
+                    gymtorch.unwrap_tensor(self.root_states),
+                    gymtorch.unwrap_tensor(env_ids_int32),
+                    len(env_ids_int32),
+                )
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:

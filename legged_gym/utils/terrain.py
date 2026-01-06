@@ -89,6 +89,17 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     max_gap = max(1, (x_max - x_min) - 2 * wall_cells - 2)
     gap_cells = min(gap_cells, max_gap)
     gap_half = max(1, gap_cells // 2)
+    gap_offset_deg = getattr(cfg, "fixed_layout_gap_center_offset_deg", 0.0)
+    offset_ratio = 0.0
+    if gap_offset_deg > 0.0:
+        base_deg = 45.0
+        offset_ratio = np.sin(np.deg2rad(min(gap_offset_deg, base_deg))) / np.sin(np.deg2rad(base_deg))
+    max_gap_shift_x = max(0, ((x_max - x_min) - 2 * wall_cells - gap_cells) // 2)
+    max_gap_shift_y = max(0, ((y_max - y_min) - 2 * wall_cells - gap_cells) // 2)
+    gap_shift_x = int(round(np.random.uniform(-1.0, 1.0) * max_gap_shift_x * offset_ratio))
+    gap_shift_y = int(round(np.random.uniform(-1.0, 1.0) * max_gap_shift_y * offset_ratio))
+    cx_gap = int(np.clip(cx + gap_shift_x, x_min + wall_cells + gap_half, x_max - wall_cells - gap_half))
+    cy_gap = int(np.clip(cy + gap_shift_y, y_min + wall_cells + gap_half, y_max - wall_cells - gap_half))
 
     def fill_rect(x1, x2, y1, y2, height):
         if x2 > x1 and y2 > y1:
@@ -99,8 +110,8 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     top_y2 = y_max
     bot_y1 = y_min
     bot_y2 = min(y_max, y_min + wall_cells)
-    left_x2 = max(x_min, cx - gap_half)
-    right_x1 = min(x_max, cx + gap_half)
+    left_x2 = max(x_min, cx_gap - gap_half)
+    right_x1 = min(x_max, cx_gap + gap_half)
     fill_rect(x_min, left_x2, top_y1, top_y2, high_cells)
     fill_rect(right_x1, x_max, top_y1, top_y2, high_cells)
     fill_rect(x_min, left_x2, bot_y1, bot_y2, high_cells)
@@ -111,8 +122,8 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     left_x2 = min(x_max, x_min + wall_cells)
     right_x1 = max(x_min, x_max - wall_cells)
     right_x2 = x_max
-    lower_y2 = max(y_min, cy - gap_half)
-    upper_y1 = min(y_max, cy + gap_half)
+    lower_y2 = max(y_min, cy_gap - gap_half)
+    upper_y1 = min(y_max, cy_gap + gap_half)
     fill_rect(left_x1, left_x2, y_min, lower_y2, high_cells)
     fill_rect(left_x1, left_x2, upper_y1, y_max, high_cells)
     fill_rect(right_x1, right_x2, y_min, lower_y2, high_cells)
@@ -150,16 +161,37 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
 
     cyl_radius = sample_radius()
     cyl_offset_use = max(cyl_offset, cyl_radius + robot_clearance)
+    gap_offset_x = (cx_gap - cx) * h_scale
+    gap_offset_y = (cy_gap - cy) * h_scale
 
     gap_centers = [
-        (0.0, ring_half - wall_thickness - cyl_offset_use),   # north
-        (0.0, -ring_half + wall_thickness + cyl_offset_use),  # south
-        (ring_half - wall_thickness - cyl_offset_use, 0.0),   # east
-        (-ring_half + wall_thickness + cyl_offset_use, 0.0),  # west
+        (gap_offset_x, ring_half - wall_thickness - cyl_offset_use),   # north
+        (gap_offset_x, -ring_half + wall_thickness + cyl_offset_use),  # south
+        (ring_half - wall_thickness - cyl_offset_use, gap_offset_y),   # east
+        (-ring_half + wall_thickness + cyl_offset_use, gap_offset_y),  # west
     ]
     gap_heights = [high_cells, low_cells, high_cells, low_cells]
     for (gx, gy), h_cells in zip(gap_centers, gap_heights):
         fill_cylinder(gx, gy, cyl_radius, h_cells)
+
+    rand_num_min = getattr(cfg, "fixed_layout_rand_cyl_num_min", 0)
+    rand_num_max = getattr(cfg, "fixed_layout_rand_cyl_num_max", 0)
+    if rand_num_max > 0 and rand_num_max >= rand_num_min:
+        num_rand = np.random.randint(rand_num_min, rand_num_max + 1)
+        rand_r_min_cfg = getattr(cfg, "fixed_layout_rand_cyl_r_min", 0.0)
+        rand_r_max_cfg = getattr(cfg, "fixed_layout_rand_cyl_r_max", ring_half)
+        for _ in range(num_rand):
+            rand_radius = sample_radius()
+            min_r = max(center_clearance + robot_clearance + rand_radius, rand_r_min_cfg)
+            max_r = min(ring_half - wall_thickness - robot_clearance - rand_radius, rand_r_max_cfg)
+            if max_r <= min_r:
+                continue
+            angle = np.random.uniform(-np.pi, np.pi)
+            radius = np.random.uniform(min_r, max_r)
+            rx = radius * np.cos(angle)
+            ry = radius * np.sin(angle)
+            h_cells = high_cells if np.random.rand() < 0.5 else low_cells
+            fill_cylinder(rx, ry, rand_radius, h_cells)
 
     _apply_mixed_overlays(terrain, difficulty, cfg)
     return terrain
