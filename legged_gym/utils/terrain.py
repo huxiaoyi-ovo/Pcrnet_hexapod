@@ -68,8 +68,9 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     gap_width = gap_max - (gap_max - gap_min) * difficulty
     min_gap = 2.0 * robot_clearance + gap_buffer
     gap_width = max(gap_width, min_gap)
-    high_h = np.random.uniform(high_min, high_max)
-    low_h = np.random.uniform(low_min, low_max)
+    passable_width = max(0.0, gap_width - 2.0 * robot_clearance - gap_buffer)
+    high_h = np.random.uniform(high_min, high_min + (high_max - high_min) * difficulty)
+    low_h = np.random.uniform(low_min, low_min + (low_max - low_min) * difficulty)
 
     # 转为离散单位
     ring_half_cells = max(1, int(round(ring_half / h_scale)))
@@ -170,12 +171,17 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
             height_cells,
         )
 
-    def sample_radius():
-        radius = np.random.uniform(cyl_radius_min, cyl_radius_max)
+    def sample_radius(scale: float = 1.0, radius_limit: float = None):
+        radius_max = cyl_radius_min + (cyl_radius_max - cyl_radius_min) * scale
+        if radius_limit is not None:
+            radius_max = min(radius_max, radius_limit)
+        if radius_max < cyl_radius_min:
+            radius_max = cyl_radius_min
+        radius = np.random.uniform(cyl_radius_min, radius_max)
         max_radius = max(0.05, ring_half - wall_thickness - cyl_offset - robot_clearance)
         return min(radius, max_radius)
 
-    cyl_radius = sample_radius()
+    cyl_radius = sample_radius(difficulty)
     cyl_offset_use = max(cyl_offset, cyl_radius + robot_clearance)
     gap_offset_x = (cx_gap - cx) * h_scale
     gap_offset_y = (cy_gap - cy) * h_scale
@@ -196,11 +202,18 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
     rand_box_min = float(getattr(cfg, "fixed_layout_rand_box_size_min", 0.25))
     rand_box_max = float(getattr(cfg, "fixed_layout_rand_box_size_max", 0.6))
     if rand_num_max > 0 and rand_num_max >= rand_num_min:
-        num_rand = np.random.randint(rand_num_min, rand_num_max + 1)
+        num_float = rand_num_min + (rand_num_max - rand_num_min) * difficulty
+        num_rand = int(round(num_float))
         rand_r_min_cfg = getattr(cfg, "fixed_layout_rand_cyl_r_min", 0.0)
         rand_r_max_cfg = getattr(cfg, "fixed_layout_rand_cyl_r_max", ring_half)
+        box_max = rand_box_min + (rand_box_max - rand_box_min) * difficulty
+        if passable_width > 0.0:
+            box_max = min(box_max, passable_width)
+            if box_max < rand_box_min:
+                box_max = rand_box_min
         for _ in range(num_rand):
-            rand_radius = sample_radius()
+            radius_limit = 0.5 * passable_width if passable_width > 0.0 else None
+            rand_radius = sample_radius(difficulty, radius_limit=radius_limit)
             min_r = max(center_clearance + robot_clearance + rand_radius, rand_r_min_cfg)
             max_r = min(ring_half - wall_thickness - robot_clearance - rand_radius, rand_r_max_cfg)
             if max_r <= min_r:
@@ -211,8 +224,8 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
             ry = radius * np.sin(angle)
             h_cells = high_cells if np.random.rand() < 0.5 else low_cells
             if np.random.rand() < rand_box_prob:
-                size_x = np.random.uniform(rand_box_min, rand_box_max)
-                size_y = np.random.uniform(rand_box_min, rand_box_max)
+                size_x = np.random.uniform(rand_box_min, box_max)
+                size_y = np.random.uniform(rand_box_min, box_max)
                 fill_box(rx, ry, size_x, size_y, h_cells)
             else:
                 fill_cylinder(rx, ry, rand_radius, h_cells)

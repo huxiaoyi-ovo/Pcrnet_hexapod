@@ -112,8 +112,8 @@ class HexGroundCfg(LeggedRobotCfg):
         fixed_layout_cyl_radius_min = 0.12
         fixed_layout_cyl_radius_max = 0.12
         fixed_layout_cyl_offset = 0.7
-        fixed_layout_rand_cyl_num_min = 4
-        fixed_layout_rand_cyl_num_max = 8
+        fixed_layout_rand_cyl_num_min = 5
+        fixed_layout_rand_cyl_num_max = 10
         fixed_layout_rand_cyl_r_min = 0.8
         fixed_layout_rand_cyl_r_max = 1.6
         fixed_layout_rand_shape_box_prob = 0.5

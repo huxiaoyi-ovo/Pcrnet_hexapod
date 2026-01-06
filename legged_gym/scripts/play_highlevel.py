@@ -171,6 +171,8 @@ def main():
     aff_stack_buf = obs["gt_affordance"].repeat(1, aff_stack, 1, 1)
     aff_stack_fill = torch.ones(env.num_envs, device=device)
     stack_reset_mask = None
+    level_up_pressed = False
+    level_down_pressed = False
     while True:
         manual_reset = False
         level_delta = 0
@@ -178,10 +180,18 @@ def main():
             for evt in env.env.gym.query_viewer_action_events(viewer):
                 if evt.action == "RESET_ENV" and evt.value > 0:
                     manual_reset = True
-                elif evt.action == "LEVEL_DOWN" and evt.value > 0:
-                    level_delta -= 1
-                elif evt.action == "LEVEL_UP" and evt.value > 0:
-                    level_delta += 1
+                elif evt.action == "LEVEL_DOWN":
+                    if evt.value > 0 and not level_down_pressed:
+                        level_delta -= 1
+                        level_down_pressed = True
+                    elif evt.value <= 0:
+                        level_down_pressed = False
+                elif evt.action == "LEVEL_UP":
+                    if evt.value > 0 and not level_up_pressed:
+                        level_delta += 1
+                        level_up_pressed = True
+                    elif evt.value <= 0:
+                        level_up_pressed = False
         if manual_reset or level_delta != 0:
             if level_delta != 0 and hasattr(env.env, "terrain_levels"):
                 env_idx = args.camera_env
