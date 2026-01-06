@@ -991,6 +991,7 @@ def train(args):
     aff_stack_buf = None
     teacher_stack_buf = None
     stack_reset_mask = None
+    last_dones = None
     for iteration in range(args.num_iterations):
         start_time = time.time()
         
@@ -1095,6 +1096,7 @@ def train(args):
             
             # 环境步进
             next_obs, rewards, dones, env_info = env.step(subgoal, intensity)
+            last_dones = dones.clone()
 
             # 存储数据
             buffer.add(
@@ -1185,19 +1187,32 @@ def train(args):
             goal = obs_dict['goal']
             
             if args.mode == 'teacher':
-                aff_map = obs_dict['gt_affordance']
+                aff_map_next = obs_dict['gt_affordance']
                 difficulty = obs_dict['gt_difficulty']
             else:
                 if vision_model is not None:
                     with torch.no_grad():
                         vis_out = vision_model(obs_dict['depth'], normalize=True)
-                        aff_map = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
-                        difficulty = difficulty_from_gap(aff_map)
+                        aff_map_next = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
+                        difficulty = difficulty_from_gap(aff_map_next)
                 else:
-                    aff_map = obs_dict['gt_affordance']
+                    aff_map_next = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']
             
-            out = planner(aff_map, state, goal, difficulty)
+            if aff_stack_buf is None:
+                aff_stack_bootstrap = aff_map_next.repeat(1, aff_stack, 1, 1)
+            else:
+                aff_stack_bootstrap = torch.roll(aff_stack_buf, shifts=-aff_map_next.shape[1], dims=1)
+                aff_stack_bootstrap[:, -aff_map_next.shape[1]:, :, :] = aff_map_next
+                if last_dones is not None and last_dones.any():
+                    done_mask = last_dones.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+                    aff_stack_bootstrap = torch.where(
+                        done_mask,
+                        aff_map_next.repeat(1, aff_stack, 1, 1),
+                        aff_stack_bootstrap,
+                    )
+
+            out = planner(aff_stack_bootstrap, state, goal, difficulty)
             next_value = out.value
         
         # 计算 Returns 和 Advantages
