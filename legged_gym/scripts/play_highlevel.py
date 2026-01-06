@@ -175,7 +175,7 @@ def main():
         manual_reset = False
         level_delta = 0
         if input_enabled:
-            for evt in env.env.gym.get_keyboard_events(viewer):
+            for evt in env.env.gym.query_viewer_action_events(viewer):
                 if evt.action == "RESET_ENV" and evt.value > 0:
                     manual_reset = True
                 elif evt.action == "LEVEL_DOWN" and evt.value > 0:
