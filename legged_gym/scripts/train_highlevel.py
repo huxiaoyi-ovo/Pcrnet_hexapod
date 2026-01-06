@@ -292,9 +292,19 @@ class HierarchicalHexapodEnv:
             map_extent = float(cam_cfg.far_clip)
         else:
             map_extent = 5.0
+        self.affordance_cell_size = float(cell_size) if cell_size is not None else (map_extent / map_size)
         self.affordance_map_size = map_size
         self.affordance_map_extent = map_extent
-        self.affordance_clearance = float(getattr(env_cfg.terrain, "fixed_layout_robot_clearance", 0.27))
+        clearance = getattr(env_cfg.terrain, "fixed_layout_robot_clearance", None)
+        if clearance is None:
+            body_shape = getattr(getattr(env_cfg, "asset", None), "body_shape", None)
+            if body_shape is not None:
+                clearance = math.hypot(float(body_shape.x), float(body_shape.y)) + 0.05
+            else:
+                clearance = 0.27
+        self.affordance_clearance = float(clearance)
+        self.affordance_clearance_free = self.affordance_clearance + 0.3
+        self.affordance_dist_map = self._build_affordance_dist_map()
         self.affordance_blocking_height = float(getattr(env_cfg.navigation, "goal_obstacle_height_threshold", 0.2))
 
         if hasattr(self.env, "_resample_commands"):
@@ -327,7 +337,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=5.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.1,
-                    heading_offset_rad=-0.5 * math.pi,
+                    heading_offset_rad=0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
@@ -337,11 +347,15 @@ class HierarchicalHexapodEnv:
                     intensity_gate_use=True,
                     intensity_gate_min_speed=0.0,
                     intensity_gate_min_approach=0.01,
+                    intensity_goal_slow_dist=0.6,
+                    intensity_goal_min_factor=0.1,
+                    intensity_clearance_safe=self.affordance_clearance,
+                    intensity_clearance_free=self.affordance_clearance_free,
                     heading_gate_use=True,
                     heading_gate_min_speed=0.0,
                     heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
-                    collision_penalty=-10.0,
+                    collision_penalty=-20.0,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -358,6 +372,7 @@ class HierarchicalHexapodEnv:
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.clearance_override = None
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -541,6 +556,37 @@ class HierarchicalHexapodEnv:
 
         return torch.cat([occ_all.unsqueeze(1), passable_gap.unsqueeze(1)], dim=1)
 
+    def _build_affordance_dist_map(self) -> torch.Tensor:
+        map_size = self.affordance_map_size
+        map_extent = self.affordance_map_extent
+        cell = self.affordance_cell_size
+        x_centers = torch.linspace(
+            -map_extent * 0.5 + cell * 0.5,
+            map_extent * 0.5 - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        y_centers = torch.linspace(
+            0.0 + cell * 0.5,
+            map_extent - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        return torch.sqrt(grid_x ** 2 + grid_y ** 2)
+
+    def _compute_clearance_from_affordance(self, aff_map: torch.Tensor) -> torch.Tensor:
+        occ = aff_map[:, 0] > 0.5
+        dist_map = self.affordance_dist_map
+        if dist_map.device != aff_map.device:
+            dist_map = dist_map.to(aff_map.device)
+        dist = torch.where(occ, dist_map, torch.full_like(dist_map, self.affordance_map_extent))
+        min_dist = dist.amin(dim=(1, 2))
+        no_obs = ~occ.any(dim=(1, 2))
+        if no_obs.any():
+            min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
+        return min_dist
+
     def _get_high_level_obs(self) -> Dict[str, torch.Tensor]:
         """
         构建高层观测字典
@@ -700,18 +746,21 @@ class HierarchicalHexapodEnv:
         collision_threshold = None
         collision_threshold_src = None
         collision_indices_src = None
+        clearance = None
         if hasattr(self.env, "contact_forces"):
             collision_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
             collision_threshold_src = "collision_force_threshold"
-            indices = getattr(self.env, "termination_contact_indices", None)
-            collision_indices_src = "termination_contact_indices"
-            if indices is None or indices.numel() == 0:
-                indices = getattr(self.env, "penalised_contact_indices", None)
-                collision_indices_src = "penalised_contact_indices"
+            indices = getattr(self.env, "penalised_contact_indices", None)
+            collision_indices_src = "penalised_contact_indices"
             if indices is not None and indices.numel() > 0:
                 contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
                 collision_force_max = contact_norm.max(dim=1).values
                 collision_mask = torch.any(contact_norm > collision_threshold, dim=1)
+        if self.clearance_override is not None:
+            clearance = self.clearance_override
+            self.clearance_override = None
+        elif reward_obs is not None and 'gt_affordance' in reward_obs:
+            clearance = self._compute_clearance_from_affordance(reward_obs['gt_affordance'])
 
         reward_terms = None
         if self.reward_func is not None:
@@ -739,13 +788,18 @@ class HierarchicalHexapodEnv:
                 prev_intensity=self.prev_intensity,
                 terrain_difficulty=reward_obs['gt_difficulty'],
                 collision_mask=collision_mask,
+                clearance=clearance,
             )
+            if clearance is not None:
+                reward_dict['clearance'] = clearance
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
             if self.reward_cfg is not None:
                 dist_to_goal = torch.norm(robot_pos[:, :2] - goal_pos, dim=-1)
                 reach_now = dist_to_goal < self.reward_cfg.goal_reach_threshold
+                if reach_now.any():
+                    done_any |= reach_now
                 reach_mask = reach_now & (~self.reach_given)
                 if reach_now.any():
                     repeated = reach_now & self.reach_given
@@ -809,6 +863,7 @@ class HierarchicalHexapodEnv:
             'collision_threshold': collision_threshold,
             'collision_threshold_src': collision_threshold_src,
             'collision_indices_src': collision_indices_src,
+            'clearance': clearance,
         }
 
         return next_obs, total_reward, done_any, info
@@ -958,6 +1013,10 @@ def train(args):
         collision_threshold_value = None
         collision_threshold_src_value = None
         collision_indices_src_value = None
+        clearance_sum = torch.zeros((), device=device)
+        intensity_goal_factor_sum = torch.zeros((), device=device)
+        intensity_clear_factor_sum = torch.zeros((), device=device)
+        optimal_intensity_sum = torch.zeros((), device=device)
         
         for step in range(args.num_steps):
             # 准备输入
@@ -967,6 +1026,7 @@ def train(args):
             if args.mode == 'teacher':
                 aff_map = obs_dict['gt_affordance']
                 difficulty = obs_dict['gt_difficulty']
+                env.clearance_override = None
             else:
                 # Student: 使用 Vision 模型预测
                 if vision_model is not None:
@@ -980,6 +1040,7 @@ def train(args):
                 else:
                     aff_map = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']
+                env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             
             # Planner 决策
             with torch.no_grad():
@@ -1038,6 +1099,12 @@ def train(args):
                 for key in reward_term_keys:
                     if key in reward_terms:
                         reward_term_sums[key] += reward_terms[key].sum()
+                if 'intensity_goal_factor' in reward_terms:
+                    intensity_goal_factor_sum += reward_terms['intensity_goal_factor'].sum()
+                if 'intensity_clear_factor' in reward_terms:
+                    intensity_clear_factor_sum += reward_terms['intensity_clear_factor'].sum()
+                if 'optimal_intensity' in reward_terms:
+                    optimal_intensity_sum += reward_terms['optimal_intensity'].sum()
             collision_mask = env_info.get('collision_mask', None) if env_info is not None else None
             if collision_mask is not None:
                 collision_rate_sum += collision_mask.float().sum()
@@ -1053,6 +1120,9 @@ def train(args):
             collision_indices_src = env_info.get('collision_indices_src', None) if env_info is not None else None
             if collision_indices_src is not None:
                 collision_indices_src_value = collision_indices_src
+            clearance = env_info.get('clearance', None) if env_info is not None else None
+            if clearance is not None:
+                clearance_sum += clearance.sum()
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
             done_ids = dones.nonzero(as_tuple=False).flatten()
@@ -1221,8 +1291,10 @@ def train(args):
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
         mean_step_reward = (mean_reward / mean_length) if mean_length > 0 else 0.0
+        rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
         reward_residual = mean_step_reward - breakdown_total_mean
+        resid_rollout = rollout_mean_step_reward - breakdown_total_mean
         collision_rate_mean = (collision_rate_sum / total_samples).item()
         collision_force_mean = 0.0
         collision_force_p95 = 0.0
@@ -1230,6 +1302,10 @@ def train(args):
             collision_force_all = torch.cat(collision_force_samples, dim=0)
             collision_force_mean = collision_force_all.mean().item()
             collision_force_p95 = torch.quantile(collision_force_all, 0.95).item()
+        clearance_mean = (clearance_sum / total_samples).item()
+        intensity_goal_factor_mean = (intensity_goal_factor_sum / total_samples).item()
+        intensity_clear_factor_mean = (intensity_clear_factor_sum / total_samples).item()
+        optimal_intensity_mean = (optimal_intensity_sum / total_samples).item()
 
         # TensorBoard
         writer.add_scalar('Loss/Total', total_loss / max(num_updates, 1), iteration)
@@ -1243,6 +1319,8 @@ def train(args):
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
         writer.add_scalar('Perf/MeanStepReward', mean_step_reward, iteration)
         writer.add_scalar('Perf/RewardResidual', reward_residual, iteration)
+        writer.add_scalar('Perf/RolloutMeanStepReward', rollout_mean_step_reward, iteration)
+        writer.add_scalar('Perf/RolloutRewardResidual', resid_rollout, iteration)
         writer.add_scalar('Perf/FPS', fps, iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
@@ -1256,6 +1334,13 @@ def train(args):
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
         if collision_threshold_value is not None:
             writer.add_scalar('Diag/CollisionThreshold', collision_threshold_value, iteration)
+        writer.add_scalar('Stats/ClearanceMin', clearance_mean, iteration)
+        writer.add_scalar('Stats/IntensityGoalFactor', intensity_goal_factor_mean, iteration)
+        writer.add_scalar('Stats/IntensityClearFactor', intensity_clear_factor_mean, iteration)
+        writer.add_scalar('Stats/OptimalIntensity', optimal_intensity_mean, iteration)
+        if env.reward_cfg is not None:
+            writer.add_scalar('Stats/IntensityClearanceSafe', float(env.reward_cfg.intensity_clearance_safe), iteration)
+            writer.add_scalar('Stats/IntensityClearanceFree', float(env.reward_cfg.intensity_clearance_free), iteration)
         writer.add_scalar('Stats/SubgoalNorm', subgoal_norm_mean, iteration)
         writer.add_scalar('Stats/Intensity', intensity_mean, iteration)
         writer.add_scalar('Stats/FilteredIntensity', filtered_intensity_mean, iteration)
@@ -1286,12 +1371,14 @@ def train(args):
                           f"""{'Entropy loss:':>{pad}} {entropy_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
                           f"""{'Mean step reward:':>{pad}} {mean_step_reward:.3f} (resid {reward_residual:.3f})\n"""
+                          f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
+                          f"""{'Clearance / IntensityFac:':>{pad}} {clearance_mean:.3f} / {intensity_goal_factor_mean:.3f} {intensity_clear_factor_mean:.3f} (opt {optimal_intensity_mean:.3f})\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""

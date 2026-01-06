@@ -188,11 +188,19 @@ def main():
             reward_heading = 0.0
             reward_time = 0.0
             reward_intensity = 0.0
+            clearance = 0.0
+            intensity_goal_factor = 0.0
+            intensity_clear_factor = 0.0
+            optimal_intensity = 0.0
             if reward_terms is not None:
                 reward_approach = float(reward_terms.get("approach", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_heading = float(reward_terms.get("heading", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_time = float(reward_terms.get("time", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_intensity = float(reward_terms.get("intensity_match", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                clearance = float(reward_terms.get("clearance", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                intensity_goal_factor = float(reward_terms.get("intensity_goal_factor", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                intensity_clear_factor = float(reward_terms.get("intensity_clear_factor", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                optimal_intensity = float(reward_terms.get("optimal_intensity", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
             yaw_raw = 0.0
             yaw_policy = 0.0
             heading_err_pos = 0.0
@@ -214,7 +222,7 @@ def main():
             if goal is not None:
                 bearing_y = math.atan2(goal[0], goal[1])
             print(
-                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) clr={:.3f} fac(g/c)={:.3f}/{:.3f} optI={:.3f} subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                     step_idx,
                     cmd_speed,
                     progress,
@@ -225,6 +233,10 @@ def main():
                     reward_heading,
                     reward_time,
                     reward_intensity,
+                    clearance,
+                    intensity_goal_factor,
+                    intensity_clear_factor,
+                    optimal_intensity,
                     np.array2string(sub, precision=3, floatmode="fixed"),
                     np.array2string(goal, precision=3, floatmode="fixed"),
                     goal_dist,
