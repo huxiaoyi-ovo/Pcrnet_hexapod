@@ -154,6 +154,22 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
         patch[mask] = np.maximum(patch[mask], height_cells)
         height_field[x1:x2, y1:y2] = patch
 
+    def fill_box(center_x: float, center_y: float, size_x: float, size_y: float, height_cells: int):
+        half_x = max(1, int(round(0.5 * size_x / h_scale)))
+        half_y = max(1, int(round(0.5 * size_y / h_scale)))
+        cx_i = int(round(cx + center_x / h_scale))
+        cy_i = int(round(cy + center_y / h_scale))
+        x1 = max(0, cx_i - half_x)
+        x2 = min(width, cx_i + half_x + 1)
+        y1 = max(0, cy_i - half_y)
+        y2 = min(length, cy_i + half_y + 1)
+        if x2 <= x1 or y2 <= y1:
+            return
+        height_field[x1:x2, y1:y2] = np.maximum(
+            height_field[x1:x2, y1:y2],
+            height_cells,
+        )
+
     def sample_radius():
         radius = np.random.uniform(cyl_radius_min, cyl_radius_max)
         max_radius = max(0.05, ring_half - wall_thickness - cyl_offset - robot_clearance)
@@ -176,6 +192,9 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
 
     rand_num_min = getattr(cfg, "fixed_layout_rand_cyl_num_min", 0)
     rand_num_max = getattr(cfg, "fixed_layout_rand_cyl_num_max", 0)
+    rand_box_prob = float(getattr(cfg, "fixed_layout_rand_shape_box_prob", 0.5))
+    rand_box_min = float(getattr(cfg, "fixed_layout_rand_box_size_min", 0.25))
+    rand_box_max = float(getattr(cfg, "fixed_layout_rand_box_size_max", 0.6))
     if rand_num_max > 0 and rand_num_max >= rand_num_min:
         num_rand = np.random.randint(rand_num_min, rand_num_max + 1)
         rand_r_min_cfg = getattr(cfg, "fixed_layout_rand_cyl_r_min", 0.0)
@@ -191,7 +210,12 @@ def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain
             rx = radius * np.cos(angle)
             ry = radius * np.sin(angle)
             h_cells = high_cells if np.random.rand() < 0.5 else low_cells
-            fill_cylinder(rx, ry, rand_radius, h_cells)
+            if np.random.rand() < rand_box_prob:
+                size_x = np.random.uniform(rand_box_min, rand_box_max)
+                size_y = np.random.uniform(rand_box_min, rand_box_max)
+                fill_box(rx, ry, size_x, size_y, h_cells)
+            else:
+                fill_cylinder(rx, ry, rand_radius, h_cells)
 
     _apply_mixed_overlays(terrain, difficulty, cfg)
     return terrain

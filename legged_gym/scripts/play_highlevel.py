@@ -139,11 +139,11 @@ def main():
     if not input_enabled and not args.headless:
         print("[PlayHigh] ⚠ viewer not available; keyboard controls disabled.")
     if input_enabled:
-        print("[PlayHigh] 键盘控制: R=重置, [=降级, ]=升级")
+        print("[PlayHigh] 键盘控制: R=重置, A=降级, D=升级")
         gym = env.env.gym
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "RESET_ENV")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_LEFT_BRACKET, "LEVEL_DOWN")
-        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_RIGHT_BRACKET, "LEVEL_UP")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "LEVEL_DOWN")
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "LEVEL_UP")
     obs = env.reset()
     heading_offset = 0.0
     if hasattr(env, "reward_cfg") and env.reward_cfg is not None:

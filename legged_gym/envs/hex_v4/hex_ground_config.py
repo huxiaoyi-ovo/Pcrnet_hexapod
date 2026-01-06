@@ -116,6 +116,9 @@ class HexGroundCfg(LeggedRobotCfg):
         fixed_layout_rand_cyl_num_max = 8
         fixed_layout_rand_cyl_r_min = 0.8
         fixed_layout_rand_cyl_r_max = 1.6
+        fixed_layout_rand_shape_box_prob = 0.5
+        fixed_layout_rand_box_size_min = 0.25
+        fixed_layout_rand_box_size_max = 0.6
         # mixed terrain placeholders (disabled by default)
         mixed_enable = False
         mixed_roughness_enable = False
