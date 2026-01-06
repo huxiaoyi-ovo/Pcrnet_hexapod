@@ -37,6 +37,7 @@ def parse_args():
         help="Low-level policy checkpoint path",
     )
     parser.add_argument("--teacher_ckpt", type=str, required=True, help="Teacher checkpoint path")
+    parser.add_argument("--aff_stack", type=int, default=4, help="affordance 堆叠帧数 (短时记忆)")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
     parser.add_argument("--decimation", type=int, default=5, help="High/low frequency ratio")
     parser.add_argument("--headless", action="store_true", default=False, help="Disable viewer")
@@ -101,6 +102,8 @@ def main():
     args = parse_args()
     if args.task != "hex_ground":
         raise ValueError("play_highlevel.py currently supports only --task hex_ground")
+    if getattr(args, "aff_stack", 1) > 1:
+        print(f"[PlayHigh] aff_stack={args.aff_stack}: 输入通道数改变，需与 ckpt 训练时一致，否则无法加载。")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     th.import_modules()
@@ -137,9 +140,11 @@ def main():
         heading_offset = float(getattr(env.reward_cfg, "heading_offset_rad", 0.0))
     print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (from reward_cfg)")
     aff_shape = obs["gt_affordance"].shape[1:]
+    aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
+    aff_channels = aff_shape[0] * aff_stack
     # Use clearer alias; implementation is identical to TerrainAdaptivePlanner.
     planner = th.HighLevelPlanner(
-        affordance_channels=aff_shape[0],
+        affordance_channels=aff_channels,
         state_dim=obs["state"].shape[1],
         goal_dim=obs["goal"].shape[1],
     ).to(device)
@@ -153,16 +158,25 @@ def main():
     camera_frame_idx = 0
 
     prev_dist = None
+    aff_stack_buf = obs["gt_affordance"].repeat(1, aff_stack, 1, 1)
+    stack_reset_mask = None
     while True:
+        if stack_reset_mask is not None and stack_reset_mask.any():
+            aff_stack_buf[stack_reset_mask] = obs["gt_affordance"][stack_reset_mask].repeat(1, aff_stack, 1, 1)
+            stack_reset_mask = None
+        aff_stack_buf = torch.roll(aff_stack_buf, shifts=-obs["gt_affordance"].shape[1], dims=1)
+        aff_stack_buf[:, -obs["gt_affordance"].shape[1]:, :, :] = obs["gt_affordance"]
         with torch.no_grad():
             subgoal, intensity, _ = planner.get_action(
-                obs["gt_affordance"],
+                aff_stack_buf,
                 obs["state"],
                 obs["goal"],
                 obs["gt_difficulty"],
                 deterministic=deterministic,
             )
         obs, rewards, dones, info = env.step(subgoal, intensity)
+        if dones.any():
+            stack_reset_mask = dones.clone()
 
         env_idx = 0
         goal = obs["goal"][env_idx].detach().cpu().numpy()

@@ -582,7 +582,7 @@ class HierarchicalHexapodEnv:
             dist_map = dist_map.to(aff_map.device)
         dist = torch.where(occ, dist_map, torch.full_like(dist_map, self.affordance_map_extent))
         min_dist = dist.amin(dim=(1, 2))
-        no_obs = ~occ.any(dim=(1, 2))
+        no_obs = ~occ.flatten(1).any(dim=1)
         if no_obs.any():
             min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
         return min_dist
@@ -891,6 +891,8 @@ def train(args):
     print(f"Mode: {args.mode.upper()}")
     print(f"Device: {device}")
     print(f"{'='*60}\n")
+    if getattr(args, "aff_stack", 1) > 1:
+        print(f"[Warn] aff_stack={args.aff_stack}: 输入通道数改变，必须使用相同 aff_stack 训练/加载 ckpt；旧 ckpt 不兼容。")
     
     # 导入模块
     import_modules()
@@ -904,10 +906,12 @@ def train(args):
     state_dim = obs_dict['state'].shape[1]
     goal_dim = obs_dict['goal'].shape[1]
     aff_shape = obs_dict['gt_affordance'].shape[1:]
+    aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
+    aff_channels = aff_shape[0] * aff_stack
 
     # 创建 Planner (V3.6)
     planner = HighLevelPlanner(
-        affordance_channels=aff_shape[0],
+        affordance_channels=aff_channels,
         state_dim=state_dim,
         goal_dim=goal_dim,
     ).to(device)
@@ -927,7 +931,7 @@ def train(args):
         # 加载 Teacher
         if args.teacher_ckpt:
             teacher_model = HighLevelPlanner(
-                affordance_channels=aff_shape[0],
+                affordance_channels=aff_channels,
                 state_dim=state_dim,
                 goal_dim=goal_dim,
             ).to(device)
@@ -967,6 +971,7 @@ def train(args):
     print(f"[Main] 日志目录: {log_dir}")
     
     # 创建 Rollout Buffer
+    aff_shape = (aff_channels, aff_shape[1], aff_shape[2])
     buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_shape, device)
     
     # 训练统计
@@ -983,6 +988,9 @@ def train(args):
     print(f"  - Batch size: {env.num_envs * args.num_steps}")
     print(f"  - Learning rate: {args.lr}")
     
+    aff_stack_buf = None
+    teacher_stack_buf = None
+    stack_reset_mask = None
     for iteration in range(args.num_iterations):
         start_time = time.time()
         
@@ -1041,15 +1049,28 @@ def train(args):
                     aff_map = obs_dict['gt_affordance']
                     difficulty = obs_dict['gt_difficulty']
                 env.clearance_override = env._compute_clearance_from_affordance(aff_map)
-            
+
+            # 初始化/更新 aff 堆叠
+            if aff_stack_buf is None:
+                aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
+            else:
+                if stack_reset_mask is not None and stack_reset_mask.any():
+                    aff_stack_buf[stack_reset_mask] = aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                    if teacher_stack_buf is not None:
+                        teacher_aff = obs_dict['gt_affordance']
+                        teacher_stack_buf[stack_reset_mask] = teacher_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                    stack_reset_mask = None
+                aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
+                aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
+
             # Planner 决策
             with torch.no_grad():
                 subgoal, intensity, info = planner.get_action(
-                    aff_map, state, goal, difficulty, deterministic=False
+                    aff_stack_buf, state, goal, difficulty, deterministic=False
                 )
                 
                 log_prob, value, _, _ = planner.evaluate_actions(
-                    aff_map, state, goal, difficulty, subgoal, intensity
+                    aff_stack_buf, state, goal, difficulty, subgoal, intensity
                 )
             
             # Teacher 目标 (Student 模式)
@@ -1057,8 +1078,14 @@ def train(args):
             teacher_intensity = None
             if args.mode == 'student' and teacher_model is not None:
                 with torch.no_grad():
+                    teacher_aff = obs_dict['gt_affordance']
+                    if teacher_stack_buf is None:
+                        teacher_stack_buf = teacher_aff.repeat(1, aff_stack, 1, 1)
+                    else:
+                        teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-teacher_aff.shape[1], dims=1)
+                        teacher_stack_buf[:, -teacher_aff.shape[1]:, :, :] = teacher_aff
                     t_sub, t_int, _ = teacher_model.get_action(
-                        obs_dict['gt_affordance'],
+                        teacher_stack_buf,
                         state, goal,
                         obs_dict['gt_difficulty'],
                         deterministic=True
@@ -1073,7 +1100,7 @@ def train(args):
             buffer.add(
                 state.detach(),
                 goal.detach(),
-                aff_map.detach(),
+                aff_stack_buf.detach(),
                 difficulty.detach(),
                 subgoal.detach(),
                 intensity.detach(),
@@ -1145,6 +1172,8 @@ def train(args):
             else:
                 running_returns += rewards
             
+            if dones.any():
+                stack_reset_mask = dones.clone()
             obs_dict = next_obs
 
         rollout_time = time.time() - rollout_start
@@ -1433,6 +1462,8 @@ if __name__ == "__main__":
     # 环境
     parser.add_argument('--task', type=str, default='hex_terrain',
                         help='Isaac Gym 任务名称')
+    parser.add_argument('--aff_stack', type=int, default=4,
+                        help='affordance 堆叠帧数 (短时记忆)')
     parser.add_argument('--num_envs', type=int, default=4096,
                         help='并行环境数量')
     parser.add_argument('--decimation', type=int, default=5,
