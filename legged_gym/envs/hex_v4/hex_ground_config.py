@@ -62,7 +62,7 @@ class HexGroundCfg(LeggedRobotCfg):
         spawn_edge_margin = 0.3
         spawn_outside_margin = 0.2
         spawn_yaw_jitter_deg = 20.0
-        heading_offset_rad = -0.5 * math.pi
+        heading_offset_rad = 0.5 * math.pi
         crossable_height_max = 0.08
         crossable_width_margin = 0.0
         crossable_sector_deg = 60.0

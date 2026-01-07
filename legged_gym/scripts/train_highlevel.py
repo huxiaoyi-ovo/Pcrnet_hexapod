@@ -363,7 +363,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=6.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.08,
-                    heading_offset_rad=-0.5 * math.pi,
+                    heading_offset_rad=0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
@@ -1841,7 +1841,7 @@ if __name__ == "__main__":
                         help='输出目录')
     parser.add_argument('--log_interval', type=int, default=10,
                         help='日志间隔')
-    parser.add_argument('--save_interval', type=int, default=50,
+    parser.add_argument('--save_interval', type=int, default=200,
                         help='保存间隔')
     
     args, unknown = parser.parse_known_args()
