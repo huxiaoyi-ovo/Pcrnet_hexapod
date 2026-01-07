@@ -140,6 +140,7 @@ class RolloutBuffer:
         # 观测（仅保留 PPO 更新所需张量）
         self.states = torch.zeros(num_steps, num_envs, state_dim, device=device)
         self.goals = torch.zeros(num_steps, num_envs, goal_dim, device=device)
+        # aff_map_shape 为堆叠后的通道数 (aff_channels, H, W)
         self.aff_maps = torch.zeros(num_steps, num_envs, *aff_map_shape, device=device)
         self.difficulties = torch.zeros(num_steps, num_envs, device=device)
 
@@ -1216,8 +1217,8 @@ def train(args):
     print(f"[Main] 日志目录: {log_dir}")
     
     # 创建 Rollout Buffer
-    aff_shape = (aff_channels, aff_shape[1], aff_shape[2])
-    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_shape, device)
+    aff_map_shape = (aff_channels, aff_shape[1], aff_shape[2])
+    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_map_shape, device)
     
     # 训练统计
     episode_rewards = deque(maxlen=100)
