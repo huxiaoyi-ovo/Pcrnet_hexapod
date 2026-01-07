@@ -600,9 +600,17 @@ class HexGround(LeggedRobot):
         if len(env_ids) !=0:
             self._resample_nav_goals(env_ids)
             if hasattr(self, "goal_world"):
-                # 出生时朝向目标点（不使用 yaw 扰动）
+                # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
                 goal_delta = self.goal_world[env_ids] - self.root_states[env_ids, :2]
-                yaw = torch.atan2(goal_delta[:, 1], goal_delta[:, 0])
+                yaw_offset = float(getattr(self.nav_cfg, "heading_offset_rad", 0.0)) if self.nav_cfg is not None else 0.0
+                jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
+                jitter = torch_rand_float(
+                    -math.radians(jitter_deg),
+                    math.radians(jitter_deg),
+                    (len(env_ids), 1),
+                    device=self.device,
+                ).squeeze(1)
+                yaw = torch.atan2(goal_delta[:, 1], goal_delta[:, 0]) - yaw_offset + jitter
                 qz = torch.sin(0.5 * yaw)
                 qw = torch.cos(0.5 * yaw)
                 quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)

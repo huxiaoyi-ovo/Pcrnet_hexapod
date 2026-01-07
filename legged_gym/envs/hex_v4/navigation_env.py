@@ -39,6 +39,14 @@ class NavigationRewardConfig:
     heading_gate_min_speed: float = 0.05  # 低速门控阈值
     heading_gate_min_approach: float = 0.0  # 进度门控阈值
 
+    # 可通行区域引导
+    passable_align_scale: float = 0.0
+    passable_occ_ratio_low: float = 0.2
+    passable_occ_ratio_high: float = 0.6
+    passable_sector_deg: float = 60.0
+    crossable_align_scale: float = 0.0
+    crossable_gate_min_speed: float = 0.05
+
     # ★运动强度奖励 (替代步态效率)★
     intensity_match_bonus: float = 0.2    # 强度匹配地形的奖励
     intensity_mismatch_penalty: float = -0.1  # 强度不匹配的惩罚
@@ -107,6 +115,11 @@ class NavigationRewardFunction:
         terrain_difficulty: torch.Tensor,  # (N,) 地形难度 ★修改★
         collision_mask: torch.Tensor,      # (N,) 是否碰撞
         clearance: Optional[torch.Tensor] = None,  # (N,) 前方最小障碍距离
+        cmd_xy: Optional[torch.Tensor] = None,  # (N, 2) 实际执行的平移指令
+        passable_dir: Optional[torch.Tensor] = None,  # (N, 2) 可通行方向
+        passable_gate: Optional[torch.Tensor] = None,  # (N,) 可通行门控
+        crossable_dir: Optional[torch.Tensor] = None,  # (N, 2) 低障中心方向
+        crossable_gate: Optional[torch.Tensor] = None,  # (N,) 低障门控
     ) -> Dict[str, torch.Tensor]:
         """
         计算综合奖励
@@ -160,6 +173,37 @@ class NavigationRewardFunction:
             heading_reward = heading_reward * gate.float()
         rewards['heading'] = heading_reward
 
+        # 2.5 可通行区域引导奖励
+        passable_align = torch.zeros(num_envs, device=device)
+        if cmd_xy is not None and passable_dir is not None and self.cfg.passable_align_scale != 0.0:
+            cmd_norm = torch.norm(cmd_xy, dim=-1, keepdim=True)
+            pass_norm = torch.norm(passable_dir, dim=-1, keepdim=True)
+            cmd_unit = cmd_xy / (cmd_norm + 1e-6)
+            pass_unit = passable_dir / (pass_norm + 1e-6)
+            align = torch.sum(cmd_unit * pass_unit, dim=-1)
+            gate = passable_gate if passable_gate is not None else torch.ones_like(align)
+            gate = gate * (cmd_norm.squeeze(-1) > 1e-2).float()
+            passable_align = align * gate * self.cfg.passable_align_scale
+        rewards['passable_align'] = passable_align
+        if passable_gate is not None:
+            rewards['passable_gate'] = passable_gate
+
+        crossable_align = torch.zeros(num_envs, device=device)
+        if cmd_xy is not None and crossable_dir is not None and self.cfg.crossable_align_scale != 0.0:
+            cmd_norm = torch.norm(cmd_xy, dim=-1, keepdim=True)
+            cross_norm = torch.norm(crossable_dir, dim=-1, keepdim=True)
+            cmd_unit = cmd_xy / (cmd_norm + 1e-6)
+            cross_unit = crossable_dir / (cross_norm + 1e-6)
+            align = torch.sum(cmd_unit * cross_unit, dim=-1)
+            gate = crossable_gate if crossable_gate is not None else torch.ones_like(align)
+            gate = gate * (cmd_norm.squeeze(-1) > self.cfg.crossable_gate_min_speed).float()
+            roll, pitch = self._quat_to_rp(robot_quat)
+            pose_gate = (torch.abs(roll) < self.cfg.roll_threshold) & (torch.abs(pitch) < self.cfg.pitch_threshold)
+            crossable_align = align * gate * pose_gate.float() * self.cfg.crossable_align_scale
+        rewards['crossable_align'] = crossable_align
+        if crossable_gate is not None:
+            rewards['crossable_gate'] = crossable_gate
+
         # 3. 运动强度适配奖励 ★新增★
         intensity_rewards = self._compute_intensity_reward(
             intensity,
@@ -199,6 +243,8 @@ class NavigationRewardFunction:
             rewards['approach'] +
             rewards['reach'] +
             rewards['heading'] +
+            rewards['passable_align'] +
+            rewards['crossable_align'] +
             rewards['intensity_match'] +    # ★新增★
             rewards['intensity_smooth'] +   # ★新增★
             rewards['collision'] +
@@ -330,6 +376,14 @@ class NavigationRewardFunction:
         """
         x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         return torch.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+
+    @staticmethod
+    def _quat_to_rp(quat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """四元数转 roll/pitch (quat=[x,y,z,w])"""
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        roll = torch.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+        pitch = torch.asin(torch.clamp(2 * (w * y - z * x), -1, 1))
+        return roll, pitch
 
     @staticmethod
     def _angle_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

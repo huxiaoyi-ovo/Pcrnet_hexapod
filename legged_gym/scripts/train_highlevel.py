@@ -55,7 +55,7 @@ sys.path.insert(0, PROJECT_ROOT)
 # 默认维度定义（实际训练时以环境观测维度为准）
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
-AFFORDANCE_CHANNELS = 2  # [occupancy, passable_gap]
+AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
 
 
 def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
@@ -242,7 +242,7 @@ class HierarchicalHexapodEnv:
     状态空间 (V3.6):
         robot_state: (N, 9) = [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
         goal: (N, 2) = [goal_x, goal_y]
-        affordance: (N, 2, 16, 16) = [occupancy, passable_gap]
+        affordance: (N, 3, 16, 16) = [occupancy, passable_gap, low_obstacle]
         terrain_difficulty: (N,)
     """
     
@@ -305,7 +305,32 @@ class HierarchicalHexapodEnv:
         self.affordance_clearance = float(clearance)
         self.affordance_clearance_free = self.affordance_clearance + 0.3
         self.affordance_dist_map = self._build_affordance_dist_map()
-        self.affordance_blocking_height = float(getattr(env_cfg.navigation, "goal_obstacle_height_threshold", 0.2))
+        crossable_height = getattr(env_cfg.navigation, "crossable_height_max", None)
+        if crossable_height is None:
+            crossable_height = getattr(env_cfg.navigation, "goal_obstacle_height_threshold", 0.2)
+        self.affordance_blocking_height = float(crossable_height)
+        self.affordance_crossable_height = float(crossable_height)
+        body_shape = getattr(getattr(env_cfg, "asset", None), "body_shape", None)
+        if body_shape is not None:
+            self.body_width = 2.0 * float(body_shape.y)
+        else:
+            self.body_width = 0.44
+        width_margin = float(getattr(env_cfg.navigation, "crossable_width_margin", 0.0))
+        self.crossable_width = self.body_width + width_margin
+        self.crossable_sector_deg = float(getattr(env_cfg.navigation, "crossable_sector_deg", 60.0))
+        self.camera_fov_rad = None
+        self.camera_bearing_rad = 0.0
+        self.camera_far = self.affordance_map_extent
+        if cam_cfg is not None:
+            self.camera_fov_rad = math.radians(float(getattr(cam_cfg, "horizontal_fov", 0.0)))
+            self.camera_far = float(getattr(cam_cfg, "far_clip", self.affordance_map_extent))
+            yaw_deg = float(getattr(cam_cfg, "yaw_deg", 0.0))
+            # Convert camera yaw to bearing_y convention (0 means +Y forward).
+            self.camera_bearing_rad = math.radians(yaw_deg) - 0.5 * math.pi
+        (self.affordance_x_map,
+         self.affordance_y_map,
+         self.affordance_bearing_map,
+         self.affordance_visible_mask) = self._build_affordance_geometry()
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -337,7 +362,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=6.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.08,
-                    heading_offset_rad=0.5 * math.pi,
+                    heading_offset_rad=-0.5 * math.pi,
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,
@@ -352,10 +377,16 @@ class HierarchicalHexapodEnv:
                     intensity_clearance_safe=self.affordance_clearance,
                     intensity_clearance_free=self.affordance_clearance_free,
                     heading_gate_use=True,
-                    heading_gate_min_speed=0.0,
+                    heading_gate_min_speed=0.1,
                     heading_gate_min_approach=0.01,
                     velocity_scale=0.0,
                     collision_penalty=-10.0,
+                    passable_align_scale=0.05,
+                    passable_occ_ratio_low=0.2,
+                    passable_occ_ratio_high=0.6,
+                    passable_sector_deg=60.0,
+                    crossable_align_scale=0.05,
+                    crossable_gate_min_speed=0.05,
                 )
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
@@ -373,6 +404,7 @@ class HierarchicalHexapodEnv:
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
+        self.reward_affordance_override = None
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -463,6 +495,7 @@ class HierarchicalHexapodEnv:
         self.prev_intensity.zero_()
         self.reach_given.zero_()
         self.goal_change_count.zero_()
+        self.reward_affordance_override = None
         self.adapter.reset(self.num_envs, self.device)
 
         self._refresh_depth_images(force=True)
@@ -544,6 +577,8 @@ class HierarchicalHexapodEnv:
 
         occ_all = (heights > 1e-6).float()
         occ_block = (heights >= self.affordance_blocking_height).float().unsqueeze(1)
+        low_mask = (heights > 1e-6) & (heights < self.affordance_crossable_height)
+        low_obstacle = low_mask.float()
 
         radius_cells = int(math.ceil(self.affordance_clearance / cell))
         if radius_cells > 0:
@@ -554,7 +589,11 @@ class HierarchicalHexapodEnv:
             passable = occ_block < 0.5
         passable_gap = passable.float().squeeze(1)
 
-        return torch.cat([occ_all.unsqueeze(1), passable_gap.unsqueeze(1)], dim=1)
+        return torch.cat([
+            occ_all.unsqueeze(1),
+            passable_gap.unsqueeze(1),
+            low_obstacle.unsqueeze(1),
+        ], dim=1)
 
     def _build_affordance_dist_map(self) -> torch.Tensor:
         map_size = self.affordance_map_size
@@ -575,6 +614,36 @@ class HierarchicalHexapodEnv:
         grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
         return torch.sqrt(grid_x ** 2 + grid_y ** 2)
 
+    def _build_affordance_geometry(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        map_size = self.affordance_map_size
+        map_extent = self.affordance_map_extent
+        cell = self.affordance_cell_size
+        x_centers = torch.linspace(
+            -map_extent * 0.5 + cell * 0.5,
+            map_extent * 0.5 - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        y_centers = torch.linspace(
+            0.0 + cell * 0.5,
+            map_extent - cell * 0.5,
+            map_size,
+            device=self.device,
+        )
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        bearing_y = torch.atan2(grid_x, grid_y)
+        dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
+        visible = torch.ones_like(dist, dtype=torch.bool)
+        if self.camera_fov_rad is not None and self.camera_fov_rad > 0.0:
+            angle = torch.atan2(
+                torch.sin(bearing_y - self.camera_bearing_rad),
+                torch.cos(bearing_y - self.camera_bearing_rad),
+            )
+            visible = visible & (torch.abs(angle) <= 0.5 * self.camera_fov_rad)
+        if self.camera_far is not None:
+            visible = visible & (dist <= float(self.camera_far) + 1e-6)
+        return grid_x, grid_y, bearing_y, visible
+
     def _compute_clearance_from_affordance(self, aff_map: torch.Tensor) -> torch.Tensor:
         occ = aff_map[:, 0] > 0.5
         dist_map = self.affordance_dist_map
@@ -587,6 +656,129 @@ class HierarchicalHexapodEnv:
             min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
         return min_dist
 
+    def _compute_passable_guidance(
+        self,
+        aff_map: torch.Tensor,
+        goal_local: torch.Tensor,
+        block_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if aff_map.ndim != 4 or aff_map.size(1) < 2:
+            zeros = torch.zeros(aff_map.shape[0], device=aff_map.device)
+            return torch.zeros(aff_map.shape[0], 2, device=aff_map.device), zeros, zeros
+
+        occ = aff_map[:, 0]
+        passable = aff_map[:, 1]
+
+        visible = self.affordance_visible_mask
+        if visible is None:
+            visible = torch.ones_like(passable[0], dtype=torch.bool)
+        if visible.device != aff_map.device:
+            visible = visible.to(aff_map.device)
+
+        x_map = self.affordance_x_map
+        y_map = self.affordance_y_map
+        bearing_map = self.affordance_bearing_map
+        if x_map.device != aff_map.device:
+            x_map = x_map.to(aff_map.device)
+            y_map = y_map.to(aff_map.device)
+            bearing_map = bearing_map.to(aff_map.device)
+
+        visible_f = visible.float()
+        passable_vis = passable * visible_f
+        if block_mask is not None:
+            passable_vis = passable_vis * (1.0 - block_mask)
+        dir_x = (passable_vis * x_map).sum(dim=(1, 2))
+        dir_y = (passable_vis * y_map).sum(dim=(1, 2))
+        pass_dir = torch.stack([dir_x, dir_y], dim=1)
+        pass_norm = torch.norm(pass_dir, dim=-1, keepdim=True)
+        goal_norm = torch.norm(goal_local, dim=-1, keepdim=True)
+        goal_dir = goal_local / (goal_norm + 1e-6)
+        pass_dir = torch.where(pass_norm > 1e-6, pass_dir / (pass_norm + 1e-6), goal_dir)
+
+        sector_deg = 0.0
+        if self.reward_cfg is not None:
+            sector_deg = float(getattr(self.reward_cfg, "passable_sector_deg", 0.0))
+        sector_half = math.radians(sector_deg) * 0.5 if sector_deg > 0.0 else 0.0
+        if sector_half > 0.0:
+            goal_bearing = torch.atan2(goal_local[:, 0], goal_local[:, 1])
+            angle = torch.atan2(
+                torch.sin(bearing_map.unsqueeze(0) - goal_bearing.view(-1, 1, 1)),
+                torch.cos(bearing_map.unsqueeze(0) - goal_bearing.view(-1, 1, 1)),
+            )
+            sector_mask = torch.abs(angle) <= sector_half
+            sector_mask = sector_mask & visible.unsqueeze(0)
+        else:
+            sector_mask = visible.unsqueeze(0)
+
+        sector_f = sector_mask.float()
+        occ_ratio = (occ * sector_f).sum(dim=(1, 2)) / (sector_f.sum(dim=(1, 2)) + 1e-6)
+        occ_low = 0.0
+        occ_high = 1.0
+        if self.reward_cfg is not None:
+            occ_low = float(getattr(self.reward_cfg, "passable_occ_ratio_low", 0.0))
+            occ_high = float(getattr(self.reward_cfg, "passable_occ_ratio_high", 1.0))
+        if occ_high > occ_low:
+            gate = torch.clamp((occ_ratio - occ_low) / (occ_high - occ_low), 0.0, 1.0)
+        else:
+            gate = torch.zeros_like(occ_ratio)
+
+        return pass_dir, gate, occ_ratio
+
+    def _compute_low_obstacle_guidance(
+        self,
+        aff_map: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        if aff_map.ndim != 4 or aff_map.size(1) < 3:
+            zeros = torch.zeros(aff_map.shape[0], device=aff_map.device)
+            return torch.zeros(aff_map.shape[0], 2, device=aff_map.device), zeros, zeros, None
+
+        low_obs = aff_map[:, 2] > 0.5
+        visible = self.affordance_visible_mask
+        if visible is None:
+            visible = torch.ones_like(low_obs[0], dtype=torch.bool)
+        if visible.device != aff_map.device:
+            visible = visible.to(aff_map.device)
+
+        bearing_map = self.affordance_bearing_map
+        x_map = self.affordance_x_map
+        y_map = self.affordance_y_map
+        if bearing_map.device != aff_map.device:
+            bearing_map = bearing_map.to(aff_map.device)
+            x_map = x_map.to(aff_map.device)
+            y_map = y_map.to(aff_map.device)
+
+        sector_half = math.radians(self.crossable_sector_deg) * 0.5 if self.crossable_sector_deg > 0.0 else 0.0
+        if sector_half > 0.0:
+            sector_mask = torch.abs(bearing_map) <= sector_half
+            sector_mask = sector_mask & visible
+        else:
+            sector_mask = visible
+
+        mask = low_obs & sector_mask
+        valid = mask.flatten(1).any(dim=1)
+
+        x_map_b = x_map.unsqueeze(0)
+        y_map_b = y_map.unsqueeze(0)
+        big = torch.full_like(x_map_b, 1e6)
+        neg = torch.full_like(x_map_b, -1e6)
+
+        x_min = torch.where(mask, x_map_b, big).amin(dim=(1, 2))
+        x_max = torch.where(mask, x_map_b, neg).amax(dim=(1, 2))
+        width = torch.where(valid, x_max - x_min, torch.zeros_like(x_min))
+
+        count = mask.float().sum(dim=(1, 2)).clamp_min(1.0)
+        center_x = torch.where(valid, (x_max + x_min) * 0.5, torch.zeros_like(x_min))
+        center_y = torch.where(valid, (mask.float() * y_map_b).sum(dim=(1, 2)) / count, torch.zeros_like(x_min))
+        center_dir = torch.stack([center_x, center_y], dim=1)
+        center_norm = torch.norm(center_dir, dim=-1, keepdim=True)
+        center_dir = torch.where(center_norm > 1e-6, center_dir / center_norm, torch.zeros_like(center_dir))
+
+        width_gate = width < self.crossable_width
+        gate = valid & width_gate
+        block_mask = mask.float() * (~width_gate).float().view(-1, 1, 1)
+
+        return center_dir, gate.float(), width, block_mask
+
     def _get_high_level_obs(self) -> Dict[str, torch.Tensor]:
         """
         构建高层观测字典
@@ -595,7 +787,7 @@ class HierarchicalHexapodEnv:
             Dict with keys:
             - state: (N, 9+1) robot state + prev_filtered_intensity
             - goal: (N, 2) relative goal
-            - gt_affordance: (N, 2, 16, 16) ground truth affordance
+            - gt_affordance: (N, 3, 16, 16) ground truth affordance
             - gt_difficulty: (N,) difficulty derived from passable_gap
             - depth: (N, 1, H, W) depth image
         """
@@ -620,6 +812,7 @@ class HierarchicalHexapodEnv:
             ], dim=-1)
 
         # Align yaw to policy heading convention (+Y forward) via heading_offset_rad.
+        offset = 0.0
         if self.reward_cfg is not None:
             offset = float(getattr(self.reward_cfg, "heading_offset_rad", 0.0))
             if offset != 0.0:
@@ -640,6 +833,13 @@ class HierarchicalHexapodEnv:
             obs_dict['goal'] = self.env.goal_buf.clone()
         else:
             obs_dict['goal'] = self.env.commands[:, :2].clone()
+        if offset != 0.0:
+            goal = obs_dict['goal']
+            cos_o = math.cos(offset)
+            sin_o = math.sin(offset)
+            goal_x = cos_o * goal[:, 0] + sin_o * goal[:, 1]
+            goal_y = -sin_o * goal[:, 0] + cos_o * goal[:, 1]
+            obs_dict['goal'] = torch.stack([goal_x, goal_y], dim=1)
         
         # 3. GT Affordance
         if hasattr(self.env, 'get_affordance_data'):
@@ -656,11 +856,12 @@ class HierarchicalHexapodEnv:
                 if side_len ** 2 == heights.shape[1]:
                     h_map = heights.view(self.num_envs, 1, side_len, side_len)
                     h_map = torch.nn.functional.interpolate(h_map, size=(16, 16), mode='bilinear')
-                    obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map)], dim=1)
+                    low = torch.zeros_like(h_map)
+                    obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map), low], dim=1)
                 else:
-                    obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
+                    obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 3, 16, 16, device=self.device)
             else:
-                obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 2, 16, 16, device=self.device)
+                obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 3, 16, 16, device=self.device)
         obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
         
         # 4. Depth Image
@@ -747,6 +948,11 @@ class HierarchicalHexapodEnv:
         collision_threshold_src = None
         collision_indices_src = None
         clearance = None
+        reward_aff_map = reward_obs['gt_affordance'] if reward_obs is not None else None
+        override_used = getattr(self, "reward_affordance_override", None) is not None
+        if override_used:
+            reward_aff_map = self.reward_affordance_override
+            self.reward_affordance_override = None
         if hasattr(self.env, "contact_forces"):
             collision_threshold = getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
             collision_threshold_src = "collision_force_threshold"
@@ -759,8 +965,31 @@ class HierarchicalHexapodEnv:
         if self.clearance_override is not None:
             clearance = self.clearance_override
             self.clearance_override = None
-        elif reward_obs is not None and 'gt_affordance' in reward_obs:
-            clearance = self._compute_clearance_from_affordance(reward_obs['gt_affordance'])
+        elif reward_aff_map is not None:
+            clearance = self._compute_clearance_from_affordance(reward_aff_map)
+        passable_dir = None
+        passable_gate = None
+        passable_occ_ratio = None
+        crossable_dir = None
+        crossable_gate = None
+        crossable_width = None
+        low_block_mask = None
+        if (
+            self.reward_cfg is not None
+            and (
+                getattr(self.reward_cfg, "passable_align_scale", 0.0) != 0.0
+                or getattr(self.reward_cfg, "crossable_align_scale", 0.0) != 0.0
+            )
+            and reward_aff_map is not None
+        ):
+            crossable_dir, crossable_gate, crossable_width, low_block_mask = self._compute_low_obstacle_guidance(
+                reward_aff_map
+            )
+            passable_dir, passable_gate, passable_occ_ratio = self._compute_passable_guidance(
+                reward_aff_map,
+                reward_obs['goal'],
+                block_mask=low_block_mask,
+            )
 
         reward_terms = None
         if self.reward_func is not None:
@@ -777,6 +1006,9 @@ class HierarchicalHexapodEnv:
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
                 goal_pos = torch.stack([goal_x, goal_y], dim=1)
             filtered_intensity = adapter_info['filtered_intensity'].squeeze(-1)
+            reward_difficulty = reward_obs['gt_difficulty']
+            if override_used and reward_aff_map is not None:
+                reward_difficulty = difficulty_from_gap(reward_aff_map)
             
             reward_dict = self.reward_func.compute_reward(
                 robot_pos=robot_pos,
@@ -786,12 +1018,21 @@ class HierarchicalHexapodEnv:
                 robot_quat=robot_quat,
                 intensity=filtered_intensity,
                 prev_intensity=self.prev_intensity,
-                terrain_difficulty=reward_obs['gt_difficulty'],
+                terrain_difficulty=reward_difficulty,
                 collision_mask=collision_mask,
                 clearance=clearance,
+                cmd_xy=velocity_cmd[:, :2],
+                passable_dir=passable_dir,
+                passable_gate=passable_gate,
+                crossable_dir=crossable_dir,
+                crossable_gate=crossable_gate,
             )
             if clearance is not None:
                 reward_dict['clearance'] = clearance
+            if passable_occ_ratio is not None:
+                reward_dict['passable_occ_ratio'] = passable_occ_ratio
+            if crossable_width is not None:
+                reward_dict['crossable_width'] = crossable_width
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -893,6 +1134,10 @@ def train(args):
     print(f"{'='*60}\n")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[Warn] aff_stack={args.aff_stack}: 输入通道数改变，必须使用相同 aff_stack 训练/加载 ckpt；旧 ckpt 不兼容。")
+    if args.mode == "student" and not getattr(args, "vision_ckpt", None):
+        raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
+    if args.mode == "student":
+        args.camera_enable = True
     
     # 导入模块
     import_modules()
@@ -1004,6 +1249,10 @@ def train(args):
             'approach',
             'reach',
             'heading',
+            'passable_align',
+            'passable_gate',
+            'crossable_align',
+            'crossable_gate',
             'intensity_match',
             'intensity_smooth',
             'collision',
@@ -1024,6 +1273,8 @@ def train(args):
         collision_threshold_src_value = None
         collision_indices_src_value = None
         clearance_sum = torch.zeros((), device=device)
+        passable_occ_ratio_sum = torch.zeros((), device=device)
+        crossable_width_sum = torch.zeros((), device=device)
         intensity_goal_factor_sum = torch.zeros((), device=device)
         intensity_clear_factor_sum = torch.zeros((), device=device)
         optimal_intensity_sum = torch.zeros((), device=device)
@@ -1040,20 +1291,21 @@ def train(args):
                 aff_map = obs_dict['gt_affordance']
                 difficulty = obs_dict['gt_difficulty']
                 env.clearance_override = None
+                env.reward_affordance_override = None
             else:
                 # Student: 使用 Vision 模型预测
-                if vision_model is not None:
-                    with torch.no_grad():
-                        vis_out = vision_model(obs_dict['depth'], normalize=True)
-                        aff_map = torch.stack([
-                            vis_out['occupancy'], 
-                            vis_out['passable_gap']
-                        ], dim=1)
-                        difficulty = difficulty_from_gap(aff_map)
-                else:
-                    aff_map = obs_dict['gt_affordance']
-                    difficulty = obs_dict['gt_difficulty']
+                if vision_model is None:
+                    raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
+                with torch.no_grad():
+                    vis_out = vision_model(obs_dict['depth'], normalize=True)
+                    aff_map = torch.stack([
+                        vis_out['occupancy'],
+                        vis_out['passable_gap'],
+                        vis_out['low_obstacle'],
+                    ], dim=1)
+                    difficulty = difficulty_from_gap(aff_map)
                 env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+                env.reward_affordance_override = aff_map
 
             # 初始化/更新 aff 堆叠
             if aff_stack_buf is None:
@@ -1165,6 +1417,10 @@ def train(args):
                     intensity_clear_factor_sum += reward_terms['intensity_clear_factor'].sum()
                 if 'optimal_intensity' in reward_terms:
                     optimal_intensity_sum += reward_terms['optimal_intensity'].sum()
+                if 'passable_occ_ratio' in reward_terms:
+                    passable_occ_ratio_sum += reward_terms['passable_occ_ratio'].sum()
+                if 'crossable_width' in reward_terms:
+                    crossable_width_sum += reward_terms['crossable_width'].sum()
             collision_mask = env_info.get('collision_mask', None) if env_info is not None else None
             if collision_mask is not None:
                 collision_rate_sum += collision_mask.float().sum()
@@ -1221,14 +1477,16 @@ def train(args):
                 aff_map_next = obs_dict['gt_affordance']
                 difficulty = obs_dict['gt_difficulty']
             else:
-                if vision_model is not None:
-                    with torch.no_grad():
-                        vis_out = vision_model(obs_dict['depth'], normalize=True)
-                        aff_map_next = torch.stack([vis_out['occupancy'], vis_out['passable_gap']], dim=1)
-                        difficulty = difficulty_from_gap(aff_map_next)
-                else:
-                    aff_map_next = obs_dict['gt_affordance']
-                    difficulty = obs_dict['gt_difficulty']
+                if vision_model is None:
+                    raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
+                with torch.no_grad():
+                    vis_out = vision_model(obs_dict['depth'], normalize=True)
+                    aff_map_next = torch.stack([
+                        vis_out['occupancy'],
+                        vis_out['passable_gap'],
+                        vis_out['low_obstacle'],
+                    ], dim=1)
+                    difficulty = difficulty_from_gap(aff_map_next)
             
             if aff_stack_buf is None:
                 aff_stack_bootstrap = aff_map_next.repeat(1, aff_stack, 1, 1)
@@ -1380,6 +1638,8 @@ def train(args):
             collision_force_mean = collision_force_all.mean().item()
             collision_force_p95 = torch.quantile(collision_force_all, 0.95).item()
         clearance_mean = (clearance_sum / total_samples).item()
+        passable_occ_ratio_mean = (passable_occ_ratio_sum / total_samples).item()
+        crossable_width_mean = (crossable_width_sum / total_samples).item()
         intensity_goal_factor_mean = (intensity_goal_factor_sum / total_samples).item()
         intensity_clear_factor_mean = (intensity_clear_factor_sum / total_samples).item()
         optimal_intensity_mean = (optimal_intensity_sum / total_samples).item()
@@ -1427,6 +1687,8 @@ def train(args):
         if collision_threshold_value is not None:
             writer.add_scalar('Diag/CollisionThreshold', collision_threshold_value, iteration)
         writer.add_scalar('Stats/ClearanceMin', clearance_mean, iteration)
+        writer.add_scalar('Stats/PassableOccRatio', passable_occ_ratio_mean, iteration)
+        writer.add_scalar('Stats/CrossableWidth', crossable_width_mean, iteration)
         writer.add_scalar('Stats/IntensityGoalFactor', intensity_goal_factor_mean, iteration)
         writer.add_scalar('Stats/IntensityClearFactor', intensity_clear_factor_mean, iteration)
         writer.add_scalar('Stats/OptimalIntensity', optimal_intensity_mean, iteration)
@@ -1475,6 +1737,8 @@ def train(args):
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
                           f"""{'Clearance / IntensityFac:':>{pad}} {clearance_mean:.3f} / {intensity_goal_factor_mean:.3f} {intensity_clear_factor_mean:.3f} (opt {optimal_intensity_mean:.3f})\n"""
+                          f"""{'Passable gate/align:':>{pad}} {reward_term_means.get('passable_gate', 0.0):.3f} / {reward_term_means.get('passable_align', 0.0):.3f} (occ {passable_occ_ratio_mean:.3f})\n"""
+                          f"""{'Crossable gate/align:':>{pad}} {reward_term_means.get('crossable_gate', 0.0):.3f} / {reward_term_means.get('crossable_align', 0.0):.3f} (width {crossable_width_mean:.3f})\n"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""

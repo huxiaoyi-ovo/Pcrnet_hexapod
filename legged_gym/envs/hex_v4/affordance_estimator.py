@@ -145,6 +145,33 @@ class PassableGapHead(nn.Module):
         return out.squeeze(1)
 
 
+class LowObstacleHead(nn.Module):
+    """
+    可跨越低障预测头
+    Input: (B, 256, 8, 8)
+    Output: (B, 16, 16) Score [0,1]
+    """
+    def __init__(self, in_channels: int = 256):
+        super().__init__()
+        self.decoder = nn.Sequential(
+            # Upsample: 8x8 -> 16x16
+            nn.ConvTranspose2d(in_channels, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            # Refine
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            # Output
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        out = self.decoder(features)
+        return out.squeeze(1)
+
+
 # 主网络
 
 class AffordanceEstimator(nn.Module):
@@ -163,6 +190,7 @@ class AffordanceEstimator(nn.Module):
         # Heads
         self.occupancy_head = OccupancyHead(self.encoder.out_channels)
         self.passable_gap_head = PassableGapHead(self.encoder.out_channels)
+        self.low_obstacle_head = LowObstacleHead(self.encoder.out_channels)
 
     def forward(
         self, 
@@ -177,7 +205,7 @@ class AffordanceEstimator(nn.Module):
             normalize: 是否执行 V3 的输入归一化 (Input Normalization)
         
         Returns:
-            Dict containing 'occupancy', 'passable_gap'
+            Dict containing 'occupancy', 'passable_gap', 'low_obstacle'
         """
         
         # V3 CODE OPTIMIZATION: Input Normalization
@@ -196,10 +224,12 @@ class AffordanceEstimator(nn.Module):
         # Decode
         occupancy = self.occupancy_head(features)
         passable_gap = self.passable_gap_head(features)
+        low_obstacle = self.low_obstacle_head(features)
 
         outputs = {
             'occupancy': occupancy,             # (B, 16, 16)
             'passable_gap': passable_gap,       # (B, 16, 16)
+            'low_obstacle': low_obstacle,       # (B, 16, 16)
         }
 
         if return_features:
@@ -212,18 +242,20 @@ class AffordanceEstimator(nn.Module):
 
 class AffordanceLoss(nn.Module):
     """
-    双通道损失函数
-    L_total = w1 * L_occ + w2 * L_gap
+    三通道损失函数
+    L_total = w1 * L_occ + w2 * L_gap + w3 * L_low
     """
     def __init__(
         self,
         occupancy_weight: float = 1.0,
         passable_gap_weight: float = 1.0,
+        low_obstacle_weight: float = 1.0,
     ):
         super().__init__()
         self.weights = {
             'occupancy': occupancy_weight,
-            'passable_gap': passable_gap_weight
+            'passable_gap': passable_gap_weight,
+            'low_obstacle': low_obstacle_weight,
         }
         
         # Loss Criteria
@@ -237,20 +269,25 @@ class AffordanceLoss(nn.Module):
         
         # 1. Occupancy Loss
         l_occ = self.bce_loss(predictions['occupancy'], targets['occupancy'])
-        
+
         # 2. Passable Gap Loss
         l_gap = self.bce_loss(predictions['passable_gap'], targets['passable_gap'])
-        
+
+        # 3. Low Obstacle Loss
+        l_low = self.bce_loss(predictions['low_obstacle'], targets['low_obstacle'])
+
         # Weighted Sum
         total_loss = (
             self.weights['occupancy'] * l_occ +
-            self.weights['passable_gap'] * l_gap
+            self.weights['passable_gap'] * l_gap +
+            self.weights['low_obstacle'] * l_low
         )
         
         return {
             'total': total_loss,
             'loss_occupancy': l_occ,
-            'loss_passable_gap': l_gap
+            'loss_passable_gap': l_gap,
+            'loss_low_obstacle': l_low,
         }
 
 
@@ -280,13 +317,15 @@ if __name__ == "__main__":
         
     assert outputs['occupancy'].shape == (batch_size, 16, 16)
     assert outputs['passable_gap'].shape == (batch_size, 16, 16)
+    assert outputs['low_obstacle'].shape == (batch_size, 16, 16)
     
     # 5. Test Loss
     print("\n[Test] Calculating loss...")
     criterion = AffordanceLoss()
     targets = {
         'occupancy': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device),
-        'passable_gap': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device)
+        'passable_gap': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device),
+        'low_obstacle': torch.randint(0, 2, (batch_size, 16, 16)).float().to(device),
     }
     
     losses = criterion(outputs, targets)

@@ -1,3 +1,5 @@
+import math
+
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 
@@ -15,7 +17,7 @@ class HexGroundCfg(LeggedRobotCfg):
         num_privileged_obs = 230 #3+3+6+11*13=155 155+75=230
         # num_privileged_obs = None
         num_actions = 18
-        episode_length_s=10
+        episode_length_s=15
         env_spacing=2.0
         termination_height_threshold = 0.035
         termination_max_tilt_deg = 60.0
@@ -59,7 +61,11 @@ class HexGroundCfg(LeggedRobotCfg):
         spawn_edge_enable = True
         spawn_edge_margin = 0.3
         spawn_outside_margin = 0.2
-        spawn_yaw_jitter_deg = 30.0
+        spawn_yaw_jitter_deg = 20.0
+        heading_offset_rad = -0.5 * math.pi
+        crossable_height_max = 0.08
+        crossable_width_margin = 0.0
+        crossable_sector_deg = 60.0
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
         #mesh_type = 'plane'

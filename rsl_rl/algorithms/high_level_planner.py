@@ -32,31 +32,29 @@ class PlannerOutput(NamedTuple):
 class AffordanceCNNEncoder(nn.Module):
     """
     Affordance 地图编码器 (CNN)
-    Input: (B, 2, 16, 16) [Occupancy, Traversability]
+    Input: (B, C, 16, 16) [Occupancy, Passable, LowOb]
     Output: (B, 128)
     """
     def __init__(self, in_channels: int = 2, out_features: int = 128):
         super().__init__()
-        
+
         self.cnn = nn.Sequential(
             # 16x16 -> 8x8
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_channels + 2, 32, kernel_size=3, stride=2, padding=1),
             nn.ELU(inplace=True),
-            
+
             # 8x8 -> 4x4
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ELU(inplace=True),
-            
-            # 4x4 -> 2x2
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+
+            # 4x4 -> 4x4 (保留空间信息)
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.ELU(inplace=True),
-            
-            # Global Pooling: 2x2 -> 1x1
-            nn.AdaptiveAvgPool2d(1),
+
             nn.Flatten(),
         )
-        
-        self.fc = nn.Linear(128, out_features)
+
+        self.fc = nn.Linear(128 * 4 * 4, out_features)
         self._init_weights()
 
     def _init_weights(self):
@@ -67,7 +65,13 @@ class AffordanceCNNEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, affordance_map: torch.Tensor) -> torch.Tensor:
-        x = self.cnn(affordance_map)
+        batch, _, height, width = affordance_map.shape
+        coord_x = torch.linspace(-1.0, 1.0, width, device=affordance_map.device)
+        coord_y = torch.linspace(-1.0, 1.0, height, device=affordance_map.device)
+        yy, xx = torch.meshgrid(coord_y, coord_x, indexing="ij")
+        coord = torch.stack([xx, yy], dim=0).unsqueeze(0).expand(batch, -1, -1, -1)
+        x = torch.cat([affordance_map, coord], dim=1)
+        x = self.cnn(x)
         return self.fc(x)
 
 

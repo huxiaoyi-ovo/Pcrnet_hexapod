@@ -134,6 +134,7 @@ def _get_nav_cfg(cfg):
         "spawn_outside_margin": getattr(nav, "spawn_outside_margin", 0.2),
         "spawn_yaw_jitter_deg": getattr(nav, "spawn_yaw_jitter_deg", 30.0),
         "goal_obstacle_height_threshold": getattr(nav, "goal_obstacle_height_threshold", 0.2),
+        "crossable_height_max": getattr(nav, "crossable_height_max", None),
     }
 
 
@@ -504,21 +505,27 @@ class AffordanceDataset(Dataset):
         depth = sample['depth']
         occupancy = sample['occupancy']
         passable_gap = sample['passable_gap']
+        low_obstacle = sample.get('low_obstacle', None)
 
         depth_t = torch.from_numpy(depth).float().unsqueeze(0)
         occ_t = torch.from_numpy(occupancy).float()
         gap_t = torch.from_numpy(passable_gap).float()
+        if low_obstacle is None:
+            low_obstacle = np.zeros_like(passable_gap, dtype=np.float32)
+        low_t = torch.from_numpy(low_obstacle).float()
 
         if self.transform:
             if random.random() > 0.5:
                 depth_t = torch.flip(depth_t, [-1])
                 occ_t = torch.flip(occ_t, [-1])
                 gap_t = torch.flip(gap_t, [-1])
+                low_t = torch.flip(low_t, [-1])
 
         return {
             'depth': depth_t,
             'occupancy': occ_t,
             'passable_gap': gap_t,
+            'low_obstacle': low_t,
         }
 
 
@@ -545,20 +552,34 @@ def generate_synthetic_sample(
         MAP_SIZE,
         height_threshold=0.0,
     )
+    crossable_height = nav_cfg.get("crossable_height_max", None)
+    if crossable_height is None:
+        crossable_height = nav_cfg["goal_obstacle_height_threshold"]
+    crossable_height = float(crossable_height)
     occ_blocking = _obstacles_to_map(
         obstacles,
         robot_pos,
         robot_yaw,
         map_extent,
         MAP_SIZE,
-        height_threshold=nav_cfg["goal_obstacle_height_threshold"],
+        height_threshold=crossable_height,
+    )
+    occ_crossable = _obstacles_to_map(
+        obstacles,
+        robot_pos,
+        robot_yaw,
+        map_extent,
+        MAP_SIZE,
+        height_threshold=crossable_height,
     )
     passable_gap = _compute_passable_gap(occ_blocking, map_extent, clearance)
+    low_obstacle = np.clip(occ_all - occ_crossable, 0.0, 1.0)
 
     return {
         'depth': depth.astype(np.float32),
         'occupancy': occ_all.astype(np.float32),
         'passable_gap': passable_gap.astype(np.float32),
+        'low_obstacle': low_obstacle.astype(np.float32),
         'difficulty': np.array([difficulty], dtype=np.float32),
     }
 
@@ -573,7 +594,7 @@ def visualize_samples(samples: List[Dict], save_path: str = "data_preview.png"):
         return
 
     num_show = min(5, len(samples))
-    fig, axes = plt.subplots(num_show, 4, figsize=(16, 4 * num_show))
+    fig, axes = plt.subplots(num_show, 5, figsize=(18, 4 * num_show))
 
     if num_show == 1:
         axes = [axes]
@@ -595,9 +616,14 @@ def visualize_samples(samples: List[Dict], save_path: str = "data_preview.png"):
         ax.set_title("Passable Gap")
 
         ax = axes[i][3] if num_show > 1 else axes[3]
+        ax.imshow(s.get('low_obstacle', np.zeros_like(s['passable_gap'])), cmap='Oranges', vmin=0, vmax=1)
+        ax.set_title("Low Obstacle")
+
+        ax = axes[i][4] if num_show > 1 else axes[4]
         gap_ratio = float(np.mean(s['passable_gap']))
         occ_ratio = float(np.mean(s['occupancy']))
-        ax.text(0.1, 0.6, f"Gap Ratio: {gap_ratio:.2f}\nOcc Ratio: {occ_ratio:.2f}", fontsize=12)
+        low_ratio = float(np.mean(s.get('low_obstacle', np.zeros_like(s['passable_gap']))))
+        ax.text(0.1, 0.6, f"Gap Ratio: {gap_ratio:.2f}\nOcc Ratio: {occ_ratio:.2f}\nLow Ratio: {low_ratio:.2f}", fontsize=12)
         ax.axis('off')
 
     plt.tight_layout()
@@ -642,6 +668,7 @@ def main():
 
     occ_ratio = [float(np.mean(s['occupancy'])) for s in samples]
     gap_ratio = [float(np.mean(s['passable_gap'])) for s in samples]
+    low_ratio = [float(np.mean(s.get('low_obstacle', 0.0))) for s in samples]
 
     print("\n" + "=" * 40)
     print("DATASET STATISTICS")
@@ -649,6 +676,7 @@ def main():
     print(f"Total Samples: {len(samples)}")
     print(f"Occupancy Ratio: mean={np.mean(occ_ratio):.4f}, std={np.std(occ_ratio):.4f}")
     print(f"Gap Ratio: mean={np.mean(gap_ratio):.4f}, std={np.std(gap_ratio):.4f}")
+    print(f"Low Ratio: mean={np.mean(low_ratio):.4f}, std={np.std(low_ratio):.4f}")
     print("=" * 40)
 
     if args.visualize:

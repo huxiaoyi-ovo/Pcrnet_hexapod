@@ -74,6 +74,7 @@ class TrainConfig:
         self.loss_weights = {
             'occupancy': 10.0,      # 占用预测比较稀疏，权重加大
             'passable_gap': 5.0,
+            'low_obstacle': 5.0,
         }
         
         # 数据参数 (对应合成数据脚本)
@@ -103,9 +104,11 @@ def save_visualization(
     pred_occ = preds['occupancy'][0].detach().cpu().numpy()
     gt_gap = targets['passable_gap'][0].cpu().numpy()
     pred_gap = preds['passable_gap'][0].detach().cpu().numpy()
+    gt_low = targets['low_obstacle'][0].cpu().numpy()
+    pred_low = preds['low_obstacle'][0].detach().cpu().numpy()
 
     # 绘图
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig, axes = plt.subplots(2, 4, figsize=(18, 10))
     
     # 1. Depth Input
     ax = axes[0, 0]
@@ -132,13 +135,23 @@ def save_visualization(
     ax.set_title("Pred Passable Gap")
     
     # 4. Info Panel
+    ax = axes[0, 3]
+    ax.imshow(gt_low, cmap='Oranges', vmin=0, vmax=1)
+    ax.set_title("GT Low Obstacle")
+
+    ax = axes[1, 3]
+    ax.imshow(pred_low, cmap='Oranges', vmin=0, vmax=1)
+    ax.set_title("Pred Low Obstacle")
+
     ax = axes[1, 0]
     occ_err = float(np.mean(np.abs(gt_occ - pred_occ)))
     gap_err = float(np.mean(np.abs(gt_gap - pred_gap)))
+    low_err = float(np.mean(np.abs(gt_low - pred_low)))
     text_info = (
         f"Epoch: {epoch}\n"
         f"Occ MAE: {occ_err:.4f}\n"
-        f"Gap MAE: {gap_err:.4f}"
+        f"Gap MAE: {gap_err:.4f}\n"
+        f"Low MAE: {low_err:.4f}"
     )
     ax.text(0.5, 0.5, text_info, ha='center', va='center', fontsize=14)
     ax.axis('off')
@@ -162,7 +175,7 @@ def train_one_epoch(
     
     model.train()
     total_loss = 0
-    metrics = {'loss_occ': 0, 'loss_gap': 0}
+    metrics = {'loss_occ': 0, 'loss_gap': 0, 'loss_low': 0}
     
     for batch_idx, batch in enumerate(loader):
         # 1. 数据搬运
@@ -170,6 +183,7 @@ def train_one_epoch(
         targets = {
             'occupancy': batch['occupancy'].to(cfg.device),
             'passable_gap': batch['passable_gap'].to(cfg.device),
+            'low_obstacle': batch['low_obstacle'].to(cfg.device),
         }
         
         # 2. 前向传播
@@ -189,6 +203,7 @@ def train_one_epoch(
         total_loss += loss.item()
         metrics['loss_occ'] += loss_dict['loss_occupancy'].item()
         metrics['loss_gap'] += loss_dict['loss_passable_gap'].item()
+        metrics['loss_low'] += loss_dict['loss_low_obstacle'].item()
     
     # 平均化
     num_batches = len(loader)
@@ -196,6 +211,7 @@ def train_one_epoch(
         'total': total_loss / num_batches,
         'loss_occ': metrics['loss_occ'] / num_batches,
         'loss_gap': metrics['loss_gap'] / num_batches,
+        'loss_low': metrics['loss_low'] / num_batches,
     }
 
 @torch.no_grad()
@@ -212,6 +228,7 @@ def validate(
     total_loss = 0
     gap_ratio_sum = 0
     occ_ratio_sum = 0
+    low_ratio_sum = 0
     
     # 收集所有样本用于筛选最高难度
     all_samples = [] if visualize else None
@@ -221,6 +238,7 @@ def validate(
         targets = {
             'occupancy': batch['occupancy'].to(cfg.device),
             'passable_gap': batch['passable_gap'].to(cfg.device),
+            'low_obstacle': batch['low_obstacle'].to(cfg.device),
         }
         
         preds = model(depth, normalize=False)
@@ -229,6 +247,7 @@ def validate(
         total_loss += loss_dict['total'].item()
         gap_ratio_sum += targets['passable_gap'].mean().item()
         occ_ratio_sum += targets['occupancy'].mean().item()
+        low_ratio_sum += targets['low_obstacle'].mean().item()
         
         # 收集样本信息用于后续筛选最高难度
         if visualize:
@@ -238,10 +257,12 @@ def validate(
                     'targets': {
                         'occupancy': targets['occupancy'][i:i+1],
                         'passable_gap': targets['passable_gap'][i:i+1],
+                        'low_obstacle': targets['low_obstacle'][i:i+1],
                     },
                     'preds': {
                         'occupancy': preds['occupancy'][i:i+1],
                         'passable_gap': preds['passable_gap'][i:i+1],
+                        'low_obstacle': preds['low_obstacle'][i:i+1],
                     },
                     'gap_ratio': targets['passable_gap'][i].mean().item()
                 })
@@ -278,6 +299,7 @@ def validate(
         'val_loss': total_loss / num_batches,
         'val_gap_ratio': gap_ratio_sum / num_batches,
         'val_occ_ratio': occ_ratio_sum / num_batches,
+        'val_low_ratio': low_ratio_sum / num_batches,
     }
 
 # ==========================================
@@ -285,7 +307,7 @@ def validate(
 # ==========================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Affordance Estimator (Occ + Gap)")
+    parser = argparse.ArgumentParser(description="Train Affordance Estimator (Occ + Gap + Low)")
     parser.add_argument('--data_path', type=str, required=True, help='Path to .pt dataset file')
     parser.add_argument('--output_dir', type=str, default='outputs/train_v3', help='Output directory')
     parser.add_argument('--batch_size', type=int, default=64)
@@ -337,6 +359,7 @@ def main():
     criterion = AffordanceLoss(
         occupancy_weight=cfg.loss_weights['occupancy'],
         passable_gap_weight=cfg.loss_weights['passable_gap'],
+        low_obstacle_weight=cfg.loss_weights['low_obstacle'],
     ).to(cfg.device)
     
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -370,16 +393,21 @@ def main():
         
         # Print
         print(f"Epoch [{epoch}/{cfg.epochs}] "
-              f"Train Loss: {train_metrics['total']:.4f} (Occ: {train_metrics['loss_occ']:.3f}) | "
+              f"Train Loss: {train_metrics['total']:.4f} "
+              f"(Occ: {train_metrics['loss_occ']:.3f}, Gap: {train_metrics['loss_gap']:.3f}, Low: {train_metrics['loss_low']:.3f}) | "
               f"Val Loss: {val_metrics['val_loss']:.4f} | "
-              f"Gap Ratio: {val_metrics['val_gap_ratio']:.3f} | "
+              f"Gap/Low Ratio: {val_metrics['val_gap_ratio']:.3f} / {val_metrics['val_low_ratio']:.3f} | "
               f"LR: {current_lr:.2e}")
         
         # Tensorboard
         writer.add_scalar('Loss/Train', train_metrics['total'], epoch)
         writer.add_scalar('Loss/Val', val_metrics['val_loss'], epoch)
+        writer.add_scalar('Loss/TrainOcc', train_metrics['loss_occ'], epoch)
+        writer.add_scalar('Loss/TrainGap', train_metrics['loss_gap'], epoch)
+        writer.add_scalar('Loss/TrainLow', train_metrics['loss_low'], epoch)
         writer.add_scalar('Metric/Gap_Ratio', val_metrics['val_gap_ratio'], epoch)
         writer.add_scalar('Metric/Occ_Ratio', val_metrics['val_occ_ratio'], epoch)
+        writer.add_scalar('Metric/Low_Ratio', val_metrics['val_low_ratio'], epoch)
         writer.add_scalar('LR', current_lr, epoch)
         
         # --- Checkpoint ---
@@ -402,6 +430,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
