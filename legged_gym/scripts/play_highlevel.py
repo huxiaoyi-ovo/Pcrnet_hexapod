@@ -375,6 +375,91 @@ def main():
                                                 math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
             if goal is not None:
                 bearing_y = math.atan2(goal[0], goal[1])
+            goal_bearing = bearing_y
+            pass_bearing = 0.0
+            cross_bearing = 0.0
+            pass_goal_err = 0.0
+            cross_goal_err = 0.0
+            pass_dir_norm = 0.0
+            cross_dir_norm = 0.0
+            pass_vis_mean = 0.0
+            pass_sector_mean = 0.0
+            low_vis_mean = 0.0
+            low_sector_mean = 0.0
+            vis_ratio = 0.0
+            sector_vis_ratio = 0.0
+            low_block_ratio = 0.0
+            pass_out_sector = 0
+            pass_dir_dbg = None
+            cross_dir_dbg = None
+            pass_gate_dbg = 0.0
+            pass_occ_dbg = 0.0
+            cross_gate_dbg = 0.0
+            cross_width_dbg = 0.0
+            debug_aff = None
+            if obs is not None:
+                debug_aff = _get_aff_map(obs)
+            if debug_aff is not None:
+                cross_dir, cross_gate_dbg, cross_width_dbg, low_block_mask = env._compute_low_obstacle_guidance(
+                    debug_aff
+                )
+                pass_dir, pass_gate_dbg, pass_occ_dbg = env._compute_passable_guidance(
+                    debug_aff,
+                    obs["goal"],
+                    block_mask=low_block_mask,
+                )
+                pass_dir_dbg = pass_dir[env_idx].detach().cpu().numpy()
+                cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
+                pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
+                cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
+                if pass_dir_norm > 1e-6:
+                    pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
+                if cross_dir_norm > 1e-6:
+                    cross_bearing = math.atan2(cross_dir_dbg[0], cross_dir_dbg[1])
+
+                def _angle_diff(a, b):
+                    return math.atan2(math.sin(a - b), math.cos(a - b))
+
+                pass_goal_err = _angle_diff(pass_bearing, goal_bearing)
+                cross_goal_err = _angle_diff(cross_bearing, goal_bearing)
+
+                passable = debug_aff[env_idx, 1]
+                low_obs = debug_aff[env_idx, 2]
+                visible = env.affordance_visible_mask
+                if visible is None:
+                    visible = torch.ones_like(passable, dtype=torch.bool)
+                if visible.device != passable.device:
+                    visible = visible.to(passable.device)
+                vis_count = visible.float().sum().clamp_min(1.0)
+                vis_ratio = float((vis_count / float(visible.numel())).detach().cpu())
+                visible_f = visible.float()
+                pass_vis_mean = float((passable * visible_f).sum().div(vis_count).detach().cpu())
+                low_vis_mean = float((low_obs * visible_f).sum().div(vis_count).detach().cpu())
+
+                sector_deg = 0.0
+                if env.reward_cfg is not None:
+                    sector_deg = float(getattr(env.reward_cfg, "passable_sector_deg", 0.0))
+                sector_half = math.radians(sector_deg) * 0.5 if sector_deg > 0.0 else 0.0
+                if sector_half > 0.0:
+                    bearing_map = env.affordance_bearing_map
+                    if bearing_map.device != passable.device:
+                        bearing_map = bearing_map.to(passable.device)
+                    angle = torch.atan2(
+                        torch.sin(bearing_map - goal_bearing),
+                        torch.cos(bearing_map - goal_bearing),
+                    )
+                    sector_mask = (torch.abs(angle) <= sector_half) & visible
+                else:
+                    sector_mask = visible
+                sector_count = sector_mask.float().sum().clamp_min(1.0)
+                sector_vis_ratio = float((sector_count / vis_count).detach().cpu())
+                sector_f = sector_mask.float()
+                pass_sector_mean = float((passable * sector_f).sum().div(sector_count).detach().cpu())
+                low_sector_mean = float((low_obs * sector_f).sum().div(sector_count).detach().cpu())
+                if low_block_mask is not None:
+                    low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
+                if sector_half > 0.0:
+                    pass_out_sector = int(abs(pass_goal_err) > sector_half)
             aff_delta = 0.0
             aff_std = 0.0
             aff_filled = float(aff_stack_fill[env_idx].item()) / max(aff_stack, 1)
@@ -418,6 +503,35 @@ def main():
                     bearing_y,
                     heading_err_pos,
                     heading_err_neg,
+                )
+            )
+            print(
+                "[PlayHigh][diag] goal_bear={:.3f} pass_bear={:.3f} cross_bear={:.3f} err_gp={:.3f} err_gc={:.3f} "
+                "pass_dir={} cross_dir={} norm_p/c={:.3f}/{:.3f} pass_gate_dbg={:.3f} pass_occ_dbg={:.3f} "
+                "cross_gate_dbg={:.3f} cross_width_dbg={:.3f} low_block_ratio={:.3f} vis_ratio={:.3f} "
+                "pass_vis/sector={:.3f}/{:.3f} low_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f} "
+                "pass_out_sector={}".format(
+                    goal_bearing,
+                    pass_bearing,
+                    cross_bearing,
+                    pass_goal_err,
+                    cross_goal_err,
+                    "None" if pass_dir_dbg is None else np.array2string(pass_dir_dbg, precision=3, floatmode="fixed"),
+                    "None" if cross_dir_dbg is None else np.array2string(cross_dir_dbg, precision=3, floatmode="fixed"),
+                    pass_dir_norm,
+                    cross_dir_norm,
+                    pass_gate_dbg,
+                    pass_occ_dbg,
+                    cross_gate_dbg,
+                    cross_width_dbg,
+                    low_block_ratio,
+                    vis_ratio,
+                    pass_vis_mean,
+                    pass_sector_mean,
+                    low_vis_mean,
+                    low_sector_mean,
+                    sector_vis_ratio,
+                    pass_out_sector,
                 )
             )
 
