@@ -65,6 +65,18 @@ def parse_args():
         help="Disable debug output",
     )
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
+    parser.add_argument(
+        "--heading_offset_override",
+        type=float,
+        default=None,
+        help="Override heading_offset_rad (radians) for debug alignment",
+    )
+    parser.add_argument(
+        "--heading_offset_flip",
+        action="store_true",
+        default=False,
+        help="Flip heading_offset_rad sign for debug alignment",
+    )
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0]] + unknown
@@ -176,7 +188,15 @@ def main():
     heading_offset = 0.0
     if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
         heading_offset = float(getattr(env.reward_cfg, "heading_offset_rad", 0.0))
-    print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (from reward_cfg)")
+    if args.heading_offset_override is not None:
+        heading_offset = float(args.heading_offset_override)
+    elif args.heading_offset_flip:
+        heading_offset = -heading_offset
+    if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
+        env.reward_cfg.heading_offset_rad = heading_offset
+    if hasattr(env, "env") and hasattr(env.env, "nav_cfg") and env.env.nav_cfg is not None:
+        env.env.nav_cfg.heading_offset_rad = heading_offset
+    print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (effective)")
     def _get_max_level():
         if not hasattr(env.env, "terrain_levels"):
             return 0
