@@ -380,6 +380,11 @@ def main():
             heading_err_pos = 0.0
             heading_err_neg = 0.0
             bearing_y = 0.0
+            goal_raw_dbg = None
+            goal_raw_bear_xy = 0.0
+            goal_raw_bear_y = 0.0
+            goal_world_bear_xy = 0.0
+            goal_world_bear_y = 0.0
             if hasattr(env.env, "root_states"):
                 quat = env.env.root_states[env_idx, 3:7].detach().cpu().numpy()
                 x, y, z, w = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
@@ -393,8 +398,18 @@ def main():
                                                 math.cos((yaw_raw + 0.5 * math.pi) - goal_dir))
                     heading_err_neg = math.atan2(math.sin((yaw_raw - 0.5 * math.pi) - goal_dir),
                                                 math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
+                    delta_x = goal_w[0] - pos[0]
+                    delta_y = goal_w[1] - pos[1]
+                    rel_x = math.cos(yaw_raw) * delta_x + math.sin(yaw_raw) * delta_y
+                    rel_y = -math.sin(yaw_raw) * delta_x + math.cos(yaw_raw) * delta_y
+                    goal_world_bear_xy = math.atan2(rel_y, rel_x)
+                    goal_world_bear_y = math.atan2(rel_x, rel_y)
             if goal is not None:
                 bearing_y = math.atan2(goal[0], goal[1])
+            if hasattr(env.env, "goal_buf"):
+                goal_raw_dbg = env.env.goal_buf[env_idx].detach().cpu().numpy()
+                goal_raw_bear_xy = math.atan2(goal_raw_dbg[1], goal_raw_dbg[0])
+                goal_raw_bear_y = math.atan2(goal_raw_dbg[0], goal_raw_dbg[1])
             goal_bearing = bearing_y
             pass_bearing = 0.0
             cross_bearing = 0.0
@@ -556,6 +571,19 @@ def main():
                     low_sector_mean,
                     sector_vis_ratio,
                     pass_out_sector,
+                )
+            )
+            print(
+                "[PlayHigh][goal] raw={} rot={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
+                "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} offset={:.3f}".format(
+                    "None" if goal_raw_dbg is None else np.array2string(goal_raw_dbg, precision=3, floatmode="fixed"),
+                    "None" if goal is None else np.array2string(goal, precision=3, floatmode="fixed"),
+                    goal_raw_bear_xy,
+                    goal_raw_bear_y,
+                    goal_world_bear_xy,
+                    goal_world_bear_y,
+                    bearing_y,
+                    heading_offset,
                 )
             )
 
