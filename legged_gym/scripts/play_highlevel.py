@@ -408,6 +408,10 @@ def main():
                     obs["goal"],
                     block_mask=low_block_mask,
                 )
+                pass_gate_dbg = float(pass_gate_dbg[env_idx].detach().cpu())
+                pass_occ_dbg = float(pass_occ_dbg[env_idx].detach().cpu())
+                cross_gate_dbg = float(cross_gate_dbg[env_idx].detach().cpu())
+                cross_width_dbg = float(cross_width_dbg[env_idx].detach().cpu())
                 pass_dir_dbg = pass_dir[env_idx].detach().cpu().numpy()
                 cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
                 pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
@@ -457,7 +461,7 @@ def main():
                 pass_sector_mean = float((passable * sector_f).sum().div(sector_count).detach().cpu())
                 low_sector_mean = float((low_obs * sector_f).sum().div(sector_count).detach().cpu())
                 if low_block_mask is not None:
-                    low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
+                low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
                 if sector_half > 0.0:
                     pass_out_sector = int(abs(pass_goal_err) > sector_half)
             aff_delta = 0.0
