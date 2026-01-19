@@ -461,7 +461,7 @@ def main():
                 pass_sector_mean = float((passable * sector_f).sum().div(sector_count).detach().cpu())
                 low_sector_mean = float((low_obs * sector_f).sum().div(sector_count).detach().cpu())
                 if low_block_mask is not None:
-                low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
+                    low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
                 if sector_half > 0.0:
                     pass_out_sector = int(abs(pass_goal_err) > sector_half)
             aff_delta = 0.0
