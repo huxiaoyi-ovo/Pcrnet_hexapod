@@ -406,7 +406,6 @@ class HierarchicalHexapodEnv:
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
         self.reward_affordance_override = None
-        self.guidance_goal_fix = bool(getattr(args, "guidance_goal_fix", False))
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -839,8 +838,8 @@ class HierarchicalHexapodEnv:
             goal = obs_dict['goal']
             cos_o = math.cos(offset)
             sin_o = math.sin(offset)
-            goal_x = cos_o * goal[:, 0] + sin_o * goal[:, 1]
-            goal_y = -sin_o * goal[:, 0] + cos_o * goal[:, 1]
+            goal_x = cos_o * goal[:, 0] - sin_o * goal[:, 1]
+            goal_y = sin_o * goal[:, 0] + cos_o * goal[:, 1]
             obs_dict['goal'] = torch.stack([goal_x, goal_y], dim=1)
         
         # 3. GT Affordance
@@ -987,13 +986,9 @@ class HierarchicalHexapodEnv:
             crossable_dir, crossable_gate, crossable_width, low_block_mask = self._compute_low_obstacle_guidance(
                 reward_aff_map
             )
-            guidance_goal = reward_obs['goal']
-            if self.guidance_goal_fix and hasattr(self.env, "goal_buf"):
-                goal_body = self.env.goal_buf
-                guidance_goal = torch.stack([-goal_body[:, 1], goal_body[:, 0]], dim=1)
             passable_dir, passable_gate, passable_occ_ratio = self._compute_passable_guidance(
                 reward_aff_map,
-                guidance_goal,
+                reward_obs['goal'],
                 block_mask=low_block_mask,
             )
 
