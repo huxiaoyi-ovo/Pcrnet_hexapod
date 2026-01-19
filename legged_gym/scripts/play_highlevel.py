@@ -66,6 +66,13 @@ def parse_args():
     )
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     parser.add_argument(
+        "--no_guidance_goal_fix",
+        dest="guidance_goal_fix",
+        action="store_false",
+        help="Disable +Y-forward guidance goal fix",
+    )
+    parser.set_defaults(guidance_goal_fix=True)
+    parser.add_argument(
         "--heading_offset_override",
         type=float,
         default=None,
@@ -197,6 +204,7 @@ def main():
     if hasattr(env, "env") and hasattr(env.env, "nav_cfg") and env.env.nav_cfg is not None:
         env.env.nav_cfg.heading_offset_rad = heading_offset
     print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (effective)")
+    print(f"[PlayHigh] guidance_goal_fix={getattr(env, 'guidance_goal_fix', False)}")
     def _get_max_level():
         if not hasattr(env.env, "terrain_levels"):
             return 0
@@ -383,6 +391,9 @@ def main():
             goal_raw_dbg = None
             goal_raw_bear_xy = 0.0
             goal_raw_bear_y = 0.0
+            goal_fix_dbg = None
+            goal_fix_bear = 0.0
+            use_goal_fix = False
             goal_world_bear_xy = 0.0
             goal_world_bear_y = 0.0
             if hasattr(env.env, "root_states"):
@@ -410,7 +421,11 @@ def main():
                 goal_raw_dbg = env.env.goal_buf[env_idx].detach().cpu().numpy()
                 goal_raw_bear_xy = math.atan2(goal_raw_dbg[1], goal_raw_dbg[0])
                 goal_raw_bear_y = math.atan2(goal_raw_dbg[0], goal_raw_dbg[1])
-            goal_bearing = bearing_y
+                if getattr(env, "guidance_goal_fix", False):
+                    goal_fix_dbg = np.array([-goal_raw_dbg[1], goal_raw_dbg[0]])
+                    goal_fix_bear = math.atan2(goal_fix_dbg[0], goal_fix_dbg[1])
+                    use_goal_fix = True
+            goal_bearing = goal_fix_bear if use_goal_fix else bearing_y
             pass_bearing = 0.0
             cross_bearing = 0.0
             pass_goal_err = 0.0
@@ -438,9 +453,13 @@ def main():
                 cross_dir, cross_gate_dbg, cross_width_dbg, low_block_mask = env._compute_low_obstacle_guidance(
                     debug_aff
                 )
+                debug_goal = obs["goal"]
+                if getattr(env, "guidance_goal_fix", False) and hasattr(env.env, "goal_buf"):
+                    goal_body = env.env.goal_buf
+                    debug_goal = torch.stack([-goal_body[:, 1], goal_body[:, 0]], dim=1)
                 pass_dir, pass_gate_dbg, pass_occ_dbg = env._compute_passable_guidance(
                     debug_aff,
-                    obs["goal"],
+                    debug_goal,
                     block_mask=low_block_mask,
                 )
                 pass_gate_dbg = float(pass_gate_dbg[env_idx].detach().cpu())
@@ -574,15 +593,18 @@ def main():
                 )
             )
             print(
-                "[PlayHigh][goal] raw={} rot={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
-                "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} offset={:.3f}".format(
+                "[PlayHigh][goal] raw={} rot={} fix={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
+                "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} bear_fix={:.3f} use_fix={} offset={:.3f}".format(
                     "None" if goal_raw_dbg is None else np.array2string(goal_raw_dbg, precision=3, floatmode="fixed"),
                     "None" if goal is None else np.array2string(goal, precision=3, floatmode="fixed"),
+                    "None" if goal_fix_dbg is None else np.array2string(goal_fix_dbg, precision=3, floatmode="fixed"),
                     goal_raw_bear_xy,
                     goal_raw_bear_y,
                     goal_world_bear_xy,
                     goal_world_bear_y,
                     bearing_y,
+                    goal_fix_bear,
+                    int(use_goal_fix),
                     heading_offset,
                 )
             )
