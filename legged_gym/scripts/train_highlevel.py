@@ -363,7 +363,7 @@ class HierarchicalHexapodEnv:
                     goal_approach_scale=6.0,
                     goal_reach_threshold=0.1,
                     heading_scale=0.08,
-                    heading_offset_rad=0.5 * math.pi,
+                    heading_offset_rad=0.5 * math.pi,  # 标准: +pi/2, 机体 +Y 为前进
                     heading_use_difficulty_gate=True,
                     heading_min_weight=0.2,
                     stability_scale=0.01,

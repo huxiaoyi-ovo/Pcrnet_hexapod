@@ -7,6 +7,7 @@ import os
 import sys
 import argparse
 import math
+import types
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 from isaacgym import gymapi
@@ -134,6 +135,17 @@ def main():
         os.makedirs(args.camera_dir, exist_ok=True)
 
     env = th.HierarchicalHexapodEnv(args, device)
+    if hasattr(env, "env") and hasattr(env.env, "cfg") and hasattr(env.env.cfg, "terrain"):
+        env.env.cfg.terrain.curriculum = False
+    if hasattr(env.env, "_update_terrain_curriculum"):
+        def _no_update(self, env_ids):
+            return
+        env.env._update_terrain_curriculum = types.MethodType(_no_update, env.env)
+    if hasattr(env.env, "terrain_levels"):
+        env.env.terrain_levels.fill_(0)
+        if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types") and hasattr(env.env, "env_origins"):
+            env.env.env_origins[:] = env.env.terrain_origins[env.env.terrain_levels, env.env.terrain_types]
+        print("[PlayHigh] curriculum disabled; start at level 0")
     vision_model = None
     if args.mode == "student":
         vision_model = th.AffordanceEstimator(
@@ -161,11 +173,19 @@ def main():
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "RESET_ENV")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "LEVEL_DOWN")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_D, "LEVEL_UP")
-    obs = env.reset()
     heading_offset = 0.0
     if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
         heading_offset = float(getattr(env.reward_cfg, "heading_offset_rad", 0.0))
     print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (from reward_cfg)")
+    def _get_max_level():
+        if not hasattr(env.env, "terrain_levels"):
+            return 0
+        max_level = int(getattr(env.env, "max_terrain_level", 0))
+        if max_level <= 0 and hasattr(env.env, "terrain_origins"):
+            max_level = int(env.env.terrain_origins.shape[0])
+        if max_level <= 0 and hasattr(env.env, "cfg"):
+            max_level = int(getattr(env.env.cfg.terrain, "num_rows", 1))
+        return max(1, max_level)
     def _get_aff_map(current_obs):
         if args.mode == "student":
             if current_obs is None:
@@ -184,6 +204,7 @@ def main():
             return th.difficulty_from_gap(current_aff)
         return current_obs["gt_difficulty"]
 
+    obs = env.reset()
     aff_map = _get_aff_map(obs)
     aff_shape = aff_map.shape[1:]
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
@@ -231,13 +252,14 @@ def main():
         if manual_reset or level_delta != 0:
             if level_delta != 0 and hasattr(env.env, "terrain_levels"):
                 env_idx = args.camera_env
-                max_level = int(getattr(env.env, "max_terrain_level", 0))
-                if max_level <= 0 and hasattr(env.env, "cfg"):
-                    max_level = int(getattr(env.env.cfg.terrain, "num_rows", 1))
+                max_level = _get_max_level()
                 current_level = int(env.env.terrain_levels[env_idx].item())
+                current_level = int(np.clip(current_level, 0, max_level - 1))
                 new_level = int(np.clip(current_level + level_delta, 0, max_level - 1))
                 env.env.terrain_levels[env_idx] = new_level
-                if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types"):
+                if (hasattr(env.env, "terrain_origins")
+                        and hasattr(env.env, "terrain_types")
+                        and hasattr(env.env, "env_origins")):
                     env.env.env_origins[env_idx] = env.env.terrain_origins[new_level, env.env.terrain_types[env_idx]]
                 print(f"[PlayHigh] curriculum level -> {new_level}")
             obs = env.reset()
