@@ -1,14 +1,10 @@
 """
-navigation_env.py - 导航任务环境与奖励函数 V2
+navigation_env.py - 导航任务环境与奖励函数 V5
 
-改动说明 (相比V1):
-- 移除: 步态效率奖励 (gait_optimal_bonus, gait_switch_penalty)
-- 新增: 运动强度适配奖励 (intensity_match, intensity_smooth)
-- 修改: 使用连续的地形难度而非离散步态
-
-创新点:
-- 强度-地形匹配奖励: 鼓励在简单地形用高强度，复杂地形用低强度
-- 强度平滑惩罚: 避免运动强度剧烈波动
+改动说明:
+- 退役 intensity 速度缩放语义，改为 MoE 门控 y
+- 新增: risk barrier 连续风险成本
+- 新增: gate smooth 惩罚，限制门控抖动
 """
 
 import torch
@@ -20,7 +16,7 @@ from dataclasses import dataclass
 
 @dataclass
 class NavigationRewardConfig:
-    """导航奖励配置 V2"""
+    """导航奖励配置 V5"""
 
     # 目标接近奖励
     goal_approach_scale: float = 2.0      # 接近目标的奖励系数
@@ -47,18 +43,13 @@ class NavigationRewardConfig:
     crossable_align_scale: float = 0.0
     crossable_gate_min_speed: float = 0.05
 
-    # ★运动强度奖励 (替代步态效率)★
-    intensity_match_bonus: float = 0.2    # 强度匹配地形的奖励
-    intensity_mismatch_penalty: float = -0.1  # 强度不匹配的惩罚
-    intensity_smooth_penalty: float = -0.05   # 强度变化惩罚
-    max_intensity_change: float = 0.2     # 每步最大强度变化
-    intensity_gate_use: bool = False      # 强度匹配门控
-    intensity_gate_min_speed: float = 0.05  # 强度门控速度阈值
-    intensity_gate_min_approach: float = 0.0  # 强度门控进度阈值
-    intensity_goal_slow_dist: float = 0.6    # 目标附近降强度距离
-    intensity_goal_min_factor: float = 0.1  # 目标因子最小值
-    intensity_clearance_safe: float = 0.25  # 安全距离阈值 (m)
-    intensity_clearance_free: float = 0.6   # 认为安全的距离 (m)
+    # ★门控平滑与风险成本（MoE）★
+    gate_smooth_penalty: float = -0.05     # 门控变化惩罚
+    gate_max_change: float = 0.2           # 每步门控变化阈值
+    risk_barrier_scale: float = -0.5       # 连续风险成本系数
+    risk_barrier_safe: float = 0.25        # 安全距离阈值 (m)
+    risk_barrier_free: float = 0.6         # 认为安全的距离 (m)
+    risk_barrier_tau: float = 0.1          # 风险成本斜率
 
     # 时间惩罚
     time_penalty: float = -0.01           # 每步时间惩罚
@@ -73,31 +64,23 @@ class NavigationRewardConfig:
 
 
 class NavigationRewardFunction:
-    """导航任务奖励函数 V2 ★核心设计★
+    """导航任务奖励函数 V5 ★核心设计★
 
     奖励结构:
     1. 主奖励 (目标导向):
        - 接近目标: r = scale × (d_{t-1} - d_t)
        - 到达奖励: r = bonus if d < threshold
 
-    2. 强度适配 (地形自适应) ★新增★:
-       - 最优强度 = 1 - 地形难度
-       - 强度匹配奖励/惩罚
-       - 强度平滑惩罚
+    2. MoE 门控:
+       - gate smooth 惩罚 (限制 y 抖动)
 
     3. 安全性:
+       - risk barrier 连续风险成本
        - 碰撞惩罚
        - 姿态稳定性
 
     4. 效率:
        - 时间惩罚
-
-    强度-地形关系:
-    地形难度 d   →  最优强度 λ* = 1 - d
-
-    d ≈ 0 (简单) →  λ* ≈ 1 (激进，快速通过)
-    d ≈ 0.5 (中等) → λ* ≈ 0.5 (平衡)
-    d ≈ 1 (困难) →  λ* ≈ 0 (保守，谨慎通过)
     """
 
     def __init__(self, cfg: NavigationRewardConfig = None):
@@ -110,8 +93,6 @@ class NavigationRewardFunction:
         goal_pos: torch.Tensor,            # (N, 2) 目标位置
         robot_vel: torch.Tensor,           # (N, 3) 速度
         robot_quat: torch.Tensor,          # (N, 4) 姿态四元数
-        intensity: torch.Tensor,           # (N,) 当前运动强度 ★新增★
-        prev_intensity: torch.Tensor,      # (N,) 上一运动强度 ★新增★
         terrain_difficulty: torch.Tensor,  # (N,) 地形难度 ★修改★
         collision_mask: torch.Tensor,      # (N,) 是否碰撞
         clearance: Optional[torch.Tensor] = None,  # (N,) 前方最小障碍距离
@@ -120,6 +101,10 @@ class NavigationRewardFunction:
         passable_gate: Optional[torch.Tensor] = None,  # (N,) 可通行门控
         crossable_dir: Optional[torch.Tensor] = None,  # (N, 2) 低障中心方向
         crossable_gate: Optional[torch.Tensor] = None,  # (N,) 低障门控
+        gate_y: Optional[torch.Tensor] = None,  # (N,) 门控权重
+        prev_gate_y: Optional[torch.Tensor] = None,  # (N,) 上一门控
+        intensity: Optional[torch.Tensor] = None,       # (N,) 兼容字段（将被 gate_y 替代）
+        prev_intensity: Optional[torch.Tensor] = None,  # (N,) 兼容字段
     ) -> Dict[str, torch.Tensor]:
         """
         计算综合奖励
@@ -204,22 +189,31 @@ class NavigationRewardFunction:
         if crossable_gate is not None:
             rewards['crossable_gate'] = crossable_gate
 
-        # 3. 运动强度适配奖励 ★新增★
-        intensity_rewards = self._compute_intensity_reward(
-            intensity,
-            prev_intensity,
-            terrain_difficulty,
-            dist_to_goal=dist_to_goal,
-            clearance=clearance,
+        # 3. Gate smooth + Risk barrier
+        if gate_y is None:
+            gate_y = intensity if intensity is not None else torch.zeros(num_envs, device=device)
+        if prev_gate_y is None:
+            prev_gate_y = prev_intensity if prev_intensity is not None else gate_y
+        gate_change = torch.abs(gate_y - prev_gate_y)
+        gate_smooth = torch.where(
+            gate_change > self.cfg.gate_max_change,
+            self.cfg.gate_smooth_penalty * gate_change,
+            torch.zeros_like(gate_change),
         )
-        if self.cfg.intensity_gate_use:
-            progress = prev_dist - dist_to_goal
-            gate = progress > self.cfg.intensity_gate_min_approach
-            if self.cfg.intensity_gate_min_speed > 0:
-                speed = torch.norm(robot_vel[:, :2], dim=-1)
-                gate = gate & (speed > self.cfg.intensity_gate_min_speed)
-            intensity_rewards['intensity_match'] = intensity_rewards['intensity_match'] * gate.float()
-        rewards.update(intensity_rewards)
+        rewards['gate_smooth'] = gate_smooth
+
+        risk_barrier = torch.zeros(num_envs, device=device)
+        risk_scale = None
+        if clearance is not None and self.cfg.risk_barrier_scale != 0.0:
+            safe = self.cfg.risk_barrier_safe
+            free = max(self.cfg.risk_barrier_free, safe + 1e-6)
+            tau = max(self.cfg.risk_barrier_tau, 1e-3)
+            risk = torch.exp(-(clearance - safe) / tau)
+            risk_barrier = self.cfg.risk_barrier_scale * risk
+            risk_scale = torch.clamp((clearance - safe) / (free - safe), 0.0, 1.0)
+        rewards['risk_barrier'] = risk_barrier
+        if risk_scale is not None:
+            rewards['risk_scale'] = risk_scale
 
         # 4. 碰撞惩罚
         collision_reward = collision_mask.float() * self.cfg.collision_penalty
@@ -245,8 +239,8 @@ class NavigationRewardFunction:
             rewards['heading'] +
             rewards['passable_align'] +
             rewards['crossable_align'] +
-            rewards['intensity_match'] +    # ★新增★
-            rewards['intensity_smooth'] +   # ★新增★
+            rewards['gate_smooth'] +
+            rewards['risk_barrier'] +
             rewards['collision'] +
             rewards['stability'] +
             rewards['velocity'] +
@@ -255,67 +249,6 @@ class NavigationRewardFunction:
         rewards['total'] = total_reward
 
         return rewards
-
-    def _compute_intensity_reward(
-        self,
-        intensity: torch.Tensor,
-        prev_intensity: torch.Tensor,
-        terrain_difficulty: torch.Tensor,
-        dist_to_goal: Optional[torch.Tensor] = None,
-        clearance: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        计算运动强度适配奖励 ★新增★
-
-        原理:
-        1. 计算最优强度 = 1 - 地形难度
-        2. 评估当前强度与最优强度的匹配程度
-        3. 惩罚强度剧烈变化
-        """
-        # 最优强度: 地形越简单，强度应越高
-        goal_factor = torch.ones_like(intensity)
-        if dist_to_goal is not None and self.cfg.intensity_goal_slow_dist > 0:
-            goal_factor = torch.clamp(
-                dist_to_goal / self.cfg.intensity_goal_slow_dist,
-                min=self.cfg.intensity_goal_min_factor,
-                max=1.0,
-            )
-
-        clear_factor = torch.ones_like(intensity)
-        if clearance is not None:
-            safe = self.cfg.intensity_clearance_safe
-            free = max(self.cfg.intensity_clearance_free, safe + 1e-6)
-            clear_factor = torch.clamp((clearance - safe) / (free - safe), 0.0, 1.0)
-
-        optimal_intensity = (1.0 - terrain_difficulty) * goal_factor * clear_factor
-
-        # 强度匹配误差
-        intensity_error = torch.abs(intensity - optimal_intensity)
-
-        # 匹配奖励: 误差越小，奖励越高
-        # error=0 -> reward=0.2, error=1 -> reward=-0.1
-        match_reward = torch.where(
-            intensity_error < 0.2,
-            torch.full_like(intensity_error, self.cfg.intensity_match_bonus),
-            self.cfg.intensity_match_bonus - intensity_error * 0.3
-        )
-
-        # 强度变化惩罚
-        intensity_change = torch.abs(intensity - prev_intensity)
-        smooth_penalty = torch.where(
-            intensity_change > self.cfg.max_intensity_change,
-            self.cfg.intensity_smooth_penalty * intensity_change,
-            torch.zeros_like(intensity_change)
-        )
-
-        return {
-            'intensity_match': match_reward,
-            'intensity_smooth': smooth_penalty,
-            'optimal_intensity': optimal_intensity,  # 用于日志
-            'intensity_error': intensity_error,      # 用于日志
-            'intensity_goal_factor': goal_factor,
-            'intensity_clear_factor': clear_factor,
-        }
 
     def _compute_stability_reward(self, robot_quat: torch.Tensor) -> torch.Tensor:
         """计算姿态稳定性奖励

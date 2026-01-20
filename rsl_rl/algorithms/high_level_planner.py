@@ -467,9 +467,333 @@ class LocomotionAdapter:
         
         return velocity_cmd, info
 
+
+class CmdVelOutput(NamedTuple):
+    cmd_mean: torch.Tensor
+    cmd_std: torch.Tensor
+    value: torch.Tensor
+
+
+class CmdVelExpert(nn.Module):
+    """
+    Command-space expert policy.
+    Output: cmd_vel = [vx, vy, omega] (tanh-squashed Gaussian).
+    """
+    def __init__(
+        self,
+        affordance_channels: int = 3,
+        state_dim: int = 9,
+        goal_dim: int = 2,
+        hidden_dim: int = 256,
+        min_std: float = 0.01,
+        max_std: float = 1.0,
+        cmd_scale: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    ):
+        super().__init__()
+        self.min_std = min_std
+        self.max_std = max_std
+
+        self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
+        self.state_encoder = StateEncoder(state_dim, 64)
+        self.goal_encoder = GoalEncoder(goal_dim, 32)
+
+        fusion_dim = 128 + 64 + 32 + 1
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+
+        self.cmd_mean_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 3)
+        )
+        self.cmd_std_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 3),
+            nn.Softplus()
+        )
+
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1)
+        )
+
+        self.register_buffer("cmd_scale", torch.tensor(cmd_scale))
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        nn.init.orthogonal_(self.cmd_mean_head[-1].weight, gain=0.01)
+
+    def forward(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+    ) -> CmdVelOutput:
+        aff_feat = self.affordance_encoder(affordance_map)
+        state_feat = self.state_encoder(robot_state)
+        goal_feat = self.goal_encoder(goal)
+
+        if terrain_difficulty.dim() == 1:
+            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
+
+        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
+        hidden = self.fusion(fused)
+
+        cmd_mean = self.cmd_mean_head(hidden)
+        cmd_std = self.cmd_std_head(hidden)
+        cmd_std = torch.clamp(cmd_std, self.min_std, self.max_std)
+        value = self.value_head(hidden)
+
+        return CmdVelOutput(cmd_mean=cmd_mean, cmd_std=cmd_std, value=value)
+
+    def get_action(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, Dict]:
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        if deterministic:
+            cmd_raw = out.cmd_mean
+        else:
+            cmd_dist = Normal(out.cmd_mean, out.cmd_std)
+            cmd_raw = cmd_dist.rsample()
+        cmd = torch.tanh(cmd_raw) * self.cmd_scale
+        info = {
+            "value": out.value,
+            "cmd_mean": out.cmd_mean,
+            "cmd_std": out.cmd_std,
+        }
+        return cmd, info
+
+    def evaluate_actions(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        cmd_action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+
+        cmd_norm = cmd_action / self.cmd_scale
+        cmd_norm = torch.clamp(cmd_norm, -0.999999, 0.999999)
+        cmd_raw = torch.atanh(cmd_norm)
+
+        cmd_dist = Normal(out.cmd_mean, out.cmd_std)
+        log_prob_raw = cmd_dist.log_prob(cmd_raw)
+        log_det_jacobian = 2.0 * (np.log(2.0) - cmd_raw - F.softplus(-2.0 * cmd_raw))
+        cmd_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
+        cmd_entropy = cmd_dist.entropy().sum(dim=-1)
+
+        return cmd_log_prob, out.value, cmd_entropy, None
+
+
+class GateOutput(NamedTuple):
+    y_alpha: torch.Tensor
+    y_beta: torch.Tensor
+    value: torch.Tensor
+
+
+class GatePolicy(nn.Module):
+    """
+    Gate policy for MoE arbitration. Output y in [0,1] using Beta.
+    """
+    def __init__(
+        self,
+        affordance_channels: int = 3,
+        state_dim: int = 9,
+        goal_dim: int = 2,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
+        self.state_encoder = StateEncoder(state_dim, 64)
+        self.goal_encoder = GoalEncoder(goal_dim, 32)
+
+        fusion_dim = 128 + 64 + 32 + 1
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+
+        self.y_alpha_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1),
+            nn.Softplus()
+        )
+        self.y_beta_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1),
+            nn.Softplus()
+        )
+
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 1)
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        nn.init.orthogonal_(self.y_alpha_head[-2].weight, gain=0.01)
+        nn.init.orthogonal_(self.y_beta_head[-2].weight, gain=0.01)
+
+    def forward(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+    ) -> GateOutput:
+        aff_feat = self.affordance_encoder(affordance_map)
+        state_feat = self.state_encoder(robot_state)
+        goal_feat = self.goal_encoder(goal)
+
+        if terrain_difficulty.dim() == 1:
+            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
+
+        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
+        hidden = self.fusion(fused)
+
+        y_alpha = self.y_alpha_head(hidden) + 1.0
+        y_beta = self.y_beta_head(hidden) + 1.0
+        value = self.value_head(hidden)
+        return GateOutput(y_alpha=y_alpha, y_beta=y_beta, value=value)
+
+    def get_action(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, Dict]:
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        if deterministic:
+            y = out.y_alpha / (out.y_alpha + out.y_beta)
+            y = y.squeeze(-1)
+        else:
+            y_dist = Beta(out.y_alpha, out.y_beta)
+            y = y_dist.sample().squeeze(-1)
+        info = {
+            "value": out.value,
+            "y_alpha": out.y_alpha,
+            "y_beta": out.y_beta,
+        }
+        return y, info
+
+    def evaluate_actions(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        y_action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        y_dist = Beta(out.y_alpha, out.y_beta)
+        eps = 1e-6
+        y_clamped = torch.clamp(y_action, eps, 1.0 - eps)
+        if y_clamped.dim() == 1:
+            y_clamped = y_clamped.unsqueeze(-1)
+        y_log_prob = y_dist.log_prob(y_clamped).sum(dim=-1)
+        y_entropy = y_dist.entropy().sum(dim=-1)
+        return y_log_prob, out.value, y_entropy, None
+
+
+class CommandPostProcessor:
+    """
+    Post-processor for cmd_vel:
+    1) clamp to limits
+    2) slew-rate limiting
+    3) risk-based scaling (clearance)
+    """
+    def __init__(
+        self,
+        max_cmd: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        max_delta: Tuple[float, float, float] = (0.2, 0.2, 0.4),
+        safe_distance: float = 0.25,
+        free_distance: float = 0.6,
+        enable_risk_scale: bool = True,
+    ):
+        self.max_cmd = torch.tensor(max_cmd)
+        self.max_delta = torch.tensor(max_delta)
+        self.safe_distance = safe_distance
+        self.free_distance = max(free_distance, safe_distance + 1e-6)
+        self.enable_risk_scale = enable_risk_scale
+        self.last_cmd = None
+
+    def reset(self, num_envs: int, device: torch.device):
+        self.last_cmd = torch.zeros(num_envs, 3, device=device)
+
+    def process(
+        self,
+        cmd: torch.Tensor,
+        clearance: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict]:
+        if cmd.dim() == 1:
+            cmd = cmd.unsqueeze(0)
+
+        device = cmd.device
+        max_cmd = self.max_cmd.to(device)
+        max_delta = self.max_delta.to(device)
+
+        # 1) Clamp to limits
+        cmd_clamped = torch.clamp(cmd, -max_cmd, max_cmd)
+
+        # 2) Slew-rate limiting
+        if self.last_cmd is None or self.last_cmd.shape != cmd_clamped.shape:
+            self.last_cmd = torch.zeros_like(cmd_clamped)
+        delta = torch.clamp(cmd_clamped - self.last_cmd, -max_delta, max_delta)
+        cmd_slew = self.last_cmd + delta
+        self.last_cmd = cmd_slew.detach()
+
+        # 3) Risk-based scaling
+        scale = None
+        if clearance is not None and self.enable_risk_scale:
+            clearance = clearance.to(device)
+            scale = torch.clamp(
+                (clearance - self.safe_distance) / (self.free_distance - self.safe_distance),
+                0.0,
+                1.0,
+            )
+            cmd_slew = cmd_slew * scale.unsqueeze(-1)
+
+        info = {
+            "cmd_raw": cmd,
+            "cmd_clamped": cmd_clamped,
+            "cmd_slew": cmd_slew,
+            "risk_scale": scale,
+        }
+        return cmd_slew, info
+
     def reset_numpy(self):
         """重置NumPy状态（真机部署时每个Episode开始调用）"""
-        self._last_intensity_np = 0.0
+        self.last_cmd = None
 
 
 def test_planner_v36():

@@ -1,34 +1,21 @@
 """
-scripts/train_highlevel.py - V3.6 高层规划器训练脚本
+scripts/train_highlevel.py - V5 Command-Space MoE 训练脚本
 
-版本: v3.6 (Production Ready with Squashed Gaussian + Beta)
-作者: 胡潇屹
-日期: 2025年12月
-
-核心改动 (相比 V3.3):
-1. state_dim=9: 匹配 hex_terrain.py 中的 robot_state_buf 定义
-   [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
-2. 使用 V3.6 TerrainAdaptivePlanner: Squashed Gaussian + Beta 分布
-3. 集成完整 PPO 训练循环 (GAE, Clipped Loss)
-4. 支持 LocomotionAdapter 的 Slew Rate Limiting
-
-依赖:
-- legged_gym (必须在 PYTHONPATH 中)
-- rsl_rl (必须在 PYTHONPATH 中)
-- rsl_rl.algorithms.high_level_planner (V3.6)
-- legged_gym.envs.hex_v4.affordance_estimator (Phase 1)
-- legged_gym.scripts.navigation_env (V2 Reward)
+核心变化:
+1) Experts 直接输出 cmd_vel, Gate 输出 y (MoE 仲裁)
+2) Command Post-Processor 统一命令限幅/滤波/风险钳制
+3) Teacher/Student 仅用于 affordance 蒸馏
 
 用法:
-    1. 训练 Teacher:
-       python scripts/train_highlevel.py --mode teacher --task hex_terrain \\
-           --low_level_ckpt agents/fast_2000.pt
+    Follow / Avoid:
+        python scripts/train_highlevel.py --mode teacher --skill follow --task hex_terrain \\
+            --low_level_ckpt agents/fast_2000.pt
 
-    2. 训练 Student (Distillation):
-       python scripts/train_highlevel.py --mode student --task hex_terrain \\
-           --low_level_ckpt agents/fast_2000.pt \\
-           --teacher_ckpt outputs/planner/teacher/best_model.pt \\
-           --vision_ckpt outputs/train_v4_fix/run_xxx/best_model.pt
+    Gate:
+        python scripts/train_highlevel.py --mode teacher --skill moe --task hex_terrain \\
+            --low_level_ckpt agents/fast_2000.pt \\
+            --follow_ckpt outputs/planner/follow/best_model.pt \\
+            --avoid_ckpt outputs/planner/avoid/best_model.pt
 """
 
 import os
@@ -45,7 +32,7 @@ import numpy as np
 import torch.nn.functional as F
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Any
 from collections import deque
 
 # 添加项目根目录
@@ -57,6 +44,19 @@ STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
 AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
 
+# 延迟导入占位（便于静态检查）
+task_registry: Any = None
+TerrainAdaptivePlanner: Any = None
+HighLevelPlanner: Any = None
+LocomotionAdapter: Any = None
+CmdVelExpert: Any = None
+GatePolicy: Any = None
+CommandPostProcessor: Any = None
+AffordanceEstimator: Any = None
+NavigationRewardFunction: Any = None
+NavigationRewardConfig: Any = None
+ActorCritic: Any = None
+
 
 def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
     if aff_map.ndim != 4 or aff_map.size(1) < 2:
@@ -64,6 +64,18 @@ def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
     gap = aff_map[:, 1]
     difficulty = 1.0 - gap.mean(dim=(1, 2))
     return torch.clamp(difficulty, 0.0, 1.0)
+
+
+def apply_goal_occlusion(
+    goal: torch.Tensor,
+    prev_goal: Optional[torch.Tensor],
+    occlude_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if prev_goal is None:
+        prev_goal = goal.detach()
+    occlude_mask = occlude_mask.view(-1, 1)
+    masked_goal = torch.where(occlude_mask, prev_goal, goal)
+    return masked_goal, masked_goal.detach()
 
 
 def import_modules():
@@ -86,6 +98,9 @@ def import_modules():
     try:
         from rsl_rl.algorithms.high_level_planner import TerrainAdaptivePlanner as TAP
         from rsl_rl.algorithms.high_level_planner import LocomotionAdapter as LA
+        from rsl_rl.algorithms.high_level_planner import CmdVelExpert as CVE
+        from rsl_rl.algorithms.high_level_planner import GatePolicy as GP
+        from rsl_rl.algorithms.high_level_planner import CommandPostProcessor as CPP
         from rsl_rl.modules import ActorCritic as AC
         
         # 赋值给全局变量
@@ -93,6 +108,9 @@ def import_modules():
         globals()['TerrainAdaptivePlanner'] = TAP
         globals()['HighLevelPlanner'] = TAP
         globals()['LocomotionAdapter'] = LA
+        globals()['CmdVelExpert'] = CVE
+        globals()['GatePolicy'] = GP
+        globals()['CommandPostProcessor'] = CPP
         globals()['ActorCritic'] = AC
         print("[Init] ✓ rsl_rl 模块导入成功")
     except ImportError as e:
@@ -130,12 +148,14 @@ class RolloutBuffer:
         state_dim: int,
         goal_dim: int,
         aff_map_shape: Tuple[int, int, int],
+        action_dim: int,
         device: torch.device,
     ):
         self.num_envs = num_envs
         self.num_steps = num_steps
         self.device = device
         self.step = 0
+        self.action_dim = action_dim
 
         # 观测（仅保留 PPO 更新所需张量）
         self.states = torch.zeros(num_steps, num_envs, state_dim, device=device)
@@ -145,8 +165,7 @@ class RolloutBuffer:
         self.difficulties = torch.zeros(num_steps, num_envs, device=device)
 
         # 动作
-        self.subgoals = torch.zeros(num_steps, num_envs, 3, device=device)
-        self.intensities = torch.zeros(num_steps, num_envs, device=device)
+        self.actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
         
         # PPO 核心数据
         self.log_probs = torch.zeros(num_steps, num_envs, device=device)
@@ -155,8 +174,7 @@ class RolloutBuffer:
         self.dones = torch.zeros(num_steps, num_envs, device=device)
         
         # 蒸馏目标 (Student 模式)
-        self.teacher_subgoals = torch.zeros(num_steps, num_envs, 3, device=device)
-        self.teacher_intensities = torch.zeros(num_steps, num_envs, device=device)
+        self.teacher_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
 
     def add(
         self,
@@ -164,30 +182,26 @@ class RolloutBuffer:
         goal,
         aff_map,
         difficulty,
-        subgoal,
-        intensity,
+        action,
         log_prob,
         value,
         reward,
         done,
-        teacher_subgoal=None,
-        teacher_intensity=None,
+        teacher_action=None,
     ):
         """添加一步数据"""
         self.states[self.step] = state
         self.goals[self.step] = goal
         self.aff_maps[self.step] = aff_map
         self.difficulties[self.step] = difficulty
-        self.subgoals[self.step] = subgoal
-        self.intensities[self.step] = intensity
+        self.actions[self.step] = action
         self.log_probs[self.step] = log_prob
         self.values[self.step] = value.squeeze(-1)
         self.rewards[self.step] = reward
         self.dones[self.step] = done.float()
         
-        if teacher_subgoal is not None:
-            self.teacher_subgoals[self.step] = teacher_subgoal
-            self.teacher_intensities[self.step] = teacher_intensity
+        if teacher_action is not None:
+            self.teacher_actions[self.step] = teacher_action
         
         self.step += 1
 
@@ -218,29 +232,27 @@ class RolloutBuffer:
         self.goals.zero_()
         self.aff_maps.zero_()
         self.difficulties.zero_()
-        self.subgoals.zero_()
-        self.intensities.zero_()
+        self.actions.zero_()
         self.log_probs.zero_()
         self.values.zero_()
         self.rewards.zero_()
         self.dones.zero_()
-        self.teacher_subgoals.zero_()
-        self.teacher_intensities.zero_()
+        self.teacher_actions.zero_()
 
 
-# V3 核心环境包装器 (The Hierarchical Environment Wrapper)
+# V5 核心环境包装器 (The Hierarchical Environment Wrapper)
 class HierarchicalHexapodEnv:
     """
-    V3.6 分层环境包装器
+    V5 分层环境包装器
     
     职责:
     1. 托管 Isaac Gym 底层环境 (hex_terrain)
     2. 托管 Low-Level Controller (冻结的底层策略)
-    3. 托管 Locomotion Adapter (V3.6 Slew Rate Limiting)
-    4. 托管 Reward Function (V2 强度适配奖励)
+    3. 托管 Command Post-Processor (限幅/滤波/风险钳制)
+    4. 托管 Reward Function (V5 gate_smooth + risk_barrier)
     5. 提供 Teacher/Student 两种数据流
     
-    状态空间 (V3.6):
+    状态空间 (V5):
         robot_state: (N, 9) = [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
         goal: (N, 2) = [goal_x, goal_y]
         affordance: (N, 3, 16, 16) = [occupancy, passable_gap, low_obstacle]
@@ -341,22 +353,35 @@ class HierarchicalHexapodEnv:
         # 加载 Low-Level Controller
         self._load_low_level_policy(args.low_level_ckpt)
         
-        # 初始化 Locomotion Adapter (V3.6 with Slew Rate Limiting)
-        self.adapter = LocomotionAdapter(
-            max_linear_vel=1.0,
-            max_angular_vel=0.8,
-            min_speed_factor=0.4,
-            max_intensity_change=0.1  # V3.6 关键参数
+        # 初始化 Command Post-Processor (V5)
+        max_lin_cmd = float(getattr(nav_cfg, "max_lin_vel_command", 0.8))
+        max_ang_cmd = float(getattr(nav_cfg, "max_ang_vel_command", 1.5))
+        slew_lin = float(getattr(args, "cmd_slew_lin", 0.2))
+        slew_ang = float(getattr(args, "cmd_slew_ang", 0.4))
+        safe_dist_arg = getattr(args, "cmd_safe_dist", None)
+        free_dist_arg = getattr(args, "cmd_free_dist", None)
+        safe_dist = self.affordance_clearance if safe_dist_arg is None else float(safe_dist_arg)
+        free_dist = self.affordance_clearance_free if free_dist_arg is None else float(free_dist_arg)
+        self.post_processor = CommandPostProcessor(
+            max_cmd=(max_lin_cmd, max_lin_cmd, max_ang_cmd),
+            max_delta=(slew_lin, slew_lin, slew_ang),
+            safe_distance=safe_dist,
+            free_distance=free_dist,
+            enable_risk_scale=not bool(getattr(args, "disable_risk_scale", False)),
         )
-        self.adapter.reset(self.num_envs, device)
+        self.post_processor.reset(self.num_envs, device)
         
         # 初始化 Reward Function
         if NavigationRewardConfig is not None:
             reward_kwargs = dict(
                 goal_approach_scale=2.0,
                 goal_reach_bonus=10.0,
-                intensity_match_bonus=0.2,
-                intensity_smooth_penalty=-0.05,
+                gate_smooth_penalty=-0.05,
+                gate_max_change=0.2,
+                risk_barrier_scale=-0.5,
+                risk_barrier_safe=self.affordance_clearance,
+                risk_barrier_free=self.affordance_clearance_free,
+                risk_barrier_tau=0.1,
             )
             if args.task == "hex_ground":
                 reward_kwargs.update(
@@ -368,15 +393,12 @@ class HierarchicalHexapodEnv:
                     heading_min_weight=0.2,
                     stability_scale=0.01,
                     time_penalty=-0.03,
-                    intensity_match_bonus=0.1,
-                    intensity_smooth_penalty=0.0,
-                    intensity_gate_use=True,
-                    intensity_gate_min_speed=0.0,
-                    intensity_gate_min_approach=0.01,
-                    intensity_goal_slow_dist=0.6,
-                    intensity_goal_min_factor=0.1,
-                    intensity_clearance_safe=self.affordance_clearance,
-                    intensity_clearance_free=self.affordance_clearance_free,
+                    gate_smooth_penalty=-0.02,
+                    gate_max_change=0.1,
+                    risk_barrier_scale=-0.8,
+                    risk_barrier_safe=self.affordance_clearance,
+                    risk_barrier_free=self.affordance_clearance_free,
+                    risk_barrier_tau=0.08,
                     heading_gate_use=True,
                     heading_gate_min_speed=0.1,
                     heading_gate_min_approach=0.01,
@@ -397,7 +419,7 @@ class HierarchicalHexapodEnv:
         
         # 状态缓冲区
         self.prev_robot_pos = torch.zeros(self.num_envs, 3, device=device)
-        self.prev_intensity = torch.zeros(self.num_envs, device=device)
+        self.prev_gate_y = torch.zeros(self.num_envs, device=device)
         self.reach_given = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.goal_change_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.prev_goal_world = None
@@ -406,6 +428,7 @@ class HierarchicalHexapodEnv:
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
         self.reward_affordance_override = None
+        self.last_obs = None
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -493,11 +516,11 @@ class HierarchicalHexapodEnv:
                     self.env.obs_buf[:, -3:] = 0.0
         
         self.episode_length_buf.zero_()
-        self.prev_intensity.zero_()
+        self.prev_gate_y.zero_()
         self.reach_given.zero_()
         self.goal_change_count.zero_()
         self.reward_affordance_override = None
-        self.adapter.reset(self.num_envs, self.device)
+        self.post_processor.reset(self.num_envs, self.device)
 
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
@@ -505,6 +528,7 @@ class HierarchicalHexapodEnv:
         if hasattr(self.env, "goal_world"):
             self.prev_goal_world = self.env.goal_world.clone()
         
+        self.last_obs = obs_dict
         return obs_dict
 
     def _refresh_depth_images(self, force: bool = False) -> None:
@@ -786,7 +810,7 @@ class HierarchicalHexapodEnv:
         
         Returns:
             Dict with keys:
-            - state: (N, 9+1) robot state + prev_filtered_intensity
+            - state: (N, 9+1) robot state + prev_gate_y
             - goal: (N, 2) relative goal
             - gt_affordance: (N, 3, 16, 16) ground truth affordance
             - gt_difficulty: (N,) difficulty derived from passable_gap
@@ -824,10 +848,10 @@ class HierarchicalHexapodEnv:
                 state[:, 2] = yaw
                 obs_dict['state'] = state
         
-        # 1.5 添加上一时刻强度（解决强度滤波的非马尔可夫性）
-        if hasattr(self, "prev_intensity"):
-            prev_intensity = self.prev_intensity.unsqueeze(1)
-            obs_dict['state'] = torch.cat([obs_dict['state'], prev_intensity], dim=1)
+        # 1.5 添加上一时刻 gate_y（解决门控滤波的非马尔可夫性）
+        if hasattr(self, "prev_gate_y"):
+            prev_gate_y = self.prev_gate_y.unsqueeze(1)
+            obs_dict['state'] = torch.cat([obs_dict['state'], prev_gate_y], dim=1)
 
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
@@ -875,20 +899,28 @@ class HierarchicalHexapodEnv:
         
         return obs_dict
 
-    def step(self, subgoal: torch.Tensor, intensity: torch.Tensor
-             ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict]:
+    def step(
+        self,
+        cmd_vel: torch.Tensor,
+        gate_y: Optional[torch.Tensor] = None,
+    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict]:
         """
         高层步进 (10Hz)
-        
+
         Args:
-            subgoal: (N, 3) [dx, dy, dyaw] 子目标
-            intensity: (N,) 运动强度 [0, 1]
-        
+            cmd_vel: (N, 3) [vx, vy, omega] 高层命令
+            gate_y: (N,) 门控权重（仅 Gate 训练使用）
+
         Returns:
             obs_dict, rewards, dones, info
         """
-        # 1. Adapter: 动作映射 (带 Slew Rate Limiting)
-        velocity_cmd, adapter_info = self.adapter.convert(subgoal, intensity)
+        # 1. Command Post-Processor
+        clearance_pp = None
+        if self.clearance_override is not None:
+            clearance_pp = self.clearance_override
+        elif self.last_obs is not None and 'gt_affordance' in self.last_obs:
+            clearance_pp = self._compute_clearance_from_affordance(self.last_obs['gt_affordance'])
+        velocity_cmd, post_info = self.post_processor.process(cmd_vel, clearance_pp)
 
         # 2. Low-Level 控制循环 (50Hz)
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
@@ -941,6 +973,7 @@ class HierarchicalHexapodEnv:
         # 3. 计算高层奖励
         self._refresh_depth_images()
         reward_obs = self._get_high_level_obs()
+        self.last_obs = reward_obs
         robot_pos = self.env.root_states[:, :3]
         
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -993,6 +1026,9 @@ class HierarchicalHexapodEnv:
             )
 
         reward_terms = None
+        if gate_y is None:
+            gate_y = torch.zeros(self.num_envs, device=self.device)
+        gate_y = gate_y.to(self.device)
         if self.reward_func is not None:
             robot_vel = self.env.base_lin_vel
             robot_quat = self.env.root_states[:, 3:7]
@@ -1006,7 +1042,6 @@ class HierarchicalHexapodEnv:
                 goal_x = robot_pos[:, 0] + cos_h * goal_local[:, 0] - sin_h * goal_local[:, 1]
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
                 goal_pos = torch.stack([goal_x, goal_y], dim=1)
-            filtered_intensity = adapter_info['filtered_intensity'].squeeze(-1)
             reward_difficulty = reward_obs['gt_difficulty']
             if override_used and reward_aff_map is not None:
                 reward_difficulty = difficulty_from_gap(reward_aff_map)
@@ -1017,8 +1052,8 @@ class HierarchicalHexapodEnv:
                 goal_pos=goal_pos,
                 robot_vel=robot_vel,
                 robot_quat=robot_quat,
-                intensity=filtered_intensity,
-                prev_intensity=self.prev_intensity,
+                gate_y=gate_y,
+                prev_gate_y=self.prev_gate_y,
                 terrain_difficulty=reward_difficulty,
                 collision_mask=collision_mask,
                 clearance=clearance,
@@ -1056,7 +1091,7 @@ class HierarchicalHexapodEnv:
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
-        self.prev_intensity = adapter_info['filtered_intensity'].squeeze(-1).clone()
+        self.prev_gate_y = gate_y.clone()
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
@@ -1080,24 +1115,23 @@ class HierarchicalHexapodEnv:
                 'l': self.episode_len_buf.clone(),
             }
             self.episode_length_buf[done_any] = 0
-            self.prev_intensity[done_any] = 0
+            self.prev_gate_y[done_any] = 0
             self.reach_given[done_any] = False
             self.goal_change_count[done_any] = 0
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[done_any] = self.env.goal_world[done_any]
-            # ★ 修复幽灵动量问题: 重置 Adapter 的变化率限制记忆
-            # 防止 Reset 后机器人因残留的 last_intensity 记忆而"猛冲"
-            self.adapter.last_intensity[done_any] = 0.0
+            # 重置 Post-Processor 的变化率限制记忆
+            self.post_processor.last_cmd[done_any] = 0.0
 
         next_obs = self._get_high_level_obs()
 
         info = {
-            'adapter_info': adapter_info,
+            'post_info': post_info,
             'episode_length': length_snapshot,
             'reward_terms': reward_terms,
-            'filtered_intensity': adapter_info['filtered_intensity'].squeeze(-1),
+            'gate_y': gate_y,
             'goal_change_count': self.goal_change_count.clone(),
             'episode': episode_info,
             'collision_mask': collision_mask,
@@ -1126,13 +1160,22 @@ class HierarchicalHexapodEnv:
 
 # 训练循环 (PPO + Distillation)
 def train(args):
-    """主训练函数 (V3.6 完整 PPO 实现)"""
+    """主训练函数 (V5 Command-Space MoE)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
-    print(f"V3.6 High-Level Planner Training")
-    print(f"Mode: {args.mode.upper()}")
+    print(f"V5 Command-Space MoE Training")
+    print(f"Mode: {args.mode.upper()} | Skill: {getattr(args, 'skill', 'follow')}")
     print(f"Device: {device}")
     print(f"{'='*60}\n")
+    if args.task != "hex_ground":
+        print(f"[Warn] V5 主线默认任务为 hex_ground，当前 task={args.task}（hex_terrain 视为 legacy）。")
+    if getattr(args, "skill", "follow") == "moe":
+        if args.num_steps < 48:
+            print(f"[Warn] Gate 训练建议 num_steps>=48，当前 num_steps={args.num_steps}。")
+        print(f"[Info] Gate difficulty 输入: {'ON' if gate_use_difficulty else 'OFF'}")
+        print(f"[Info] MoE affordance 来源: {'student' if moe_use_student_aff else args.mode}")
+    if getattr(args, "disable_risk_scale", False):
+        print("[Info] CommandPostProcessor 风险缩放已禁用（消融用）。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[Warn] aff_stack={args.aff_stack}: 输入通道数改变，必须使用相同 aff_stack 训练/加载 ckpt；旧 ckpt 不兼容。")
     if args.mode == "student" and not getattr(args, "vision_ckpt", None):
@@ -1155,31 +1198,48 @@ def train(args):
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
     aff_channels = aff_shape[0] * aff_stack
 
-    # 创建 Planner (V3.6)
-    planner = HighLevelPlanner(
-        affordance_channels=aff_channels,
-        state_dim=state_dim,
-        goal_dim=goal_dim,
-    ).to(device)
+    # 创建 Policy (V5)
+    skill = getattr(args, "skill", "follow")
+    is_gate = skill == "moe"
+    cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
+    action_dim = 1 if is_gate else 3
+    gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
+    moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
 
-    optimizer = optim.Adam(planner.parameters(), lr=args.lr)
+    if is_gate:
+        policy = GatePolicy(
+            affordance_channels=aff_channels,
+            state_dim=state_dim,
+            goal_dim=goal_dim,
+        ).to(device)
+    else:
+        policy = CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=state_dim,
+            goal_dim=goal_dim,
+            cmd_scale=cmd_scale,
+        ).to(device)
+
+    optimizer = optim.Adam(policy.parameters(), lr=args.lr)
 
     # 加载 Teacher/Vision 模型 (Student 模式)
     teacher_model = None
     vision_model = None
+    follow_model = None
+    avoid_model = None
 
     if args.mode == 'teacher':
         print("[Main] Mode: TEACHER. Training from scratch with GT.")
-
     elif args.mode == 'student':
         print("\n[Student] 加载 Teacher 和 Vision 模型...")
 
         # 加载 Teacher
-        if args.teacher_ckpt:
-            teacher_model = HighLevelPlanner(
+        if args.teacher_ckpt and not is_gate:
+            teacher_model = CmdVelExpert(
                 affordance_channels=aff_channels,
                 state_dim=state_dim,
                 goal_dim=goal_dim,
+                cmd_scale=cmd_scale,
             ).to(device)
 
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
@@ -1190,7 +1250,7 @@ def train(args):
             teacher_model.eval()
 
             # 用 Teacher 权重初始化 Student
-            planner.load_state_dict(teacher_model.state_dict())
+            policy.load_state_dict(teacher_model.state_dict())
             print(f"[Student] ✓ Teacher 加载成功: {args.teacher_ckpt}")
 
         # 加载 Vision (AffordanceEstimator)
@@ -1208,17 +1268,64 @@ def train(args):
                 vision_model.load_state_dict(ckpt)
             vision_model.eval()
             print(f"[Student] ✓ Vision 加载成功: {args.vision_ckpt}")
+    if args.mode == 'teacher' and is_gate and moe_use_student_aff:
+        if not getattr(args, "vision_ckpt", None):
+            raise ValueError("moe_use_student_aff 需要提供 --vision_ckpt。")
+        if AffordanceEstimator is None:
+            raise ValueError("AffordanceEstimator 不可用，无法使用 student affordance。")
+        vision_model = AffordanceEstimator(
+            depth_channels=1,
+            output_size=16,
+            max_depth_range=5.0
+        ).to(device)
+        ckpt = torch.load(args.vision_ckpt, map_location=device)
+        if 'model_state_dict' in ckpt:
+            vision_model.load_state_dict(ckpt['model_state_dict'])
+        else:
+            vision_model.load_state_dict(ckpt)
+        vision_model.eval()
+        print(f"[Gate] ✓ Vision 加载成功: {args.vision_ckpt}")
+
+    if is_gate:
+        if not getattr(args, "follow_ckpt", None) or not getattr(args, "avoid_ckpt", None):
+            raise ValueError("Gate 模式需要提供 --follow_ckpt 和 --avoid_ckpt。")
+        follow_model = CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=state_dim,
+            goal_dim=goal_dim,
+            cmd_scale=cmd_scale,
+        ).to(device)
+        avoid_model = CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=state_dim,
+            goal_dim=goal_dim,
+            cmd_scale=cmd_scale,
+        ).to(device)
+        for model, ckpt_path in [(follow_model, args.follow_ckpt), (avoid_model, args.avoid_ckpt)]:
+            ckpt = torch.load(ckpt_path, map_location=device)
+            if 'model_state_dict' in ckpt:
+                model.load_state_dict(ckpt['model_state_dict'])
+            else:
+                model.load_state_dict(ckpt)
+            model.eval()
+            for param in model.parameters():
+                param.requires_grad = False
+        print(f"[Gate] ✓ Follow/Avoid 加载完成: {args.follow_ckpt}, {args.avoid_ckpt}")
+        if any(param.requires_grad for param in follow_model.parameters()):
+            raise RuntimeError("Gate 模式下 Follow expert 仍存在可训练参数。")
+        if any(param.requires_grad for param in avoid_model.parameters()):
+            raise RuntimeError("Gate 模式下 Avoid expert 仍存在可训练参数。")
 
     # 创建日志目录
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_dir = os.path.join(args.output_dir, f"{args.mode}_{timestamp}")
+    log_dir = os.path.join(args.output_dir, f"{skill}_{args.mode}_{timestamp}")
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     print(f"[Main] 日志目录: {log_dir}")
     
     # 创建 Rollout Buffer
     aff_map_shape = (aff_channels, aff_shape[1], aff_shape[2])
-    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_map_shape, device)
+    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_map_shape, action_dim, device)
     
     # 训练统计
     episode_rewards = deque(maxlen=100)
@@ -1235,6 +1342,7 @@ def train(args):
     print(f"  - Learning rate: {args.lr}")
     
     aff_stack_buf = None
+    last_goal_obs = None
     teacher_stack_buf = None
     stack_reset_mask = None
     last_dones = None
@@ -1254,8 +1362,8 @@ def train(args):
             'passable_gate',
             'crossable_align',
             'crossable_gate',
-            'intensity_match',
-            'intensity_smooth',
+            'risk_barrier',
+            'gate_smooth',
             'collision',
             'stability',
             'velocity',
@@ -1263,9 +1371,8 @@ def train(args):
             'total',
         ]
         reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
-        subgoal_norm_sum = torch.zeros((), device=device)
-        intensity_sum = torch.zeros((), device=device)
-        filtered_intensity_sum = torch.zeros((), device=device)
+        gate_y_sum = torch.zeros((), device=device)
+        gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
         collision_rate_sum = torch.zeros((), device=device)
@@ -1276,9 +1383,7 @@ def train(args):
         clearance_sum = torch.zeros((), device=device)
         passable_occ_ratio_sum = torch.zeros((), device=device)
         crossable_width_sum = torch.zeros((), device=device)
-        intensity_goal_factor_sum = torch.zeros((), device=device)
-        intensity_clear_factor_sum = torch.zeros((), device=device)
-        optimal_intensity_sum = torch.zeros((), device=device)
+        risk_scale_sum = torch.zeros((), device=device)
         aff_stack_delta_sum = torch.zeros((), device=device)
         aff_stack_std_sum = torch.zeros((), device=device)
         aff_stack_filled_sum = torch.zeros((), device=device)
@@ -1286,14 +1391,14 @@ def train(args):
         for step in range(args.num_steps):
             # 准备输入
             state = obs_dict['state']
-            goal = obs_dict['goal']
+            goal_raw = obs_dict['goal']
             
-            if args.mode == 'teacher':
-                aff_map = obs_dict['gt_affordance']
-                difficulty = obs_dict['gt_difficulty']
-                env.clearance_override = None
-                env.reward_affordance_override = None
-            else:
+            use_student_aff = args.mode != 'teacher'
+            if is_gate and moe_use_student_aff:
+                use_student_aff = True
+            if is_gate and args.mode == 'teacher' and moe_use_student_aff:
+                print("[Warn] moe_use_student_aff=True 但当前 mode=teacher，仍会使用 student affordance。")
+            if use_student_aff:
                 # Student: 使用 Vision 模型预测
                 if vision_model is None:
                     raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
@@ -1307,6 +1412,11 @@ def train(args):
                     difficulty = difficulty_from_gap(aff_map)
                 env.clearance_override = env._compute_clearance_from_affordance(aff_map)
                 env.reward_affordance_override = aff_map
+            else:
+                aff_map = obs_dict['gt_affordance']
+                difficulty = obs_dict['gt_difficulty']
+                env.clearance_override = None
+                env.reward_affordance_override = None
 
             # 初始化/更新 aff 堆叠
             if aff_stack_buf is None:
@@ -1348,38 +1458,95 @@ def train(args):
                 aff_stack_std_sum += 0.0
                 aff_stack_filled_sum += 1.0
 
-            # Planner 决策
-            with torch.no_grad():
-                subgoal, intensity, info = planner.get_action(
+            # T1: goal occlusion (weak, input-only)
+            if getattr(args, "t1_goal_occlusion", False):
+                prob = float(getattr(args, "t1_goal_occlusion_prob", 0.02))
+                max_steps = int(getattr(args, "t1_goal_occlusion_len", 10))
+                if prob > 0.0 and max_steps > 0:
+                    if (
+                        not hasattr(env, "t1_occ_steps")
+                        or env.t1_occ_steps is None
+                        or env.t1_occ_steps.shape[0] != env.num_envs
+                    ):
+                        env.t1_occ_steps = torch.zeros(env.num_envs, device=device, dtype=torch.long)
+                    active = env.t1_occ_steps > 0
+                    start = (torch.rand(env.num_envs, device=device) < prob) & (~active)
+                    if start.any():
+                        env.t1_occ_steps[start] = torch.randint(1, max_steps + 1, (start.sum(),), device=device)
+                    occ_mask = env.t1_occ_steps > 0
+                    goal, last_goal_obs = apply_goal_occlusion(goal_raw, last_goal_obs, occ_mask)
+                    env.t1_occ_steps[occ_mask] -= 1
+                else:
+                    goal = goal_raw
+                    last_goal_obs = goal_raw.detach()
+            else:
+                goal = goal_raw
+                last_goal_obs = goal_raw.detach()
+
+            # Policy 决策
+            teacher_action = None
+            gate_y = None
+            cmd_used = None
+            if is_gate:
+                gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
+                with torch.no_grad():
+                    cmd_f, _ = follow_model.get_action(
+                        aff_stack_buf, state, goal, difficulty,
+                        deterministic=bool(getattr(args, "moe_expert_deterministic", True))
+                    )
+                    cmd_a, _ = avoid_model.get_action(
+                        aff_stack_buf, state, goal, difficulty,
+                        deterministic=bool(getattr(args, "moe_expert_deterministic", True))
+                    )
+                    cmd_f = cmd_f.detach()
+                    cmd_a = cmd_a.detach()
+                gate_y, _ = policy.get_action(
+                    aff_stack_buf, state, goal, gate_difficulty, deterministic=False
+                )
+                gate_y_prev = env.prev_gate_y.clone()
+                if getattr(args, "gate_safe_clamp", False):
+                    safe_max = float(getattr(args, "gate_safe_max", 0.3))
+                    clearance_gate = env._compute_clearance_from_affordance(aff_map)
+                    gate_y = torch.where(
+                        clearance_gate < env.post_processor.safe_distance,
+                        torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
+                        gate_y,
+                    )
+                log_prob, value, _, _ = policy.evaluate_actions(
+                    aff_stack_buf, state, goal, gate_difficulty, gate_y
+                )
+                cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
+                next_obs, rewards, dones, env_info = env.step(cmd, gate_y)
+                action = gate_y.unsqueeze(-1)
+                cmd_used = cmd
+            else:
+                cmd, _ = policy.get_action(
                     aff_stack_buf, state, goal, difficulty, deterministic=False
                 )
-                
-                log_prob, value, _, _ = planner.evaluate_actions(
-                    aff_stack_buf, state, goal, difficulty, subgoal, intensity
+                log_prob, value, _, _ = policy.evaluate_actions(
+                    aff_stack_buf, state, goal, difficulty, cmd
                 )
-            
-            # Teacher 目标 (Student 模式)
-            teacher_subgoal = None
-            teacher_intensity = None
-            if args.mode == 'student' and teacher_model is not None:
-                with torch.no_grad():
-                    teacher_aff = obs_dict['gt_affordance']
-                    if teacher_stack_buf is None:
-                        teacher_stack_buf = teacher_aff.repeat(1, aff_stack, 1, 1)
-                    else:
-                        teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-teacher_aff.shape[1], dims=1)
-                        teacher_stack_buf[:, -teacher_aff.shape[1]:, :, :] = teacher_aff
-                    t_sub, t_int, _ = teacher_model.get_action(
-                        teacher_stack_buf,
-                        state, goal,
-                        obs_dict['gt_difficulty'],
-                        deterministic=True
-                    )
-                    teacher_subgoal = t_sub
-                    teacher_intensity = t_int
-            
-            # 环境步进
-            next_obs, rewards, dones, env_info = env.step(subgoal, intensity)
+
+                if args.mode == 'student' and teacher_model is not None:
+                    with torch.no_grad():
+                        teacher_aff = obs_dict['gt_affordance']
+                        if teacher_stack_buf is None:
+                            teacher_stack_buf = teacher_aff.repeat(1, aff_stack, 1, 1)
+                        else:
+                            teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-teacher_aff.shape[1], dims=1)
+                            teacher_stack_buf[:, -teacher_aff.shape[1]:, :, :] = teacher_aff
+                        t_cmd, _ = teacher_model.get_action(
+                            teacher_stack_buf,
+                            state, goal,
+                            obs_dict['gt_difficulty'],
+                            deterministic=True
+                        )
+                        teacher_action = t_cmd
+
+                next_obs, rewards, dones, env_info = env.step(cmd)
+                action = cmd
+                gate_y_prev = None
+                cmd_used = cmd
             last_dones = dones.clone()
 
             # 存储数据
@@ -1388,36 +1555,31 @@ def train(args):
                 goal.detach(),
                 aff_stack_buf.detach(),
                 difficulty.detach(),
-                subgoal.detach(),
-                intensity.detach(),
+                action.detach(),
                 log_prob.detach(),
                 value.detach(),
                 rewards.detach(),
                 dones.detach(),
-                teacher_subgoal.detach() if teacher_subgoal is not None else None,
-                teacher_intensity.detach() if teacher_intensity is not None else None,
+                teacher_action.detach() if teacher_action is not None else None,
             )
 
             # 统计分量与行为
             goal_dist_sum += torch.norm(goal, dim=1).sum()
-            subgoal_norm_sum += torch.norm(subgoal[:, :2], dim=1).sum()
-            intensity_sum += intensity.sum()
-            filtered = env_info.get('filtered_intensity', None)
-            if filtered is not None:
-                filtered_intensity_sum += filtered.sum()
+            if is_gate:
+                gate_y_sum += gate_y.sum()
+                if gate_y_prev is not None:
+                    gate_y_change_sum += torch.abs(gate_y - gate_y_prev).sum()
             if hasattr(env.env, "commands"):
                 cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
+            else:
+                cmd_speed_sum += torch.norm(cmd_used[:, :2], dim=1).sum()
             reward_terms = env_info.get('reward_terms', None)
             if reward_terms is not None:
                 for key in reward_term_keys:
                     if key in reward_terms:
                         reward_term_sums[key] += reward_terms[key].sum()
-                if 'intensity_goal_factor' in reward_terms:
-                    intensity_goal_factor_sum += reward_terms['intensity_goal_factor'].sum()
-                if 'intensity_clear_factor' in reward_terms:
-                    intensity_clear_factor_sum += reward_terms['intensity_clear_factor'].sum()
-                if 'optimal_intensity' in reward_terms:
-                    optimal_intensity_sum += reward_terms['optimal_intensity'].sum()
+                if 'risk_scale' in reward_terms:
+                    risk_scale_sum += reward_terms['risk_scale'].sum()
                 if 'passable_occ_ratio' in reward_terms:
                     passable_occ_ratio_sum += reward_terms['passable_occ_ratio'].sum()
                 if 'crossable_width' in reward_terms:
@@ -1465,6 +1627,10 @@ def train(args):
             if dones.any():
                 stack_reset_mask = dones.clone()
             obs_dict = next_obs
+            if dones.any():
+                if last_goal_obs is not None:
+                    last_goal_obs = last_goal_obs.clone()
+                    last_goal_obs[dones] = obs_dict['goal'][dones]
 
         rollout_time = time.time() - rollout_start
         
@@ -1502,7 +1668,11 @@ def train(args):
                         aff_stack_bootstrap,
                     )
 
-            out = planner(aff_stack_bootstrap, state, goal, difficulty)
+            if is_gate:
+                gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
+                out = policy(aff_stack_bootstrap, state, goal, gate_difficulty)
+            else:
+                out = policy(aff_stack_bootstrap, state, goal, difficulty)
             next_value = out.value
         
         # 计算 Returns 和 Advantages
@@ -1534,8 +1704,7 @@ def train(args):
                 env_idx = mb_indices % env.num_envs
                 
                 # 获取 mini-batch 数据
-                mb_subgoals = buffer.subgoals[step_idx, env_idx]
-                mb_intensities = buffer.intensities[step_idx, env_idx]
+                mb_actions = buffer.actions[step_idx, env_idx]
                 mb_old_log_probs = buffer.log_probs[step_idx, env_idx]
                 mb_advantages = advantages[step_idx, env_idx]
                 mb_returns = returns[step_idx, env_idx]
@@ -1547,10 +1716,17 @@ def train(args):
                 mb_difficulties = buffer.difficulties[step_idx, env_idx]
                 
                 # 评估当前策略
-                new_log_probs, new_values, entropy, _ = planner.evaluate_actions(
-                    mb_aff_maps, mb_states, mb_goals, mb_difficulties,
-                    mb_subgoals, mb_intensities
-                )
+                if is_gate:
+                    gate_difficulty = mb_difficulties if gate_use_difficulty else torch.zeros_like(mb_difficulties)
+                    new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                        mb_aff_maps, mb_states, mb_goals, gate_difficulty,
+                        mb_actions
+                    )
+                else:
+                    new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                        mb_aff_maps, mb_states, mb_goals, mb_difficulties,
+                        mb_actions
+                    )
                 
                 # PPO Clipped Loss
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
@@ -1571,14 +1747,9 @@ def train(args):
                 
                 # 蒸馏 Loss (Student 模式)
                 distill_loss = torch.tensor(0.0, device=device)
-                if args.mode == 'student' and teacher_model is not None:
-                    mb_teacher_subgoals = buffer.teacher_subgoals[step_idx, env_idx]
-                    mb_teacher_intensities = buffer.teacher_intensities[step_idx, env_idx]
-                    
-                    distill_loss = (
-                        nn.functional.mse_loss(mb_subgoals, mb_teacher_subgoals) +
-                        nn.functional.mse_loss(mb_intensities, mb_teacher_intensities)
-                    )
+                if args.mode == 'student' and teacher_model is not None and not is_gate:
+                    mb_teacher_actions = buffer.teacher_actions[step_idx, env_idx]
+                    distill_loss = nn.functional.mse_loss(mb_actions, mb_teacher_actions)
                 
                 # 总 Loss
                 loss = (
@@ -1591,7 +1762,7 @@ def train(args):
                 # 优化
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(planner.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
                 optimizer.step()
                 
                 total_loss += loss.item()
@@ -1621,10 +1792,10 @@ def train(args):
         
         total_samples = env.num_envs * args.num_steps
         reward_term_means = {k: (v / total_samples).item() for k, v in reward_term_sums.items()}
-        subgoal_norm_mean = (subgoal_norm_sum / total_samples).item()
-        intensity_mean = (intensity_sum / total_samples).item()
-        filtered_intensity_mean = (filtered_intensity_sum / total_samples).item()
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
+        gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
+        gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
+        risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
@@ -1641,9 +1812,7 @@ def train(args):
         clearance_mean = (clearance_sum / total_samples).item()
         passable_occ_ratio_mean = (passable_occ_ratio_sum / total_samples).item()
         crossable_width_mean = (crossable_width_sum / total_samples).item()
-        intensity_goal_factor_mean = (intensity_goal_factor_sum / total_samples).item()
-        intensity_clear_factor_mean = (intensity_clear_factor_sum / total_samples).item()
-        optimal_intensity_mean = (optimal_intensity_sum / total_samples).item()
+        risk_scale_mean = (risk_scale_sum / total_samples).item()
         aff_stack_delta_mean = (aff_stack_delta_sum / args.num_steps).item()
         aff_stack_std_mean = (aff_stack_std_sum / args.num_steps).item()
         aff_stack_filled_mean = (aff_stack_filled_sum / args.num_steps).item()
@@ -1690,15 +1859,10 @@ def train(args):
         writer.add_scalar('Stats/ClearanceMin', clearance_mean, iteration)
         writer.add_scalar('Stats/PassableOccRatio', passable_occ_ratio_mean, iteration)
         writer.add_scalar('Stats/CrossableWidth', crossable_width_mean, iteration)
-        writer.add_scalar('Stats/IntensityGoalFactor', intensity_goal_factor_mean, iteration)
-        writer.add_scalar('Stats/IntensityClearFactor', intensity_clear_factor_mean, iteration)
-        writer.add_scalar('Stats/OptimalIntensity', optimal_intensity_mean, iteration)
-        if env.reward_cfg is not None:
-            writer.add_scalar('Stats/IntensityClearanceSafe', float(env.reward_cfg.intensity_clearance_safe), iteration)
-            writer.add_scalar('Stats/IntensityClearanceFree', float(env.reward_cfg.intensity_clearance_free), iteration)
-        writer.add_scalar('Stats/SubgoalNorm', subgoal_norm_mean, iteration)
-        writer.add_scalar('Stats/Intensity', intensity_mean, iteration)
-        writer.add_scalar('Stats/FilteredIntensity', filtered_intensity_mean, iteration)
+        writer.add_scalar('Stats/RiskScale', risk_scale_mean, iteration)
+        if is_gate:
+            writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
+            writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
         writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
         for key, value in reward_term_means.items():
@@ -1721,6 +1885,9 @@ def train(args):
             terrain_level_str = "n/a"
             if terrain_level_mean is not None:
                 terrain_level_str = f"{terrain_level_mean:.2f}"
+            gate_line = ""
+            if is_gate:
+                gate_line = f"""{'Gate y / Δy:':>{pad}} {gate_y_mean:.3f} / {gate_y_change_mean:.3f}\n"""
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -1736,15 +1903,15 @@ def train(args):
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
-                          f"""{'Subgoal norm / Intensity:':>{pad}} {subgoal_norm_mean:.3f} / {intensity_mean:.3f} (filt {filtered_intensity_mean:.3f})\n"""
-                          f"""{'Clearance / IntensityFac:':>{pad}} {clearance_mean:.3f} / {intensity_goal_factor_mean:.3f} {intensity_clear_factor_mean:.3f} (opt {optimal_intensity_mean:.3f})\n"""
+                          f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
+                          f"""{gate_line}"""
                           f"""{'Passable gate/align:':>{pad}} {reward_term_means.get('passable_gate', 0.0):.3f} / {reward_term_means.get('passable_align', 0.0):.3f} (occ {passable_occ_ratio_mean:.3f})\n"""
                           f"""{'Crossable gate/align:':>{pad}} {reward_term_means.get('crossable_gate', 0.0):.3f} / {reward_term_means.get('crossable_align', 0.0):.3f} (width {crossable_width_mean:.3f})\n"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
-                          f"""{'Reward(intensity/col/stab):':>{pad}} {reward_term_means.get('intensity_match', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f}\n"""
+                          f"""{'Reward(gate/risk/col):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f}\n"""
                           f"""{'Reward(velocity/time/total):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
             print(log_string)
@@ -1754,7 +1921,7 @@ def train(args):
             ckpt_path = os.path.join(log_dir, f'model_{iteration}.pt')
             torch.save({
                 'iteration': iteration,
-                'model_state_dict': planner.state_dict(),
+                'model_state_dict': policy.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'mean_reward': mean_reward,
             }, ckpt_path)
@@ -1766,7 +1933,7 @@ def train(args):
             best_path = os.path.join(log_dir, 'best_model.pt')
             torch.save({
                 'iteration': iteration,
-                'model_state_dict': planner.state_dict(),
+                'model_state_dict': policy.state_dict(),
                 'mean_reward': mean_reward,
             }, best_path)
             print(f"  ★ New best: {mean_reward:.2f}")
@@ -1779,23 +1946,26 @@ def train(args):
     print(f"{'='*60}")
     
     writer.close()
-    return planner
+    return policy
 
     
 
 # 入口函数
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="V3.6 High-Level Planner Training")
+    parser = argparse.ArgumentParser(description="V5 Command-Space MoE Training")
     
     # 模式
     parser.add_argument('--mode', type=str, required=True, 
                         choices=['teacher', 'student'],
                         help='训练模式: teacher (GT) 或 student (Vision)')
+    parser.add_argument('--skill', type=str, default='follow',
+                        choices=['follow', 'avoid', 'moe'],
+                        help='训练技能: follow / avoid / moe (gate)')
     
     # 环境
-    parser.add_argument('--task', type=str, default='hex_terrain',
+    parser.add_argument('--task', type=str, default='hex_ground',
                         help='Isaac Gym 任务名称')
-    parser.add_argument('--aff_stack', type=int, default=4,
+    parser.add_argument('--aff_stack', type=int, default=1,
                         help='affordance 堆叠帧数 (短时记忆)')
     parser.add_argument('--num_envs', type=int, default=4096,
                         help='并行环境数量')
@@ -1807,6 +1977,10 @@ if __name__ == "__main__":
                         help='底层控制器路径')
     parser.add_argument('--teacher_ckpt', type=str, default=None,
                         help='(Student) Teacher 模型路径')
+    parser.add_argument('--follow_ckpt', type=str, default=None,
+                        help='(Gate) Follow expert 模型路径')
+    parser.add_argument('--avoid_ckpt', type=str, default=None,
+                        help='(Gate) Avoid expert 模型路径')
     parser.add_argument('--vision_ckpt', type=str, default=None,
                         help='(Student) Vision 模型路径')
     
@@ -1835,6 +2009,32 @@ if __name__ == "__main__":
                         help='蒸馏 loss 系数 (Student 模式)')
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help='梯度裁剪')
+    parser.add_argument('--cmd_slew_lin', type=float, default=0.2,
+                        help='命令线速度变化率限制')
+    parser.add_argument('--cmd_slew_ang', type=float, default=0.4,
+                        help='命令角速度变化率限制')
+    parser.add_argument('--cmd_safe_dist', type=float, default=None,
+                        help='安全距离阈值（None 使用默认 clearance）')
+    parser.add_argument('--cmd_free_dist', type=float, default=None,
+                        help='安全全速距离（None 使用默认 clearance_free）')
+    parser.add_argument('--gate_safe_clamp', action='store_true',
+                        help='Gate 训练早期启用安全 clamp')
+    parser.add_argument('--gate_safe_max', type=float, default=0.3,
+                        help='安全 clamp 的最大 y 值')
+    parser.add_argument('--moe_expert_deterministic', action='store_true',
+                        help='Gate 训练时专家使用确定性输出')
+    parser.add_argument('--gate_use_difficulty', action='store_true',
+                        help='Gate 使用 difficulty 作为输入（特权信息）')
+    parser.add_argument('--moe_use_student_aff', action='store_true',
+                        help='moe 模式强制使用 student affordance（与部署一致）')
+    parser.add_argument('--disable_risk_scale', action='store_true',
+                        help='禁用 CommandPostProcessor 的风险缩放（消融用）')
+    parser.add_argument('--t1_goal_occlusion', action='store_true',
+                        help='训练中启用 T1 弱遮挡（仅影响 policy 输入）')
+    parser.add_argument('--t1_goal_occlusion_prob', type=float, default=0.02,
+                        help='T1 弱遮挡触发概率')
+    parser.add_argument('--t1_goal_occlusion_len', type=int, default=10,
+                        help='T1 弱遮挡持续步数')
     
     # 输出
     parser.add_argument('--output_dir', type=str, default='outputs/planner',

@@ -37,9 +37,19 @@ def parse_args():
         default="logs/hex_ground/Dec31_16-52-59_/model_6000.pt",
         help="Low-level policy checkpoint path",
     )
-    parser.add_argument("--teacher_ckpt", type=str, required=True, help="Teacher checkpoint path")
+    parser.add_argument("--teacher_ckpt", type=str, required=True, help="Expert checkpoint path")
+    parser.add_argument(
+        "--skill",
+        type=str,
+        default="follow",
+        choices=["follow", "avoid", "moe"],
+        help="Expert skill: follow / avoid / moe (gate)",
+    )
+    parser.add_argument("--follow_ckpt", type=str, default=None, help="(moe) Follow expert checkpoint")
+    parser.add_argument("--avoid_ckpt", type=str, default=None, help="(moe) Avoid expert checkpoint")
+    parser.add_argument("--gate_use_difficulty", action="store_true", help="Gate 使用 difficulty 作为输入（特权信息）")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="Student vision checkpoint path")
-    parser.add_argument("--aff_stack", type=int, default=4, help="affordance 堆叠帧数 (短时记忆)")
+    parser.add_argument("--aff_stack", type=int, default=1, help="affordance 堆叠帧数 (短时记忆)")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
     parser.add_argument("--decimation", type=int, default=5, help="High/low frequency ratio")
     parser.add_argument("--headless", action="store_true", default=False, help="Disable viewer")
@@ -51,6 +61,11 @@ def parse_args():
     parser.add_argument("--camera_dir", type=str, default="outputs/play_highlevel_camera", help="Camera output dir")
     parser.add_argument("--camera_interval", type=int, default=5, help="Camera capture interval")
     parser.add_argument("--camera_env", type=int, default=0, help="Env index for camera output")
+    parser.add_argument("--cmd_slew_lin", type=float, default=0.2, help="命令线速度变化率限制")
+    parser.add_argument("--cmd_slew_ang", type=float, default=0.4, help="命令角速度变化率限制")
+    parser.add_argument("--cmd_safe_dist", type=float, default=None, help="安全距离阈值（None 使用默认 clearance）")
+    parser.add_argument("--cmd_free_dist", type=float, default=None, help="安全全速距离（None 使用默认 clearance_free）")
+    parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
         "--debug_cmd",
         dest="debug_cmd",
@@ -116,6 +131,7 @@ def main():
     args = parse_args()
     if args.task != "hex_ground":
         raise ValueError("play_highlevel.py currently supports only --task hex_ground")
+    print("[PlayHigh] V5 主线任务默认 hex_ground；hex_terrain 视为 legacy。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[PlayHigh] aff_stack={args.aff_stack}: 输入通道数改变，需与 ckpt 训练时一致，否则无法加载。")
 
@@ -207,9 +223,11 @@ def main():
             max_level = int(getattr(env.env.cfg.terrain, "num_rows", 1))
         return max(1, max_level)
     def _get_aff_map(current_obs):
+        if current_obs is None:
+            raise ValueError("obs is None when building affordance map.")
         if args.mode == "student":
-            if current_obs is None:
-                return None
+            if vision_model is None:
+                raise RuntimeError("vision_model is not initialized in student mode.")
             with torch.no_grad():
                 vis_out = vision_model(current_obs["depth"], normalize=True)
                 return torch.stack([
@@ -229,17 +247,49 @@ def main():
     aff_shape = aff_map.shape[1:]
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
     aff_channels = aff_shape[0] * aff_stack
-    # Use clearer alias; implementation is identical to TerrainAdaptivePlanner.
-    planner = th.HighLevelPlanner(
-        affordance_channels=aff_channels,
-        state_dim=obs["state"].shape[1],
-        goal_dim=obs["goal"].shape[1],
-    ).to(device)
-
-    ckpt = torch.load(args.teacher_ckpt, map_location=device)
-    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-    planner.load_state_dict(state_dict)
-    planner.eval()
+    cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
+    skill = getattr(args, "skill", "follow")
+    is_gate = skill == "moe"
+    if is_gate:
+        if not args.follow_ckpt or not args.avoid_ckpt:
+            raise ValueError("moe 需要 --follow_ckpt 和 --avoid_ckpt")
+        policy = th.GatePolicy(
+            affordance_channels=aff_channels,
+            state_dim=obs["state"].shape[1],
+            goal_dim=obs["goal"].shape[1],
+        ).to(device)
+        follow_policy = th.CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=obs["state"].shape[1],
+            goal_dim=obs["goal"].shape[1],
+            cmd_scale=cmd_scale,
+        ).to(device)
+        avoid_policy = th.CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=obs["state"].shape[1],
+            goal_dim=obs["goal"].shape[1],
+            cmd_scale=cmd_scale,
+        ).to(device)
+        gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
+        gate_state = gate_ckpt["model_state_dict"] if isinstance(gate_ckpt, dict) and "model_state_dict" in gate_ckpt else gate_ckpt
+        policy.load_state_dict(gate_state)
+        for model, ckpt_path in [(follow_policy, args.follow_ckpt), (avoid_policy, args.avoid_ckpt)]:
+            ckpt = torch.load(ckpt_path, map_location=device)
+            state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+            model.load_state_dict(state_dict)
+            model.eval()
+        policy.eval()
+    else:
+        policy = th.CmdVelExpert(
+            affordance_channels=aff_channels,
+            state_dim=obs["state"].shape[1],
+            goal_dim=obs["goal"].shape[1],
+            cmd_scale=cmd_scale,
+        ).to(device)
+        ckpt = torch.load(args.teacher_ckpt, map_location=device)
+        state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+        policy.load_state_dict(state_dict)
+        policy.eval()
     step_idx = 0
     deterministic = not args.stochastic
     camera_frame_idx = 0
@@ -311,18 +361,44 @@ def main():
         else:
             aff_stack_fill.fill_(1)
         difficulty = _get_difficulty(obs, aff_map)
+        gate_y = None
         with torch.no_grad():
-            subgoal, intensity, _ = planner.get_action(
-                aff_stack_buf,
-                obs["state"],
-                obs["goal"],
-                difficulty,
-                deterministic=deterministic,
-            )
+            if is_gate:
+                gate_difficulty = difficulty if args.gate_use_difficulty else torch.zeros_like(difficulty)
+                cmd_f, _ = follow_policy.get_action(
+                    aff_stack_buf,
+                    obs["state"],
+                    obs["goal"],
+                    difficulty,
+                    deterministic=True,
+                )
+                cmd_a, _ = avoid_policy.get_action(
+                    aff_stack_buf,
+                    obs["state"],
+                    obs["goal"],
+                    difficulty,
+                    deterministic=True,
+                )
+                gate_y, _ = policy.get_action(
+                    aff_stack_buf,
+                    obs["state"],
+                    obs["goal"],
+                    gate_difficulty,
+                    deterministic=deterministic,
+                )
+                cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
+            else:
+                cmd, _ = policy.get_action(
+                    aff_stack_buf,
+                    obs["state"],
+                    obs["goal"],
+                    difficulty,
+                    deterministic=deterministic,
+                )
         if args.mode == "student":
             env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             env.reward_affordance_override = aff_map
-        obs, rewards, dones, info = env.step(subgoal, intensity)
+        obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
         if dones.any():
             stack_reset_mask = dones.clone()
 
@@ -334,26 +410,23 @@ def main():
 
         if args.debug_cmd and step_idx % args.debug_interval == 0:
             env_idx = 0
-            sub = subgoal[env_idx].detach().cpu().numpy()
-            inten = float(intensity[env_idx].detach().cpu())
-            cmd = None
+            cmd_pred = cmd[env_idx].detach().cpu().numpy()
+            cmd_exec = None
             if hasattr(env.env, "commands"):
-                cmd = env.env.commands[env_idx, :3].detach().cpu().numpy()
-            cmd_str = "None" if cmd is None else np.array2string(cmd, precision=3, floatmode="fixed")
-            cmd_speed = 0.0 if cmd is None else float(np.linalg.norm(cmd[:2]))
-            filtered_intensity = None
-            if info is not None and "filtered_intensity" in info:
-                filtered_intensity = float(info["filtered_intensity"][env_idx].detach().cpu())
+                cmd_exec = env.env.commands[env_idx, :3].detach().cpu().numpy()
+            cmd_show = cmd_exec if cmd_exec is not None else cmd_pred
+            cmd_str = "None" if cmd_show is None else np.array2string(cmd_show, precision=3, floatmode="fixed")
+            cmd_speed = 0.0 if cmd_show is None else float(np.linalg.norm(cmd_show[:2]))
             reward_total = float(rewards[env_idx].detach().cpu()) if rewards is not None else 0.0
             reward_terms = info.get("reward_terms") if info is not None else None
             reward_approach = 0.0
             reward_heading = 0.0
             reward_time = 0.0
-            reward_intensity = 0.0
+            reward_gate = 0.0
+            reward_risk = 0.0
             clearance = 0.0
-            intensity_goal_factor = 0.0
-            intensity_clear_factor = 0.0
-            optimal_intensity = 0.0
+            risk_scale = 0.0
+            gate_val = 0.0
             passable_gate = 0.0
             passable_align = 0.0
             passable_occ_ratio = 0.0
@@ -364,17 +437,18 @@ def main():
                 reward_approach = float(reward_terms.get("approach", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_heading = float(reward_terms.get("heading", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 reward_time = float(reward_terms.get("time", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
-                reward_intensity = float(reward_terms.get("intensity_match", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                reward_gate = float(reward_terms.get("gate_smooth", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                reward_risk = float(reward_terms.get("risk_barrier", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 clearance = float(reward_terms.get("clearance", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
-                intensity_goal_factor = float(reward_terms.get("intensity_goal_factor", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
-                intensity_clear_factor = float(reward_terms.get("intensity_clear_factor", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
-                optimal_intensity = float(reward_terms.get("optimal_intensity", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                risk_scale = float(reward_terms.get("risk_scale", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 passable_gate = float(reward_terms.get("passable_gate", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 passable_align = float(reward_terms.get("passable_align", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 passable_occ_ratio = float(reward_terms.get("passable_occ_ratio", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 crossable_gate = float(reward_terms.get("crossable_gate", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 crossable_align = float(reward_terms.get("crossable_align", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 crossable_width = float(reward_terms.get("crossable_width", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+            if is_gate and gate_y is not None:
+                gate_val = float(gate_y[env_idx].detach().cpu())
             yaw_raw = 0.0
             yaw_policy = 0.0
             heading_err_pos = 0.0
@@ -510,17 +584,17 @@ def main():
                 aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                 aff_std = stack.std(dim=0, unbiased=False).mean().item()
             print(
-                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} intensity={:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, intensity={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} fac(g/c)={:.3f}/{:.3f} optI={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} subgoal={} goal={} dist={:.3f} cmd={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate_y={:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                     step_idx,
                     cmd_speed,
                     progress,
-                    inten,
-                    filtered_intensity if filtered_intensity is not None else 0.0,
+                    gate_val,
                     reward_total,
                     reward_approach,
                     reward_heading,
                     reward_time,
-                    reward_intensity,
+                    reward_gate,
+                    reward_risk,
                     passable_gate,
                     passable_align,
                     passable_occ_ratio,
@@ -528,13 +602,11 @@ def main():
                     crossable_align,
                     crossable_width,
                     clearance,
-                    intensity_goal_factor,
-                    intensity_clear_factor,
-                    optimal_intensity,
+                    risk_scale,
                     aff_delta,
                     aff_std,
                     aff_filled,
-                    np.array2string(sub, precision=3, floatmode="fixed"),
+                    np.array2string(cmd_pred, precision=3, floatmode="fixed"),
                     np.array2string(goal, precision=3, floatmode="fixed"),
                     goal_dist,
                     cmd_str,
