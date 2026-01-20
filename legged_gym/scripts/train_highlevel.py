@@ -615,6 +615,11 @@ class HierarchicalHexapodEnv:
         map_size = self.affordance_map_size
         map_extent = self.affordance_map_extent
         cell = map_extent / map_size
+        if not math.isfinite(cell) or cell <= 0.0:
+            if not getattr(self, "_scene_aff_cell_warned", False):
+                print(f"[Warn] scene affordance cell invalid: cell={cell}, extent={map_extent}, size={map_size}")
+                self._scene_aff_cell_warned = True
+            return None
         occ_all = torch.zeros(self.num_envs, map_size, map_size, device=self.device)
 
         robot_xy = self.env.root_states[:, :2]
@@ -622,6 +627,12 @@ class HierarchicalHexapodEnv:
             yaw = self.env.robot_state_buf[:, 2]
         else:
             yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        if not torch.isfinite(yaw).all():
+            yaw = yaw.clone()
+            yaw[~torch.isfinite(yaw)] = 0.0
+        if not torch.isfinite(robot_xy).all():
+            robot_xy = robot_xy.clone()
+            robot_xy[~torch.isfinite(robot_xy)] = 0.0
         cos_h = torch.cos(yaw)
         sin_h = torch.sin(yaw)
 
@@ -629,6 +640,21 @@ class HierarchicalHexapodEnv:
         y_min = 0.0
 
         def rasterize(env_id: int, center_x: float, center_y: float, size_x: float, size_y: float) -> None:
+            if not (
+                math.isfinite(center_x)
+                and math.isfinite(center_y)
+                and math.isfinite(size_x)
+                and math.isfinite(size_y)
+            ):
+                if not getattr(self, "_scene_aff_nan_warned", False):
+                    print(
+                        "[Warn] scene affordance rasterize got NaN/inf "
+                        f"(env={env_id}, center=({center_x},{center_y}), size=({size_x},{size_y}))"
+                    )
+                    self._scene_aff_nan_warned = True
+                return
+            if size_x <= 0.0 or size_y <= 0.0:
+                return
             dx = center_x - float(robot_xy[env_id, 0].item())
             dy = center_y - float(robot_xy[env_id, 1].item())
             x_body = float(cos_h[env_id].item()) * dx + float(sin_h[env_id].item()) * dy

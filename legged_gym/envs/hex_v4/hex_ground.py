@@ -71,32 +71,154 @@ class HexGround(LeggedRobot):
         obs_dict, _, _, _ = self.step_separate(torch.zeros_like(self.actions))
         return obs_dict
     
-    def _create_envs(self):
-        super()._create_envs()
-        robot_indices = np.zeros(self.num_envs, dtype=np.int32)
-        for env_id in range(self.num_envs):
-            env_handle = self.envs[env_id]
-            actor_handle = self.actor_handles[env_id]
-            robot_indices[env_id] = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-        self.robot_actor_indices = torch.tensor(robot_indices, device=self.device, dtype=torch.int32)
+    def _pre_create_envs(self):
+        self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
         self.scene_manager = getattr(self.terrain, "scene_manager", None)
+        self.static_block_groups = []
+        self.static_block_group_sizes = []
+        self.static_block_group_heights = []
+        self.static_block_group_max = []
+        self.static_block_assets = []
+        self.static_block_actor_handles = None
+        self.static_block_actor_indices = None
+        self.static_wall_actor_handles = None
+        self.static_wall_actor_indices = None
+        self.static_wall_asset = None
+        self.dynamic_actor_handles = None
+        self.dynamic_actor_indices = None
+        self.dynamic_asset = None
+
         if self.scene_manager is None:
-            self.dynamic_actor_indices = None
-            self.dynamic_actor_handles = None
-            self.static_block_actor_indices = None
-            self.static_block_actor_handles = None
-            self.static_wall_actor_indices = None
-            self.static_wall_actor_handles = None
+            return
+
+        block_max = int(getattr(self.cfg.terrain, "scene_static_block_max", 0))
+        wall_max = int(getattr(self.cfg.terrain, "scene_static_wall_max", 0))
+        if block_max <= 0:
+            block_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
+        if wall_max <= 0:
+            wall_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
+
+        block_sizes = list(getattr(self.cfg.terrain, "scene_static_block_sizes", []) or [])
+        block_heights = list(getattr(self.cfg.terrain, "scene_static_block_heights", []) or [])
+        if not block_sizes:
+            block_sizes = [float(getattr(self.cfg.terrain, "scene_static_block_size", 0.4))]
+        if not block_heights:
+            block_heights = [float(getattr(self.cfg.terrain, "scene_static_block_height", 0.35))] * len(block_sizes)
+        if len(block_heights) < len(block_sizes):
+            block_heights.extend([block_heights[-1]] * (len(block_sizes) - len(block_heights)))
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+        asset_options.collapse_fixed_joints = True
+
+        if block_max > 0 and block_sizes:
+            self.static_block_groups = [f"block_{idx}" for idx in range(len(block_sizes))]
+            self.static_block_group_sizes = [float(v) for v in block_sizes]
+            self.static_block_group_heights = [float(v) for v in block_heights[:len(block_sizes)]]
+            per_group_max = int(math.ceil(block_max / float(len(self.static_block_groups))))
+            self.static_block_group_max = [per_group_max for _ in self.static_block_groups]
+            for idx, group in enumerate(self.static_block_groups):
+                size_xy = float(self.static_block_group_sizes[idx])
+                height = float(self.static_block_group_heights[idx])
+                block_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+                self.static_block_assets.append(block_asset)
+                handles = [[None for _ in range(per_group_max)] for _ in range(self.num_envs)]
+                indices = np.zeros((self.num_envs, per_group_max), dtype=np.int32)
+                setattr(self, f"static_{group}_actor_handles", handles)
+                setattr(self, f"static_{group}_actor_indices", indices)
+        else:
             self.static_block_groups = []
             self.static_block_group_sizes = []
             self.static_block_group_heights = []
+            self.static_block_group_max = []
+
+        if wall_max > 0:
+            size_xy = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
+            height = float(getattr(self.cfg.terrain, "scene_static_wall_block_height", 0.35))
+            self.static_wall_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+            self.static_wall_actor_handles = [[None for _ in range(wall_max)] for _ in range(self.num_envs)]
+            self.static_wall_actor_indices = np.zeros((self.num_envs, wall_max), dtype=np.int32)
+        else:
+            self.static_wall_actor_indices = None
+            self.static_wall_actor_handles = None
+            self.static_wall_asset = None
+
+        if self.scene_manager.has_dynamic:
+            max_dyn = int(self.scene_manager.max_dynamic_obstacles)
+            if max_dyn > 0:
+                size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
+                height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
+                self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+                self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
+                self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
+
+    def _on_create_robot(self, env_id, env_handle, actor_handle):
+        if hasattr(self, "robot_actor_indices"):
+            self.robot_actor_indices[env_id] = self.gym.get_actor_index(
+                env_handle, actor_handle, gymapi.DOMAIN_SIM
+            )
+
+    def _create_env_actors(self, env_id, env_handle):
+        if self.scene_manager is None:
             return
-        self._create_static_obstacle_actors()
-        if not self.scene_manager.has_dynamic:
-            self.dynamic_actor_indices = None
-            self.dynamic_actor_handles = None
-            return
-        self._create_dynamic_obstacle_actors()
+        if self.static_block_groups:
+            for idx, group in enumerate(self.static_block_groups):
+                per_group_max = self.static_block_group_max[idx]
+                block_asset = self.static_block_assets[idx]
+                handles = getattr(self, f"static_{group}_actor_handles")
+                indices = getattr(self, f"static_{group}_actor_indices")
+                for obs_id in range(per_group_max):
+                    pose = gymapi.Transform()
+                    pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                    actor_handle = self.gym.create_actor(
+                        env_handle,
+                        block_asset,
+                        pose,
+                        f"static_{group}_{obs_id}",
+                        env_id,
+                        0,
+                        0,
+                    )
+                    handles[env_id][obs_id] = actor_handle
+                    actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                    indices[env_id, obs_id] = actor_index
+
+        if self.static_wall_asset is not None and self.static_wall_actor_indices is not None:
+            wall_max = int(self.static_wall_actor_indices.shape[1])
+            for obs_id in range(wall_max):
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                actor_handle = self.gym.create_actor(
+                    env_handle,
+                    self.static_wall_asset,
+                    pose,
+                    f"static_wall_{obs_id}",
+                    env_id,
+                    0,
+                    0,
+                )
+                self.static_wall_actor_handles[env_id][obs_id] = actor_handle
+                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                self.static_wall_actor_indices[env_id, obs_id] = actor_index
+
+        if self.dynamic_asset is not None and self.dynamic_actor_indices is not None:
+            max_dyn = int(self.dynamic_actor_indices.shape[1])
+            for obs_id in range(max_dyn):
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                actor_handle = self.gym.create_actor(
+                    env_handle,
+                    self.dynamic_asset,
+                    pose,
+                    f"dyn_obs_{obs_id}",
+                    env_id,
+                    0,
+                    0,
+                )
+                self.dynamic_actor_handles[env_id][obs_id] = actor_handle
+                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                self.dynamic_actor_indices[env_id, obs_id] = actor_index
 
     def _init_camera_buffers(self):
         """初始化相机图像接收buffer"""
