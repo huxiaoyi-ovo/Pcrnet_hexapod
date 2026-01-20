@@ -41,6 +41,13 @@ from .a1.a1_config import A1RoughCfg, A1RoughCfgPPO
 
 from .hex_v4.hex_ground import HexGround
 from .hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgPPO
+from .hex_v4.hex_s1_config import HexS1Cfg, HexS1CfgPPO, HexS1FollowCfg, HexS1FollowCfgPPO
+from .hex_v4.hex_s2_config import HexS2Cfg, HexS2CfgPPO
+from .hex_v4.hex_s3_config import HexS3Cfg, HexS3CfgPPO
+from .hex_v4.hex_s4_config import HexS4Cfg, HexS4CfgPPO
+from .hex_v4.hex_s5_config import HexS5Cfg, HexS5CfgPPO
+from .hex_v4.hex_s6_config import HexS6Cfg, HexS6CfgPPO
+from .hex_v4.hex_mix_gate_config import HexMixGateCfg, HexMixGateCfgPPO
 
 from .hex_v4.hex_climb import HexClimb
 from .hex_v4.hex_climb_config import HexClimbCfg, HexClimbCfgPPO
@@ -61,4 +68,12 @@ task_registry.register( "cassie", Cassie, CassieRoughCfg(), CassieRoughCfgPPO() 
 task_registry.register("hex_ground",HexGround,HexGroundCfg(),HexGroundCfgPPO())
 
 task_registry.register("hex_terrain",HexTerrain,HexTerrainCfg(),HexTerrainCfgPPO())
+task_registry.register("hex_s1", HexGround, HexS1Cfg(), HexS1CfgPPO())
+task_registry.register("hex_s1_follow", HexGround, HexS1FollowCfg(), HexS1FollowCfgPPO())
+task_registry.register("hex_s2", HexGround, HexS2Cfg(), HexS2CfgPPO())
+task_registry.register("hex_s3", HexGround, HexS3Cfg(), HexS3CfgPPO())
+task_registry.register("hex_s4", HexGround, HexS4Cfg(), HexS4CfgPPO())
+task_registry.register("hex_s5", HexGround, HexS5Cfg(), HexS5CfgPPO())
+task_registry.register("hex_s6", HexGround, HexS6Cfg(), HexS6CfgPPO())
+task_registry.register("hex_mix_gate", HexGround, HexMixGateCfg(), HexMixGateCfgPPO())
 # print("Registered HexGround environment")

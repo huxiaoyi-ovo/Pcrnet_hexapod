@@ -11,3 +11,24 @@ python legged_gym/scripts/play_highlevel.py --task hex_ground --teacher_ckpt out
 
 
 python legged_gym/scripts/train_highlevel.py --mode teacher --task hex_ground --low_level_ckpt  logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --decimation 5 --headless
+
+# V5 最小可运行指令（S1-S6 + MoE + resume/finetune）
+# 说明：请替换 low_level_ckpt / follow_ckpt / avoid_ckpt / gate_ckpt 为你的实际路径
+
+# S1 Follow 训练（cmd-space expert）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1_follow --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
+
+# S1 Avoid 训练（主训）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
+
+# S2 Avoid 微调（跨 task finetune）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --finetune_from outputs/planner/avoid/best_model.pt --num_envs 512 --num_steps 24 --num_iterations 120 --decimation 5 --headless
+
+# S4 Gate 单场景训练（冻结 Follow/Avoid）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_s4 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --follow_ckpt outputs/planner/follow/best_model.pt --avoid_ckpt outputs/planner/avoid/best_model.pt --num_envs 512 --num_steps 48 --num_iterations 200 --decimation 5 --headless
+
+# Mix Gate 微调（S3/S4/S5 混合）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_mix_gate --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --follow_ckpt outputs/planner/follow/best_model.pt --avoid_ckpt outputs/planner/avoid/best_model.pt --finetune_from outputs/planner/moe/best_model.pt --num_envs 512 --num_steps 48 --num_iterations 120 --decimation 5 --headless
+
+# Resume 示例（恢复优化器与 iter）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --resume outputs/planner/avoid/checkpoint_0200.pt --num_envs 512 --num_steps 24 --num_iterations 100 --decimation 5 --headless

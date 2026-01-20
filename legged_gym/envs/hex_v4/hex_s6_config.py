@@ -1,0 +1,52 @@
+from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgPPO
+
+
+class HexS6Cfg(HexGroundCfg):
+    class terrain(HexGroundCfg.terrain):
+        fixed_layout_enable = False
+        scene_type = "s6_ood_structured"
+        scene_seed = 106
+        scene_clearance = 0.27
+        scene_margin = 0.3
+        scene_high_dt = 0.1
+        scene_dynamic_max = 0
+        scene_holdout = True
+        scene_use_actors = True
+        scene_use_heightfield = False
+        scene_resample_on_reset = True
+        scene_resample_on_level_change = True
+        scene_static_max = 60
+        scene_static_block_size = 0.4
+        scene_static_block_height = 0.35
+        scene_static_block_sizes = [0.36, 0.44]
+        scene_static_block_heights = [0.35, 0.4]
+        scene_params_easy = {
+            "u_width": 2.0,
+            "u_depth": 1.4,
+            "u_thickness": 0.25,
+            "l_size": 1.4,
+            "l_thickness": 0.25,
+            "cluster_count": 6,
+            "cluster_radius": 0.18,
+            "cluster_spread": 0.6,
+            "obstacle_height": 0.35,
+        }
+        scene_params_hard = {
+            "u_width": 2.4,
+            "u_depth": 1.7,
+            "u_thickness": 0.3,
+            "l_size": 1.8,
+            "l_thickness": 0.3,
+            "cluster_count": 10,
+            "cluster_radius": 0.22,
+            "cluster_spread": 0.8,
+            "obstacle_height": 0.4,
+        }
+        num_cols = 3
+        terrain_proportions = [1.0]
+        max_init_terrain_level = 4
+
+
+class HexS6CfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "hex_s6"

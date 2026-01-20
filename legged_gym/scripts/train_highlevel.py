@@ -273,6 +273,19 @@ class HierarchicalHexapodEnv:
         # 初始化 Isaac Gym 环境
         print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
         env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+        if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
+            if hasattr(env_cfg.navigation, "follow_goal_force_blocking_line"):
+                env_cfg.navigation.goal_force_blocking_line = bool(
+                    getattr(env_cfg.navigation, "follow_goal_force_blocking_line")
+                )
+            else:
+                env_cfg.navigation.goal_force_blocking_line = False
+            if hasattr(env_cfg.navigation, "follow_goal_force_blocking_prob"):
+                env_cfg.navigation.goal_force_blocking_prob = float(
+                    getattr(env_cfg.navigation, "follow_goal_force_blocking_prob")
+                )
+            else:
+                env_cfg.navigation.goal_force_blocking_prob = 0.0
 
         if getattr(args, "camera_enable", False) and hasattr(env_cfg, "sensor"):
             if hasattr(env_cfg.sensor, "depth_camera"):
@@ -373,44 +386,16 @@ class HierarchicalHexapodEnv:
         
         # 初始化 Reward Function
         if NavigationRewardConfig is not None:
-            reward_kwargs = dict(
-                goal_approach_scale=2.0,
-                goal_reach_bonus=10.0,
-                gate_smooth_penalty=-0.05,
-                gate_max_change=0.2,
-                risk_barrier_scale=-0.5,
-                risk_barrier_safe=self.affordance_clearance,
-                risk_barrier_free=self.affordance_clearance_free,
-                risk_barrier_tau=0.1,
-            )
-            if args.task == "hex_ground":
-                reward_kwargs.update(
-                    goal_approach_scale=6.0,
-                    goal_reach_threshold=0.1,
-                    heading_scale=0.08,
-                    heading_offset_rad=0.5 * math.pi,  # 标准: +pi/2, 机体 +Y 为前进
-                    heading_use_difficulty_gate=True,
-                    heading_min_weight=0.2,
-                    stability_scale=0.01,
-                    time_penalty=-0.03,
-                    gate_smooth_penalty=-0.02,
-                    gate_max_change=0.1,
-                    risk_barrier_scale=-0.8,
-                    risk_barrier_safe=self.affordance_clearance,
-                    risk_barrier_free=self.affordance_clearance_free,
-                    risk_barrier_tau=0.08,
-                    heading_gate_use=True,
-                    heading_gate_min_speed=0.1,
-                    heading_gate_min_approach=0.01,
-                    velocity_scale=0.0,
-                    collision_penalty=-10.0,
-                    passable_align_scale=0.05,
-                    passable_occ_ratio_low=0.2,
-                    passable_occ_ratio_high=0.6,
-                    passable_sector_deg=60.0,
-                    crossable_align_scale=0.05,
-                    crossable_gate_min_speed=0.05,
-                )
+            reward_defaults = NavigationRewardConfig()
+            reward_kwargs = {k: getattr(reward_defaults, k) for k in reward_defaults.__dict__.keys()}
+            if nav_cfg is not None and hasattr(nav_cfg, "reward_cfg"):
+                for key, value in dict(getattr(nav_cfg, "reward_cfg")).items():
+                    if value is not None:
+                        reward_kwargs[key] = value
+            if reward_kwargs.get("risk_barrier_safe") is None:
+                reward_kwargs["risk_barrier_safe"] = self.affordance_clearance
+            if reward_kwargs.get("risk_barrier_free") is None:
+                reward_kwargs["risk_barrier_free"] = self.affordance_clearance_free
             self.reward_cfg = NavigationRewardConfig(**reward_kwargs)
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
         else:
@@ -557,6 +542,10 @@ class HierarchicalHexapodEnv:
             self.env.depth_images[:] = processed
 
     def _compute_gt_affordance_from_heightfield(self) -> Optional[torch.Tensor]:
+        if getattr(self.env.cfg.terrain, "scene_use_actors", False):
+            scene_aff = self._compute_gt_affordance_from_scene()
+            if scene_aff is not None:
+                return scene_aff
         if getattr(self.env, "height_samples", None) is None:
             return None
         map_size = self.affordance_map_size
@@ -605,6 +594,98 @@ class HierarchicalHexapodEnv:
         low_mask = (heights > 1e-6) & (heights < self.affordance_crossable_height)
         low_obstacle = low_mask.float()
 
+        radius_cells = int(math.ceil(self.affordance_clearance / cell))
+        if radius_cells > 0:
+            kernel = 2 * radius_cells + 1
+            pooled = F.max_pool2d(occ_block, kernel_size=kernel, stride=1, padding=radius_cells)
+            passable = (pooled <= 0.5) & (occ_block < 0.5)
+        else:
+            passable = occ_block < 0.5
+        passable_gap = passable.float().squeeze(1)
+
+        return torch.cat([
+            occ_all.unsqueeze(1),
+            passable_gap.unsqueeze(1),
+            low_obstacle.unsqueeze(1),
+        ], dim=1)
+
+    def _compute_gt_affordance_from_scene(self) -> Optional[torch.Tensor]:
+        if not hasattr(self.env, "scene_spec_cache"):
+            return None
+        map_size = self.affordance_map_size
+        map_extent = self.affordance_map_extent
+        cell = map_extent / map_size
+        occ_all = torch.zeros(self.num_envs, map_size, map_size, device=self.device)
+
+        robot_xy = self.env.root_states[:, :2]
+        if hasattr(self.env, "robot_state_buf"):
+            yaw = self.env.robot_state_buf[:, 2]
+        else:
+            yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        cos_h = torch.cos(yaw)
+        sin_h = torch.sin(yaw)
+
+        x_min = -0.5 * map_extent
+        y_min = 0.0
+
+        def rasterize(env_id: int, center_x: float, center_y: float, size_x: float, size_y: float) -> None:
+            dx = center_x - float(robot_xy[env_id, 0].item())
+            dy = center_y - float(robot_xy[env_id, 1].item())
+            x_body = float(cos_h[env_id].item()) * dx + float(sin_h[env_id].item()) * dy
+            y_body = -float(sin_h[env_id].item()) * dx + float(cos_h[env_id].item()) * dy
+            x0 = x_body - 0.5 * size_x
+            x1 = x_body + 0.5 * size_x
+            y0 = y_body - 0.5 * size_y
+            y1 = y_body + 0.5 * size_y
+            ix0 = int(math.floor((x0 - x_min) / cell))
+            ix1 = int(math.ceil((x1 - x_min) / cell))
+            iy0 = int(math.floor((y0 - y_min) / cell))
+            iy1 = int(math.ceil((y1 - y_min) / cell))
+            ix0 = max(0, min(map_size - 1, ix0))
+            ix1 = max(0, min(map_size - 1, ix1))
+            iy0 = max(0, min(map_size - 1, iy0))
+            iy1 = max(0, min(map_size - 1, iy1))
+            occ_all[env_id, ix0:ix1 + 1, iy0:iy1 + 1] = 1.0
+
+        for env_id in range(self.num_envs):
+            scene_spec = self.env.scene_spec_cache[env_id]
+            if scene_spec is None:
+                continue
+            origin = self.env.env_origins[env_id]
+            for spec in scene_spec.static_obstacles:
+                center_x = float(origin[0].item() + spec.position[0])
+                center_y = float(origin[1].item() + spec.position[1])
+                rasterize(env_id, center_x, center_y, spec.size[0], spec.size[1])
+
+        if hasattr(self.env, "dynamic_active") and self.env.dynamic_active is not None:
+            dyn_size = float(getattr(self.env.cfg.terrain, "scene_dynamic_size", 0.4))
+            for env_id in range(self.num_envs):
+                if self.env.dynamic_active[env_id].numel() == 0:
+                    continue
+                origin = self.env.env_origins[env_id]
+                t = float(self.env.scene_dyn_time[env_id].item())
+                for obs_id, active in enumerate(self.env.dynamic_active[env_id]):
+                    if not bool(active.item()):
+                        continue
+                    period = float(self.env.dynamic_period[env_id, obs_id].item())
+                    phase = float(self.env.dynamic_phase[env_id, obs_id].item())
+                    path_len = float(self.env.dynamic_path_len[env_id, obs_id].item())
+                    half = 0.5 * period if period > 1e-6 else 0.0
+                    tau = (t + phase) % period if period > 1e-6 else 0.0
+                    progress = tau / half if half > 1e-6 else 0.0
+                    if tau > half and half > 1e-6:
+                        progress = (period - tau) / half
+                    progress = max(0.0, min(1.0, progress))
+                    dist = progress * path_len
+                    start = self.env.dynamic_start[env_id, obs_id]
+                    direction = self.env.dynamic_dir[env_id, obs_id]
+                    pos_local = start + direction * dist
+                    center_x = float(origin[0].item() + pos_local[0].item())
+                    center_y = float(origin[1].item() + pos_local[1].item())
+                    rasterize(env_id, center_x, center_y, dyn_size, dyn_size)
+
+        occ_block = occ_all.unsqueeze(1)
+        low_obstacle = torch.zeros_like(occ_all)
         radius_cells = int(math.ceil(self.affordance_clearance / cell))
         if radius_cells > 0:
             kernel = 2 * radius_cells + 1
@@ -1169,6 +1250,8 @@ def train(args):
     print(f"{'='*60}\n")
     if args.task != "hex_ground":
         print(f"[Warn] V5 主线默认任务为 hex_ground，当前 task={args.task}（hex_terrain 视为 legacy）。")
+    gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
+    moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
     if getattr(args, "skill", "follow") == "moe":
         if args.num_steps < 48:
             print(f"[Warn] Gate 训练建议 num_steps>=48，当前 num_steps={args.num_steps}。")
@@ -1316,10 +1399,48 @@ def train(args):
         if any(param.requires_grad for param in avoid_model.parameters()):
             raise RuntimeError("Gate 模式下 Avoid expert 仍存在可训练参数。")
 
+    resume_path = getattr(args, "resume", None)
+    finetune_path = getattr(args, "finetune_from", None)
+    if resume_path and finetune_path:
+        raise ValueError("不能同时使用 --resume 与 --finetune_from。")
+
+    start_iteration = 0
+    best_reward = float("-inf")
+    if resume_path:
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint 不存在: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+        policy.load_state_dict(state_dict)
+        if isinstance(ckpt, dict) and "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        else:
+            print("[Warn] Resume checkpoint 未包含 optimizer_state_dict。")
+        start_iteration = int(ckpt.get("iteration", 0)) + 1 if isinstance(ckpt, dict) else 0
+        best_reward = float(ckpt.get("best_reward", ckpt.get("mean_reward", -float("inf")))) if isinstance(ckpt, dict) else best_reward
+        if isinstance(ckpt, dict) and "torch_rng_state" in ckpt:
+            torch.set_rng_state(ckpt["torch_rng_state"])
+        if isinstance(ckpt, dict) and "numpy_rng_state" in ckpt:
+            np.random.set_state(ckpt["numpy_rng_state"])
+        if torch.cuda.is_available() and isinstance(ckpt, dict) and "cuda_rng_state" in ckpt:
+            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+        log_dir = os.path.dirname(resume_path)
+        print(f"[Main] Resume: {resume_path}")
+    elif finetune_path:
+        if not os.path.exists(finetune_path):
+            raise FileNotFoundError(f"Finetune checkpoint 不存在: {finetune_path}")
+        ckpt = torch.load(finetune_path, map_location=device)
+        state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+        policy.load_state_dict(state_dict)
+        print(f"[Main] Finetune from: {finetune_path}")
+
     # 创建日志目录
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_dir = os.path.join(args.output_dir, f"{skill}_{args.mode}_{timestamp}")
-    os.makedirs(log_dir, exist_ok=True)
+    if resume_path:
+        os.makedirs(log_dir, exist_ok=True)
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_dir = os.path.join(args.output_dir, f"{skill}_{args.mode}_{timestamp}")
+        os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     print(f"[Main] 日志目录: {log_dir}")
     
@@ -1331,12 +1452,14 @@ def train(args):
     episode_rewards = deque(maxlen=100)
     episode_lengths = deque(maxlen=100)
     goal_change_counts = deque(maxlen=100)
-    best_reward = float('-inf')
+    if not resume_path:
+        best_reward = float("-inf")
     
     # 训练内的 episode 回报统计
     running_returns = torch.zeros(env.num_envs, device=device)
     
-    print(f"\n[Main] 开始训练 ({args.num_iterations} iterations)...")
+    total_iterations = start_iteration + args.num_iterations
+    print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
     print(f"  - Steps per iteration: {args.num_steps}")
     print(f"  - Batch size: {env.num_envs * args.num_steps}")
     print(f"  - Learning rate: {args.lr}")
@@ -1347,7 +1470,7 @@ def train(args):
     stack_reset_mask = None
     last_dones = None
     aff_stack_fill = None
-    for iteration in range(args.num_iterations):
+    for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
         
         # ============ Rollout Phase ============
@@ -1872,7 +1995,7 @@ def train(args):
         if iteration % args.log_interval == 0:
             width = 80
             pad = 32
-            header = f" Learning iteration {iteration}/{args.num_iterations} "
+            header = f" Learning iteration {iteration}/{total_iterations} "
             collision_threshold_str = "n/a"
             collision_threshold_src_str = "n/a"
             collision_indices_src_str = "n/a"
@@ -1924,6 +2047,10 @@ def train(args):
                 'model_state_dict': policy.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'mean_reward': mean_reward,
+                'best_reward': best_reward,
+                'torch_rng_state': torch.get_rng_state(),
+                'numpy_rng_state': np.random.get_state(),
+                'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }, ckpt_path)
             print(f"  Saved: {ckpt_path}")
         
@@ -1935,6 +2062,7 @@ def train(args):
                 'iteration': iteration,
                 'model_state_dict': policy.state_dict(),
                 'mean_reward': mean_reward,
+                'best_reward': best_reward,
             }, best_path)
             print(f"  ★ New best: {mean_reward:.2f}")
     
@@ -1983,6 +2111,10 @@ if __name__ == "__main__":
                         help='(Gate) Avoid expert 模型路径')
     parser.add_argument('--vision_ckpt', type=str, default=None,
                         help='(Student) Vision 模型路径')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='恢复训练 checkpoint 路径（含优化器与迭代）')
+    parser.add_argument('--finetune_from', type=str, default=None,
+                        help='微调 checkpoint 路径（仅加载权重）')
     
     # 训练超参数
     parser.add_argument('--num_iterations', type=int, default=1000,

@@ -4,8 +4,10 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils.actuator import Actuator
 from legged_gym.envs.hex_v4.expert import ExpertGround
+from legged_gym.envs.hex_v4.scene_manager import SceneSpec, StaticObstacleSpec
 import torch
 import numpy as np
+from typing import Optional
 
 from isaacgym import gymtorch,gymapi,gymutil
 from legged_gym.utils import get_args,class_to_dict
@@ -30,6 +32,16 @@ class HexGround(LeggedRobot):
         self.nav_cfg = getattr(cfg, "navigation", None)
         self.debug_viz = False
         self.foot_traj_viz=False
+        self.scene_manager = getattr(self, "scene_manager", None)
+        if self.scene_manager is None:
+            self.scene_manager = getattr(self.terrain, "scene_manager", None)
+        self.scene_specs = getattr(self.terrain, "scene_specs", None)
+        self.scene_meta = [None] * self.num_envs
+        self.scene_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
+        self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
+        self.scene_spec_cache = [None] * self.num_envs
+        self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.int32)
+        self._init_scene_runtime()
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
         self.actuator=Actuator(self.cfg,self.device)
         #额外初始化专家类，可以在step时，提供专家动作参考
@@ -61,7 +73,24 @@ class HexGround(LeggedRobot):
     
     def _create_envs(self):
         super()._create_envs()
-        #打印一些值进行查看
+        self.scene_manager = getattr(self.terrain, "scene_manager", None)
+        if self.scene_manager is None:
+            self.dynamic_actor_indices = None
+            self.dynamic_actor_handles = None
+            self.static_block_actor_indices = None
+            self.static_block_actor_handles = None
+            self.static_wall_actor_indices = None
+            self.static_wall_actor_handles = None
+            self.static_block_groups = []
+            self.static_block_group_sizes = []
+            self.static_block_group_heights = []
+            return
+        self._create_static_obstacle_actors()
+        if not self.scene_manager.has_dynamic:
+            self.dynamic_actor_indices = None
+            self.dynamic_actor_handles = None
+            return
+        self._create_dynamic_obstacle_actors()
 
     def _init_camera_buffers(self):
         """初始化相机图像接收buffer"""
@@ -278,17 +307,521 @@ class HexGround(LeggedRobot):
             )
         return depth_normalized
 
+    def _init_scene_runtime(self):
+        if self.scene_manager is None:
+            return
+        self._init_static_runtime()
+        self._init_dynamic_runtime()
+
+    def _init_static_runtime(self):
+        for group in getattr(self, "static_block_groups", []):
+            self._init_static_group(group)
+        self._init_static_group("wall")
+
+    def _init_static_group(self, group: str):
+        indices = getattr(self, f"static_{group}_actor_indices", None)
+        if indices is None:
+            return
+        if isinstance(indices, list):
+            indices = np.array(indices, dtype=np.int32)
+        if isinstance(indices, np.ndarray):
+            indices = torch.tensor(indices, device=self.device, dtype=torch.int32)
+        max_static = int(indices.shape[1]) if indices is not None else 0
+        if max_static <= 0:
+            return
+        setattr(self, f"static_{group}_actor_indices", indices)
+        setattr(self, f"static_{group}_actor_indices_flat", indices.reshape(-1).contiguous())
+        setattr(self, f"static_{group}_actor_indices_flat_long", indices.reshape(-1).contiguous().to(torch.long))
+        setattr(self, f"static_{group}_active", torch.zeros(self.num_envs, max_static, device=self.device, dtype=torch.bool))
+        setattr(self, f"static_{group}_pos_local", torch.zeros(self.num_envs, max_static, 3, device=self.device))
+        quat = torch.zeros(self.num_envs, max_static, 4, device=self.device)
+        quat[..., 3] = 1.0
+        setattr(self, f"static_{group}_quat", quat)
+
+    def _init_dynamic_runtime(self):
+        if self.dynamic_actor_indices is None:
+            return
+        if isinstance(self.dynamic_actor_indices, list):
+            self.dynamic_actor_indices = np.array(self.dynamic_actor_indices, dtype=np.int32)
+        if isinstance(self.dynamic_actor_indices, np.ndarray):
+            self.dynamic_actor_indices = torch.tensor(
+                self.dynamic_actor_indices, device=self.device, dtype=torch.int32
+            )
+        max_dyn = int(self.dynamic_actor_indices.shape[1]) if self.dynamic_actor_indices is not None else 0
+        if max_dyn <= 0:
+            return
+        self.dynamic_actor_indices_flat = self.dynamic_actor_indices.reshape(-1).contiguous()
+        self.dynamic_actor_indices_flat_long = self.dynamic_actor_indices_flat.to(torch.long)
+        self.dynamic_active = torch.zeros(self.num_envs, max_dyn, device=self.device, dtype=torch.bool)
+        self.dynamic_start = torch.zeros(self.num_envs, max_dyn, 3, device=self.device)
+        self.dynamic_dir = torch.zeros(self.num_envs, max_dyn, 3, device=self.device)
+        self.dynamic_path_len = torch.zeros(self.num_envs, max_dyn, device=self.device)
+        self.dynamic_phase = torch.zeros(self.num_envs, max_dyn, device=self.device)
+        self.dynamic_period = torch.ones(self.num_envs, max_dyn, device=self.device)
+        self.dynamic_height = torch.zeros(self.num_envs, max_dyn, device=self.device)
+        self.dynamic_quat = torch.zeros(self.num_envs, max_dyn, 4, device=self.device)
+        self.dynamic_quat[..., 3] = 1.0
+
+    def _create_static_obstacle_actors(self):
+        block_max = int(getattr(self.cfg.terrain, "scene_static_block_max", 0))
+        wall_max = int(getattr(self.cfg.terrain, "scene_static_wall_max", 0))
+        if block_max <= 0:
+            block_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
+        if wall_max <= 0:
+            wall_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
+
+        block_sizes = list(getattr(self.cfg.terrain, "scene_static_block_sizes", []) or [])
+        block_heights = list(getattr(self.cfg.terrain, "scene_static_block_heights", []) or [])
+        if not block_sizes:
+            block_sizes = [float(getattr(self.cfg.terrain, "scene_static_block_size", 0.4))]
+        if not block_heights:
+            block_heights = [float(getattr(self.cfg.terrain, "scene_static_block_height", 0.35))] * len(block_sizes)
+        if len(block_heights) < len(block_sizes):
+            block_heights.extend([block_heights[-1]] * (len(block_sizes) - len(block_heights)))
+        self.static_block_groups = [f"block_{idx}" for idx in range(len(block_sizes))]
+        self.static_block_group_sizes = [float(v) for v in block_sizes]
+        self.static_block_group_heights = [float(v) for v in block_heights[:len(block_sizes)]]
+        if block_max <= 0:
+            self.static_block_groups = []
+
+        if block_max <= 0 and wall_max <= 0:
+            self.static_block_actor_indices = None
+            self.static_block_actor_handles = None
+            self.static_wall_actor_indices = None
+            self.static_wall_actor_handles = None
+            return
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+        asset_options.collapse_fixed_joints = True
+
+        if block_max > 0 and self.static_block_groups:
+            per_group_max = int(math.ceil(block_max / float(len(self.static_block_groups))))
+            for idx, group in enumerate(self.static_block_groups):
+                size_xy = float(self.static_block_group_sizes[idx])
+                height = float(self.static_block_group_heights[idx])
+                block_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+                handles = [[None for _ in range(per_group_max)] for _ in range(self.num_envs)]
+                indices = np.zeros((self.num_envs, per_group_max), dtype=np.int32)
+                for env_id in range(self.num_envs):
+                    env_handle = self.envs[env_id]
+                    for obs_id in range(per_group_max):
+                        pose = gymapi.Transform()
+                        pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                        actor_handle = self.gym.create_actor(
+                            env_handle,
+                            block_asset,
+                            pose,
+                            f"static_{group}_{obs_id}",
+                            env_id,
+                            0,
+                            0,
+                        )
+                        handles[env_id][obs_id] = actor_handle
+                        actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                        indices[env_id, obs_id] = actor_index
+                setattr(self, f"static_{group}_actor_handles", handles)
+                setattr(self, f"static_{group}_actor_indices", indices)
+        else:
+            self.static_block_actor_indices = None
+            self.static_block_actor_handles = None
+
+        if wall_max > 0:
+            size_xy = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
+            height = float(getattr(self.cfg.terrain, "scene_static_wall_block_height", 0.35))
+            wall_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+            self.static_wall_actor_handles = [[None for _ in range(wall_max)] for _ in range(self.num_envs)]
+            self.static_wall_actor_indices = np.zeros((self.num_envs, wall_max), dtype=np.int32)
+            for env_id in range(self.num_envs):
+                env_handle = self.envs[env_id]
+                for obs_id in range(wall_max):
+                    pose = gymapi.Transform()
+                    pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                    actor_handle = self.gym.create_actor(
+                        env_handle,
+                        wall_asset,
+                        pose,
+                        f"static_wall_{obs_id}",
+                        env_id,
+                        0,
+                        0,
+                    )
+                    self.static_wall_actor_handles[env_id][obs_id] = actor_handle
+                    actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                    self.static_wall_actor_indices[env_id, obs_id] = actor_index
+        else:
+            self.static_wall_actor_indices = None
+            self.static_wall_actor_handles = None
+
+    def _create_dynamic_obstacle_actors(self):
+        max_dyn = int(self.scene_manager.max_dynamic_obstacles)
+        if max_dyn <= 0:
+            self.dynamic_actor_indices = None
+            self.dynamic_actor_handles = None
+            return
+        size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
+        height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+        asset_options.collapse_fixed_joints = True
+        obstacle_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+
+        self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
+        self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
+        for env_id in range(self.num_envs):
+            env_handle = self.envs[env_id]
+            for obs_id in range(max_dyn):
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                actor_handle = self.gym.create_actor(
+                    env_handle,
+                    obstacle_asset,
+                    pose,
+                    f"dyn_obs_{obs_id}",
+                    env_id,
+                    0,
+                    0,
+                )
+                self.dynamic_actor_handles[env_id][obs_id] = actor_handle
+                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                self.dynamic_actor_indices[env_id, obs_id] = actor_index
+
+    def _get_scene_spec(self, env_id: int):
+        if self.scene_specs is None:
+            return None
+        level = int(self.terrain_levels[env_id].item()) if hasattr(self, "terrain_levels") else 0
+        col = int(self.terrain_types[env_id].item()) if hasattr(self, "terrain_types") else 0
+        level = max(0, min(level, len(self.scene_specs) - 1))
+        col = max(0, min(col, len(self.scene_specs[level]) - 1))
+        return self.scene_specs[level][col]
+
+    def _get_scene_difficulty(self, env_id: int) -> float:
+        if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
+            denom = max(1, int(self.max_terrain_level))
+            return float(self.terrain_levels[env_id].item()) / denom
+        return 0.0
+
+    def _fill_static_buffers(self, env_id: int, static_specs):
+        block_groups = getattr(self, "static_block_groups", [])
+        has_wall = self.static_wall_actor_indices is not None
+        has_block = bool(block_groups)
+        if not has_block and not has_wall:
+            return
+        for group in block_groups:
+            active = getattr(self, f"static_{group}_active", None)
+            pos_local = getattr(self, f"static_{group}_pos_local", None)
+            if active is not None:
+                active[env_id].fill_(False)
+            if pos_local is not None:
+                pos_local[env_id].zero_()
+        if has_wall:
+            self.static_wall_active[env_id].fill_(False)
+            self.static_wall_pos_local[env_id].zero_()
+
+        group_max = {}
+        group_idx = {}
+        for idx, group in enumerate(block_groups):
+            indices = getattr(self, f"static_{group}_actor_indices", None)
+            group_max[group] = int(indices.shape[1]) if indices is not None else 0
+            group_idx[group] = 0
+        wall_max = int(self.static_wall_actor_indices.shape[1]) if has_wall else 0
+        wall_idx = 0
+        block_sizes = getattr(self, "static_block_group_sizes", [])
+
+        for spec in static_specs:
+            pos = torch.tensor(spec.position, device=self.device, dtype=torch.float32)
+            if spec.kind == "wall" and has_wall and wall_idx < wall_max:
+                self.static_wall_active[env_id, wall_idx] = True
+                self.static_wall_pos_local[env_id, wall_idx] = pos
+                wall_idx += 1
+                continue
+            if not has_block:
+                continue
+            size_xy = float(max(spec.size[0], spec.size[1]))
+            height = float(spec.size[2])
+            if block_sizes:
+                diffs = []
+                for s, h in zip(block_sizes, self.static_block_group_heights):
+                    size_diff = abs(size_xy - s) / max(size_xy, 1e-6)
+                    height_diff = abs(height - h) / max(height, 1e-6)
+                    diffs.append(size_diff + height_diff)
+                sel_idx = int(np.argmin(diffs))
+            else:
+                sel_idx = 0
+            group = block_groups[sel_idx]
+            if group_idx[group] >= group_max[group]:
+                continue
+            active = getattr(self, f"static_{group}_active")
+            pos_local = getattr(self, f"static_{group}_pos_local")
+            active[env_id, group_idx[group]] = True
+            pos_local[env_id, group_idx[group]] = pos
+            group_idx[group] += 1
+
+    def _allocate_static_specs(self, static_specs):
+        block_groups = getattr(self, "static_block_groups", [])
+        has_block = bool(block_groups)
+        has_wall = self.static_wall_actor_indices is not None
+        if not has_block and not has_wall:
+            return list(static_specs), len(static_specs), len(static_specs), 0.0
+
+        wall_specs = [spec for spec in static_specs if spec.kind == "wall"]
+        block_specs = [spec for spec in static_specs if spec.kind != "wall"]
+        wall_max = int(self.static_wall_actor_indices.shape[1]) if has_wall else 0
+        if wall_max > 0:
+            wall_specs = wall_specs[:wall_max]
+        else:
+            wall_specs = []
+
+        group_caps = {}
+        group_used = {}
+        for group in block_groups:
+            indices = getattr(self, f"static_{group}_actor_indices", None)
+            group_caps[group] = int(indices.shape[1]) if indices is not None else 0
+            group_used[group] = 0
+
+        spawned = list(wall_specs)
+        for spec in block_specs:
+            if not has_block:
+                break
+            size_xy = float(max(spec.size[0], spec.size[1]))
+            height = float(spec.size[2])
+            best_group = None
+            best_score = None
+            for idx, group in enumerate(block_groups):
+                if group_used[group] >= group_caps[group]:
+                    continue
+                size = float(self.static_block_group_sizes[idx])
+                h = float(self.static_block_group_heights[idx])
+                size_diff = abs(size_xy - size) / max(size_xy, 1e-6)
+                height_diff = abs(height - h) / max(height, 1e-6)
+                score = size_diff + height_diff
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_group = group
+            if best_group is None:
+                break
+            idx = block_groups.index(best_group)
+            size = float(self.static_block_group_sizes[idx])
+            h = float(self.static_block_group_heights[idx])
+            if abs(size - size_xy) > 1e-6 or abs(h - height) > 1e-6:
+                raw_size = spec.raw_size if spec.raw_size is not None else spec.size
+                spec = StaticObstacleSpec(
+                    kind=spec.kind,
+                    position=spec.position,
+                    size=(size, size, h),
+                    yaw=spec.yaw,
+                    raw_size=raw_size,
+                )
+            spawned.append(spec)
+            group_used[best_group] += 1
+
+        num_target = len(static_specs)
+        num_spawned = len(spawned)
+        truncate_rate = 0.0
+        if num_target > 0:
+            truncate_rate = 1.0 - float(num_spawned) / float(num_target)
+        return spawned, num_target, num_spawned, truncate_rate
+
+    def _fill_dynamic_buffers(self, env_id: int, dynamic_specs):
+        if self.dynamic_actor_indices is None:
+            return
+        self.dynamic_active[env_id].fill_(False)
+        self.dynamic_start[env_id].zero_()
+        self.dynamic_dir[env_id].zero_()
+        self.dynamic_path_len[env_id].zero_()
+        self.dynamic_phase[env_id].zero_()
+        self.dynamic_period[env_id].fill_(1.0)
+        self.dynamic_height[env_id].zero_()
+
+        max_dyn = int(self.dynamic_actor_indices.shape[1])
+        for idx, spec in enumerate(dynamic_specs[:max_dyn]):
+            start = torch.tensor(spec.path_start, device=self.device, dtype=torch.float32)
+            end = torch.tensor(spec.path_end, device=self.device, dtype=torch.float32)
+            delta = end - start
+            delta_xy = delta.clone()
+            delta_xy[2] = 0.0
+            path_len = torch.norm(delta_xy[:2])
+            direction = delta_xy / (path_len + 1e-6)
+            self.dynamic_active[env_id, idx] = True
+            self.dynamic_start[env_id, idx] = start
+            self.dynamic_dir[env_id, idx] = direction
+            self.dynamic_path_len[env_id, idx] = path_len
+            self.dynamic_phase[env_id, idx] = float(spec.phase)
+            self.dynamic_period[env_id, idx] = float(spec.period)
+            self.dynamic_height[env_id, idx] = float(spec.size[2])
+
+    def _sync_static_obstacles(self, env_ids: torch.Tensor):
+        for group in getattr(self, "static_block_groups", []):
+            self._sync_static_group(env_ids, group)
+        self._sync_static_group(env_ids, "wall")
+
+    def _sync_static_group(self, env_ids: torch.Tensor, group: str):
+        indices = getattr(self, f"static_{group}_actor_indices", None)
+        if indices is None or len(env_ids) == 0:
+            return
+        active = getattr(self, f"static_{group}_active")
+        pos_local = getattr(self, f"static_{group}_pos_local")
+        quat = getattr(self, f"static_{group}_quat")
+        max_static = int(indices.shape[1])
+        origins = self.env_origins[env_ids].repeat_interleave(max_static, dim=0)
+        pos_world = pos_local[env_ids].reshape(-1, 3) + origins[:, :3]
+        active_flat = active[env_ids].reshape(-1)
+        if (~active_flat).any():
+            pos_world[~active_flat] = 0.0
+            pos_world[~active_flat, 2] = -5.0
+        quat_flat = quat[env_ids].reshape(-1, 4)
+        indices_flat = indices[env_ids].reshape(-1)
+        indices_long = indices_flat.to(torch.long)
+        self.root_states[indices_long, :3] = pos_world
+        self.root_states[indices_long, 3:7] = quat_flat
+        self.root_states[indices_long, 7:13] = 0.0
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(indices_flat),
+            len(indices_flat),
+        )
+
+    def _reset_scene(self, env_ids: torch.Tensor, force_resample: Optional[torch.Tensor] = None):
+        if self.scene_manager is None:
+            return
+        if len(env_ids) == 0:
+            return
+        if force_resample is None:
+            force_resample = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
+        use_actor_sampling = bool(getattr(self.cfg.terrain, "scene_use_actors", False))
+        resample_on_reset = bool(getattr(self.cfg.terrain, "scene_resample_on_reset", False))
+
+        env_id_list = env_ids.tolist()
+        for idx, env_id in enumerate(env_id_list):
+            self.scene_episode_count[env_id] += 1
+            episode_idx = int(self.scene_episode_count[env_id].item())
+            scene_spec = None
+            if use_actor_sampling:
+                need_resample = bool(force_resample[idx].item()) or resample_on_reset or self.scene_spec_cache[env_id] is None
+                if need_resample:
+                    difficulty = self._get_scene_difficulty(env_id)
+                    scene_spec = self.scene_manager.sample_scene(difficulty, env_id, episode_idx)
+                    self.scene_spec_cache[env_id] = scene_spec
+                else:
+                    scene_spec = self.scene_spec_cache[env_id]
+            else:
+                scene_spec = self._get_scene_spec(env_id)
+
+            static_specs = scene_spec.static_obstacles if scene_spec is not None else []
+            spawned_specs, num_target, num_spawned, truncate_rate = self._allocate_static_specs(static_specs)
+            if scene_spec is not None:
+                layout_hash = self.scene_manager._hash_layout(list(spawned_specs), scene_spec.dynamic_template)
+                scene_spec = SceneSpec(
+                    scene_type=scene_spec.scene_type,
+                    difficulty=scene_spec.difficulty,
+                    params=scene_spec.params,
+                    static_obstacles=tuple(spawned_specs),
+                    dynamic_template=scene_spec.dynamic_template,
+                    layout_seed=scene_spec.layout_seed,
+                    layout_id=scene_spec.layout_id,
+                    layout_hash=layout_hash,
+                )
+                self.scene_spec_cache[env_id] = scene_spec
+            self._fill_static_buffers(env_id, spawned_specs)
+
+            dynamic_specs = []
+            if scene_spec is not None and self.scene_manager.has_dynamic and self.dynamic_actor_indices is not None:
+                dynamic_specs = self.scene_manager.sample_dynamic_obstacles(scene_spec, env_id, episode_idx)
+            if self.dynamic_actor_indices is not None:
+                self._fill_dynamic_buffers(env_id, dynamic_specs)
+            if scene_spec is not None:
+                self.scene_meta[env_id] = self.scene_manager.build_meta(scene_spec, dynamic_specs)
+                self.scene_meta[env_id]["num_static_target"] = int(num_target)
+                self.scene_meta[env_id]["num_static_spawned"] = int(num_spawned)
+                self.scene_meta[env_id]["truncate_rate"] = float(truncate_rate)
+                if truncate_rate > 0.05:
+                    print(
+                        f"[Warn] static truncate_rate={truncate_rate:.3f} "
+                        f"(env={env_id}, target={num_target}, spawned={num_spawned})"
+                    )
+
+        if getattr(self, "static_block_groups", []) or self.static_wall_actor_indices is not None:
+            self._sync_static_obstacles(env_ids)
+        if self.dynamic_actor_indices is not None:
+            self.scene_dyn_time[env_ids] = 0.0
+            self._sync_dynamic_obstacles()
+        sample_id = int(env_ids[0].item())
+        if self.scene_meta[sample_id] is not None:
+            self.extras["scene_meta"] = self.scene_meta[sample_id]
+
+    def _update_dynamic_obstacles(self):
+        if self.dynamic_actor_indices is None:
+            return
+        self.scene_dyn_time += self.dt
+        self._sync_dynamic_obstacles()
+
+    def _sync_dynamic_obstacles(self):
+        if self.dynamic_actor_indices is None:
+            return
+        t = self.scene_dyn_time.view(-1, 1, 1)
+        period = self.dynamic_period.unsqueeze(-1).clamp(min=1e-3)
+        phase = self.dynamic_phase.unsqueeze(-1)
+        half = 0.5 * period
+        tau = torch.remainder(t + phase, period)
+        progress = torch.where(tau <= half, tau / half, (period - tau) / half).clamp(0.0, 1.0)
+        dist = progress * self.dynamic_path_len.unsqueeze(-1)
+        pos_local = self.dynamic_start + self.dynamic_dir * dist
+        pos_local[..., 2] = self.dynamic_height * 0.5
+        pos_world = pos_local + self.env_origins[:, None, :3]
+        inactive_mask = ~self.dynamic_active
+        if inactive_mask.any():
+            pos_world[inactive_mask] = 0.0
+            pos_world[inactive_mask, 2] = -5.0
+        pos_flat = pos_world.reshape(-1, 3)
+        quat_flat = self.dynamic_quat.reshape(-1, 4)
+        indices = self.dynamic_actor_indices_flat
+        indices_long = self.dynamic_actor_indices_flat_long
+        self.root_states[indices_long, :3] = pos_flat
+        self.root_states[indices_long, 3:7] = quat_flat
+        self.root_states[indices_long, 7:13] = 0.0
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(indices),
+            len(indices),
+        )
+
+    def _maybe_resample_scene_columns(self, env_ids: torch.Tensor):
+        if len(env_ids) == 0:
+            return
+        scene_type = getattr(self.cfg.terrain, "scene_type", None)
+        scene_types = getattr(self.cfg.terrain, "scene_types", None)
+        if not scene_type and not scene_types:
+            return
+        if not getattr(self.cfg.terrain, "scene_resample_on_reset", False):
+            return
+        if not hasattr(self, "terrain_types") or self.terrain_types is None:
+            return
+        num_cols = int(getattr(self.cfg.terrain, "num_cols", 1))
+        if num_cols <= 1:
+            return
+        if self.scene_specs is None:
+            return
+        new_cols = torch.randint(0, num_cols, (len(env_ids),), device=self.device)
+        self.terrain_types[env_ids] = new_cols
+        if not getattr(self.cfg.terrain, "curriculum", False) and hasattr(self, "terrain_origins"):
+            self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
     def _reset_root_states(self, env_ids):
         """重置root状态，slalom地形时固定入口位姿"""
         if len(env_ids) == 0:
             return
+        scene_type = getattr(self.cfg.terrain, "scene_type", None)
         if self.custom_origins:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
             self.root_states[env_ids, :2] += torch_rand_float(
                 -1.0, 1.0, (len(env_ids), 2), device=self.device
             )
-            if hasattr(self, "terrain_types"):
+            if not scene_type and hasattr(self, "terrain_types"):
                 proportions = []
                 running = 0.0
                 for p in self.cfg.terrain.terrain_proportions:
@@ -474,6 +1007,10 @@ class HexGround(LeggedRobot):
         #     exit(0)
             
         return torques
+
+    def _post_physics_step_callback(self):
+        self._update_dynamic_obstacles()
+        super()._post_physics_step_callback()
     
 
     def post_physics_step(self):
@@ -595,9 +1132,20 @@ class HexGround(LeggedRobot):
 
 
     def reset_idx(self, env_ids:torch.Tensor):
+        prev_levels = None
+        if hasattr(self, "terrain_levels") and len(env_ids) > 0:
+            prev_levels = self.terrain_levels[env_ids].clone()
+        self._maybe_resample_scene_columns(env_ids)
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
+            force_resample = None
+            if prev_levels is not None and bool(getattr(self.cfg.terrain, "scene_resample_on_level_change", False)):
+                level_changed = self.terrain_levels[env_ids] != prev_levels
+                force_resample = level_changed
+            self._reset_scene(env_ids, force_resample=force_resample)
+            if prev_levels is not None:
+                self.scene_level_cache[env_ids] = self.terrain_levels[env_ids]
             self._resample_nav_goals(env_ids)
             if hasattr(self, "goal_world"):
                 # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
@@ -830,11 +1378,47 @@ class HexGround(LeggedRobot):
             if reached.any():
                 self._resample_nav_goals(reached.nonzero(as_tuple=False).flatten())
 
-    def _line_has_obstacle(self, start_xy: torch.Tensor, goal_xy: torch.Tensor) -> torch.Tensor:
-        if self.height_samples is None:
-            return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
+    def _line_has_obstacle(
+        self,
+        start_xy: torch.Tensor,
+        goal_xy: torch.Tensor,
+        env_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         samples = int(getattr(self.nav_cfg, "goal_line_samples", 16))
         if samples <= 0:
+            return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
+        use_actor = bool(getattr(self.cfg.terrain, "scene_use_actors", False))
+        if use_actor and hasattr(self, "scene_spec_cache") and self.scene_spec_cache is not None and env_ids is not None:
+            t = torch.linspace(0.0, 1.0, samples, device=self.device)
+            blocked = torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
+        for idx, env_id in enumerate(env_ids.tolist()):
+            scene_spec = self.scene_spec_cache[env_id]
+            if scene_spec is None:
+                continue
+                p0 = start_xy[idx]
+                p1 = goal_xy[idx]
+                points = p0 + (p1 - p0).unsqueeze(0) * t.view(-1, 1)
+                origin = self.env_origins[env_id, :2]
+                for spec in scene_spec.static_obstacles:
+                    center = origin + torch.tensor(spec.position[:2], device=self.device, dtype=torch.float32)
+                    size_xy = float(max(spec.size[0], spec.size[1]))
+                    if spec.kind == "pole":
+                        radius = 0.5 * size_xy
+                        dx = points[:, 0] - center[0]
+                        dy = points[:, 1] - center[1]
+                        inside = (dx * dx + dy * dy) <= (radius * radius)
+                    else:
+                        half_x = 0.5 * spec.size[0]
+                        half_y = 0.5 * spec.size[1]
+                        dx = torch.abs(points[:, 0] - center[0])
+                        dy = torch.abs(points[:, 1] - center[1])
+                        inside = (dx <= half_x) & (dy <= half_y)
+                    if inside.any():
+                        blocked[idx] = True
+                        break
+            return blocked
+
+        if self.height_samples is None:
             return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
 
         t = torch.linspace(0.0, 1.0, samples, device=self.device).view(1, -1, 1)
@@ -869,6 +1453,8 @@ class HexGround(LeggedRobot):
         range_x = getattr(self.nav_cfg, "goal_range_x", [2.0, 5.0])
         range_y = getattr(self.nav_cfg, "goal_range_y", [-3.0, 3.0])
         allow_fallback = bool(getattr(self.nav_cfg, "goal_allow_fallback", True))
+        force_blocking = bool(getattr(self.nav_cfg, "goal_force_blocking_line", False))
+        force_prob = float(getattr(self.nav_cfg, "goal_force_blocking_prob", 1.0))
 
         pending = env_ids.clone()
         for _ in range(max_tries):
@@ -881,8 +1467,12 @@ class HexGround(LeggedRobot):
             pos = self.root_states[pending, :2]
             dist = torch.norm(goal_world - pos, dim=1)
             dist_ok = dist >= min_dist
-            blocked = self._line_has_obstacle(pos, goal_world)
-            ok = dist_ok & blocked
+            blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+            if force_blocking and force_prob > 0.0:
+                force_mask = torch.rand_like(dist_ok.float()) < force_prob
+            else:
+                force_mask = torch.zeros_like(dist_ok, dtype=torch.bool)
+            ok = dist_ok & (blocked | ~force_mask)
             if ok.any():
                 self.goal_world[pending[ok]] = goal_world[ok]
             pending = pending[~ok]
@@ -898,9 +1488,15 @@ class HexGround(LeggedRobot):
                 pos = self.root_states[pending, :2]
                 dist = torch.norm(goal_world - pos, dim=1)
                 dist_ok = dist >= min_dist
-                if dist_ok.any():
-                    self.goal_world[pending[dist_ok]] = goal_world[dist_ok]
-                pending = pending[~dist_ok]
+                blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+                if force_blocking and force_prob > 0.0:
+                    force_mask = torch.rand_like(blocked.float()) < force_prob
+                else:
+                    force_mask = torch.zeros_like(blocked, dtype=torch.bool)
+                ok = dist_ok & (blocked | ~force_mask)
+                if ok.any():
+                    self.goal_world[pending[ok]] = goal_world[ok]
+                pending = pending[~ok]
 
     def _init_buffers(self):
         super()._init_buffers()

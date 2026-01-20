@@ -23,7 +23,12 @@ from legged_gym.scripts import train_highlevel as th
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Play high-level planner in Isaac Gym")
-    parser.add_argument("--task", type=str, default="hex_ground", help="Task name (only hex_ground supported)")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="hex_ground",
+        help="Task name (hex_ground / hex_s1..hex_s6 / hex_mix_gate)",
+    )
     parser.add_argument(
         "--mode",
         type=str,

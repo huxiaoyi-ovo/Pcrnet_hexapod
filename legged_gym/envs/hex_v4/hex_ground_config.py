@@ -66,8 +66,56 @@ class HexGroundCfg(LeggedRobotCfg):
         crossable_height_max = 0.08
         crossable_width_margin = 0.0
         crossable_sector_deg = 60.0
+        # 目标采样：是否强制“直线遇障”（actor/heightfield）
+        goal_force_blocking_line = True
+        goal_force_blocking_prob = 1.0
+        # Follow 训练覆盖（避免破坏技能分离）
+        follow_goal_force_blocking_line = False
+        follow_goal_force_blocking_prob = 0.0
+        # V5 高层奖励参数（统一口径；hex_s1..s6 继承）
+        reward_cfg = {
+            "goal_approach_scale": 6.0,
+            "goal_reach_bonus": 10.0,
+            "goal_reach_threshold": 0.1,
+            "heading_scale": 0.08,
+            "heading_offset_rad": 0.5 * math.pi,
+            "heading_use_difficulty_gate": True,
+            "heading_min_weight": 0.2,
+            "heading_gate_use": True,
+            "heading_gate_min_speed": 0.1,
+            "heading_gate_min_approach": 0.01,
+            "passable_align_scale": 0.05,
+            "passable_occ_ratio_low": 0.2,
+            "passable_occ_ratio_high": 0.6,
+            "passable_sector_deg": 60.0,
+            "crossable_align_scale": 0.05,
+            "crossable_gate_min_speed": 0.05,
+            "gate_smooth_penalty": -0.02,
+            "gate_max_change": 0.1,
+            "risk_barrier_scale": -0.8,
+            "risk_barrier_safe": None,
+            "risk_barrier_free": None,
+            "risk_barrier_tau": 0.08,
+            "collision_penalty": -10.0,
+            "stability_scale": 0.01,
+            "time_penalty": -0.03,
+            "velocity_scale": 0.0,
+        }
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
+        scene_use_actors = False
+        scene_use_heightfield = False
+        scene_resample_on_reset = False
+        scene_resample_on_level_change = True
+        scene_static_max = 0
+        scene_static_block_max = 0
+        scene_static_wall_max = 0
+        scene_static_block_size = 0.4
+        scene_static_block_height = 0.35
+        scene_static_block_sizes = []
+        scene_static_block_heights = []
+        scene_static_wall_block_size = 1.0
+        scene_static_wall_block_height = 0.35
         #mesh_type = 'plane'
         curriculum = True
         border_size=1.0

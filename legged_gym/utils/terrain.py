@@ -308,12 +308,27 @@ class Terrain:
         self.tot_rows = int(cfg.num_rows * self.length_per_env_pixels) + 2 * self.border
 
         self.height_field_raw = np.zeros((self.tot_rows , self.tot_cols), dtype=np.int16)
-        if cfg.curriculum:
+        self.scene_specs = None
+        self.scene_manager = None
+        self.scene_use_actors = bool(getattr(cfg, "scene_use_actors", False))
+        if getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None):
+            from legged_gym.envs.hex_v4.scene_manager import SceneManager
+            self.scene_manager = SceneManager(cfg)
+            self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
+
+        if self.scene_manager is not None:
+            if self.scene_use_actors:
+                self.scene_flat()
+            elif cfg.curriculum:
+                self.scene_curriculum()
+            else:
+                self.scene_randomized()
+        elif cfg.curriculum:
             self.curiculum()
         elif cfg.selected:
             self.selected_terrain()
-        else:    
-            self.randomized_terrain()   
+        else:
+            self.randomized_terrain()
         
         self.heightsamples = self.height_field_raw
         if self.type=="trimesh":
@@ -340,6 +355,55 @@ class Terrain:
                 choice = j / self.cfg.num_cols + 0.001
                 terrain = self.make_terrain(choice, difficulty)
                 self.add_terrain_to_map(terrain, i, j)
+
+    def scene_randomized(self):
+        for k in range(self.cfg.num_sub_terrains):
+            (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
+            difficulty = np.random.uniform(0.0, 1.0)
+            terrain = terrain_utils.SubTerrain(
+                "terrain",
+                width=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
+                vertical_scale=self.cfg.vertical_scale,
+                horizontal_scale=self.cfg.horizontal_scale,
+            )
+            seed = self.scene_manager.seed_for_cell(i, j)
+            scene_spec = self.scene_manager.build_scene(terrain, difficulty, seed=seed)
+            if self.scene_specs is not None:
+                self.scene_specs[i][j] = scene_spec
+            self.add_terrain_to_map(terrain, i, j)
+
+    def scene_curriculum(self):
+        for j in range(self.cfg.num_cols):
+            for i in range(self.cfg.num_rows):
+                difficulty = i / max(1, (self.cfg.num_rows - 1))
+                terrain = terrain_utils.SubTerrain(
+                    "terrain",
+                    width=self.width_per_env_pixels,
+                    length=self.length_per_env_pixels,
+                    vertical_scale=self.cfg.vertical_scale,
+                    horizontal_scale=self.cfg.horizontal_scale,
+                )
+                seed = self.scene_manager.seed_for_cell(i, j)
+                scene_spec = self.scene_manager.build_scene(terrain, difficulty, seed=seed)
+                if self.scene_specs is not None:
+                    self.scene_specs[i][j] = scene_spec
+                self.add_terrain_to_map(terrain, i, j)
+
+    def scene_flat(self):
+        for k in range(self.cfg.num_sub_terrains):
+            (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
+            terrain = terrain_utils.SubTerrain(
+                "terrain",
+                width=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
+                vertical_scale=self.cfg.vertical_scale,
+                horizontal_scale=self.cfg.horizontal_scale,
+            )
+            terrain.height_field_raw[:] = 0
+            if self.scene_specs is not None:
+                self.scene_specs[i][j] = None
+            self.add_terrain_to_map(terrain, i, j)
 
     def selected_terrain(self):
         terrain_type = self.cfg.terrain_kwargs.pop('type')

@@ -151,11 +151,10 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         
         #使用单张卡训练时，使用agrs.rl_device
-        if 'hex' in name:
-            if name=='hex_ground':
-                runner = EGPORunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-            elif name=='hex_terrain':
-                runner = EGPOEncoderRunner(env,train_cfg_dict,log_dir,device=args.rl_device)
+        if name == "hex_ground":
+            runner = EGPORunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        elif name == "hex_terrain":
+            runner = EGPOEncoderRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         else:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         # runner = ExpertPreloadRunner(env, train_cfg_dict, log_dir,device=args.rl_device)
