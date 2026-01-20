@@ -1,34 +1,46 @@
+# 在项目根目录执行
 conda activate hexapod_rl_env
-python ~/RL_hexapod_gym/legged_gym/scripts/train.py --task=
 
-python ~/RL_GYM_PROJECTS/RL_hexapod_gym/legged_gym/scripts/train.py --task=hex_terrain --num_envs=6
-python legged_gym/scripts/play.py --task=hex_ground --num_envs=1  --load_run=Dec23_20-05-01_ground_wobble_fix --checkpoint=400 --camera_mode=both --camera_show --keyboard_cmds
+# ------------------------
+# 低层运动策略（EGPO）
+# ------------------------
+# 训练（EGPO 仅用于低层）
+python legged_gym/scripts/train.py --task=hex_ground --num_envs 4096 --headless
 
-python legged_gym/scripts/play.py --task=hex_ground --num_envs=1  --load_run=EGPO --checkpoint=2000 --camera_mode=both --camera_show --keyboard_cmds
+# 演示（低层）
+python legged_gym/scripts/play.py --task=hex_ground --num_envs 1 --load_run <LOW_RUN> --checkpoint <LOW_CKPT> --camera_mode=both --camera_show --keyboard_cmds
 
+# ------------------------
+# 高层 V5 Teacher 训练（cmd-space MoE）
+# ------------------------
+# S1 Follow（Forest，Follow 专用任务）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1_follow --low_level_ckpt <LOW_LEVEL_CKPT> --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
 
-python legged_gym/scripts/play_highlevel.py --task hex_ground --teacher_ckpt outputs/planner/teacher_20260104_192531/best_model.pt --camera_show
+# S1 Avoid（Forest 主训）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt <LOW_LEVEL_CKPT> --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
 
+# S2 Avoid 微调（Corridor，跨 task finetune）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --low_level_ckpt <LOW_LEVEL_CKPT> --finetune_from <AVOID_FOREST_CKPT> --num_envs 512 --num_steps 24 --num_iterations 120 --decimation 5 --headless
 
-python legged_gym/scripts/train_highlevel.py --mode teacher --task hex_ground --low_level_ckpt  logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --decimation 5 --headless
-
-# V5 最小可运行指令（S1-S6 + MoE + resume/finetune）
-# 说明：请替换 low_level_ckpt / follow_ckpt / avoid_ckpt / gate_ckpt 为你的实际路径
-
-# S1 Follow 训练（cmd-space expert）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1_follow --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
-
-# S1 Avoid 训练（主训）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
-
-# S2 Avoid 微调（跨 task finetune）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --finetune_from outputs/planner/avoid/best_model.pt --num_envs 512 --num_steps 24 --num_iterations 120 --decimation 5 --headless
-
-# S4 Gate 单场景训练（冻结 Follow/Avoid）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_s4 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --follow_ckpt outputs/planner/follow/best_model.pt --avoid_ckpt outputs/planner/avoid/best_model.pt --num_envs 512 --num_steps 48 --num_iterations 200 --decimation 5 --headless
+# S4 Gate 单场景训练（Crossing，冻结 Follow/Avoid）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_s4 --low_level_ckpt <LOW_LEVEL_CKPT> --follow_ckpt <FOLLOW_CKPT> --avoid_ckpt <AVOID_CKPT> --num_envs 512 --num_steps 48 --num_iterations 200 --decimation 5 --headless
 
 # Mix Gate 微调（S3/S4/S5 混合）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_mix_gate --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --follow_ckpt outputs/planner/follow/best_model.pt --avoid_ckpt outputs/planner/avoid/best_model.pt --finetune_from outputs/planner/moe/best_model.pt --num_envs 512 --num_steps 48 --num_iterations 120 --decimation 5 --headless
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_mix_gate --low_level_ckpt <LOW_LEVEL_CKPT> --follow_ckpt <FOLLOW_CKPT> --avoid_ckpt <AVOID_CKPT> --finetune_from <GATE_S4_CKPT> --num_envs 512 --num_steps 48 --num_iterations 120 --decimation 5 --headless
 
-# Resume 示例（恢复优化器与 iter）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --resume outputs/planner/avoid/checkpoint_0200.pt --num_envs 512 --num_steps 24 --num_iterations 100 --decimation 5 --headless
+# Gate + T1 弱遮挡（低概率，训练稳定后再启）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill moe --task hex_mix_gate --low_level_ckpt <LOW_LEVEL_CKPT> --follow_ckpt <FOLLOW_CKPT> --avoid_ckpt <AVOID_CKPT> --finetune_from <GATE_S4_CKPT> --t1_goal_occlusion --t1_goal_occlusion_prob 0.02 --t1_goal_occlusion_len 10 --num_envs 512 --num_steps 48 --num_iterations 120 --decimation 5 --headless
+
+# Resume / Finetune 示例
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --low_level_ckpt <LOW_LEVEL_CKPT> --resume <AVOID_CKPT> --num_envs 512 --num_steps 24 --num_iterations 100 --decimation 5 --headless
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --low_level_ckpt <LOW_LEVEL_CKPT> --finetune_from <AVOID_CKPT> --num_envs 512 --num_steps 24 --num_iterations 120 --decimation 5 --headless
+
+# ------------------------
+# 高层可视化 / 演示
+# ------------------------
+python legged_gym/scripts/play_highlevel.py --mode teacher --skill follow --task hex_ground --low_level_ckpt <LOW_LEVEL_CKPT> --teacher_ckpt <FOLLOW_CKPT> --camera_show
+python legged_gym/scripts/play_highlevel.py --mode teacher --skill avoid --task hex_ground --low_level_ckpt <LOW_LEVEL_CKPT> --teacher_ckpt <AVOID_CKPT> --camera_show
+python legged_gym/scripts/play_highlevel.py --mode teacher --skill moe --task hex_ground --low_level_ckpt <LOW_LEVEL_CKPT> --teacher_ckpt <GATE_CKPT> --follow_ckpt <FOLLOW_CKPT> --avoid_ckpt <AVOID_CKPT> --camera_show
+
+# 说明：如果 play_highlevel 已支持 hex_s1..hex_s6，可将 --task 改为 hex_s1/hex_s2/hex_s3/hex_s4/hex_s5/hex_s6/hex_mix_gate 用于场景可视化。
+# Hold-out（S6）建议仅用于最终测试/可视化，不参与训练。

@@ -73,6 +73,12 @@ class HexGround(LeggedRobot):
     
     def _create_envs(self):
         super()._create_envs()
+        robot_indices = np.zeros(self.num_envs, dtype=np.int32)
+        for env_id in range(self.num_envs):
+            env_handle = self.envs[env_id]
+            actor_handle = self.actor_handles[env_id]
+            robot_indices[env_id] = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+        self.robot_actor_indices = torch.tensor(robot_indices, device=self.device, dtype=torch.int32)
         self.scene_manager = getattr(self.terrain, "scene_manager", None)
         if self.scene_manager is None:
             self.dynamic_actor_indices = None
@@ -674,14 +680,38 @@ class HexGround(LeggedRobot):
         quat_flat = quat[env_ids].reshape(-1, 4)
         indices_flat = indices[env_ids].reshape(-1)
         indices_long = indices_flat.to(torch.long)
-        self.root_states[indices_long, :3] = pos_world
-        self.root_states[indices_long, 3:7] = quat_flat
-        self.root_states[indices_long, 7:13] = 0.0
+        root_states = getattr(self, "all_root_states", self.root_states)
+        root_states[indices_long, :3] = pos_world
+        root_states[indices_long, 3:7] = quat_flat
+        root_states[indices_long, 7:13] = 0.0
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
-            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(root_states),
             gymtorch.unwrap_tensor(indices_flat),
             len(indices_flat),
+        )
+
+    def _sync_robot_root_states(self, env_ids: torch.Tensor):
+        if len(env_ids) == 0:
+            return
+        root_states = getattr(self, "all_root_states", self.root_states)
+        if getattr(self, "robot_actor_indices_long", None) is None:
+            env_ids_int32 = env_ids.to(torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim,
+                gymtorch.unwrap_tensor(root_states),
+                gymtorch.unwrap_tensor(env_ids_int32),
+                len(env_ids_int32),
+            )
+            return
+        actor_ids = self.robot_actor_indices_long[env_ids]
+        root_states[actor_ids] = self.root_states[env_ids]
+        actor_ids_int32 = actor_ids.to(torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(root_states),
+            gymtorch.unwrap_tensor(actor_ids_int32),
+            len(actor_ids_int32),
         )
 
     def _reset_scene(self, env_ids: torch.Tensor, force_resample: Optional[torch.Tensor] = None):
@@ -779,12 +809,13 @@ class HexGround(LeggedRobot):
         quat_flat = self.dynamic_quat.reshape(-1, 4)
         indices = self.dynamic_actor_indices_flat
         indices_long = self.dynamic_actor_indices_flat_long
-        self.root_states[indices_long, :3] = pos_flat
-        self.root_states[indices_long, 3:7] = quat_flat
-        self.root_states[indices_long, 7:13] = 0.0
+        root_states = getattr(self, "all_root_states", self.root_states)
+        root_states[indices_long, :3] = pos_flat
+        root_states[indices_long, 3:7] = quat_flat
+        root_states[indices_long, 7:13] = 0.0
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
-            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(root_states),
             gymtorch.unwrap_tensor(indices),
             len(indices),
         )
@@ -895,13 +926,7 @@ class HexGround(LeggedRobot):
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.1, 0.1, (len(env_ids), 6), device=self.device
         )
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim,
-            gymtorch.unwrap_tensor(self.root_states),
-            gymtorch.unwrap_tensor(env_ids_int32),
-            len(env_ids_int32),
-        )
+        self._sync_robot_root_states(env_ids)
 
 
     def step(self,actions):
@@ -1017,6 +1042,7 @@ class HexGround(LeggedRobot):
         #添加了base_lin_acc的计算，添加了IMU加速度计算，添加了分开式的观测计算,所以需要重写基类的这个函数
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
+        self._refresh_robot_root_states()
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
@@ -1066,6 +1092,7 @@ class HexGround(LeggedRobot):
         #添加了base_lin_acc的计算，添加了IMU加速度计算，添加了分开式的观测计算,所以需要重写基类的这个函数
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
+        self._refresh_robot_root_states()
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
@@ -1163,13 +1190,7 @@ class HexGround(LeggedRobot):
                 qw = torch.cos(0.5 * yaw)
                 quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
                 self.root_states[env_ids, 3:7] = quat
-                env_ids_int32 = env_ids.to(dtype=torch.int32)
-                self.gym.set_actor_root_state_tensor_indexed(
-                    self.sim,
-                    gymtorch.unwrap_tensor(self.root_states),
-                    gymtorch.unwrap_tensor(env_ids_int32),
-                    len(env_ids_int32),
-                )
+                self._sync_robot_root_states(env_ids)
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:

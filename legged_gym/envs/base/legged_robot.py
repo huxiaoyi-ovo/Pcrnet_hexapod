@@ -512,7 +512,21 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         # create some wrapper tensors for different slices
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)
+        self.all_root_states = gymtorch.wrap_tensor(actor_root_state)
+        robot_indices = getattr(self, "robot_actor_indices", None)
+        self.robot_actor_indices_long = None
+        if robot_indices is not None:
+            if isinstance(robot_indices, list):
+                robot_indices = torch.tensor(robot_indices, device=self.device, dtype=torch.long)
+            elif isinstance(robot_indices, np.ndarray):
+                robot_indices = torch.tensor(robot_indices, device=self.device, dtype=torch.long)
+            else:
+                robot_indices = robot_indices.to(self.device).to(torch.long)
+            self.robot_actor_indices_long = robot_indices
+            self.root_states = torch.zeros(self.num_envs, 13, device=self.device, dtype=self.all_root_states.dtype)
+            self._refresh_robot_root_states()
+        else:
+            self.root_states = self.all_root_states
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
@@ -562,6 +576,11 @@ class LeggedRobot(BaseTask):
                 if self.cfg.control.control_type in ["P", "V"]:
                     print(f"PD gain of joint {name} were not defined, setting them to zero")
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+
+    def _refresh_robot_root_states(self):
+        if self.robot_actor_indices_long is None:
+            return
+        self.root_states[:] = self.all_root_states[self.robot_actor_indices_long]
 
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
