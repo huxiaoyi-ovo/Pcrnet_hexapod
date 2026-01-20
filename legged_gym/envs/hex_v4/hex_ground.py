@@ -40,7 +40,7 @@ class HexGround(LeggedRobot):
         self.scene_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
         self.scene_spec_cache = [None] * self.num_envs
-        self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.int32)
+        self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         self._init_scene_runtime()
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
         self.actuator=Actuator(self.cfg,self.device)
