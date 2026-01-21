@@ -15,12 +15,16 @@ class HexS1Cfg(HexGroundCfg):
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 80
+        scene_static_block_max = 40
+        scene_static_wall_max = 160
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
+        scene_static_wall_block_size = 1.6
         scene_params_easy = {
             "corridor_width": 1.6,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
+            "wall_segment_count": 16,
             "gate_count": 2,
             "gate_thickness": 0.25,
             "gap_width_min": 0.8,
@@ -33,6 +37,7 @@ class HexS1Cfg(HexGroundCfg):
             "corridor_width": 1.1,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
+            "wall_segment_count": 20,
             "gate_count": 3,
             "gate_thickness": 0.3,
             "gap_width_min": 0.6,
@@ -65,12 +70,16 @@ class HexS1FollowCfg(HexGroundCfg):
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 80
+        scene_static_block_max = 40
+        scene_static_wall_max = 160
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
+        scene_static_wall_block_size = 1.6
         scene_params_easy = {
             "corridor_width": 1.6,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
+            "wall_segment_count": 16,
             "gate_count": 2,
             "gate_thickness": 0.25,
             "gap_width_min": 0.8,
@@ -83,6 +92,7 @@ class HexS1FollowCfg(HexGroundCfg):
             "corridor_width": 1.1,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
+            "wall_segment_count": 20,
             "gate_count": 3,
             "gate_thickness": 0.3,
             "gap_width_min": 0.6,

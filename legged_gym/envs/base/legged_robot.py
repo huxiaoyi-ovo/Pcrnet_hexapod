@@ -419,7 +419,10 @@ class LeggedRobot(BaseTask):
         self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(0.5, 1.5, (len(env_ids), self.num_dof), device=self.device)
         self.dof_vel[env_ids] = 0.
 
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        if self.robot_actor_indices_int32 is not None:
+            env_ids_int32 = self.robot_actor_indices_int32[env_ids]
+        else:
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(self.sim,
                                               gymtorch.unwrap_tensor(self.dof_state),
                                               gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
@@ -450,7 +453,16 @@ class LeggedRobot(BaseTask):
         """
         max_vel = self.cfg.domain_rand.max_push_vel_xy
         self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+        if self.robot_actor_indices_int32 is None:
+            self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+        else:
+            self.all_root_states[self.robot_actor_indices_long] = self.root_states
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim,
+                gymtorch.unwrap_tensor(self.all_root_states),
+                gymtorch.unwrap_tensor(self.robot_actor_indices_int32),
+                len(self.robot_actor_indices_int32),
+            )
 
     def _update_terrain_curriculum(self, env_ids):
         """ Implements the game-inspired curriculum.
@@ -527,6 +539,7 @@ class LeggedRobot(BaseTask):
         self.all_root_states = gymtorch.wrap_tensor(actor_root_state)
         robot_indices = getattr(self, "robot_actor_indices", None)
         self.robot_actor_indices_long = None
+        self.robot_actor_indices_int32 = None
         if robot_indices is not None:
             if isinstance(robot_indices, list):
                 robot_indices = torch.tensor(robot_indices, device=self.device, dtype=torch.long)
@@ -535,6 +548,7 @@ class LeggedRobot(BaseTask):
             else:
                 robot_indices = robot_indices.to(self.device).to(torch.long)
             self.robot_actor_indices_long = robot_indices
+            self.robot_actor_indices_int32 = robot_indices.to(torch.int32)
             self.root_states = torch.zeros(self.num_envs, 13, device=self.device, dtype=self.all_root_states.dtype)
             self._refresh_robot_root_states()
         else:

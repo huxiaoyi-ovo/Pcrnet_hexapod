@@ -721,6 +721,23 @@ class HierarchicalHexapodEnv:
             passable = occ_block < 0.5
         passable_gap = passable.float().squeeze(1)
 
+        if (
+            hasattr(self.env, "nav_cfg")
+            and self.env.nav_cfg is not None
+            and bool(getattr(self.env.nav_cfg, "affordance_debug", False))
+        ):
+            if not getattr(self, "_aff_debug_logged", False):
+                mid = map_size // 2
+                occ_center = float(occ_all[0, mid, mid].item())
+                occ_front = float(occ_all[0, mid, min(map_size - 1, mid + 2)].item())
+                occ_right = float(occ_all[0, min(map_size - 1, mid + 2), mid].item())
+                print(
+                    "[AffDebug] occ(center/front/right)="
+                    f"({occ_center:.1f}/{occ_front:.1f}/{occ_right:.1f}) "
+                    f"map_extent={map_extent:.2f} cell={cell:.3f}"
+                )
+                self._aff_debug_logged = True
+
         return torch.cat([
             occ_all.unsqueeze(1),
             passable_gap.unsqueeze(1),

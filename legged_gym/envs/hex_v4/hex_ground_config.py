@@ -66,6 +66,8 @@ class HexGroundCfg(LeggedRobotCfg):
         crossable_height_max = 0.08
         crossable_width_margin = 0.0
         crossable_sector_deg = 60.0
+        # affordance 坐标系校验（+Y forward 约定）
+        affordance_debug = False
         # 目标采样：是否强制“直线遇障”（actor/heightfield）
         goal_force_blocking_line = True
         goal_force_blocking_prob = 1.0

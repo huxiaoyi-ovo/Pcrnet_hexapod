@@ -153,6 +153,37 @@ class HexGround(LeggedRobot):
                 self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
                 self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
 
+    def _post_create_envs(self):
+        if not hasattr(self, "robot_actor_indices"):
+            return
+        indices = np.asarray(self.robot_actor_indices, dtype=np.int32)
+        if indices.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"robot_actor_indices mismatch: got {indices.shape[0]}, expected {self.num_envs}"
+            )
+        if np.any(indices < 0):
+            raise RuntimeError(f"robot_actor_indices invalid: {indices}")
+        if np.any(np.diff(indices) <= 0):
+            raise RuntimeError(f"robot_actor_indices not strictly increasing: {indices}")
+        for env_id in range(self.num_envs):
+            robot_idx = int(indices[env_id])
+            other_indices = []
+            for group in getattr(self, "static_block_groups", []):
+                arr = getattr(self, f"static_{group}_actor_indices", None)
+                if arr is not None and arr.shape[1] > 0:
+                    other_indices.append(arr[env_id])
+            if self.static_wall_actor_indices is not None and self.static_wall_actor_indices.shape[1] > 0:
+                other_indices.append(self.static_wall_actor_indices[env_id])
+            if self.dynamic_actor_indices is not None and self.dynamic_actor_indices.shape[1] > 0:
+                other_indices.append(self.dynamic_actor_indices[env_id])
+            if other_indices:
+                min_other = int(np.min(np.concatenate(other_indices)))
+                if min_other <= robot_idx:
+                    raise RuntimeError(
+                        f"robot actor is not first in env {env_id}: "
+                        f"robot_idx={robot_idx}, min_other={min_other}"
+                    )
+
     def _on_create_robot(self, env_id, env_handle, actor_handle):
         if hasattr(self, "robot_actor_indices"):
             self.robot_actor_indices[env_id] = self.gym.get_actor_index(
@@ -1342,11 +1373,16 @@ class HexGround(LeggedRobot):
         #不给初始关节角度添加随机值，因此重写
         self.dof_pos[env_ids]= self.default_dof_pos
         self.dof_vel[env_ids]= 0.
-        env_ids_int32=env_ids.to(dtype=torch.int32)
-        self.gym.set_dof_state_tensor_indexed(self.sim,
-                                              gymtorch.unwrap_tensor(self.dof_state),
-                                              gymtorch.unwrap_tensor(env_ids_int32),
-                                              len(env_ids_int32))
+        if self.robot_actor_indices_int32 is None:
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
+        else:
+            env_ids_int32 = self.robot_actor_indices_int32[env_ids]
+        self.gym.set_dof_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.dof_state),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
 
     def compute_observations(self):
         #先记录观测的最大、最小、平均值

@@ -558,13 +558,25 @@ class SceneManager:
         corridor_width = float(params.get("corridor_width", 1.4))
         corridor_width = max(corridor_width, 2.0 * self.scene_clearance + 0.1)
         wall_thickness = float(params.get("wall_thickness", self.block_size))
+        segment_count = int(round(params.get("wall_segment_count", 0)))
+        segment_len = float(params.get("wall_segment_len", 0.0))
 
         outer = max(0.0, width_m - corridor_width)
         if outer > 0:
             left_center = -(corridor_width * 0.5 + outer * 0.25)
             right_center = (corridor_width * 0.5 + outer * 0.25)
-            obstacles.extend(self._tile_rect(left_center, 0.0, outer * 0.5, length_m, kind="wall"))
-            obstacles.extend(self._tile_rect(right_center, 0.0, outer * 0.5, length_m, kind="wall"))
+            if segment_count > 0:
+                if segment_len <= 0.0:
+                    segment_len = length_m / float(segment_count)
+                segment_len = max(1e-3, segment_len)
+                start_y = -0.5 * length_m + 0.5 * segment_len
+                for idx in range(segment_count):
+                    center_y = start_y + idx * segment_len
+                    obstacles.extend(self._tile_rect(left_center, center_y, outer * 0.5, segment_len, kind="wall"))
+                    obstacles.extend(self._tile_rect(right_center, center_y, outer * 0.5, segment_len, kind="wall"))
+            else:
+                obstacles.extend(self._tile_rect(left_center, 0.0, outer * 0.5, length_m, kind="wall"))
+                obstacles.extend(self._tile_rect(right_center, 0.0, outer * 0.5, length_m, kind="wall"))
 
         gate_count = int(round(params.get("gate_count", 2)))
         gate_thickness = float(params.get("gate_thickness", wall_thickness))
