@@ -4,7 +4,7 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 class HexS2Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         fixed_layout_enable = False
-        scene_type = "s2_doorway"
+        scene_type = "s2_forest"
         scene_seed = 102
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -17,33 +17,35 @@ class HexS2Cfg(HexGroundCfg):
         scene_static_max = 80
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
+        scene_static_block_sizes = [0.24, 0.36, 0.44]
+        scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_params_easy = {
-            "room_width": 2.6,
-            "wall_height": 0.35,
-            "wall_thickness": 0.25,
-            "door_count": 2,
-            "door_thickness": 0.25,
-            "door_width_min": 0.9,
-            "door_width_max": 1.3,
-            "door_offset_max": 0.5,
-            "door_margin_y": 0.8,
-            "jam_count": 0,
-            "jam_size": 0.35,
-            "door_block_width": 0.4,
+            "pole_count_min": 8,
+            "pole_count_max": 12,
+            "pole_radius_min": 0.12,
+            "pole_radius_max": 0.18,
+            "pole_height_min": 0.3,
+            "pole_height_max": 0.35,
+            "pole_margin": 0.4,
+            "block_ratio": 0.2,
+            "block_size_min": 0.28,
+            "block_size_max": 0.4,
+            "block_height_min": 0.3,
+            "block_height_max": 0.35,
         }
         scene_params_hard = {
-            "room_width": 2.1,
-            "wall_height": 0.35,
-            "wall_thickness": 0.25,
-            "door_count": 3,
-            "door_thickness": 0.3,
-            "door_width_min": 0.7,
-            "door_width_max": 1.0,
-            "door_offset_max": 0.6,
-            "door_margin_y": 0.6,
-            "jam_count": 1,
-            "jam_size": 0.4,
-            "door_block_width": 0.4,
+            "pole_count_min": 16,
+            "pole_count_max": 24,
+            "pole_radius_min": 0.14,
+            "pole_radius_max": 0.22,
+            "pole_height_min": 0.35,
+            "pole_height_max": 0.4,
+            "pole_margin": 0.3,
+            "block_ratio": 0.4,
+            "block_size_min": 0.3,
+            "block_size_max": 0.44,
+            "block_height_min": 0.35,
+            "block_height_max": 0.4,
         }
         num_cols = 3
         terrain_proportions = [1.0]

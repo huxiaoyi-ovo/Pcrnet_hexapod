@@ -4,7 +4,7 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 class HexMixGateCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         fixed_layout_enable = False
-        scene_types = ["s3_forest", "s4_crossing", "s5_transition"]
+        scene_types = ["s3_doorway", "s4_crossing", "s5_transition"]
         scene_seed = 120
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -17,30 +17,45 @@ class HexMixGateCfg(HexGroundCfg):
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 80
+        scene_static_block_max = 40
+        scene_static_wall_max = 120
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
-        scene_static_block_sizes = [0.24, 0.44]
-        scene_static_block_heights = [0.3, 0.35]
+        scene_static_block_sizes = [0.28, 0.36, 0.44]
+        scene_static_block_heights = [0.3, 0.35, 0.4]
+        scene_static_wall_block_size = 0.8
+        scene_static_wall_block_height = 0.35
 
         scene_probs_easy = {
-            "s3_forest": 0.2,
+            "s3_doorway": 0.2,
             "s4_crossing": 0.6,
             "s5_transition": 0.2,
         }
         scene_probs_hard = {
-            "s3_forest": 0.3,
+            "s3_doorway": 0.3,
             "s4_crossing": 0.4,
             "s5_transition": 0.3,
         }
 
         scene_params_easy = {
-            "s3_forest": {
-                "pole_count_min": 8,
-                "pole_count_max": 12,
-                "pole_radius_min": 0.12,
-                "pole_radius_max": 0.18,
-                "pole_height": 0.3,
-                "pole_margin": 0.4,
+            "s3_doorway": {
+                "room_width": 2.4,
+                "wall_thickness": 0.25,
+                "room_count": 3,
+                "room_boundary_jitter": 0.4,
+                "door_thickness": 0.25,
+                "door_width_min": 0.9,
+                "door_width_max": 1.2,
+                "door_offset_max": 0.5,
+                "door_block_width": 0.4,
+                "jam_count": 0,
+                "jam_size": 0.35,
+                "room_obstacle_count_min": 0,
+                "room_obstacle_count_max": 1,
+                "room_obstacle_size_min": 0.28,
+                "room_obstacle_size_max": 0.38,
+                "room_obstacle_height_min": 0.3,
+                "room_obstacle_height_max": 0.35,
             },
             "s4_crossing": {
                 "cross_width": 3.0,
@@ -58,20 +73,37 @@ class HexMixGateCfg(HexGroundCfg):
                 "pole_radius_min": 0.12,
                 "pole_radius_max": 0.18,
                 "pole_height": 0.3,
+                "block_size_min": 0.28,
+                "block_size_max": 0.4,
+                "block_height_min": 0.3,
+                "block_height_max": 0.35,
                 "sparse_count": 6,
                 "dense_count": 14,
                 "boundary_offset": 0.0,
                 "boundary_jitter": 0.4,
+                "sparse_block_ratio": 0.1,
+                "dense_block_ratio": 0.3,
             },
         }
         scene_params_hard = {
-            "s3_forest": {
-                "pole_count_min": 16,
-                "pole_count_max": 24,
-                "pole_radius_min": 0.14,
-                "pole_radius_max": 0.22,
-                "pole_height": 0.35,
-                "pole_margin": 0.3,
+            "s3_doorway": {
+                "room_width": 2.1,
+                "wall_thickness": 0.25,
+                "room_count": 4,
+                "room_boundary_jitter": 0.6,
+                "door_thickness": 0.3,
+                "door_width_min": 0.7,
+                "door_width_max": 1.0,
+                "door_offset_max": 0.6,
+                "door_block_width": 0.4,
+                "jam_count": 1,
+                "jam_size": 0.4,
+                "room_obstacle_count_min": 1,
+                "room_obstacle_count_max": 2,
+                "room_obstacle_size_min": 0.3,
+                "room_obstacle_size_max": 0.44,
+                "room_obstacle_height_min": 0.35,
+                "room_obstacle_height_max": 0.4,
             },
             "s4_crossing": {
                 "cross_width": 3.4,
@@ -89,10 +121,16 @@ class HexMixGateCfg(HexGroundCfg):
                 "pole_radius_min": 0.14,
                 "pole_radius_max": 0.22,
                 "pole_height": 0.35,
+                "block_size_min": 0.3,
+                "block_size_max": 0.44,
+                "block_height_min": 0.35,
+                "block_height_max": 0.4,
                 "sparse_count": 4,
                 "dense_count": 20,
                 "boundary_offset": 0.2,
                 "boundary_jitter": 0.6,
+                "sparse_block_ratio": 0.15,
+                "dense_block_ratio": 0.4,
             },
         }
 

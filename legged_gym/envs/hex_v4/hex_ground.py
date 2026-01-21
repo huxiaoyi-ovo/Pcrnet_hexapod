@@ -1081,6 +1081,86 @@ class HexGround(LeggedRobot):
         )
         self._sync_robot_root_states(env_ids)
 
+    def _scene_spawn_bounds(self, scene_spec: Optional[SceneSpec]):
+        if scene_spec is None:
+            return None
+        if scene_spec.scene_type == "s1_corridor":
+            width = float(scene_spec.params.get("corridor_width", self.cfg.terrain.terrain_width))
+        elif scene_spec.scene_type == "s3_doorway":
+            width = float(scene_spec.params.get("room_width", self.cfg.terrain.terrain_width))
+        else:
+            return None
+        length = float(self.cfg.terrain.terrain_length)
+        return width, length
+
+    def _scene_goal_ranges(self, scene_spec: Optional[SceneSpec]):
+        bounds = self._scene_spawn_bounds(scene_spec)
+        if bounds is None:
+            return None
+        width, length = bounds
+        if self.nav_cfg is not None:
+            margin = float(getattr(self.nav_cfg, "goal_scene_margin", self.scene_manager.scene_margin))
+        else:
+            margin = float(self.scene_manager.scene_margin)
+        if width <= 2.0 * margin or length <= 2.0 * margin:
+            return None
+        range_x = (-0.5 * width + margin, 0.5 * width - margin)
+        range_y = (-0.5 * length + margin, 0.5 * length - margin)
+        return range_x, range_y
+
+    def _is_scene_spawn_clear(self, scene_spec: SceneSpec, x_local: float, y_local: float, clearance: float) -> bool:
+        for spec in scene_spec.static_obstacles:
+            dx = abs(x_local - float(spec.position[0]))
+            dy = abs(y_local - float(spec.position[1]))
+            limit_x = 0.5 * float(spec.size[0]) + clearance
+            limit_y = 0.5 * float(spec.size[1]) + clearance
+            if dx < limit_x and dy < limit_y:
+                return False
+        return True
+
+    def _apply_scene_spawn(self, env_ids: torch.Tensor):
+        if self.scene_spec_cache is None or env_ids.numel() == 0:
+            return
+        if self.nav_cfg is not None:
+            margin = float(getattr(self.nav_cfg, "spawn_scene_margin", self.scene_manager.scene_margin))
+            clearance = float(getattr(self.nav_cfg, "spawn_scene_clearance", self.scene_manager.scene_clearance))
+            max_tries = int(getattr(self.nav_cfg, "spawn_scene_max_tries", 30))
+        else:
+            margin = float(self.scene_manager.scene_margin)
+            clearance = float(self.scene_manager.scene_clearance)
+            max_tries = 30
+
+        updated = []
+        for env_id in env_ids.tolist():
+            scene_spec = self.scene_spec_cache[env_id]
+            bounds = self._scene_spawn_bounds(scene_spec)
+            if bounds is None:
+                continue
+            width, length = bounds
+            if width <= 2.0 * margin or length <= 2.0 * margin:
+                continue
+            seed = int((scene_spec.layout_seed or 0) + env_id * 131)
+            rng = np.random.RandomState(seed)
+            x_local = 0.0
+            y_local = 0.0
+            placed = False
+            for _ in range(max_tries):
+                x_local = rng.uniform(-0.5 * width + margin, 0.5 * width - margin)
+                y_local = rng.uniform(-0.5 * length + margin, 0.5 * length - margin)
+                if scene_spec is None or self._is_scene_spawn_clear(scene_spec, x_local, y_local, clearance):
+                    placed = True
+                    break
+            if not placed:
+                x_local = float(np.clip(x_local, -0.5 * width + margin, 0.5 * width - margin))
+                y_local = float(np.clip(y_local, -0.5 * length + margin, 0.5 * length - margin))
+            self.root_states[env_id] = self.base_init_state
+            self.root_states[env_id, :3] += self.env_origins[env_id]
+            self.root_states[env_id, 0] += x_local
+            self.root_states[env_id, 1] += y_local
+            updated.append(env_id)
+        if updated:
+            self._sync_robot_root_states(torch.tensor(updated, device=self.device, dtype=torch.long))
+
 
     def step(self,actions):
         #因为返回的观测改变了，因此需要重新定义step函数
@@ -1326,6 +1406,7 @@ class HexGround(LeggedRobot):
             self._reset_scene(env_ids, force_resample=force_resample)
             if prev_levels is not None:
                 self.scene_level_cache[env_ids] = self.terrain_levels[env_ids]
+            self._apply_scene_spawn(env_ids)
             self._resample_nav_goals(env_ids)
             if hasattr(self, "goal_world"):
                 # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
@@ -1635,7 +1716,65 @@ class HexGround(LeggedRobot):
         force_blocking = bool(getattr(self.nav_cfg, "goal_force_blocking_line", False))
         force_prob = float(getattr(self.nav_cfg, "goal_force_blocking_prob", 1.0))
 
-        pending = env_ids.clone()
+        corridor_envs = []
+        other_envs = []
+        if self.scene_spec_cache is not None:
+            for env_id in env_ids.tolist():
+                scene_spec = self.scene_spec_cache[env_id]
+                if self._scene_goal_ranges(scene_spec) is not None:
+                    corridor_envs.append(env_id)
+                else:
+                    other_envs.append(env_id)
+        else:
+            other_envs = env_ids.tolist()
+
+        for env_id in corridor_envs:
+            scene_spec = self.scene_spec_cache[env_id]
+            ranges = self._scene_goal_ranges(scene_spec)
+            if ranges is None:
+                continue
+            range_x_scene, range_y_scene = ranges
+            pending = torch.tensor([env_id], device=self.device, dtype=torch.long)
+            for _ in range(max_tries):
+                rand_x = torch_rand_float(range_x_scene[0], range_x_scene[1], (1, 1), device=self.device).squeeze(1)
+                rand_y = torch_rand_float(range_y_scene[0], range_y_scene[1], (1, 1), device=self.device).squeeze(1)
+                goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, rand_y], dim=1)
+                pos = self.root_states[pending, :2]
+                dist = torch.norm(goal_world - pos, dim=1)
+                dist_ok = dist >= min_dist
+                blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+                if force_blocking and force_prob > 0.0:
+                    force_mask = torch.rand_like(dist_ok.float()) < force_prob
+                else:
+                    force_mask = torch.zeros_like(dist_ok, dtype=torch.bool)
+                ok = dist_ok & (blocked | ~force_mask)
+                if ok.any():
+                    self.goal_world[pending[ok]] = goal_world[ok]
+                    pending = pending[~ok]
+                    break
+            if pending.numel() > 0 and allow_fallback:
+                for _ in range(max_tries):
+                    rand_x = torch_rand_float(range_x_scene[0], range_x_scene[1], (1, 1), device=self.device).squeeze(1)
+                    rand_y = torch_rand_float(range_y_scene[0], range_y_scene[1], (1, 1), device=self.device).squeeze(1)
+                    goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, rand_y], dim=1)
+                    pos = self.root_states[pending, :2]
+                    dist = torch.norm(goal_world - pos, dim=1)
+                    dist_ok = dist >= min_dist
+                    blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+                    if force_blocking and force_prob > 0.0:
+                        force_mask = torch.rand_like(blocked.float()) < force_prob
+                    else:
+                        force_mask = torch.zeros_like(blocked, dtype=torch.bool)
+                    ok = dist_ok & (blocked | ~force_mask)
+                    if ok.any():
+                        self.goal_world[pending[ok]] = goal_world[ok]
+                        pending = pending[~ok]
+                        break
+
+        if not other_envs:
+            return
+
+        pending = torch.tensor(other_envs, device=self.device, dtype=torch.long)
         for _ in range(max_tries):
             if pending.numel() == 0:
                 break

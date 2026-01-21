@@ -8,7 +8,7 @@ V5 训练链路与参数清单
   - goal：2 维相对目标
   - affordance：3x16x16（occupancy / passable_gap / low_obstacle）
   - difficulty：1 - passable_gap.mean()
-- aff_stack：按通道堆叠 aff_stack 帧（默认 4），训练/ckpt 必须一致。
+- aff_stack：按通道堆叠 aff_stack 帧（默认 1），训练/ckpt 必须一致。
 - T1 弱遮挡（可选）：仅冻结/丢失 policy 输入的 goal，不改变 env 内部目标与奖励逻辑。
 - 高层输出：
   - follow/avoid：CmdVelExpert -> cmd_vel=[vx,vy,omega]
@@ -131,3 +131,12 @@ V5 训练链路与参数清单
 - 支持 --skill follow/avoid/moe；moe 需 --follow_ckpt/--avoid_ckpt
 - cmd_slew_lin/ang 与 cmd_safe/free 参数与训练一致
 - gate 模式打印 gate_y，输出风险缩放/通行/碰撞等日志
+
+八、S1–S6 场景映射（V5）
+- S1：Corridor（走廊 + 门洞收缩段 + 通道内离散障碍）
+- S2：Forest（随机静态障碍，稀疏→中等）
+- S3：Doorway（房间-门洞拓扑）
+- S4：Crossing（动态横穿）
+- S5：Sparse→Dense（非平稳密度切换）
+- S6：结构化 OOD（cluster / nonconvex / maze 混合采样）
+- S6 模板消融：在 hex_s6_config.py 中用 ood_template 固定模板，或用 ood_template_probs 设置采样比例

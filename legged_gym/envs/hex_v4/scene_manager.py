@@ -384,6 +384,41 @@ class SceneManager:
         size_xy, height, _ = self._quantize_block(raw_size_xy, height)
         return size_xy, height, raw_size_xy, raw_height
 
+    def _sample_block_size(
+        self, params: Dict[str, object], rng: np.random.RandomState
+    ) -> Tuple[float, float, float, float]:
+        size_min = float(params.get("block_size_min", self.block_size))
+        size_max = float(params.get("block_size_max", size_min))
+        height_min = float(params.get("block_height_min", self.block_height))
+        height_max = float(params.get("block_height_max", height_min))
+        size_xy = rng.uniform(size_min, size_max)
+        height = rng.uniform(height_min, height_max)
+        raw_size_xy = size_xy
+        raw_height = height
+        size_xy, height, _ = self._quantize_block(size_xy, height)
+        return size_xy, height, raw_size_xy, raw_height
+
+    def _sample_obstacle_spec(
+        self,
+        x: float,
+        y: float,
+        params: Dict[str, object],
+        rng: np.random.RandomState,
+        block_ratio: float,
+    ) -> StaticObstacleSpec:
+        if rng.uniform(0.0, 1.0) < block_ratio:
+            size_xy, height, raw_size_xy, raw_height = self._sample_block_size(params, rng)
+            kind = "block"
+        else:
+            size_xy, height, raw_size_xy, raw_height = self._sample_pole_size(params, rng)
+            kind = "pole"
+        return StaticObstacleSpec(
+            kind=kind,
+            position=(x, y, 0.5 * height),
+            size=(size_xy, size_xy, height),
+            raw_size=(raw_size_xy, raw_size_xy, raw_height),
+        )
+
     def _interpolate_params(self, difficulty: float, scene_type: str) -> Dict[str, object]:
         params_easy = self._resolve_scene_params(self.scene_params_easy, scene_type)
         params_hard = self._resolve_scene_params(self.scene_params_hard, scene_type)
@@ -467,7 +502,7 @@ class SceneManager:
         params = scene_spec.params
         if scene_spec.scene_type == "s1_corridor":
             return float(params.get("gap_width_min", params.get("corridor_width", 1.0)))
-        if scene_spec.scene_type == "s2_doorway":
+        if scene_spec.scene_type == "s3_doorway":
             return float(params.get("door_width_min", params.get("room_width", 1.0)))
         if static_count > 0:
             area = max(self.scene_width * self.scene_length, 1e-6)
@@ -539,10 +574,10 @@ class SceneManager:
     ) -> List[StaticObstacleSpec]:
         if scene_type == "s1_corridor":
             return self._build_corridor(params, rng)
-        if scene_type == "s2_doorway":
-            return self._build_doorway(params, rng)
-        if scene_type == "s3_forest":
+        if scene_type == "s2_forest":
             return self._build_forest(params, rng)
+        if scene_type == "s3_doorway":
+            return self._build_doorway(params, rng)
         if scene_type == "s4_crossing":
             return self._build_crossing(params, rng)
         if scene_type == "s5_transition":
@@ -560,6 +595,7 @@ class SceneManager:
         wall_thickness = float(params.get("wall_thickness", self.block_size))
         segment_count = int(round(params.get("wall_segment_count", 0)))
         segment_len = float(params.get("wall_segment_len", 0.0))
+        wall_jitter_x = float(params.get("wall_jitter_x", 0.0))
 
         outer = max(0.0, width_m - corridor_width)
         if outer > 0:
@@ -572,8 +608,13 @@ class SceneManager:
                 start_y = -0.5 * length_m + 0.5 * segment_len
                 for idx in range(segment_count):
                     center_y = start_y + idx * segment_len
-                    obstacles.extend(self._tile_rect(left_center, center_y, outer * 0.5, segment_len, kind="wall"))
-                    obstacles.extend(self._tile_rect(right_center, center_y, outer * 0.5, segment_len, kind="wall"))
+                    jitter = rng.uniform(-wall_jitter_x, wall_jitter_x) if wall_jitter_x > 0.0 else 0.0
+                    obstacles.extend(
+                        self._tile_rect(left_center + jitter, center_y, outer * 0.5, segment_len, kind="wall")
+                    )
+                    obstacles.extend(
+                        self._tile_rect(right_center + jitter, center_y, outer * 0.5, segment_len, kind="wall")
+                    )
             else:
                 obstacles.extend(self._tile_rect(left_center, 0.0, outer * 0.5, length_m, kind="wall"))
                 obstacles.extend(self._tile_rect(right_center, 0.0, outer * 0.5, length_m, kind="wall"))
@@ -602,6 +643,55 @@ class SceneManager:
             obstacles.extend(self._tile_rect(left_center, center_y, side_width, gate_thickness))
             obstacles.extend(self._tile_rect(right_center, center_y, side_width, gate_thickness))
 
+        obs_min = int(round(params.get("corridor_obstacle_count_min", 0)))
+        obs_max = int(round(params.get("corridor_obstacle_count_max", obs_min)))
+        if obs_min > 0 or obs_max > 0:
+            obs_count = max(obs_min, rng.randint(obs_min, obs_max + 1))
+            size_min = float(params.get("corridor_obstacle_size_min", self.block_size))
+            size_max = float(params.get("corridor_obstacle_size_max", size_min))
+            height_min = float(params.get("corridor_obstacle_height_min", self.block_height))
+            height_max = float(params.get("corridor_obstacle_height_max", height_min))
+            margin_x = float(params.get("corridor_obstacle_margin_x", 0.1))
+            margin_y = float(params.get("corridor_obstacle_margin_y", self.scene_margin))
+            clearance = float(params.get("corridor_obstacle_clearance", 0.5 * self.scene_clearance))
+
+            def is_clear(x: float, y: float, size_xy: float) -> bool:
+                for spec in obstacles:
+                    dx = abs(x - spec.position[0])
+                    dy = abs(y - spec.position[1])
+                    limit_x = 0.5 * (size_xy + spec.size[0]) + clearance
+                    limit_y = 0.5 * (size_xy + spec.size[1]) + clearance
+                    if dx < limit_x and dy < limit_y:
+                        return False
+                return True
+
+            for _ in range(obs_count):
+                raw_size = rng.uniform(size_min, size_max)
+                raw_height = rng.uniform(height_min, height_max)
+                size_xy, height, _ = self._quantize_block(raw_size, raw_height)
+                half_x = 0.5 * size_xy + margin_x
+                half_y = 0.5 * size_xy + margin_y
+                if corridor_width <= 2.0 * half_x:
+                    continue
+                max_tries = 30
+                placed = False
+                for _ in range(max_tries):
+                    x = rng.uniform(-0.5 * corridor_width + half_x, 0.5 * corridor_width - half_x)
+                    y = rng.uniform(-0.5 * length_m + half_y, 0.5 * length_m - half_y)
+                    if is_clear(x, y, size_xy):
+                        obstacles.append(
+                            StaticObstacleSpec(
+                                kind="block",
+                                position=(x, y, 0.5 * height),
+                                size=(size_xy, size_xy, height),
+                                raw_size=(raw_size, raw_size, raw_height),
+                            )
+                        )
+                        placed = True
+                        break
+                if not placed:
+                    continue
+
         return obstacles
 
     def _build_doorway(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
@@ -619,18 +709,27 @@ class SceneManager:
             obstacles.extend(self._tile_rect(left_center, 0.0, outer * 0.5, length_m, kind="wall"))
             obstacles.extend(self._tile_rect(right_center, 0.0, outer * 0.5, length_m, kind="wall"))
 
-        door_count = int(round(params.get("door_count", 2)))
+        room_count = int(round(params.get("room_count", params.get("door_count", 2))))
+        room_count = max(2, room_count)
         door_thickness = float(params.get("door_thickness", wall_thickness))
         door_min = float(params.get("door_width_min", 0.8))
         door_max = float(params.get("door_width_max", 1.2))
         door_min = max(door_min, 2.0 * self.scene_clearance + 0.05)
         door_max = max(door_max, door_min)
         offset_max = float(params.get("door_offset_max", 0.5))
-        margin_y = float(params.get("door_margin_y", 0.8))
         block_width = float(params.get("door_block_width", self.block_size))
+        jam_count = int(round(params.get("jam_count", 0)))
+        jam_size = float(params.get("jam_size", self.block_size))
 
-        for _ in range(max(0, door_count)):
-            center_y = rng.uniform(-0.5 * length_m + margin_y, 0.5 * length_m - margin_y)
+        room_len = length_m / float(room_count)
+        boundary_jitter = float(params.get("room_boundary_jitter", 0.0))
+        boundaries = []
+        for idx in range(1, room_count):
+            base_y = -0.5 * length_m + idx * room_len
+            jitter = rng.uniform(-boundary_jitter, boundary_jitter) if boundary_jitter > 0.0 else 0.0
+            boundaries.append(base_y + jitter)
+        boundaries.sort()
+        for center_y in boundaries:
             door_width = rng.uniform(door_min, door_max)
             door_width = min(door_width, room_width - 0.1)
             remain = room_width - door_width
@@ -642,14 +741,60 @@ class SceneManager:
             right_center = 0.5 * door_width + 0.5 * side_width + offset
             obstacles.extend(self._tile_rect(left_center, center_y, side_width, door_thickness))
             obstacles.extend(self._tile_rect(right_center, center_y, side_width, door_thickness))
-
-            jam_count = int(round(params.get("jam_count", 0)))
-            jam_size = float(params.get("jam_size", self.block_size))
             for _ in range(max(0, jam_count)):
                 jam_side = rng.choice([-1.0, 1.0])
                 jam_x = offset + jam_side * (0.5 * door_width + 0.5 * jam_size)
                 jam_y = center_y + rng.uniform(-0.5, 0.5) * door_thickness
                 obstacles.extend(self._tile_rect(jam_x, jam_y, jam_size, jam_size))
+
+        room_obs_min = int(round(params.get("room_obstacle_count_min", 0)))
+        room_obs_max = int(round(params.get("room_obstacle_count_max", room_obs_min)))
+        if room_obs_min > 0 or room_obs_max > 0:
+            size_min = float(params.get("room_obstacle_size_min", self.block_size))
+            size_max = float(params.get("room_obstacle_size_max", size_min))
+            height_min = float(params.get("room_obstacle_height_min", self.block_height))
+            height_max = float(params.get("room_obstacle_height_max", height_min))
+            margin_x = float(params.get("room_obstacle_margin_x", 0.1))
+            margin_y = float(params.get("room_obstacle_margin_y", self.scene_margin))
+            clearance = float(params.get("room_obstacle_clearance", 0.5 * self.scene_clearance))
+
+            def is_clear(x: float, y: float, size_xy: float) -> bool:
+                for spec in obstacles:
+                    dx = abs(x - spec.position[0])
+                    dy = abs(y - spec.position[1])
+                    limit_x = 0.5 * (size_xy + spec.size[0]) + clearance
+                    limit_y = 0.5 * (size_xy + spec.size[1]) + clearance
+                    if dx < limit_x and dy < limit_y:
+                        return False
+                return True
+
+            for room_idx in range(room_count):
+                y_min = -0.5 * length_m + room_idx * room_len + margin_y
+                y_max = -0.5 * length_m + (room_idx + 1) * room_len - margin_y
+                if y_max <= y_min:
+                    continue
+                count = max(room_obs_min, rng.randint(room_obs_min, room_obs_max + 1))
+                for _ in range(count):
+                    raw_size = rng.uniform(size_min, size_max)
+                    raw_height = rng.uniform(height_min, height_max)
+                    size_xy, height, _ = self._quantize_block(raw_size, raw_height)
+                    half_x = 0.5 * size_xy + margin_x
+                    if room_width <= 2.0 * half_x:
+                        continue
+                    max_tries = 20
+                    for _ in range(max_tries):
+                        x = rng.uniform(-0.5 * room_width + half_x, 0.5 * room_width - half_x)
+                        y = rng.uniform(y_min, y_max)
+                        if is_clear(x, y, size_xy):
+                            obstacles.append(
+                                StaticObstacleSpec(
+                                    kind="block",
+                                    position=(x, y, 0.5 * height),
+                                    size=(size_xy, size_xy, height),
+                                    raw_size=(raw_size, raw_size, raw_height),
+                                )
+                            )
+                            break
         return obstacles
 
     def _build_forest(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
@@ -660,19 +805,12 @@ class SceneManager:
         count_max = int(round(params.get("pole_count_max", 12)))
         count = max(count_min, rng.randint(count_min, count_max + 1))
         margin = float(params.get("pole_margin", 0.4))
+        block_ratio = float(params.get("block_ratio", 0.0))
 
         for _ in range(count):
             x = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
             y = rng.uniform(-0.5 * length_m + margin, 0.5 * length_m - margin)
-            size_xy, height, raw_size_xy, raw_height = self._sample_pole_size(params, rng)
-            obstacles.append(
-                StaticObstacleSpec(
-                    kind="pole",
-                    position=(x, y, 0.5 * height),
-                    size=(size_xy, size_xy, height),
-                    raw_size=(raw_size_xy, raw_size_xy, raw_height),
-                )
-            )
+            obstacles.append(self._sample_obstacle_spec(x, y, params, rng, block_ratio))
         return obstacles
 
     def _build_crossing(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
@@ -692,36 +830,56 @@ class SceneManager:
         dense_count = int(round(params.get("dense_count", 16)))
         boundary_offset = float(params.get("boundary_offset", 0.0))
         boundary_jitter = float(params.get("boundary_jitter", 0.3))
+        sparse_block_ratio = float(params.get("sparse_block_ratio", params.get("block_ratio", 0.0)))
+        dense_block_ratio = float(params.get("dense_block_ratio", params.get("block_ratio", sparse_block_ratio)))
 
         boundary = boundary_offset + rng.uniform(-boundary_jitter, boundary_jitter)
         margin = self.scene_margin
 
-        def sample(count: int, y_min: float, y_max: float) -> None:
+        def sample(count: int, y_min: float, y_max: float, block_ratio: float) -> None:
             if y_max <= y_min or count <= 0:
                 return
             for _ in range(count):
                 x = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
                 y = rng.uniform(y_min, y_max)
-                size_xy, height, raw_size_xy, raw_height = self._sample_pole_size(params, rng)
-                obstacles.append(
-                    StaticObstacleSpec(
-                        kind="pole",
-                        position=(x, y, 0.5 * height),
-                        size=(size_xy, size_xy, height),
-                        raw_size=(raw_size_xy, raw_size_xy, raw_height),
-                    )
-                )
+                obstacles.append(self._sample_obstacle_spec(x, y, params, rng, block_ratio))
 
-        sample(sparse_count, -0.5 * length_m + margin, boundary - margin)
-        sample(dense_count, boundary + margin, 0.5 * length_m - margin)
+        sample(sparse_count, -0.5 * length_m + margin, boundary - margin, sparse_block_ratio)
+        sample(dense_count, boundary + margin, 0.5 * length_m - margin, dense_block_ratio)
         return obstacles
 
     def _build_structured_ood(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
+        template = str(params.get("ood_template", "mix"))
+        if template == "mix":
+            template = self._select_ood_template(params, rng)
+        params["ood_template_selected"] = template
+        if template == "cluster":
+            return self._build_ood_cluster(params, rng)
+        if template == "maze":
+            return self._build_ood_maze(params, rng)
+        return self._build_ood_nonconvex(params, rng)
+
+    def _select_ood_template(self, params: Dict[str, object], rng: np.random.RandomState) -> str:
+        templates = ["cluster", "nonconvex", "maze"]
+        probs = params.get("ood_template_probs")
+        if isinstance(probs, dict):
+            values = [float(probs.get(name, 0.0)) for name in templates]
+        elif isinstance(probs, (list, tuple)):
+            values = [float(v) for v in probs]
+        else:
+            values = []
+        if len(values) != len(templates) or sum(values) <= 0.0:
+            values = [1.0] * len(templates)
+        values = np.asarray(values, dtype=np.float32)
+        values = values / np.sum(values)
+        return str(rng.choice(templates, p=values))
+
+    def _build_ood_nonconvex(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
         obstacles: List[StaticObstacleSpec] = []
         u_width = float(params.get("u_width", 2.2))
         u_depth = float(params.get("u_depth", 1.6))
         u_thickness = float(params.get("u_thickness", 0.25))
-        u_center_y = -0.5
+        u_center_y = float(params.get("u_center_y", -0.5))
         left_x = -0.5 * u_width + 0.5 * u_thickness
         right_x = 0.5 * u_width - 0.5 * u_thickness
         bottom_y = u_center_y - 0.5 * u_depth + 0.5 * u_thickness
@@ -731,13 +889,16 @@ class SceneManager:
 
         l_size = float(params.get("l_size", 1.6))
         l_thickness = float(params.get("l_thickness", 0.25))
-        l_center_x = 1.2
-        l_center_y = 1.2
+        l_center_x = float(params.get("l_center_x", 1.2))
+        l_center_y = float(params.get("l_center_y", 1.2))
         obstacles.extend(self._tile_rect(l_center_x, l_center_y, l_thickness, l_size, kind="wall"))
         obstacles.extend(
             self._tile_rect(l_center_x - 0.5 * l_size + 0.5 * l_thickness, l_center_y, l_size, l_thickness, kind="wall")
         )
+        return obstacles
 
+    def _build_ood_cluster(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
+        obstacles: List[StaticObstacleSpec] = []
         cluster_count = int(round(params.get("cluster_count", 8)))
         cluster_spread = float(params.get("cluster_spread", 0.8))
         cluster_radius = float(params.get("cluster_radius", 0.18))
@@ -745,7 +906,7 @@ class SceneManager:
         raw_size_xy = 2.0 * cluster_radius
         raw_height = obstacle_height
         size_xy, height, _ = self._quantize_block(raw_size_xy, obstacle_height)
-        cluster_center = np.array([-1.5, 1.5])
+        cluster_center = np.array(params.get("cluster_center", [-1.5, 1.5]), dtype=np.float32)
         for _ in range(max(0, cluster_count)):
             offset = rng.normal(scale=cluster_spread, size=2)
             x, y = (cluster_center + offset).tolist()
@@ -757,6 +918,52 @@ class SceneManager:
                     raw_size=(raw_size_xy, raw_size_xy, raw_height),
                 )
             )
+        return obstacles
+
+    def _build_ood_maze(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
+        obstacles: List[StaticObstacleSpec] = []
+        width_m = self.scene_width
+        length_m = self.scene_length
+        rows = int(round(params.get("maze_rows", 3)))
+        cols = int(round(params.get("maze_cols", 3)))
+        rows = max(2, rows)
+        cols = max(2, cols)
+        gap_width = float(params.get("maze_gap_width", 0.8))
+        wall_thickness = float(params.get("maze_wall_thickness", self.block_size))
+        wall_margin = float(params.get("maze_margin", self.scene_margin))
+
+        cell_x = width_m / float(cols)
+        cell_y = length_m / float(rows)
+
+        def add_wall_segment(center_x: float, center_y: float, size_x: float, size_y: float) -> None:
+            if size_x <= 0.0 or size_y <= 0.0:
+                return
+            obstacles.extend(self._tile_rect(center_x, center_y, size_x, size_y, kind="wall"))
+
+        # Outer boundary walls
+        add_wall_segment(0.0, -0.5 * length_m + 0.5 * wall_thickness, width_m, wall_thickness)
+        add_wall_segment(0.0, 0.5 * length_m - 0.5 * wall_thickness, width_m, wall_thickness)
+        add_wall_segment(-0.5 * width_m + 0.5 * wall_thickness, 0.0, wall_thickness, length_m)
+        add_wall_segment(0.5 * width_m - 0.5 * wall_thickness, 0.0, wall_thickness, length_m)
+
+        # Horizontal walls with gaps
+        for r in range(1, rows):
+            y = -0.5 * length_m + r * cell_y
+            gap_center = rng.uniform(-0.5 * width_m + wall_margin, 0.5 * width_m - wall_margin)
+            left_len = (gap_center - 0.5 * gap_width) - (-0.5 * width_m)
+            right_len = (0.5 * width_m) - (gap_center + 0.5 * gap_width)
+            add_wall_segment(-0.5 * width_m + 0.5 * left_len, y, left_len, wall_thickness)
+            add_wall_segment(0.5 * width_m - 0.5 * right_len, y, right_len, wall_thickness)
+
+        # Vertical walls with gaps
+        for c in range(1, cols):
+            x = -0.5 * width_m + c * cell_x
+            gap_center = rng.uniform(-0.5 * length_m + wall_margin, 0.5 * length_m - wall_margin)
+            bottom_len = (gap_center - 0.5 * gap_width) - (-0.5 * length_m)
+            top_len = (0.5 * length_m) - (gap_center + 0.5 * gap_width)
+            add_wall_segment(x, -0.5 * length_m + 0.5 * bottom_len, wall_thickness, bottom_len)
+            add_wall_segment(x, 0.5 * length_m - 0.5 * top_len, wall_thickness, top_len)
+
         return obstacles
 
     def _fill_rect(self, terrain, center_x: float, center_y: float, size_x: float, size_y: float, height_m: float) -> None:

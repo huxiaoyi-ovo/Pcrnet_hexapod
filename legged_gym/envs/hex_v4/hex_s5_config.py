@@ -17,25 +17,37 @@ class HexS5Cfg(HexGroundCfg):
         scene_static_max = 60
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
-        scene_static_block_sizes = [0.24, 0.44]
-        scene_static_block_heights = [0.3, 0.35]
+        scene_static_block_sizes = [0.28, 0.36, 0.44]
+        scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_params_easy = {
             "pole_radius_min": 0.12,
             "pole_radius_max": 0.18,
             "pole_height": 0.3,
+            "block_size_min": 0.28,
+            "block_size_max": 0.4,
+            "block_height_min": 0.3,
+            "block_height_max": 0.35,
             "sparse_count": 6,
             "dense_count": 14,
             "boundary_offset": 0.0,
             "boundary_jitter": 0.4,
+            "sparse_block_ratio": 0.1,
+            "dense_block_ratio": 0.3,
         }
         scene_params_hard = {
             "pole_radius_min": 0.14,
             "pole_radius_max": 0.22,
             "pole_height": 0.35,
+            "block_size_min": 0.3,
+            "block_size_max": 0.44,
+            "block_height_min": 0.35,
+            "block_height_max": 0.4,
             "sparse_count": 4,
             "dense_count": 20,
             "boundary_offset": 0.2,
             "boundary_jitter": 0.6,
+            "sparse_block_ratio": 0.15,
+            "dense_block_ratio": 0.4,
         }
         num_cols = 3
         terrain_proportions = [1.0]

@@ -19,12 +19,15 @@ class HexS1Cfg(HexGroundCfg):
         scene_static_wall_max = 160
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
+        scene_static_block_sizes = [0.28, 0.36, 0.44]
+        scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_static_wall_block_size = 1.6
         scene_params_easy = {
             "corridor_width": 1.6,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
             "wall_segment_count": 16,
+            "wall_jitter_x": 0.05,
             "gate_count": 2,
             "gate_thickness": 0.25,
             "gap_width_min": 0.8,
@@ -32,12 +35,22 @@ class HexS1Cfg(HexGroundCfg):
             "gate_offset_max": 0.3,
             "gate_margin_y": 0.8,
             "gate_block_width": 0.4,
+            "corridor_obstacle_count_min": 2,
+            "corridor_obstacle_count_max": 4,
+            "corridor_obstacle_size_min": 0.28,
+            "corridor_obstacle_size_max": 0.38,
+            "corridor_obstacle_height_min": 0.3,
+            "corridor_obstacle_height_max": 0.35,
+            "corridor_obstacle_margin_x": 0.12,
+            "corridor_obstacle_margin_y": 0.6,
+            "corridor_obstacle_clearance": 0.08,
         }
         scene_params_hard = {
             "corridor_width": 1.1,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
             "wall_segment_count": 20,
+            "wall_jitter_x": 0.08,
             "gate_count": 3,
             "gate_thickness": 0.3,
             "gap_width_min": 0.6,
@@ -45,6 +58,15 @@ class HexS1Cfg(HexGroundCfg):
             "gate_offset_max": 0.4,
             "gate_margin_y": 0.6,
             "gate_block_width": 0.4,
+            "corridor_obstacle_count_min": 4,
+            "corridor_obstacle_count_max": 6,
+            "corridor_obstacle_size_min": 0.3,
+            "corridor_obstacle_size_max": 0.44,
+            "corridor_obstacle_height_min": 0.35,
+            "corridor_obstacle_height_max": 0.4,
+            "corridor_obstacle_margin_x": 0.12,
+            "corridor_obstacle_margin_y": 0.5,
+            "corridor_obstacle_clearance": 0.1,
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -74,12 +96,15 @@ class HexS1FollowCfg(HexGroundCfg):
         scene_static_wall_max = 160
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
+        scene_static_block_sizes = [0.28, 0.36, 0.44]
+        scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_static_wall_block_size = 1.6
         scene_params_easy = {
             "corridor_width": 1.6,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
             "wall_segment_count": 16,
+            "wall_jitter_x": 0.05,
             "gate_count": 2,
             "gate_thickness": 0.25,
             "gap_width_min": 0.8,
@@ -87,12 +112,22 @@ class HexS1FollowCfg(HexGroundCfg):
             "gate_offset_max": 0.3,
             "gate_margin_y": 0.8,
             "gate_block_width": 0.4,
+            "corridor_obstacle_count_min": 2,
+            "corridor_obstacle_count_max": 4,
+            "corridor_obstacle_size_min": 0.28,
+            "corridor_obstacle_size_max": 0.38,
+            "corridor_obstacle_height_min": 0.3,
+            "corridor_obstacle_height_max": 0.35,
+            "corridor_obstacle_margin_x": 0.12,
+            "corridor_obstacle_margin_y": 0.6,
+            "corridor_obstacle_clearance": 0.08,
         }
         scene_params_hard = {
             "corridor_width": 1.1,
             "wall_height": 0.35,
             "wall_thickness": 0.25,
             "wall_segment_count": 20,
+            "wall_jitter_x": 0.08,
             "gate_count": 3,
             "gate_thickness": 0.3,
             "gap_width_min": 0.6,
@@ -100,6 +135,15 @@ class HexS1FollowCfg(HexGroundCfg):
             "gate_offset_max": 0.4,
             "gate_margin_y": 0.6,
             "gate_block_width": 0.4,
+            "corridor_obstacle_count_min": 4,
+            "corridor_obstacle_count_max": 6,
+            "corridor_obstacle_size_min": 0.3,
+            "corridor_obstacle_size_max": 0.44,
+            "corridor_obstacle_height_min": 0.35,
+            "corridor_obstacle_height_max": 0.4,
+            "corridor_obstacle_margin_x": 0.12,
+            "corridor_obstacle_margin_y": 0.5,
+            "corridor_obstacle_clearance": 0.1,
         }
         num_cols = 3
         terrain_proportions = [1.0]
