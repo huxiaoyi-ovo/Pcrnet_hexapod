@@ -1318,6 +1318,11 @@ def train(args):
     
     # 初始 reset（用于确定观测维度）
     obs_dict = env.reset()
+    scene_meta = None
+    if hasattr(env, "env") and hasattr(env.env, "extras"):
+        scene_meta = env.env.extras.get("scene_meta")
+    if scene_meta is not None:
+        print(f"[Debug] scene_meta: {scene_meta}")
     state_dim = obs_dict['state'].shape[1]
     goal_dim = obs_dict['goal'].shape[1]
     aff_shape = obs_dict['gt_affordance'].shape[1:]
