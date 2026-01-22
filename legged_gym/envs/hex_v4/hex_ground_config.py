@@ -109,6 +109,7 @@ class HexGroundCfg(LeggedRobotCfg):
         scene_use_heightfield = False
         scene_resample_on_reset = False
         scene_resample_on_level_change = True
+        scene_collision_filter = 0xFFFFFFFF
         scene_static_max = 0
         scene_static_block_max = 0
         scene_static_wall_max = 0

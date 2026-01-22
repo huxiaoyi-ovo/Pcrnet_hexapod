@@ -193,6 +193,7 @@ class HexGround(LeggedRobot):
     def _create_env_actors(self, env_id, env_handle):
         if self.scene_manager is None:
             return
+        scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if self.static_block_groups:
             for idx, group in enumerate(self.static_block_groups):
                 per_group_max = self.static_block_group_max[idx]
@@ -208,10 +209,17 @@ class HexGround(LeggedRobot):
                         pose,
                         f"static_{group}_{obs_id}",
                         env_id,
-                        0,
+                        scene_filter,
                         0,
                     )
                     handles[env_id][obs_id] = actor_handle
+                    try:
+                        shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+                        for prop in shape_props:
+                            prop.filter = scene_filter
+                        self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+                    except Exception:
+                        pass
                     actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                     indices[env_id, obs_id] = actor_index
 
@@ -226,10 +234,17 @@ class HexGround(LeggedRobot):
                     pose,
                     f"static_wall_{obs_id}",
                     env_id,
-                    0,
+                    scene_filter,
                     0,
                 )
                 self.static_wall_actor_handles[env_id][obs_id] = actor_handle
+                try:
+                    shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+                    for prop in shape_props:
+                        prop.filter = scene_filter
+                    self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+                except Exception:
+                    pass
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.static_wall_actor_indices[env_id, obs_id] = actor_index
 
@@ -244,10 +259,17 @@ class HexGround(LeggedRobot):
                     pose,
                     f"dyn_obs_{obs_id}",
                     env_id,
-                    0,
+                    scene_filter,
                     0,
                 )
                 self.dynamic_actor_handles[env_id][obs_id] = actor_handle
+                try:
+                    shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+                    for prop in shape_props:
+                        prop.filter = scene_filter
+                    self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+                except Exception:
+                    pass
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.dynamic_actor_indices[env_id, obs_id] = actor_index
 
