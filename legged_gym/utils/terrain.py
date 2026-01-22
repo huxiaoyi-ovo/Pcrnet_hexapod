@@ -398,7 +398,7 @@ class Terrain:
                 seed = self.scene_manager.seed_for_cell(i, j)
                 scene_spec = self.scene_manager.build_scene(terrain, difficulty, seed=seed)
                 if self.scene_specs is not None:
-                self.scene_specs[i][j] = scene_spec
+                    self.scene_specs[i][j] = scene_spec
             self.add_terrain_to_map(terrain, i, j)
 
     def scene_flat(self):
