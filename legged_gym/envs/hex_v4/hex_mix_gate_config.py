@@ -2,7 +2,10 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 
 
 class HexMixGateCfg(HexGroundCfg):
+    class env(HexGroundCfg.env):
+        env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
+        mesh_type = "plane"
         fixed_layout_enable = False
         scene_types = ["s3_doorway", "s4_crossing", "s5_transition"]
         scene_seed = 120

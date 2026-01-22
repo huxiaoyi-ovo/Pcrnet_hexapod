@@ -1325,6 +1325,17 @@ def train(args):
         print(f"[Debug] scene_meta: {scene_meta}")
     if getattr(args, "debug", False):
         try:
+            if hasattr(env, "env"):
+                spacing = getattr(getattr(env.env, "cfg", None), "env", None)
+                if spacing is not None:
+                    env_spacing = float(getattr(spacing, "env_spacing", 0.0))
+                else:
+                    env_spacing = 0.0
+                if hasattr(env.env, "env_origins"):
+                    origins = env.env.env_origins[:3].detach().cpu().tolist()
+                else:
+                    origins = []
+                print(f"[Debug] envs={env.num_envs} env_spacing={env_spacing:.3f} env_origins[:3]={origins}")
             env0 = 0
             base_pos = None
             if hasattr(env, "env") and hasattr(env.env, "root_states"):

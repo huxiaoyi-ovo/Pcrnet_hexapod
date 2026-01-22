@@ -2,7 +2,10 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 
 
 class HexS5Cfg(HexGroundCfg):
+    class env(HexGroundCfg.env):
+        env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
+        mesh_type = "plane"
         fixed_layout_enable = False
         scene_type = "s5_transition"
         scene_seed = 105
