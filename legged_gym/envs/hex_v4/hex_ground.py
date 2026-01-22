@@ -931,6 +931,71 @@ class HexGround(LeggedRobot):
         if self.dynamic_actor_indices is not None:
             self.scene_dyn_time[env_ids] = 0.0
             self._sync_dynamic_obstacles()
+        # 强制全量写回（仅 reset/重采样时），避免静态障碍仍停留在隐藏池
+        if hasattr(self, "all_root_states"):
+            self.gym.set_actor_root_state_tensor(
+                self.sim,
+                gymtorch.unwrap_tensor(self.all_root_states),
+            )
+        # Debug 抽查障碍落地（仅 debug_viz 开关）
+        if getattr(self, "debug_viz", False):
+            try:
+                check_env = int(env_ids[0].item())
+                scene_spec = self.scene_spec_cache[check_env]
+                if scene_spec is not None and len(scene_spec.static_obstacles) > 0:
+                    # 取墙体尺度为主，block/pole 用自身尺度归一
+                    wall_scale = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
+                    origins = self.env_origins[check_env]
+                    # 取前 3 个障碍做抽查
+                    for idx, spec in enumerate(scene_spec.static_obstacles[:3]):
+                        kind = spec.kind
+                        size_xy = float(max(spec.size[0], spec.size[1]))
+                        scale = wall_scale if kind == "wall" else max(size_xy, 1e-6)
+                        # 找到对应 actor 的 root_state：从缓存里找一个 active 的即可
+                        # 按 group 分配的场景，使用 local buffer 查询
+                        found = False
+                        if kind == "wall" and self.static_wall_actor_indices is not None:
+                            active = self.static_wall_active[check_env]
+                            pos_local = self.static_wall_pos_local[check_env]
+                            indices = self.static_wall_actor_indices[check_env]
+                            for local_id in torch.nonzero(active, as_tuple=False).flatten().tolist():
+                                pos = pos_local[local_id]
+                                if torch.allclose(pos, torch.tensor(spec.position, device=pos.device), atol=1e-3):
+                                    actor_idx = int(indices[local_id])
+                                    found = True
+                                    break
+                        if not found and getattr(self, "static_block_groups", []):
+                            for group in self.static_block_groups:
+                                active = getattr(self, f"static_{group}_active")[check_env]
+                                pos_local = getattr(self, f"static_{group}_pos_local")[check_env]
+                                indices = getattr(self, f"static_{group}_actor_indices")[check_env]
+                                for local_id in torch.nonzero(active, as_tuple=False).flatten().tolist():
+                                    pos = pos_local[local_id]
+                                    if torch.allclose(pos, torch.tensor(spec.position, device=pos.device), atol=1e-3):
+                                        actor_idx = int(indices[local_id])
+                                        found = True
+                                        break
+                                if found:
+                                    break
+                        if not found:
+                            continue
+                        root = self.all_root_states[actor_idx, :3]
+                        world = torch.tensor(
+                            [origins[0] + spec.position[0],
+                             origins[1] + spec.position[1],
+                             origins[2] + spec.position[2]],
+                            device=root.device,
+                        )
+                        err = torch.norm(root - world).item()
+                        if root[2].item() <= -4.0:
+                            print(f"[Debug] obstacle root z still hidden: env={check_env}, idx={idx}, z={root[2].item():.3f}")
+                        if err > 0.05 * scale:
+                            print(
+                                f"[Debug] obstacle pos err too large: env={check_env}, idx={idx}, "
+                                f"err={err:.3f}, scale={scale:.3f}"
+                            )
+            except Exception as exc:
+                print(f"[Debug] obstacle root_state check failed: {exc}")
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
             self.extras["scene_meta"] = self.scene_meta[sample_id]
