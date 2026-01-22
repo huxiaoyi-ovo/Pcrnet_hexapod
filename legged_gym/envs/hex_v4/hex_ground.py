@@ -244,6 +244,9 @@ class HexGround(LeggedRobot):
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if scene_filter >= (1 << 31):
             scene_filter = -1
+        if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_robot_group_logged", False):
+            print(f"[Debug] robot collision_group={env_id}, scene_filter={scene_filter}")
+            self._robot_group_logged = True
         try:
             shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
             for prop in shape_props:
@@ -304,6 +307,9 @@ class HexGround(LeggedRobot):
                 self.static_wall_actor_handles[env_id][obs_id] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.static_wall_actor_indices[env_id, obs_id] = actor_index
+            if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_group_logged", False):
+                print(f"[Debug] wall collision_group={env_id}, create_filter={create_filter}, scene_filter={scene_filter}")
+                self._wall_group_logged = True
 
         if self.dynamic_asset is not None and self.dynamic_actor_indices is not None:
             max_dyn = int(self.dynamic_actor_indices.shape[1])
