@@ -22,6 +22,7 @@ from legged_gym.scripts import train_highlevel as th
 
 
 def parse_args():
+    raw_argv = list(sys.argv)
     parser = argparse.ArgumentParser(description="Play high-level planner in Isaac Gym")
     parser.add_argument(
         "--task",
@@ -75,7 +76,7 @@ def parse_args():
         "--debug_cmd",
         dest="debug_cmd",
         action="store_true",
-        default=True,
+        default=False,
         help="Print high-level command debug info",
     )
     parser.add_argument(
@@ -85,6 +86,7 @@ def parse_args():
         help="Disable debug output",
     )
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
+    parser.add_argument("--debug", action="store_true", help="debug 输出（诊断信息）")
     parser.add_argument(
         "--heading_offset_override",
         type=float,
@@ -128,6 +130,8 @@ def parse_args():
         args.camera_interval = 1
     if args.debug_interval < 1:
         args.debug_interval = 1
+    if args.debug and "--no_debug_cmd" not in raw_argv:
+        args.debug_cmd = True
 
     return args
 
@@ -136,7 +140,11 @@ def main():
     args = parse_args()
     if args.task != "hex_ground":
         raise ValueError("play_highlevel.py currently supports only --task hex_ground")
-    print("[PlayHigh] V5 主线任务默认 hex_ground；hex_terrain 视为 legacy。")
+    debug = bool(getattr(args, "debug", False))
+    def dprint(*vals, **kwargs):
+        if debug:
+            print(*vals, **kwargs)
+    dprint("[PlayHigh] V5 主线任务默认 hex_ground；hex_terrain 视为 legacy。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[PlayHigh] aff_stack={args.aff_stack}: 输入通道数改变，需与 ckpt 训练时一致，否则无法加载。")
 
@@ -178,7 +186,7 @@ def main():
         env.env.terrain_levels.fill_(0)
         if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types") and hasattr(env.env, "env_origins"):
             env.env.env_origins[:] = env.env.terrain_origins[env.env.terrain_levels, env.env.terrain_types]
-        print("[PlayHigh] curriculum disabled; start at level 0")
+        dprint("[PlayHigh] curriculum disabled; start at level 0")
     vision_model = None
     if args.mode == "student":
         vision_model = th.AffordanceEstimator(
@@ -190,7 +198,7 @@ def main():
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         vision_model.load_state_dict(state_dict)
         vision_model.eval()
-        print(f"[PlayHigh] ✓ Vision 加载成功: {args.vision_ckpt}")
+        dprint(f"[PlayHigh] ✓ Vision 加载成功: {args.vision_ckpt}")
     if args.camera_env < 0:
         args.camera_env = 0
     if args.camera_env >= env.num_envs:
@@ -201,7 +209,7 @@ def main():
     if not input_enabled and not args.headless:
         print("[PlayHigh] ⚠ viewer not available; keyboard controls disabled.")
     if input_enabled:
-        print("[PlayHigh] 键盘控制: R=重置, A=降级, D=升级")
+        dprint("[PlayHigh] 键盘控制: R=重置, A=降级, D=升级")
         gym = env.env.gym
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_R, "RESET_ENV")
         gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_A, "LEVEL_DOWN")
@@ -217,7 +225,7 @@ def main():
         env.reward_cfg.heading_offset_rad = heading_offset
     if hasattr(env, "env") and hasattr(env.env, "nav_cfg") and env.env.nav_cfg is not None:
         env.env.nav_cfg.heading_offset_rad = heading_offset
-    print(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (effective)")
+    dprint(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (effective)")
     def _get_max_level():
         if not hasattr(env.env, "terrain_levels"):
             return 0

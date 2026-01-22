@@ -34,8 +34,10 @@ class HexGround(LeggedRobot):
         self.foot_traj_viz=False
         self.scene_manager = getattr(self, "scene_manager", None)
         if self.scene_manager is None:
-            self.scene_manager = getattr(self.terrain, "scene_manager", None)
-        self.scene_specs = getattr(self.terrain, "scene_specs", None)
+            terrain_obj = getattr(self, "terrain", None)
+            self.scene_manager = getattr(terrain_obj, "scene_manager", None)
+        terrain_obj = getattr(self, "terrain", None)
+        self.scene_specs = getattr(terrain_obj, "scene_specs", None)
         self.scene_meta = [None] * self.num_envs
         self.scene_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
@@ -205,6 +207,8 @@ class HexGround(LeggedRobot):
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if scene_filter >= (1 << 31):
             scene_filter = -1
+        # 创建阶段先关闭碰撞，避免 hidden pool 重叠导致 PhysX 崩溃
+        create_filter = 0
         if self.static_block_groups:
             for idx, group in enumerate(self.static_block_groups):
                 per_group_max = self.static_block_group_max[idx]
@@ -220,17 +224,10 @@ class HexGround(LeggedRobot):
                         pose,
                         f"static_{group}_{obs_id}",
                         env_id,
-                        scene_filter,
+                        create_filter,
                         0,
                     )
                     handles[env_id][obs_id] = actor_handle
-                    try:
-                        shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
-                        for prop in shape_props:
-                            prop.filter = scene_filter
-                        self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
-                    except Exception:
-                        pass
                     actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                     indices[env_id, obs_id] = actor_index
 
@@ -245,17 +242,10 @@ class HexGround(LeggedRobot):
                     pose,
                     f"static_wall_{obs_id}",
                     env_id,
-                    scene_filter,
+                    create_filter,
                     0,
                 )
                 self.static_wall_actor_handles[env_id][obs_id] = actor_handle
-                try:
-                    shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
-                    for prop in shape_props:
-                        prop.filter = scene_filter
-                    self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
-                except Exception:
-                    pass
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.static_wall_actor_indices[env_id, obs_id] = actor_index
 
@@ -270,17 +260,10 @@ class HexGround(LeggedRobot):
                     pose,
                     f"dyn_obs_{obs_id}",
                     env_id,
-                    scene_filter,
+                    create_filter,
                     0,
                 )
                 self.dynamic_actor_handles[env_id][obs_id] = actor_handle
-                try:
-                    shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
-                    for prop in shape_props:
-                        prop.filter = scene_filter
-                    self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
-                except Exception:
-                    pass
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.dynamic_actor_indices[env_id, obs_id] = actor_index
 
@@ -856,6 +839,7 @@ class HexGround(LeggedRobot):
         active = getattr(self, f"static_{group}_active")
         pos_local = getattr(self, f"static_{group}_pos_local")
         quat = getattr(self, f"static_{group}_quat")
+        handles = getattr(self, f"static_{group}_actor_handles", None)
         max_static = int(indices.shape[1])
         origins = self.env_origins[env_ids].repeat_interleave(max_static, dim=0)
         pos_world = pos_local[env_ids].reshape(-1, 3) + origins[:, :3]
@@ -876,6 +860,23 @@ class HexGround(LeggedRobot):
             gymtorch.unwrap_tensor(indices_flat),
             len(indices_flat),
         )
+        # 同步碰撞过滤：active 开碰撞，inactive 关碰撞
+        if handles is not None:
+            scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+            if scene_filter >= (1 << 31):
+                scene_filter = -1
+            for env_id in env_ids.tolist():
+                env_handles = handles[env_id]
+                active_mask = active[env_id].tolist()
+                for local_id, actor_handle in enumerate(env_handles):
+                    target_filter = scene_filter if active_mask[local_id] else 0
+                    try:
+                        shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], actor_handle)
+                        for prop in shape_props:
+                            prop.filter = target_filter
+                        self.gym.set_actor_rigid_shape_properties(self.envs[env_id], actor_handle, shape_props)
+                    except Exception:
+                        pass
 
     def _sync_robot_root_states(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
@@ -969,6 +970,11 @@ class HexGround(LeggedRobot):
                 if scene_spec.scene_type == "s1_corridor" and wall_target > 0 and wall_spawned < wall_target:
                     raise RuntimeError(
                         f"S1 corridor wall truncated: target={wall_target}, spawned={wall_spawned}"
+                    )
+                if scene_spec.scene_type in ("s3_doorway", "s6_ood_structured") and wall_target > 0 and wall_spawned < wall_target:
+                    print(
+                        f"[Warn] {scene_spec.scene_type} wall truncated: "
+                        f"target={wall_target}, spawned={wall_spawned}"
                     )
 
         if getattr(self, "static_block_groups", []) or self.static_wall_actor_indices is not None:
@@ -1082,6 +1088,23 @@ class HexGround(LeggedRobot):
             gymtorch.unwrap_tensor(indices),
             len(indices),
         )
+        # 同步动态障碍碰撞过滤：active 开碰撞，inactive 关碰撞
+        if self.dynamic_actor_handles is not None and self.dynamic_active is not None:
+            scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+            if scene_filter >= (1 << 31):
+                scene_filter = -1
+            for env_id in range(self.num_envs):
+                env_handles = self.dynamic_actor_handles[env_id]
+                active_mask = self.dynamic_active[env_id].tolist()
+                for local_id, actor_handle in enumerate(env_handles):
+                    target_filter = scene_filter if active_mask[local_id] else 0
+                    try:
+                        shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], actor_handle)
+                        for prop in shape_props:
+                            prop.filter = target_filter
+                        self.gym.set_actor_rigid_shape_properties(self.envs[env_id], actor_handle, shape_props)
+                    except Exception:
+                        pass
 
     def _maybe_resample_scene_columns(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
@@ -1910,13 +1933,16 @@ class HexGround(LeggedRobot):
             margin = float(params.get("corridor_goal_margin", self.scene_manager.scene_margin))
 
             pending = torch.tensor([env_id], device=self.device, dtype=torch.long)
+            # 先检查可用 y 区间，避免 y_max <= y_min 导致卡死
+            root_world = self.root_states[pending, :2]
+            root_local = root_world - self.env_origins[pending, :2]
+            y_min = torch.clamp(root_local[:, 1] + goal_min_offset, min=y_start + goal_buffer)
+            y_max = torch.full_like(y_min, y_end - goal_buffer)
+            if torch.any(y_max <= y_min):
+                if env_id not in other_envs:
+                    other_envs.append(env_id)
+                continue
             for _ in range(max_tries):
-                root_world = self.root_states[pending, :2]
-                root_local = root_world - self.env_origins[pending, :2]
-                y_min = torch.clamp(root_local[:, 1] + goal_min_offset, min=y_start + goal_buffer)
-                y_max = torch.full_like(y_min, y_end - goal_buffer)
-                if torch.any(y_max <= y_min):
-                    break
                 rand_y = torch_rand_float(0.0, 1.0, (1, 1), device=self.device).squeeze(1)
                 y_local = y_min + (y_max - y_min) * rand_y
                 y_val = float(y_local.item())
@@ -1942,12 +1968,6 @@ class HexGround(LeggedRobot):
                     break
             if pending.numel() > 0 and allow_fallback:
                 for _ in range(max_tries):
-                    root_world = self.root_states[pending, :2]
-                    root_local = root_world - self.env_origins[pending, :2]
-                    y_min = torch.clamp(root_local[:, 1] + goal_min_offset, min=y_start + goal_buffer)
-                    y_max = torch.full_like(y_min, y_end - goal_buffer)
-                    if torch.any(y_max <= y_min):
-                        break
                     rand_y = torch_rand_float(0.0, 1.0, (1, 1), device=self.device).squeeze(1)
                     y_local = y_min + (y_max - y_min) * rand_y
                     y_val = float(y_local.item())
@@ -1971,6 +1991,9 @@ class HexGround(LeggedRobot):
                         self.goal_world[pending[ok]] = goal_world[ok]
                         pending = pending[~ok]
                         break
+            if pending.numel() > 0 and allow_fallback:
+                if env_id not in other_envs:
+                    other_envs.append(env_id)
 
         for env_id in corridor_envs:
             scene_spec = self.scene_spec_cache[env_id]

@@ -35,6 +35,14 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Tuple, Dict, Optional, Any
 from collections import deque
 
+# Use CLI flag to gate debug output before args are parsed.
+DEBUG_MODE = "--debug" in sys.argv
+
+
+def _debug_print(*args, **kwargs):
+    if DEBUG_MODE:
+        print(*args, **kwargs)
+
 # 添加项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
@@ -89,7 +97,7 @@ def import_modules():
         import legged_gym.envs
         from legged_gym.utils import get_args, task_registry as tr
         task_registry = tr
-        print("[Init] ✓ legged_gym 导入成功")
+        _debug_print("[Init] ✓ legged_gym 导入成功")
     except ImportError as e:
         print(f"\n[Error] 无法导入 'legged_gym': {e}")
         print("请确认 legged_gym 已安装并添加到 PYTHONPATH。")
@@ -112,7 +120,7 @@ def import_modules():
         globals()['GatePolicy'] = GP
         globals()['CommandPostProcessor'] = CPP
         globals()['ActorCritic'] = AC
-        print("[Init] ✓ rsl_rl 模块导入成功")
+        _debug_print("[Init] ✓ rsl_rl 模块导入成功")
     except ImportError as e:
         print(f"\n[Error] 无法导入 rsl_rl 模块: {e}")
         sys.exit(1)
@@ -120,7 +128,7 @@ def import_modules():
     try:
         from legged_gym.envs.hex_v4.affordance_estimator import AffordanceEstimator as AE
         globals()['AffordanceEstimator'] = AE
-        print("[Init] ✓ AffordanceEstimator 导入成功")
+        _debug_print("[Init] ✓ AffordanceEstimator 导入成功")
     except ImportError as e:
         print(f"[Warning] AffordanceEstimator 导入失败: {e}")
         globals()['AffordanceEstimator'] = None
@@ -130,7 +138,7 @@ def import_modules():
         from legged_gym.envs.hex_v4.navigation_env import NavigationRewardConfig as NRC
         globals()['NavigationRewardFunction'] = NRF
         globals()['NavigationRewardConfig'] = NRC
-        print("[Init] ✓ NavigationReward 导入成功")
+        _debug_print("[Init] ✓ NavigationReward 导入成功")
     except ImportError as e:
         print(f"[Warning] NavigationReward 导入失败: {e}")
         globals()['NavigationRewardFunction'] = None
@@ -263,6 +271,7 @@ class HierarchicalHexapodEnv:
         self.args = args
         self.device = device
         self.mode = args.mode
+        self.debug = bool(getattr(args, "debug", False))
 
         from legged_gym.utils import get_args as get_isaac_args
         isaac_args = get_isaac_args()
@@ -271,7 +280,8 @@ class HierarchicalHexapodEnv:
                 setattr(self.args, key, value)
         
         # 初始化 Isaac Gym 环境
-        print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
+        if self.debug:
+            print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
         env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
         if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
             if hasattr(env_cfg.navigation, "follow_goal_force_blocking_line"):
@@ -418,11 +428,13 @@ class HierarchicalHexapodEnv:
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
         
-        print(f"[Env] 初始化完成: {self.num_envs} envs, decimation={self.decimation}")
+        if self.debug:
+            print(f"[Env] 初始化完成: {self.num_envs} envs, decimation={self.decimation}")
 
     def _load_low_level_policy(self, ckpt_path: str):
         """加载并冻结底层控制器"""
-        print(f"[Env] 加载底层策略: {ckpt_path}")
+        if self.debug:
+            print(f"[Env] 加载底层策略: {ckpt_path}")
         
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"底层策略不存在: {ckpt_path}")
@@ -488,7 +500,8 @@ class HierarchicalHexapodEnv:
         for param in self.low_level_policy.parameters():
             param.requires_grad = False
         
-        print(f"[Env] ✓ 底层策略加载成功 (冻结)")
+        if self.debug:
+            print(f"[Env] ✓ 底层策略加载成功 (冻结)")
 
     def reset(self) -> Dict[str, torch.Tensor]:
         """复位环境"""
@@ -725,6 +738,7 @@ class HierarchicalHexapodEnv:
             hasattr(self.env, "nav_cfg")
             and self.env.nav_cfg is not None
             and bool(getattr(self.env.nav_cfg, "affordance_debug", False))
+            and self.debug
         ):
             if not getattr(self, "_aff_debug_logged", False):
                 mid = map_size // 2
@@ -1291,6 +1305,10 @@ def train(args):
     print(f"Mode: {args.mode.upper()} | Skill: {getattr(args, 'skill', 'follow')}")
     print(f"Device: {device}")
     print(f"{'='*60}\n")
+    debug = bool(getattr(args, "debug", False))
+    def dprint(*vals, **kwargs):
+        if debug:
+            print(*vals, **kwargs)
     if args.task != "hex_ground":
         print(f"[Warn] V5 主线默认任务为 hex_ground，当前 task={args.task}（hex_terrain 视为 legacy）。")
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
@@ -1298,10 +1316,10 @@ def train(args):
     if getattr(args, "skill", "follow") == "moe":
         if args.num_steps < 48:
             print(f"[Warn] Gate 训练建议 num_steps>=48，当前 num_steps={args.num_steps}。")
-        print(f"[Info] Gate difficulty 输入: {'ON' if gate_use_difficulty else 'OFF'}")
-        print(f"[Info] MoE affordance 来源: {'student' if moe_use_student_aff else args.mode}")
+        dprint(f"[Info] Gate difficulty 输入: {'ON' if gate_use_difficulty else 'OFF'}")
+        dprint(f"[Info] MoE affordance 来源: {'student' if moe_use_student_aff else args.mode}")
     if getattr(args, "disable_risk_scale", False):
-        print("[Info] CommandPostProcessor 风险缩放已禁用（消融用）。")
+        dprint("[Info] CommandPostProcessor 风险缩放已禁用（消融用）。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[Warn] aff_stack={args.aff_stack}: 输入通道数改变，必须使用相同 aff_stack 训练/加载 ckpt；旧 ckpt 不兼容。")
     if args.mode == "student" and not getattr(args, "vision_ckpt", None):
@@ -1314,16 +1332,16 @@ def train(args):
     
     # 创建环境
     env = HierarchicalHexapodEnv(args, device)
-    print(f"[Main] 环境初始化完成: {env.num_envs} envs")
+    dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
     
     # 初始 reset（用于确定观测维度）
     obs_dict = env.reset()
     scene_meta = None
     if hasattr(env, "env") and hasattr(env.env, "extras"):
         scene_meta = env.env.extras.get("scene_meta")
-    if scene_meta is not None and getattr(args, "debug", False):
+    if scene_meta is not None and debug:
         print(f"[Debug] scene_meta: {scene_meta}")
-    if getattr(args, "debug", False):
+    if debug:
         try:
             if hasattr(env, "env"):
                 spacing = getattr(getattr(env.env, "cfg", None), "env", None)
@@ -1458,9 +1476,9 @@ def train(args):
     avoid_model = None
 
     if args.mode == 'teacher':
-        print("[Main] Mode: TEACHER. Training from scratch with GT.")
+        dprint("[Main] Mode: TEACHER. Training from scratch with GT.")
     elif args.mode == 'student':
-        print("\n[Student] 加载 Teacher 和 Vision 模型...")
+        dprint("\n[Student] 加载 Teacher 和 Vision 模型...")
 
         # 加载 Teacher
         if args.teacher_ckpt and not is_gate:
@@ -1480,7 +1498,7 @@ def train(args):
 
             # 用 Teacher 权重初始化 Student
             policy.load_state_dict(teacher_model.state_dict())
-            print(f"[Student] ✓ Teacher 加载成功: {args.teacher_ckpt}")
+            dprint(f"[Student] ✓ Teacher 加载成功: {args.teacher_ckpt}")
 
         # 加载 Vision (AffordanceEstimator)
         if args.vision_ckpt and AffordanceEstimator is not None:
@@ -1496,7 +1514,7 @@ def train(args):
             else:
                 vision_model.load_state_dict(ckpt)
             vision_model.eval()
-            print(f"[Student] ✓ Vision 加载成功: {args.vision_ckpt}")
+            dprint(f"[Student] ✓ Vision 加载成功: {args.vision_ckpt}")
     if args.mode == 'teacher' and is_gate and moe_use_student_aff:
         if not getattr(args, "vision_ckpt", None):
             raise ValueError("moe_use_student_aff 需要提供 --vision_ckpt。")
@@ -1513,7 +1531,7 @@ def train(args):
         else:
             vision_model.load_state_dict(ckpt)
         vision_model.eval()
-        print(f"[Gate] ✓ Vision 加载成功: {args.vision_ckpt}")
+        dprint(f"[Gate] ✓ Vision 加载成功: {args.vision_ckpt}")
 
     if is_gate:
         if not getattr(args, "follow_ckpt", None) or not getattr(args, "avoid_ckpt", None):
@@ -1539,7 +1557,7 @@ def train(args):
             model.eval()
             for param in model.parameters():
                 param.requires_grad = False
-        print(f"[Gate] ✓ Follow/Avoid 加载完成: {args.follow_ckpt}, {args.avoid_ckpt}")
+        dprint(f"[Gate] ✓ Follow/Avoid 加载完成: {args.follow_ckpt}, {args.avoid_ckpt}")
         if any(param.requires_grad for param in follow_model.parameters()):
             raise RuntimeError("Gate 模式下 Follow expert 仍存在可训练参数。")
         if any(param.requires_grad for param in avoid_model.parameters()):
@@ -1571,14 +1589,14 @@ def train(args):
         if torch.cuda.is_available() and isinstance(ckpt, dict) and "cuda_rng_state" in ckpt:
             torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
         log_dir = os.path.dirname(resume_path)
-        print(f"[Main] Resume: {resume_path}")
+        dprint(f"[Main] Resume: {resume_path}")
     elif finetune_path:
         if not os.path.exists(finetune_path):
             raise FileNotFoundError(f"Finetune checkpoint 不存在: {finetune_path}")
         ckpt = torch.load(finetune_path, map_location=device)
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         policy.load_state_dict(state_dict)
-        print(f"[Main] Finetune from: {finetune_path}")
+        dprint(f"[Main] Finetune from: {finetune_path}")
 
     # 创建日志目录
     if resume_path:
@@ -1606,9 +1624,9 @@ def train(args):
     
     total_iterations = start_iteration + args.num_iterations
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
-    print(f"  - Steps per iteration: {args.num_steps}")
-    print(f"  - Batch size: {env.num_envs * args.num_steps}")
-    print(f"  - Learning rate: {args.lr}")
+    dprint(f"  - Steps per iteration: {args.num_steps}")
+    dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
+    dprint(f"  - Learning rate: {args.lr}")
     
     aff_stack_buf = None
     last_goal_obs = None
@@ -2198,7 +2216,7 @@ def train(args):
                 'numpy_rng_state': np.random.get_state(),
                 'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }, ckpt_path)
-            print(f"  Saved: {ckpt_path}")
+            dprint(f"  Saved: {ckpt_path}")
         
         # Save best
         if mean_reward > best_reward and len(episode_rewards) >= 10:
@@ -2210,7 +2228,7 @@ def train(args):
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
             }, best_path)
-            print(f"  ★ New best: {mean_reward:.2f}")
+            dprint(f"  ★ New best: {mean_reward:.2f}")
     
     # 训练结束
     print(f"\n{'='*60}")
