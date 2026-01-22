@@ -264,6 +264,7 @@ class HexGround(LeggedRobot):
     def _create_env_actors(self, env_id, env_handle):
         if self.scene_manager is None:
             return
+        group_id = env_id + 1
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if scene_filter >= (1 << 31):
             scene_filter = -1
