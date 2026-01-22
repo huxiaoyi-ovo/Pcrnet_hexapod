@@ -194,6 +194,8 @@ class HexGround(LeggedRobot):
         if self.scene_manager is None:
             return
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+        if scene_filter >= (1 << 31):
+            scene_filter = -1
         if self.static_block_groups:
             for idx, group in enumerate(self.static_block_groups):
                 per_group_max = self.static_block_group_max[idx]
