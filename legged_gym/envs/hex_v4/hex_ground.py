@@ -268,8 +268,8 @@ class HexGround(LeggedRobot):
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if scene_filter >= (1 << 31):
             scene_filter = -1
-        # 创建阶段先关闭碰撞，避免 hidden pool 重叠导致 PhysX 崩溃
-        create_filter = 0
+        # 创建阶段用 scene_filter，hidden pool 会在同步时切换为 0
+        create_filter = scene_filter
         if self.static_block_groups:
             for idx, group in enumerate(self.static_block_groups):
                 per_group_max = self.static_block_group_max[idx]
