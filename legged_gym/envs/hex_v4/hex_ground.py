@@ -73,7 +73,16 @@ class HexGround(LeggedRobot):
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
-        self.scene_manager = getattr(self.terrain, "scene_manager", None)
+        terrain_obj = getattr(self, "terrain", None)
+        self.scene_manager = getattr(terrain_obj, "scene_manager", None)
+        if self.scene_manager is None:
+            try:
+                from legged_gym.envs.hex_v4.scene_manager import SceneManager
+                self.scene_manager = SceneManager(self.cfg.terrain)
+                if terrain_obj is not None:
+                    setattr(terrain_obj, "scene_manager", self.scene_manager)
+            except Exception:
+                self.scene_manager = None
         self.static_block_groups = []
         self.static_block_group_sizes = []
         self.static_block_group_heights = []
