@@ -16,6 +16,7 @@ from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
 import time
+from collections import deque
 class HexGround(LeggedRobot):
     def __init__(self,cfg:HexGroundCfg,sim_params,physics_engine,sim_device,headless):
         # 相机配置（在调用父类初始化前设置）
@@ -43,6 +44,22 @@ class HexGround(LeggedRobot):
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
         self.scene_spec_cache = [None] * self.num_envs
         self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        self.scene_stats = {
+            "total_envs": 0,
+            "scene_counts": {},
+            "wall_spawned_sum": 0,
+            "block_spawned_sum": 0,
+            "dyn_active_sum": 0,
+            "wall_spawned_max": 0,
+            "block_spawned_max": 0,
+            "dyn_active_max": 0,
+            "truncate_rate_max": 0.0,
+            "resets": 0,
+        }
+        self._scene_stats_print_every = 200
+        self.scene_stats_window = deque(maxlen=200)
+        # 按 env-reset 计数触发：训练更大阈值，debug 下保持较小阈值
+        self._scene_stats_window_every = 50000
         self._init_scene_runtime()
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
         self.actuator=Actuator(self.cfg,self.device)
@@ -72,6 +89,12 @@ class HexGround(LeggedRobot):
         self.reset_idx(torch.arange(self.num_envs,device=self.device))
         obs_dict, _, _, _ = self.step_separate(torch.zeros_like(self.actions))
         return obs_dict
+
+    def _draw_debug_vis(self):
+        terrain_obj = getattr(self, "terrain", None)
+        if terrain_obj is None or not hasattr(terrain_obj, "cfg"):
+            return
+        super()._draw_debug_vis()
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
@@ -194,6 +217,23 @@ class HexGround(LeggedRobot):
                         f"robot actor is not first in env {env_id}: "
                         f"robot_idx={robot_idx}, min_other={min_other}"
                     )
+
+        block_capacity = int(sum(getattr(self, "static_block_group_max", []) or []))
+        wall_capacity = int(self.static_wall_actor_indices.shape[1]) if self.static_wall_actor_indices is not None else 0
+        dyn_capacity = int(self.dynamic_actor_indices.shape[1]) if self.dynamic_actor_indices is not None else 0
+        actors_per_env = 1 + block_capacity + wall_capacity + dyn_capacity
+        total_actors = actors_per_env * self.num_envs
+        print(
+            "[ActorBudget] actors/env={} (robot=1, block={}, wall={}, dyn={}), total={}".format(
+                actors_per_env, block_capacity, wall_capacity, dyn_capacity, total_actors
+            )
+        )
+        budget = int(getattr(self.cfg.terrain, "scene_actor_budget", 0) or 0)
+        if budget > 0 and actors_per_env > budget:
+            raise RuntimeError(
+                f"actors/env {actors_per_env} exceeds budget {budget}. "
+                "Use train_large config or lower wall/block/dyn max."
+            )
 
     def _on_create_robot(self, env_id, env_handle, actor_handle):
         if hasattr(self, "robot_actor_indices"):
@@ -979,7 +1019,7 @@ class HexGround(LeggedRobot):
                 dynamic_specs = self.scene_manager.sample_dynamic_obstacles(scene_spec, env_id, episode_idx)
             if self.dynamic_actor_indices is not None:
                 self._fill_dynamic_buffers(env_id, dynamic_specs)
-            if scene_spec is not None:
+        if scene_spec is not None:
                 self.scene_meta[env_id] = self.scene_manager.build_meta(scene_spec, dynamic_specs)
                 self.scene_meta[env_id]["num_static_target"] = int(num_target)
                 self.scene_meta[env_id]["num_static_spawned"] = int(num_spawned)
@@ -987,6 +1027,7 @@ class HexGround(LeggedRobot):
                 self.scene_meta[env_id]["num_wall_target"] = int(wall_target)
                 self.scene_meta[env_id]["num_wall_spawned"] = int(wall_spawned)
                 self.scene_meta[env_id]["wall_truncate_rate"] = float(wall_truncate_rate)
+                is_large = int(getattr(self.cfg.terrain, "scene_actor_budget", 0) or 0) > 0
                 if truncate_rate > 0.05:
                     print(
                         f"[Warn] static truncate_rate={truncate_rate:.3f} "
@@ -997,10 +1038,39 @@ class HexGround(LeggedRobot):
                         f"S1 corridor wall truncated: target={wall_target}, spawned={wall_spawned}"
                     )
                 if scene_spec.scene_type in ("s3_doorway", "s6_ood_structured") and wall_target > 0 and wall_spawned < wall_target:
+                    if is_large:
+                        raise RuntimeError(
+                            f"{scene_spec.scene_type} wall truncated: target={wall_target}, spawned={wall_spawned}"
+                        )
                     print(
                         f"[Warn] {scene_spec.scene_type} wall truncated: "
                         f"target={wall_target}, spawned={wall_spawned}"
                     )
+                # 统计 mix 场景分布与 spawn 数
+                stats = self.scene_stats
+                stats["total_envs"] += 1
+                stats["resets"] += 1
+                counts = stats["scene_counts"]
+                counts[scene_spec.scene_type] = counts.get(scene_spec.scene_type, 0) + 1
+                block_spawned = int(num_spawned - wall_spawned)
+                dyn_active = int(len(dynamic_specs))
+                stats["wall_spawned_sum"] += int(wall_spawned)
+                stats["block_spawned_sum"] += int(block_spawned)
+                stats["dyn_active_sum"] += int(dyn_active)
+                stats["wall_spawned_max"] = max(stats["wall_spawned_max"], int(wall_spawned))
+                stats["block_spawned_max"] = max(stats["block_spawned_max"], int(block_spawned))
+                stats["dyn_active_max"] = max(stats["dyn_active_max"], int(dyn_active))
+                stats["truncate_rate_max"] = max(stats["truncate_rate_max"], float(truncate_rate))
+                stats_window = self.scene_stats_window
+                stats_window.append(
+                    {
+                        "scene_type": scene_spec.scene_type,
+                        "wall_spawned": int(wall_spawned),
+                        "block_spawned": int(block_spawned),
+                        "dyn_active": int(dyn_active),
+                        "truncate_rate": float(truncate_rate),
+                    }
+                )
 
         if getattr(self, "static_block_groups", []) or self.static_wall_actor_indices is not None:
             self._sync_static_obstacles(env_ids)
@@ -1075,6 +1145,58 @@ class HexGround(LeggedRobot):
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
             self.extras["scene_meta"] = self.scene_meta[sample_id]
+        # 汇总 mix 统计并写入 extras（debug 下打印）
+        stats = self.scene_stats
+        if stats["resets"] > 0 and stats["resets"] % self._scene_stats_print_every == 0:
+            total = max(1, stats["total_envs"])
+            scene_counts = {
+                k: float(v) / total for k, v in sorted(stats["scene_counts"].items(), key=lambda kv: kv[0])
+            }
+            summary = {
+                "scene_probs": scene_counts,
+                "wall_spawned_mean": stats["wall_spawned_sum"] / total,
+                "block_spawned_mean": stats["block_spawned_sum"] / total,
+                "dyn_active_mean": stats["dyn_active_sum"] / total,
+                "wall_spawned_max": stats["wall_spawned_max"],
+                "block_spawned_max": stats["block_spawned_max"],
+                "dyn_active_max": stats["dyn_active_max"],
+                "truncate_rate_max": stats["truncate_rate_max"],
+            }
+            self.extras["scene_stats"] = summary
+            if getattr(self, "debug_viz", False):
+                print(f"[Debug] scene_stats: {summary}")
+        # 最近窗口统计（按最近 N 次 reset）
+        window_every = 200 if getattr(self, "debug_viz", False) else self._scene_stats_window_every
+        if stats["resets"] > 0 and stats["resets"] % window_every == 0:
+            window = list(self.scene_stats_window)
+            window_total = max(1, len(window))
+            window_counts = {}
+            wall_vals = []
+            block_vals = []
+            dyn_vals = []
+            trunc_vals = []
+            for item in window:
+                key = item["scene_type"]
+                window_counts[key] = window_counts.get(key, 0) + 1
+                wall_vals.append(item["wall_spawned"])
+                block_vals.append(item["block_spawned"])
+                dyn_vals.append(item["dyn_active"])
+                trunc_vals.append(item["truncate_rate"])
+            window_probs = {k: v / window_total for k, v in sorted(window_counts.items(), key=lambda kv: kv[0])}
+            window_summary = {
+                "scene_probs": window_probs,
+                "wall_spawned_mean": float(np.mean(wall_vals)) if wall_vals else 0.0,
+                "block_spawned_mean": float(np.mean(block_vals)) if block_vals else 0.0,
+                "dyn_active_mean": float(np.mean(dyn_vals)) if dyn_vals else 0.0,
+                "wall_spawned_max": int(max(wall_vals)) if wall_vals else 0,
+                "block_spawned_max": int(max(block_vals)) if block_vals else 0,
+                "dyn_active_max": int(max(dyn_vals)) if dyn_vals else 0,
+                "truncate_rate_mean": float(np.mean(trunc_vals)) if trunc_vals else 0.0,
+                "truncate_rate_max": float(max(trunc_vals)) if trunc_vals else 0.0,
+            }
+            self.extras["scene_stats_window"] = window_summary
+            if getattr(self, "debug_viz", False):
+                print(f"[Debug] scene_stats_window: {window_summary}")
 
     def _update_dynamic_obstacles(self):
         if self.dynamic_actor_indices is None:

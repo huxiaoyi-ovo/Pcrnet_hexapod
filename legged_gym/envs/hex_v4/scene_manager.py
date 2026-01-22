@@ -614,6 +614,8 @@ class SceneManager:
         gate_margin_y = float(params.get("corridor_gate_margin_y", wall_size))
         pass_margin = float(params.get("corridor_gate_pass_margin", 0.05))
         min_gate_width = max(2.0 * self.scene_clearance + pass_margin, 1e-3)
+        quant_threshold = max(0.2 * self.scene_clearance, 0.05)
+        printed_warn = False
 
         y_start = -0.5 * length_m
         y_end = 0.5 * length_m
@@ -724,6 +726,33 @@ class SceneManager:
                 if not placed:
                     continue
 
+        gate_quant_stats = []
+        for g in gates:
+            g_len = float(g["length"])
+            g_width = float(g["width"])
+            n_gate = int(max(0, np.floor(g_len / tile)))
+            g_len_quant = float(n_gate * tile)
+            g_len_err = float(abs(g_len_quant - g_len))
+            gate_quant_stats.append(
+                {
+                    "y0": float(g["y0"]),
+                    "length_raw": g_len,
+                    "length_quant": g_len_quant,
+                    "length_error": g_len_err,
+                    "width_raw": g_width,
+                    "width_quant": g_width,
+                    "width_error": 0.0,
+                    "tiles": int(n_gate),
+                }
+            )
+            if not printed_warn and (n_gate == 0 or g_len_err > quant_threshold):
+                print(
+                    "[Warn] corridor gate quantization error: "
+                    f"len_raw={g_len:.3f}, len_quant={g_len_quant:.3f}, "
+                    f"err={g_len_err:.3f}, tile={tile:.3f}"
+                )
+                printed_warn = True
+
         params["corridor_length"] = float(length_m)
         params["corridor_width_nom"] = float(corridor_width)
         params["corridor_wall_block_size"] = float(wall_size)
@@ -731,6 +760,7 @@ class SceneManager:
         params["corridor_x_center"] = float(x_center)
         params["corridor_gates"] = list(gates)
         params["corridor_gate_count_actual"] = int(len(gates))
+        params["corridor_gate_quant"] = gate_quant_stats
 
         return obstacles
 
@@ -779,8 +809,8 @@ class SceneManager:
             offset = rng.uniform(-offset_max, offset_max)
             left_center = -0.5 * door_width - 0.5 * side_width + offset
             right_center = 0.5 * door_width + 0.5 * side_width + offset
-            obstacles.extend(self._tile_rect(left_center, center_y, side_width, door_thickness))
-            obstacles.extend(self._tile_rect(right_center, center_y, side_width, door_thickness))
+            obstacles.extend(self._tile_rect(left_center, center_y, side_width, door_thickness, kind="wall"))
+            obstacles.extend(self._tile_rect(right_center, center_y, side_width, door_thickness, kind="wall"))
             for _ in range(max(0, jam_count)):
                 jam_side = rng.choice([-1.0, 1.0])
                 jam_x = offset + jam_side * (0.5 * door_width + 0.5 * jam_size)
@@ -933,7 +963,9 @@ class SceneManager:
         l_center_y = float(params.get("l_center_y", 1.2))
         obstacles.extend(self._tile_rect(l_center_x, l_center_y, l_thickness, l_size, kind="wall"))
         obstacles.extend(
-            self._tile_rect(l_center_x - 0.5 * l_size + 0.5 * l_thickness, l_center_y, l_size, l_thickness, kind="wall")
+            self._tile_rect(
+                l_center_x - 0.5 * l_size + 0.5 * l_thickness, l_center_y, l_size, l_thickness, kind="wall"
+            )
         )
         return obstacles
 

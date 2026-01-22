@@ -119,6 +119,8 @@ class HexGroundCfg(LeggedRobotCfg):
         scene_static_block_heights = []
         scene_static_wall_block_size = 1.0
         scene_static_wall_block_height = 0.35
+        # 训练规模预算（actors/env 上限；0 表示不限制）
+        scene_actor_budget = 0
         #mesh_type = 'plane'
         curriculum = True
         border_size=1.0
