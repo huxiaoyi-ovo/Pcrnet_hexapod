@@ -7,7 +7,7 @@ class HexS6Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        scene_type = "s6_ood_structured"
+        scene_type = "s6_ood_cluster"
         scene_seed = 106
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -62,16 +62,17 @@ class HexS6Cfg(HexGroundCfg):
             "obstacle_height": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_size_min_k": 1.2,
-            "cluster_count_min": 2,
-            "cluster_count_max": 4,
-            "cluster_size_min": 6,
-            "cluster_size_max": 12,
-            "cluster_sigma_min_k": 1.0,
-            "cluster_sigma_max_k": 2.5,
+            "clearance": 0.27,
+            "length_mul": (20.0, 30.0),
+            "width_mul": (16.0, 20.0),
+            "cluster_count": (3, 6),
+            "cluster_radius_mul": (4.0, 6.0),
+            "cluster_size": (10, 30),
+            "cluster_sigma_mul": (1.5, 2.5),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -89,7 +90,7 @@ class HexS6LargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        scene_type = "s6_ood_structured"
+        scene_type = "s6_ood_cluster"
         scene_seed = 106
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -145,16 +146,17 @@ class HexS6LargeCfg(HexGroundCfg):
             "obstacle_height": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_size_min_k": 1.2,
-            "cluster_count_min": 2,
-            "cluster_count_max": 4,
-            "cluster_size_min": 6,
-            "cluster_size_max": 12,
-            "cluster_sigma_min_k": 1.0,
-            "cluster_sigma_max_k": 2.5,
+            "clearance": 0.27,
+            "length_mul": (20.0, 30.0),
+            "width_mul": (16.0, 20.0),
+            "cluster_count": (3, 6),
+            "cluster_radius_mul": (4.0, 6.0),
+            "cluster_size": (10, 30),
+            "cluster_sigma_mul": (1.5, 2.5),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]

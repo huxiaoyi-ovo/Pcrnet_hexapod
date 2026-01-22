@@ -65,14 +65,15 @@ class HexS3Cfg(HexGroundCfg):
             "room_obstacle_height_max": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "door_width_max_k": 5.0,
-            "door_width_min_k": 3.0,
-            "door_wall_thickness_k": 1.0,
-            "door_wall_count_min": 1,
-            "door_wall_count_max": 2,
+            "clearance": 0.27,
+            "length_mul": (24.0, 32.0),
+            "width_mul": (18.0, 22.0),
+            "wall_thickness_mul": 2.0,
+            "door_width_mul": (4.0, 2.2),
+            "wall_count": (2, 5),
+            "outer_walls": True,
+            "door_zigzag": True,
+            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -149,14 +150,15 @@ class HexS3LargeCfg(HexGroundCfg):
             "room_obstacle_height_max": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "door_width_max_k": 5.0,
-            "door_width_min_k": 3.0,
-            "door_wall_thickness_k": 1.0,
-            "door_wall_count_min": 1,
-            "door_wall_count_max": 2,
+            "clearance": 0.27,
+            "length_mul": (24.0, 32.0),
+            "width_mul": (18.0, 22.0),
+            "wall_thickness_mul": 2.0,
+            "door_width_mul": (4.0, 2.2),
+            "wall_count": (2, 5),
+            "outer_walls": True,
+            "door_zigzag": True,
+            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]

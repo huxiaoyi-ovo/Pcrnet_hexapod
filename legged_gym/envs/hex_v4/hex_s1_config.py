@@ -69,17 +69,17 @@ class HexS1Cfg(HexGroundCfg):
             "corridor_obstacle_count_max": 0,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "corridor_width_max_k": 6.0,
-            "corridor_width_min_k": 4.5,
-            "gate_width_max_k": 4.0,
-            "gate_width_min_k": 2.5,
-            "gate_length_max_k": 4.0,
-            "gate_length_min_k": 2.0,
-            "gate_count_min": 1,
-            "gate_count_max": 3,
+            "clearance": 0.27,
+            "length_mul": (18.0, 28.0),
+            "half_width_mul": (6.0, 4.0),
+            "gate_half_width_mul": (4.0, 2.2),
+            "wall_thickness_mul": 2.0,
+            "gate_len_mul": (4.0, 2.5),
+            "gate_count": (2, 5),
+            "gate_min_gap_mul": 3.0,
+            "spawn_clear_mul": 3.0,
+            "goal_clear_mul": 3.0,
+            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -159,17 +159,17 @@ class HexS1FollowCfg(HexGroundCfg):
             "corridor_obstacle_count_max": 0,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "corridor_width_max_k": 6.0,
-            "corridor_width_min_k": 4.5,
-            "gate_width_max_k": 4.0,
-            "gate_width_min_k": 2.5,
-            "gate_length_max_k": 4.0,
-            "gate_length_min_k": 2.0,
-            "gate_count_min": 1,
-            "gate_count_max": 3,
+            "clearance": 0.27,
+            "length_mul": (18.0, 28.0),
+            "half_width_mul": (6.0, 4.0),
+            "gate_half_width_mul": (4.0, 2.2),
+            "wall_thickness_mul": 2.0,
+            "gate_len_mul": (4.0, 2.5),
+            "gate_count": (2, 5),
+            "gate_min_gap_mul": 3.0,
+            "spawn_clear_mul": 3.0,
+            "goal_clear_mul": 3.0,
+            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -256,17 +256,17 @@ class HexS1LargeCfg(HexGroundCfg):
             "corridor_obstacle_count_max": 0,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "corridor_width_max_k": 6.0,
-            "corridor_width_min_k": 4.5,
-            "gate_width_max_k": 4.0,
-            "gate_width_min_k": 2.5,
-            "gate_length_max_k": 4.0,
-            "gate_length_min_k": 2.0,
-            "gate_count_min": 1,
-            "gate_count_max": 3,
+            "clearance": 0.27,
+            "length_mul": (18.0, 28.0),
+            "half_width_mul": (6.0, 4.0),
+            "gate_half_width_mul": (4.0, 2.2),
+            "wall_thickness_mul": 2.0,
+            "gate_len_mul": (4.0, 2.5),
+            "gate_count": (2, 5),
+            "gate_min_gap_mul": 3.0,
+            "spawn_clear_mul": 3.0,
+            "goal_clear_mul": 3.0,
+            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]

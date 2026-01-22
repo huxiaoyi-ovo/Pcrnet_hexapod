@@ -53,18 +53,19 @@ class HexS5Cfg(HexGroundCfg):
             "dense_block_ratio": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_size_min_k": 1.2,
-            "forest_size_max_k": 2.0,
-            "forest_min_dist_k": 2.0,
-            "forest_block_ratio": 0.5,
-            "s5_split_ratio": 0.5,
-            "s5_sparse_count_min": 6,
-            "s5_sparse_count_max": 18,
-            "s5_dense_count_min": 18,
-            "s5_dense_count_max": 42,
+            "clearance": 0.27,
+            "length_mul": (30.0, 30.0),
+            "width_mul": (20.0, 20.0),
+            "split_range": (0.35, 0.65),
+            "sparse_count": (20, 60),
+            "dense_count": (80, 180),
+            "min_dist_sparse_mul": (3.5, 2.8),
+            "min_dist_dense_mul": (2.5, 1.8),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "spawn_clear_mul": 3.0,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -130,18 +131,19 @@ class HexS5LargeCfg(HexGroundCfg):
             "dense_block_ratio": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_size_min_k": 1.2,
-            "forest_size_max_k": 2.0,
-            "forest_min_dist_k": 2.0,
-            "forest_block_ratio": 0.5,
-            "s5_split_ratio": 0.5,
-            "s5_sparse_count_min": 10,
-            "s5_sparse_count_max": 20,
-            "s5_dense_count_min": 20,
-            "s5_dense_count_max": 48,
+            "clearance": 0.27,
+            "length_mul": (30.0, 30.0),
+            "width_mul": (20.0, 20.0),
+            "split_range": (0.35, 0.65),
+            "sparse_count": (20, 60),
+            "dense_count": (80, 180),
+            "min_dist_sparse_mul": (3.5, 2.8),
+            "min_dist_dense_mul": (2.5, 1.8),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "spawn_clear_mul": 3.0,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]

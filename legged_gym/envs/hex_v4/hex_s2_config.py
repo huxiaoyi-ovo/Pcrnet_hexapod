@@ -51,15 +51,16 @@ class HexS2Cfg(HexGroundCfg):
             "block_height_max": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_count_min": 12,
-            "forest_count_max": 36,
-            "forest_size_min_k": 1.2,
-            "forest_size_max_k": 2.0,
-            "forest_min_dist_k": 2.0,
-            "forest_block_ratio": 0.5,
+            "clearance": 0.27,
+            "length_mul": (20.0, 30.0),
+            "width_mul": (16.0, 20.0),
+            "count_range": (40, 160),
+            "min_dist_mul": (3.0, 2.0),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "spawn_clear_mul": 3.0,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -123,15 +124,16 @@ class HexS2LargeCfg(HexGroundCfg):
             "block_height_max": 0.4,
         }
         scene_cfg = {
-            "clearance_m": 0.27,
-            "wall_height_k": 3.0,
-            "obs_height_k": 1.5,
-            "forest_count_min": 24,
-            "forest_count_max": 56,
-            "forest_size_min_k": 1.2,
-            "forest_size_max_k": 2.0,
-            "forest_min_dist_k": 2.0,
-            "forest_block_ratio": 0.5,
+            "clearance": 0.27,
+            "length_mul": (20.0, 30.0),
+            "width_mul": (16.0, 20.0),
+            "count_range": (40, 160),
+            "min_dist_mul": (3.0, 2.0),
+            "block_size_mul": (1.5, 2.5),
+            "pole_radius_mul": (0.6, 1.0),
+            "block_ratio": 0.5,
+            "spawn_clear_mul": 3.0,
+            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]

@@ -435,10 +435,17 @@ class Terrain:
             )
             seed = self._scene_seed(i, j)
             rng = np.random.RandomState(seed)
-            out = build_heightfield(scene_type, difficulty, rng, self.cfg)
-            terrain.height_field_raw[:] = out["hf"].astype(np.int16)
+            hf, meta = build_heightfield(
+                scene_type,
+                difficulty,
+                rng,
+                self.cfg,
+                self.cfg.horizontal_scale,
+                self.cfg.vertical_scale,
+            )
+            terrain.height_field_raw[:] = hf.astype(np.int16)
             if self.scene_specs is not None:
-                meta = dict(out.get("meta", {}))
+                meta = dict(meta)
                 meta["layout_id"] = seed
                 self.scene_specs[i][j] = meta
             self.add_terrain_to_map(terrain, i, j)
@@ -458,10 +465,17 @@ class Terrain:
                 )
                 seed = self._scene_seed(i, j)
                 rng = np.random.RandomState(seed)
-                out = build_heightfield(scene_type, difficulty, rng, self.cfg)
-                terrain.height_field_raw[:] = out["hf"].astype(np.int16)
+                hf, meta = build_heightfield(
+                    scene_type,
+                    difficulty,
+                    rng,
+                    self.cfg,
+                    self.cfg.horizontal_scale,
+                    self.cfg.vertical_scale,
+                )
+                terrain.height_field_raw[:] = hf.astype(np.int16)
                 if self.scene_specs is not None:
-                    meta = dict(out.get("meta", {}))
+                    meta = dict(meta)
                     meta["layout_id"] = seed
                     self.scene_specs[i][j] = meta
                 self.add_terrain_to_map(terrain, i, j)
