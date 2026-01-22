@@ -13,6 +13,14 @@ python legged_gym/scripts/play.py --task=hex_ground --num_envs 1 --load_run <LOW
 # ------------------------
 # 高层 V5 Teacher 训练（cmd-space MoE）
 # ------------------------
+# 训练场景说明（S1–S6）
+# - S1 Corridor：走廊 + 门洞收缩段，通道内少量离散障碍，窄口能力训练
+# - S2 Forest：开放平地随机静态障碍（pole/block 混合），Follow/Avoid 主训练分布
+# - S3 Doorway：房间-门洞拓扑，门洞宽度/位置随机，门口+转向冲突
+# - S4 Crossing：动态横穿障碍，速度由反应窗口步数反推（冲突最强）
+# - S5 Transition：稀疏→密集（或反向）分段密度切换，Gate 情境切换
+# - S6 OOD：结构化 OOD（cluster / nonconvex / maze）混合采样，默认等概率；可在 hex_s6_config.py 中用 ood_template 固定模板
+
 # S2 Follow（Forest，Follow 主训练分布）
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --low_level_ckpt <LOW_LEVEL_CKPT> --num_envs 512 --num_steps 24 --num_iterations 200 --decimation 5 --headless
 
