@@ -1224,6 +1224,10 @@ class HexGround(LeggedRobot):
         updated = []
         for env_id in env_ids.tolist():
             scene_spec = self.scene_spec_cache[env_id]
+            seed = 0
+            if scene_spec is not None:
+                seed = int((scene_spec.layout_seed or 0) + env_id * 131)
+            rng = np.random.RandomState(seed)
             if scene_spec is not None and scene_spec.scene_type == "s1_corridor":
                 params = scene_spec.params or {}
                 length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
@@ -1269,8 +1273,6 @@ class HexGround(LeggedRobot):
             width, length = bounds
             if width <= 2.0 * margin or length <= 2.0 * margin:
                 continue
-            seed = int((scene_spec.layout_seed or 0) + env_id * 131)
-            rng = np.random.RandomState(seed)
             x_local = 0.0
             y_local = 0.0
             placed = False
