@@ -235,39 +235,56 @@ class HexGround(LeggedRobot):
                 "Use train_large config or lower wall/block/dyn max."
             )
 
+    def _scene_use_actors(self) -> bool:
+        return bool(getattr(self.cfg.terrain, "scene_use_actors", False))
+
+    def _scene_group_id(self, env_id: int) -> int:
+        if self._scene_use_actors():
+            return 1
+        return env_id + 1
+
+    def _scene_collision_filter(self) -> int:
+        scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+        if scene_filter >= (1 << 31):
+            scene_filter = -1
+        return scene_filter
+
+    def _apply_actor_collision_filter(self, env_handle, actor_handle, target_filter: int, env_id: int, debug_tag: str = ""):
+        try:
+            shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+            for prop in shape_props:
+                prop.filter = target_filter
+            self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+            if getattr(self, "debug_viz", False) and env_id == 0 and debug_tag:
+                flag = f"_{debug_tag}_filter_logged"
+                if not getattr(self, flag, False):
+                    print(f"[Debug] {debug_tag} shape filter={target_filter}")
+                    setattr(self, flag, True)
+        except Exception:
+            if getattr(self, "debug_viz", False) and debug_tag:
+                flag = f"_{debug_tag}_filter_warned"
+                if not getattr(self, flag, False):
+                    print(f"[Debug] {debug_tag} shape filter update failed")
+                    setattr(self, flag, True)
+
     def _on_create_robot(self, env_id, env_handle, actor_handle):
         if hasattr(self, "robot_actor_indices"):
             self.robot_actor_indices[env_id] = self.gym.get_actor_index(
                 env_handle, actor_handle, gymapi.DOMAIN_SIM
             )
         # 机器人与障碍碰撞过滤（避免 actor 场景穿墙）
-        scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
-        if scene_filter >= (1 << 31):
-            scene_filter = -1
-        group_id = env_id + 1
+        scene_filter = self._scene_collision_filter()
+        group_id = self._scene_group_id(env_id)
         if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_robot_group_logged", False):
             print(f"[Debug] robot collision_group={group_id}, scene_filter={scene_filter}")
             self._robot_group_logged = True
-        try:
-            shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
-            for prop in shape_props:
-                prop.filter = scene_filter
-            self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
-            if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_robot_filter_logged", False):
-                print(f"[Debug] robot shape filter={scene_filter}")
-                self._robot_filter_logged = True
-        except Exception:
-            if getattr(self, "debug_viz", False) and not getattr(self, "_robot_filter_warned", False):
-                print("[Debug] robot shape filter update failed")
-                self._robot_filter_warned = True
+        self._apply_actor_collision_filter(env_handle, actor_handle, scene_filter, env_id, debug_tag="robot")
 
     def _create_env_actors(self, env_id, env_handle):
         if self.scene_manager is None:
             return
-        group_id = env_id + 1
-        scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
-        if scene_filter >= (1 << 31):
-            scene_filter = -1
+        group_id = self._scene_group_id(env_id)
+        scene_filter = self._scene_collision_filter()
         # 创建阶段用 scene_filter，hidden pool 会在同步时切换为 0
         create_filter = scene_filter
         if self.static_block_groups:
@@ -288,6 +305,7 @@ class HexGround(LeggedRobot):
                         create_filter,
                         0,
                     )
+                    self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="block")
                     handles[env_id][obs_id] = actor_handle
                     actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                     indices[env_id, obs_id] = actor_index
@@ -306,6 +324,7 @@ class HexGround(LeggedRobot):
                     create_filter,
                     0,
                 )
+                self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="wall")
                 self.static_wall_actor_handles[env_id][obs_id] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.static_wall_actor_indices[env_id, obs_id] = actor_index
@@ -327,6 +346,7 @@ class HexGround(LeggedRobot):
                     create_filter,
                     0,
                 )
+                self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="dyn")
                 self.dynamic_actor_handles[env_id][obs_id] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.dynamic_actor_indices[env_id, obs_id] = actor_index
@@ -926,21 +946,15 @@ class HexGround(LeggedRobot):
         )
         # 同步碰撞过滤：active 开碰撞，inactive 关碰撞
         if handles is not None:
-            scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
-            if scene_filter >= (1 << 31):
-                scene_filter = -1
+            scene_filter = self._scene_collision_filter()
             for env_id in env_ids.tolist():
                 env_handles = handles[env_id]
                 active_mask = active[env_id].tolist()
                 for local_id, actor_handle in enumerate(env_handles):
                     target_filter = scene_filter if active_mask[local_id] else 0
-                    try:
-                        shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], actor_handle)
-                        for prop in shape_props:
-                            prop.filter = target_filter
-                        self.gym.set_actor_rigid_shape_properties(self.envs[env_id], actor_handle, shape_props)
-                    except Exception:
-                        pass
+                    self._apply_actor_collision_filter(
+                        self.envs[env_id], actor_handle, target_filter, env_id, debug_tag=""
+                    )
                 if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_filter_logged", False):
                     if env_handles:
                         try:
@@ -1150,6 +1164,37 @@ class HexGround(LeggedRobot):
                             )
             except Exception as exc:
                 print(f"[Debug] obstacle root_state check failed: {exc}")
+            if not getattr(self, "_collision_debug_logged", False):
+                try:
+                    group_id = self._scene_group_id(check_env)
+                    scene_filter = self._scene_collision_filter()
+                    print(f"[Debug] collision group (scene)={group_id}, scene_filter={scene_filter}")
+                    # robot shape filter
+                    try:
+                        r_props = self.gym.get_actor_rigid_shape_properties(
+                            self.envs[check_env], self.actor_handles[check_env]
+                        )
+                        if r_props:
+                            print(f"[Debug] robot shape filter={r_props[0].filter}")
+                    except Exception:
+                        print("[Debug] robot shape filter query failed")
+                    # wall shape filter
+                    wall_handle = None
+                    if self.static_wall_actor_handles is not None:
+                        for h in self.static_wall_actor_handles[check_env]:
+                            if h is not None:
+                                wall_handle = h
+                                break
+                    if wall_handle is not None:
+                        try:
+                            w_props = self.gym.get_actor_rigid_shape_properties(self.envs[check_env], wall_handle)
+                            if w_props:
+                                print(f"[Debug] wall shape filter={w_props[0].filter}")
+                        except Exception:
+                            print("[Debug] wall shape filter query failed")
+                except Exception as exc:
+                    print(f"[Debug] collision filter check failed: {exc}")
+                self._collision_debug_logged = True
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
             self.extras["scene_meta"] = self.scene_meta[sample_id]
@@ -1245,21 +1290,15 @@ class HexGround(LeggedRobot):
         )
         # 同步动态障碍碰撞过滤：active 开碰撞，inactive 关碰撞
         if self.dynamic_actor_handles is not None and self.dynamic_active is not None:
-            scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
-            if scene_filter >= (1 << 31):
-                scene_filter = -1
+            scene_filter = self._scene_collision_filter()
             for env_id in range(self.num_envs):
                 env_handles = self.dynamic_actor_handles[env_id]
                 active_mask = self.dynamic_active[env_id].tolist()
                 for local_id, actor_handle in enumerate(env_handles):
                     target_filter = scene_filter if active_mask[local_id] else 0
-                    try:
-                        shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], actor_handle)
-                        for prop in shape_props:
-                            prop.filter = target_filter
-                        self.gym.set_actor_rigid_shape_properties(self.envs[env_id], actor_handle, shape_props)
-                    except Exception:
-                        pass
+                    self._apply_actor_collision_filter(
+                        self.envs[env_id], actor_handle, target_filter, env_id, debug_tag=""
+                    )
 
     def _maybe_resample_scene_columns(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
