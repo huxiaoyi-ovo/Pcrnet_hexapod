@@ -244,8 +244,9 @@ class HexGround(LeggedRobot):
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
         if scene_filter >= (1 << 31):
             scene_filter = -1
+        group_id = env_id + 1
         if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_robot_group_logged", False):
-            print(f"[Debug] robot collision_group={env_id}, scene_filter={scene_filter}")
+            print(f"[Debug] robot collision_group={group_id}, scene_filter={scene_filter}")
             self._robot_group_logged = True
         try:
             shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
@@ -282,7 +283,7 @@ class HexGround(LeggedRobot):
                         block_asset,
                         pose,
                         f"static_{group}_{obs_id}",
-                        env_id,
+                        group_id,
                         create_filter,
                         0,
                     )
@@ -300,7 +301,7 @@ class HexGround(LeggedRobot):
                     self.static_wall_asset,
                     pose,
                     f"static_wall_{obs_id}",
-                    env_id,
+                    group_id,
                     create_filter,
                     0,
                 )
@@ -308,7 +309,7 @@ class HexGround(LeggedRobot):
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.static_wall_actor_indices[env_id, obs_id] = actor_index
             if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_group_logged", False):
-                print(f"[Debug] wall collision_group={env_id}, create_filter={create_filter}, scene_filter={scene_filter}")
+                print(f"[Debug] wall collision_group={group_id}, create_filter={create_filter}, scene_filter={scene_filter}")
                 self._wall_group_logged = True
 
         if self.dynamic_asset is not None and self.dynamic_actor_indices is not None:
@@ -321,7 +322,7 @@ class HexGround(LeggedRobot):
                     self.dynamic_asset,
                     pose,
                     f"dyn_obs_{obs_id}",
-                    env_id,
+                    group_id,
                     create_filter,
                     0,
                 )
