@@ -98,16 +98,6 @@ class HexGround(LeggedRobot):
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
-        terrain_obj = getattr(self, "terrain", None)
-        self.scene_manager = getattr(terrain_obj, "scene_manager", None)
-        if self.scene_manager is None:
-            try:
-                from legged_gym.envs.hex_v4.scene_manager import SceneManager
-                self.scene_manager = SceneManager(self.cfg.terrain)
-                if terrain_obj is not None:
-                    setattr(terrain_obj, "scene_manager", self.scene_manager)
-            except Exception:
-                self.scene_manager = None
         self.static_block_groups = []
         self.static_block_group_sizes = []
         self.static_block_group_heights = []
@@ -118,6 +108,22 @@ class HexGround(LeggedRobot):
         self.static_wall_actor_handles = None
         self.static_wall_actor_indices = None
         self.static_wall_asset = None
+        self.dynamic_actor_handles = None
+        self.dynamic_actor_indices = None
+        self.dynamic_asset = None
+        if bool(getattr(self.cfg.terrain, "scene_use_heightfield", False)):
+            self.scene_manager = None
+            return
+        terrain_obj = getattr(self, "terrain", None)
+        self.scene_manager = getattr(terrain_obj, "scene_manager", None)
+        if self.scene_manager is None:
+            try:
+                from legged_gym.envs.hex_v4.scene_manager import SceneManager
+                self.scene_manager = SceneManager(self.cfg.terrain)
+                if terrain_obj is not None:
+                    setattr(terrain_obj, "scene_manager", self.scene_manager)
+            except Exception:
+                self.scene_manager = None
         self.dynamic_actor_handles = None
         self.dynamic_actor_indices = None
         self.dynamic_asset = None
@@ -1460,7 +1466,7 @@ class HexGround(LeggedRobot):
         return True
 
     def _apply_scene_spawn(self, env_ids: torch.Tensor):
-        if self.scene_spec_cache is None or env_ids.numel() == 0:
+        if self.scene_manager is None or self.scene_spec_cache is None or env_ids.numel() == 0:
             return
         if self.nav_cfg is not None:
             margin = float(getattr(self.nav_cfg, "spawn_scene_margin", self.scene_manager.scene_margin))

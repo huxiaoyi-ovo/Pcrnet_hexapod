@@ -5,7 +5,7 @@ class HexS1Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s1_corridor"
         scene_seed = 101
@@ -13,8 +13,8 @@ class HexS1Cfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -67,6 +67,19 @@ class HexS1Cfg(HexGroundCfg):
             "corridor_goal_margin": 0.2,
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "corridor_width_max_k": 6.0,
+            "corridor_width_min_k": 4.5,
+            "gate_width_max_k": 4.0,
+            "gate_width_min_k": 2.5,
+            "gate_length_max_k": 4.0,
+            "gate_length_min_k": 2.0,
+            "gate_count_min": 1,
+            "gate_count_max": 3,
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -82,7 +95,7 @@ class HexS1FollowCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s1_corridor"
         scene_seed = 101
@@ -90,8 +103,8 @@ class HexS1FollowCfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -144,6 +157,19 @@ class HexS1FollowCfg(HexGroundCfg):
             "corridor_goal_margin": 0.2,
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "corridor_width_max_k": 6.0,
+            "corridor_width_min_k": 4.5,
+            "gate_width_max_k": 4.0,
+            "gate_width_min_k": 2.5,
+            "gate_length_max_k": 4.0,
+            "gate_length_min_k": 2.0,
+            "gate_count_min": 1,
+            "gate_count_max": 3,
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -163,7 +189,7 @@ class HexS1LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s1_corridor"
         scene_seed = 101
@@ -171,8 +197,8 @@ class HexS1LargeCfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -228,6 +254,19 @@ class HexS1LargeCfg(HexGroundCfg):
             "corridor_goal_margin": 0.2,
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "corridor_width_max_k": 6.0,
+            "corridor_width_min_k": 4.5,
+            "gate_width_max_k": 4.0,
+            "gate_width_min_k": 2.5,
+            "gate_length_max_k": 4.0,
+            "gate_length_min_k": 2.0,
+            "gate_count_min": 1,
+            "gate_count_max": 3,
         }
         num_cols = 3
         terrain_proportions = [1.0]

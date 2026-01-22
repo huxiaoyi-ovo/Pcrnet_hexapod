@@ -5,18 +5,18 @@ class HexS4Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s4_crossing"
         scene_seed = 104
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
-        scene_dynamic_max = 6
+        scene_dynamic_max = 0
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 40
@@ -58,18 +58,18 @@ class HexS4LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s4_crossing"
         scene_seed = 104
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
-        scene_dynamic_max = 2
+        scene_dynamic_max = 0
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0

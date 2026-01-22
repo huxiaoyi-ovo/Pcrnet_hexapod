@@ -5,7 +5,7 @@ class HexS2Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s2_forest"
         scene_seed = 102
@@ -13,8 +13,8 @@ class HexS2Cfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 80
@@ -50,6 +50,17 @@ class HexS2Cfg(HexGroundCfg):
             "block_height_min": 0.35,
             "block_height_max": 0.4,
         }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_count_min": 12,
+            "forest_count_max": 36,
+            "forest_size_min_k": 1.2,
+            "forest_size_max_k": 2.0,
+            "forest_min_dist_k": 2.0,
+            "forest_block_ratio": 0.5,
+        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -64,7 +75,7 @@ class HexS2LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s2_forest"
         scene_seed = 102
@@ -72,8 +83,8 @@ class HexS2LargeCfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -110,6 +121,17 @@ class HexS2LargeCfg(HexGroundCfg):
             "block_size_max": 0.44,
             "block_height_min": 0.35,
             "block_height_max": 0.4,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_count_min": 24,
+            "forest_count_max": 56,
+            "forest_size_min_k": 1.2,
+            "forest_size_max_k": 2.0,
+            "forest_min_dist_k": 2.0,
+            "forest_block_ratio": 0.5,
         }
         num_cols = 3
         terrain_proportions = [1.0]

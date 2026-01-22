@@ -5,16 +5,16 @@ class HexS5Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
-        scene_type = "s5_transition"
+        scene_type = "s5_sparse_dense"
         scene_seed = 105
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 60
@@ -52,6 +52,20 @@ class HexS5Cfg(HexGroundCfg):
             "sparse_block_ratio": 0.15,
             "dense_block_ratio": 0.4,
         }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_size_min_k": 1.2,
+            "forest_size_max_k": 2.0,
+            "forest_min_dist_k": 2.0,
+            "forest_block_ratio": 0.5,
+            "s5_split_ratio": 0.5,
+            "s5_sparse_count_min": 6,
+            "s5_sparse_count_max": 18,
+            "s5_dense_count_min": 18,
+            "s5_dense_count_max": 42,
+        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -66,16 +80,16 @@ class HexS5LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
-        scene_type = "s5_transition"
+        scene_type = "s5_sparse_dense"
         scene_seed = 105
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -114,6 +128,20 @@ class HexS5LargeCfg(HexGroundCfg):
             "boundary_jitter": 0.6,
             "sparse_block_ratio": 0.15,
             "dense_block_ratio": 0.4,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_size_min_k": 1.2,
+            "forest_size_max_k": 2.0,
+            "forest_min_dist_k": 2.0,
+            "forest_block_ratio": 0.5,
+            "s5_split_ratio": 0.5,
+            "s5_sparse_count_min": 10,
+            "s5_sparse_count_max": 20,
+            "s5_dense_count_min": 20,
+            "s5_dense_count_max": 48,
         }
         num_cols = 3
         terrain_proportions = [1.0]

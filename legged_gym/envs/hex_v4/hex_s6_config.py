@@ -5,7 +5,7 @@ class HexS6Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s6_ood_structured"
         scene_seed = 106
@@ -14,8 +14,8 @@ class HexS6Cfg(HexGroundCfg):
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 80
@@ -61,6 +61,18 @@ class HexS6Cfg(HexGroundCfg):
             "cluster_spread": 0.8,
             "obstacle_height": 0.4,
         }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_size_min_k": 1.2,
+            "cluster_count_min": 2,
+            "cluster_count_max": 4,
+            "cluster_size_min": 6,
+            "cluster_size_max": 12,
+            "cluster_sigma_min_k": 1.0,
+            "cluster_sigma_max_k": 2.5,
+        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -75,7 +87,7 @@ class HexS6LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s6_ood_structured"
         scene_seed = 106
@@ -84,8 +96,8 @@ class HexS6LargeCfg(HexGroundCfg):
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -131,6 +143,18 @@ class HexS6LargeCfg(HexGroundCfg):
             "cluster_radius": 0.22,
             "cluster_spread": 0.8,
             "obstacle_height": 0.4,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "forest_size_min_k": 1.2,
+            "cluster_count_min": 2,
+            "cluster_count_max": 4,
+            "cluster_size_min": 6,
+            "cluster_size_max": 12,
+            "cluster_sigma_min_k": 1.0,
+            "cluster_sigma_max_k": 2.5,
         }
         num_cols = 3
         terrain_proportions = [1.0]

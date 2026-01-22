@@ -311,24 +311,35 @@ class Terrain:
         self.scene_specs = None
         self.scene_manager = None
         self.scene_use_actors = bool(getattr(cfg, "scene_use_actors", False))
+        self.scene_use_heightfield = bool(getattr(cfg, "scene_use_heightfield", False))
+        self._scene_heightfield_done = False
         if getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None):
-            from legged_gym.envs.hex_v4.scene_manager import SceneManager
-            self.scene_manager = SceneManager(cfg)
-            self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
-
-        if self.scene_manager is not None:
-            if self.scene_use_actors:
-                self.scene_flat()
-            elif cfg.curriculum:
-                self.scene_curriculum()
+            if self.scene_use_heightfield:
+                self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
+                if cfg.curriculum:
+                    self.scene_heightfield_curriculum()
+                else:
+                    self.scene_heightfield_randomized()
+                self._scene_heightfield_done = True
             else:
-                self.scene_randomized()
-        elif cfg.curriculum:
-            self.curiculum()
-        elif cfg.selected:
-            self.selected_terrain()
-        else:
-            self.randomized_terrain()
+                from legged_gym.envs.hex_v4.scene_manager import SceneManager
+                self.scene_manager = SceneManager(cfg)
+                self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
+
+        if not self._scene_heightfield_done:
+            if self.scene_manager is not None:
+                if self.scene_use_actors:
+                    self.scene_flat()
+                elif cfg.curriculum:
+                    self.scene_curriculum()
+                else:
+                    self.scene_randomized()
+            elif cfg.curriculum:
+                self.curiculum()
+            elif cfg.selected:
+                self.selected_terrain()
+            else:
+                self.randomized_terrain()
         
         self.heightsamples = self.height_field_raw
         if self.type=="trimesh":
@@ -387,8 +398,8 @@ class Terrain:
                 seed = self.scene_manager.seed_for_cell(i, j)
                 scene_spec = self.scene_manager.build_scene(terrain, difficulty, seed=seed)
                 if self.scene_specs is not None:
-                    self.scene_specs[i][j] = scene_spec
-                self.add_terrain_to_map(terrain, i, j)
+                self.scene_specs[i][j] = scene_spec
+            self.add_terrain_to_map(terrain, i, j)
 
     def scene_flat(self):
         for k in range(self.cfg.num_sub_terrains):
@@ -404,6 +415,56 @@ class Terrain:
             if self.scene_specs is not None:
                 self.scene_specs[i][j] = None
             self.add_terrain_to_map(terrain, i, j)
+
+    def _scene_seed(self, i: int, j: int) -> int:
+        base = int(getattr(self.cfg, "scene_seed", 0) or 0)
+        return base + i * 1000 + j * 17
+
+    def scene_heightfield_randomized(self):
+        from legged_gym.envs.hex_v4.terrain_builder import build_heightfield
+        scene_type = getattr(self.cfg, "scene_type", None)
+        for k in range(self.cfg.num_sub_terrains):
+            (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
+            difficulty = np.random.uniform(0.0, 1.0)
+            terrain = terrain_utils.SubTerrain(
+                "terrain",
+                width=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
+                vertical_scale=self.cfg.vertical_scale,
+                horizontal_scale=self.cfg.horizontal_scale,
+            )
+            seed = self._scene_seed(i, j)
+            rng = np.random.RandomState(seed)
+            out = build_heightfield(scene_type, difficulty, rng, self.cfg)
+            terrain.height_field_raw[:] = out["hf"].astype(np.int16)
+            if self.scene_specs is not None:
+                meta = dict(out.get("meta", {}))
+                meta["layout_id"] = seed
+                self.scene_specs[i][j] = meta
+            self.add_terrain_to_map(terrain, i, j)
+
+    def scene_heightfield_curriculum(self):
+        from legged_gym.envs.hex_v4.terrain_builder import build_heightfield
+        scene_type = getattr(self.cfg, "scene_type", None)
+        for j in range(self.cfg.num_cols):
+            for i in range(self.cfg.num_rows):
+                difficulty = i / max(1, (self.cfg.num_rows - 1))
+                terrain = terrain_utils.SubTerrain(
+                    "terrain",
+                    width=self.width_per_env_pixels,
+                    length=self.length_per_env_pixels,
+                    vertical_scale=self.cfg.vertical_scale,
+                    horizontal_scale=self.cfg.horizontal_scale,
+                )
+                seed = self._scene_seed(i, j)
+                rng = np.random.RandomState(seed)
+                out = build_heightfield(scene_type, difficulty, rng, self.cfg)
+                terrain.height_field_raw[:] = out["hf"].astype(np.int16)
+                if self.scene_specs is not None:
+                    meta = dict(out.get("meta", {}))
+                    meta["layout_id"] = seed
+                    self.scene_specs[i][j] = meta
+                self.add_terrain_to_map(terrain, i, j)
 
     def selected_terrain(self):
         terrain_type = self.cfg.terrain_kwargs.pop('type')

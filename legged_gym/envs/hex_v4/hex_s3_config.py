@@ -5,7 +5,7 @@ class HexS3Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s3_doorway"
         scene_seed = 103
@@ -13,8 +13,8 @@ class HexS3Cfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 120
@@ -64,6 +64,16 @@ class HexS3Cfg(HexGroundCfg):
             "room_obstacle_height_min": 0.35,
             "room_obstacle_height_max": 0.4,
         }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "door_width_max_k": 5.0,
+            "door_width_min_k": 3.0,
+            "door_wall_thickness_k": 1.0,
+            "door_wall_count_min": 1,
+            "door_wall_count_max": 2,
+        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -78,7 +88,7 @@ class HexS3LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_type = "s3_doorway"
         scene_seed = 103
@@ -86,8 +96,8 @@ class HexS3LargeCfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_actors = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
         scene_static_max = 0
@@ -137,6 +147,16 @@ class HexS3LargeCfg(HexGroundCfg):
             "room_obstacle_size_max": 0.44,
             "room_obstacle_height_min": 0.35,
             "room_obstacle_height_max": 0.4,
+        }
+        scene_cfg = {
+            "clearance_m": 0.27,
+            "wall_height_k": 3.0,
+            "obs_height_k": 1.5,
+            "door_width_max_k": 5.0,
+            "door_width_min_k": 3.0,
+            "door_wall_thickness_k": 1.0,
+            "door_wall_count_min": 1,
+            "door_wall_count_max": 2,
         }
         num_cols = 3
         terrain_proportions = [1.0]
