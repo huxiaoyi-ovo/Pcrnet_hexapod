@@ -894,7 +894,12 @@ class HexGround(LeggedRobot):
                 scene_spec = self._get_scene_spec(env_id)
 
             static_specs = scene_spec.static_obstacles if scene_spec is not None else []
+            wall_target = len([spec for spec in static_specs if spec.kind == "wall"])
             spawned_specs, num_target, num_spawned, truncate_rate = self._allocate_static_specs(static_specs)
+            wall_spawned = len([spec for spec in spawned_specs if spec.kind == "wall"])
+            wall_truncate_rate = 0.0
+            if wall_target > 0:
+                wall_truncate_rate = 1.0 - float(wall_spawned) / float(wall_target)
             if scene_spec is not None:
                 layout_hash = self.scene_manager._hash_layout(list(spawned_specs), scene_spec.dynamic_template)
                 scene_spec = SceneSpec(
@@ -920,10 +925,17 @@ class HexGround(LeggedRobot):
                 self.scene_meta[env_id]["num_static_target"] = int(num_target)
                 self.scene_meta[env_id]["num_static_spawned"] = int(num_spawned)
                 self.scene_meta[env_id]["truncate_rate"] = float(truncate_rate)
+                self.scene_meta[env_id]["num_wall_target"] = int(wall_target)
+                self.scene_meta[env_id]["num_wall_spawned"] = int(wall_spawned)
+                self.scene_meta[env_id]["wall_truncate_rate"] = float(wall_truncate_rate)
                 if truncate_rate > 0.05:
                     print(
                         f"[Warn] static truncate_rate={truncate_rate:.3f} "
                         f"(env={env_id}, target={num_target}, spawned={num_spawned})"
+                    )
+                if scene_spec.scene_type == "s1_corridor" and wall_target > 0 and wall_spawned < wall_target:
+                    raise RuntimeError(
+                        f"S1 corridor wall truncated: target={wall_target}, spawned={wall_spawned}"
                     )
 
         if getattr(self, "static_block_groups", []) or self.static_wall_actor_indices is not None:
@@ -1149,9 +1161,7 @@ class HexGround(LeggedRobot):
     def _scene_spawn_bounds(self, scene_spec: Optional[SceneSpec]):
         if scene_spec is None:
             return None
-        if scene_spec.scene_type == "s1_corridor":
-            width = float(scene_spec.params.get("corridor_width", self.cfg.terrain.terrain_width))
-        elif scene_spec.scene_type == "s3_doorway":
+        if scene_spec.scene_type == "s3_doorway":
             width = float(scene_spec.params.get("room_width", self.cfg.terrain.terrain_width))
         else:
             return None
@@ -1172,6 +1182,22 @@ class HexGround(LeggedRobot):
         range_x = (-0.5 * width + margin, 0.5 * width - margin)
         range_y = (-0.5 * length + margin, 0.5 * length - margin)
         return range_x, range_y
+
+    def _corridor_half_width_at_y(self, scene_spec: SceneSpec, y_local: float) -> float:
+        params = scene_spec.params or {}
+        width_nom = float(params.get("corridor_width_nom", params.get("corridor_width", self.cfg.terrain.terrain_width)))
+        half_nom = 0.5 * width_nom
+        gates = params.get("corridor_gates", [])
+        if not isinstance(gates, list) or not gates:
+            return half_nom
+        half_min = half_nom
+        for gate in gates:
+            y0 = float(gate.get("y0", 0.0))
+            length = float(gate.get("length", 0.0))
+            width = float(gate.get("width", width_nom))
+            if abs(y_local - y0) <= 0.5 * length:
+                half_min = min(half_min, 0.5 * width)
+        return half_min
 
     def _is_scene_spawn_clear(self, scene_spec: SceneSpec, x_local: float, y_local: float, clearance: float) -> bool:
         for spec in scene_spec.static_obstacles:
@@ -1198,6 +1224,45 @@ class HexGround(LeggedRobot):
         updated = []
         for env_id in env_ids.tolist():
             scene_spec = self.scene_spec_cache[env_id]
+            if scene_spec is not None and scene_spec.scene_type == "s1_corridor":
+                params = scene_spec.params or {}
+                length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
+                y_start = -0.5 * length
+                y_end = 0.5 * length
+                spawn_buffer = float(params.get("corridor_spawn_buffer", margin))
+                spawn_span = float(params.get("corridor_spawn_span", max(1.0, 0.3 * length)))
+                x_center = float(params.get("corridor_x_center", 0.0))
+                x_local = 0.0
+                y_local = 0.0
+                placed = False
+                for _ in range(max_tries):
+                    y_min = y_start + spawn_buffer
+                    y_max = min(y_start + spawn_span, y_end - spawn_buffer)
+                    if y_max <= y_min:
+                        break
+                    y_local = rng.uniform(y_min, y_max)
+                    half_w = self._corridor_half_width_at_y(scene_spec, y_local)
+                    x_min = x_center - (half_w - margin)
+                    x_max = x_center + (half_w - margin)
+                    if x_max <= x_min:
+                        continue
+                    x_local = rng.uniform(x_min, x_max)
+                    if self._is_scene_spawn_clear(scene_spec, x_local, y_local, clearance):
+                        placed = True
+                        break
+                if not placed:
+                    y_local = float(np.clip(y_local, y_start + spawn_buffer, y_end - spawn_buffer))
+                    half_w = self._corridor_half_width_at_y(scene_spec, y_local)
+                    x_min = x_center - (half_w - margin)
+                    x_max = x_center + (half_w - margin)
+                    if x_max > x_min:
+                        x_local = float(np.clip(x_local, x_min, x_max))
+                self.root_states[env_id] = self.base_init_state
+                self.root_states[env_id, :3] += self.env_origins[env_id]
+                self.root_states[env_id, 0] += x_local
+                self.root_states[env_id, 1] += y_local
+                updated.append(env_id)
+                continue
             bounds = self._scene_spawn_bounds(scene_spec)
             if bounds is None:
                 continue
@@ -1782,16 +1847,95 @@ class HexGround(LeggedRobot):
         force_prob = float(getattr(self.nav_cfg, "goal_force_blocking_prob", 1.0))
 
         corridor_envs = []
+        s1_envs = []
         other_envs = []
         if self.scene_spec_cache is not None:
             for env_id in env_ids.tolist():
                 scene_spec = self.scene_spec_cache[env_id]
-                if self._scene_goal_ranges(scene_spec) is not None:
+                if scene_spec is not None and scene_spec.scene_type == "s1_corridor":
+                    s1_envs.append(env_id)
+                elif self._scene_goal_ranges(scene_spec) is not None:
                     corridor_envs.append(env_id)
                 else:
                     other_envs.append(env_id)
         else:
             other_envs = env_ids.tolist()
+
+        for env_id in s1_envs:
+            scene_spec = self.scene_spec_cache[env_id]
+            if scene_spec is None:
+                continue
+            params = scene_spec.params or {}
+            length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
+            y_start = -0.5 * length
+            y_end = 0.5 * length
+            goal_buffer = float(params.get("corridor_goal_buffer", self.scene_manager.scene_margin))
+            goal_min_offset = float(params.get("corridor_goal_min_offset", min_dist))
+            x_center = float(params.get("corridor_x_center", 0.0))
+            margin = float(params.get("corridor_goal_margin", self.scene_manager.scene_margin))
+
+            pending = torch.tensor([env_id], device=self.device, dtype=torch.long)
+            for _ in range(max_tries):
+                root_world = self.root_states[pending, :2]
+                root_local = root_world - self.env_origins[pending, :2]
+                y_min = torch.clamp(root_local[:, 1] + goal_min_offset, min=y_start + goal_buffer)
+                y_max = torch.full_like(y_min, y_end - goal_buffer)
+                if torch.any(y_max <= y_min):
+                    break
+                rand_y = torch_rand_float(0.0, 1.0, (1, 1), device=self.device).squeeze(1)
+                y_local = y_min + (y_max - y_min) * rand_y
+                y_val = float(y_local.item())
+                half_w = self._corridor_half_width_at_y(scene_spec, y_val)
+                x_min = x_center - (half_w - margin)
+                x_max = x_center + (half_w - margin)
+                if x_max <= x_min:
+                    continue
+                rand_x = torch_rand_float(x_min, x_max, (1, 1), device=self.device).squeeze(1)
+                goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, y_local], dim=1)
+                pos = self.root_states[pending, :2]
+                dist = torch.norm(goal_world - pos, dim=1)
+                dist_ok = dist >= min_dist
+                blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+                if force_blocking and force_prob > 0.0:
+                    force_mask = torch.rand_like(dist_ok.float()) < force_prob
+                else:
+                    force_mask = torch.zeros_like(dist_ok, dtype=torch.bool)
+                ok = dist_ok & (blocked | ~force_mask)
+                if ok.any():
+                    self.goal_world[pending[ok]] = goal_world[ok]
+                    pending = pending[~ok]
+                    break
+            if pending.numel() > 0 and allow_fallback:
+                for _ in range(max_tries):
+                    root_world = self.root_states[pending, :2]
+                    root_local = root_world - self.env_origins[pending, :2]
+                    y_min = torch.clamp(root_local[:, 1] + goal_min_offset, min=y_start + goal_buffer)
+                    y_max = torch.full_like(y_min, y_end - goal_buffer)
+                    if torch.any(y_max <= y_min):
+                        break
+                    rand_y = torch_rand_float(0.0, 1.0, (1, 1), device=self.device).squeeze(1)
+                    y_local = y_min + (y_max - y_min) * rand_y
+                    y_val = float(y_local.item())
+                    half_w = self._corridor_half_width_at_y(scene_spec, y_val)
+                    x_min = x_center - (half_w - margin)
+                    x_max = x_center + (half_w - margin)
+                    if x_max <= x_min:
+                        continue
+                    rand_x = torch_rand_float(x_min, x_max, (1, 1), device=self.device).squeeze(1)
+                    goal_world = self.env_origins[pending, :2] + torch.stack([rand_x, y_local], dim=1)
+                    pos = self.root_states[pending, :2]
+                    dist = torch.norm(goal_world - pos, dim=1)
+                    dist_ok = dist >= min_dist
+                    blocked = self._line_has_obstacle(pos, goal_world, env_ids=pending)
+                    if force_blocking and force_prob > 0.0:
+                        force_mask = torch.rand_like(dist_ok.float()) < force_prob
+                    else:
+                        force_mask = torch.zeros_like(dist_ok, dtype=torch.bool)
+                    ok = dist_ok & (blocked | ~force_mask)
+                    if ok.any():
+                        self.goal_world[pending[ok]] = goal_world[ok]
+                        pending = pending[~ok]
+                        break
 
         for env_id in corridor_envs:
             scene_spec = self.scene_spec_cache[env_id]

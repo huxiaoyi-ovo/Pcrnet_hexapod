@@ -211,7 +211,10 @@ class SceneManager:
 
         rng = np.random.RandomState(seed)
         params = self._interpolate_params(difficulty, scene_type)
-        static_obstacles = self._build_scene_obstacles(scene_type, params, rng)
+        if scene_type == "s1_corridor":
+            static_obstacles = self._build_corridor(params, rng)
+        else:
+            static_obstacles = self._build_scene_obstacles(scene_type, params, rng)
         if terrain is not None:
             self._clear_height(terrain)
             if self.scene_use_heightfield:
@@ -501,7 +504,12 @@ class SceneManager:
     def _estimate_min_gap(self, scene_spec: SceneSpec, static_count: int) -> float:
         params = scene_spec.params
         if scene_spec.scene_type == "s1_corridor":
-            return float(params.get("gap_width_min", params.get("corridor_width", 1.0)))
+            gates = params.get("corridor_gates", [])
+            if isinstance(gates, list) and gates:
+                widths = [float(g.get("width", 0.0)) for g in gates if float(g.get("width", 0.0)) > 0.0]
+                if widths:
+                    return float(min(widths))
+            return float(params.get("corridor_width_nom", params.get("corridor_width", 1.0)))
         if scene_spec.scene_type == "s3_doorway":
             return float(params.get("door_width_min", params.get("room_width", 1.0)))
         if static_count > 0:
@@ -572,8 +580,6 @@ class SceneManager:
     def _build_scene_obstacles(
         self, scene_type: str, params: Dict[str, object], rng: np.random.RandomState
     ) -> List[StaticObstacleSpec]:
-        if scene_type == "s1_corridor":
-            return self._build_corridor(params, rng)
         if scene_type == "s2_forest":
             return self._build_forest(params, rng)
         if scene_type == "s3_doorway":
@@ -588,61 +594,87 @@ class SceneManager:
 
     def _build_corridor(self, params: Dict[str, object], rng: np.random.RandomState) -> List[StaticObstacleSpec]:
         obstacles: List[StaticObstacleSpec] = []
-        width_m = self.scene_width
-        length_m = self.scene_length
+        length_m = float(params.get("corridor_length", self.scene_length))
+        length_m = min(length_m, self.scene_length)
         corridor_width = float(params.get("corridor_width", 1.4))
         corridor_width = max(corridor_width, 2.0 * self.scene_clearance + 0.1)
-        wall_thickness = float(params.get("wall_thickness", self.block_size))
-        segment_count = int(round(params.get("wall_segment_count", 0)))
-        segment_len = float(params.get("wall_segment_len", 0.0))
-        wall_jitter_x = float(params.get("wall_jitter_x", 0.0))
+        wall_size = float(params.get("corridor_wall_block_size", self.wall_block_size))
+        wall_height = float(params.get("corridor_wall_height", self.wall_block_height))
+        x_center = float(params.get("corridor_x_center", 0.0))
+        center_jitter = float(params.get("corridor_center_x_jitter", 0.0))
+        if center_jitter > 0.0:
+            x_center += rng.uniform(-center_jitter, center_jitter)
 
-        outer = max(0.0, width_m - corridor_width)
-        if outer > 0:
-            left_center = -(corridor_width * 0.5 + outer * 0.25)
-            right_center = (corridor_width * 0.5 + outer * 0.25)
-            if segment_count > 0:
-                if segment_len <= 0.0:
-                    segment_len = length_m / float(segment_count)
-                segment_len = max(1e-3, segment_len)
-                start_y = -0.5 * length_m + 0.5 * segment_len
-                for idx in range(segment_count):
-                    center_y = start_y + idx * segment_len
-                    jitter = rng.uniform(-wall_jitter_x, wall_jitter_x) if wall_jitter_x > 0.0 else 0.0
-                    obstacles.extend(
-                        self._tile_rect(left_center + jitter, center_y, outer * 0.5, segment_len, kind="wall")
-                    )
-                    obstacles.extend(
-                        self._tile_rect(right_center + jitter, center_y, outer * 0.5, segment_len, kind="wall")
-                    )
-            else:
-                obstacles.extend(self._tile_rect(left_center, 0.0, outer * 0.5, length_m, kind="wall"))
-                obstacles.extend(self._tile_rect(right_center, 0.0, outer * 0.5, length_m, kind="wall"))
+        gate_count = int(round(params.get("corridor_gate_count", 0)))
+        gate_len = float(params.get("corridor_gate_length", wall_size))
+        gate_len_jitter = float(params.get("corridor_gate_length_jitter", 0.0))
+        gate_width = float(params.get("corridor_gate_width", corridor_width))
+        gate_width_jitter = float(params.get("corridor_gate_width_jitter", 0.0))
+        gate_spacing = float(params.get("corridor_gate_spacing_min", wall_size))
+        gate_margin_y = float(params.get("corridor_gate_margin_y", wall_size))
+        pass_margin = float(params.get("corridor_gate_pass_margin", 0.05))
+        min_gate_width = max(2.0 * self.scene_clearance + pass_margin, 1e-3)
 
-        gate_count = int(round(params.get("gate_count", 2)))
-        gate_thickness = float(params.get("gate_thickness", wall_thickness))
-        gap_min = float(params.get("gap_width_min", 0.6))
-        gap_max = float(params.get("gap_width_max", 1.0))
-        gap_min = max(gap_min, 2.0 * self.scene_clearance + 0.05)
-        gap_max = max(gap_max, gap_min)
-        offset_max = float(params.get("gate_offset_max", 0.3))
-        margin_y = float(params.get("gate_margin_y", 0.8))
-        block_width = float(params.get("gate_block_width", self.block_size))
-
-        for _ in range(max(0, gate_count)):
-            center_y = rng.uniform(-0.5 * length_m + margin_y, 0.5 * length_m - margin_y)
-            gap_width = rng.uniform(gap_min, gap_max)
-            gap_width = min(gap_width, corridor_width - 0.1)
-            remain = corridor_width - gap_width
-            if remain <= 0.05:
+        y_start = -0.5 * length_m
+        y_end = 0.5 * length_m
+        gates: List[Dict[str, float]] = []
+        max_tries = max(10, gate_count * 15)
+        for _ in range(max_tries):
+            if len(gates) >= gate_count:
+                break
+            y0 = rng.uniform(y_start + gate_margin_y, y_end - gate_margin_y)
+            length = gate_len
+            if gate_len_jitter > 0.0:
+                length *= rng.uniform(1.0 - gate_len_jitter, 1.0 + gate_len_jitter)
+            width = gate_width
+            if gate_width_jitter > 0.0:
+                width *= rng.uniform(1.0 - gate_width_jitter, 1.0 + gate_width_jitter)
+            width = min(width, corridor_width)
+            width = max(width, min_gate_width)
+            ok = True
+            for g in gates:
+                sep = abs(y0 - g["y0"])
+                req = 0.5 * length + 0.5 * g["length"] + gate_spacing
+                if sep < req:
+                    ok = False
+                    break
+            if not ok:
                 continue
-            side_width = max(block_width, 0.5 * remain)
-            offset = rng.uniform(-offset_max, offset_max)
-            left_center = -0.5 * gap_width - 0.5 * side_width + offset
-            right_center = 0.5 * gap_width + 0.5 * side_width + offset
-            obstacles.extend(self._tile_rect(left_center, center_y, side_width, gate_thickness))
-            obstacles.extend(self._tile_rect(right_center, center_y, side_width, gate_thickness))
+            gates.append({"y0": float(y0), "length": float(length), "width": float(width)})
 
+        def corridor_half_width(y_local: float) -> float:
+            half_nom = 0.5 * corridor_width
+            if not gates:
+                return half_nom
+            half_min = half_nom
+            for g in gates:
+                if abs(y_local - g["y0"]) <= 0.5 * g["length"]:
+                    half_min = min(half_min, 0.5 * g["width"])
+            return half_min
+
+        tile = max(wall_size, 1e-3)
+        n_tiles = int(np.ceil(length_m / tile))
+        for i in range(n_tiles):
+            y = y_start + (i + 0.5) * tile
+            half_w = corridor_half_width(y)
+            left_x = x_center - (half_w + 0.5 * tile)
+            right_x = x_center + (half_w + 0.5 * tile)
+            obstacles.append(
+                StaticObstacleSpec(
+                    kind="wall",
+                    position=(left_x, y, 0.5 * wall_height),
+                    size=(tile, tile, wall_height),
+                )
+            )
+            obstacles.append(
+                StaticObstacleSpec(
+                    kind="wall",
+                    position=(right_x, y, 0.5 * wall_height),
+                    size=(tile, tile, wall_height),
+                )
+            )
+
+        # 可选走廊内离散障碍（默认不启用）
         obs_min = int(round(params.get("corridor_obstacle_count_min", 0)))
         obs_max = int(round(params.get("corridor_obstacle_count_max", obs_min)))
         if obs_min > 0 or obs_max > 0:
@@ -669,15 +701,15 @@ class SceneManager:
                 raw_size = rng.uniform(size_min, size_max)
                 raw_height = rng.uniform(height_min, height_max)
                 size_xy, height, _ = self._quantize_block(raw_size, raw_height)
-                half_x = 0.5 * size_xy + margin_x
-                half_y = 0.5 * size_xy + margin_y
-                if corridor_width <= 2.0 * half_x:
-                    continue
                 max_tries = 30
                 placed = False
                 for _ in range(max_tries):
-                    x = rng.uniform(-0.5 * corridor_width + half_x, 0.5 * corridor_width - half_x)
-                    y = rng.uniform(-0.5 * length_m + half_y, 0.5 * length_m - half_y)
+                    y = rng.uniform(y_start + margin_y, y_end - margin_y)
+                    half_w = corridor_half_width(y)
+                    half_x = 0.5 * size_xy + margin_x
+                    if half_w <= half_x:
+                        continue
+                    x = rng.uniform(x_center - (half_w - half_x), x_center + (half_w - half_x))
                     if is_clear(x, y, size_xy):
                         obstacles.append(
                             StaticObstacleSpec(
@@ -691,6 +723,14 @@ class SceneManager:
                         break
                 if not placed:
                     continue
+
+        params["corridor_length"] = float(length_m)
+        params["corridor_width_nom"] = float(corridor_width)
+        params["corridor_wall_block_size"] = float(wall_size)
+        params["corridor_wall_height"] = float(wall_height)
+        params["corridor_x_center"] = float(x_center)
+        params["corridor_gates"] = list(gates)
+        params["corridor_gate_count_actual"] = int(len(gates))
 
         return obstacles
 
