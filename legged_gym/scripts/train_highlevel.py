@@ -1321,8 +1321,95 @@ def train(args):
     scene_meta = None
     if hasattr(env, "env") and hasattr(env.env, "extras"):
         scene_meta = env.env.extras.get("scene_meta")
-    if scene_meta is not None:
+    if scene_meta is not None and getattr(args, "debug", False):
         print(f"[Debug] scene_meta: {scene_meta}")
+    if getattr(args, "debug", False):
+        try:
+            env0 = 0
+            base_pos = None
+            if hasattr(env, "env") and hasattr(env.env, "root_states"):
+                base_pos = env.env.root_states[env0, :3].detach().cpu()
+            if base_pos is not None:
+                print(f"[Debug] env0 base_pos: ({base_pos[0]:.3f}, {base_pos[1]:.3f}, {base_pos[2]:.3f})")
+            if hasattr(env, "env") and hasattr(env.env, "env_origins"):
+                origin = env.env.env_origins[env0]
+                ox, oy, oz = float(origin[0].item()), float(origin[1].item()), float(origin[2].item())
+                print(f"[Debug] env0 origin: ({ox:.3f}, {oy:.3f}, {oz:.3f})")
+            else:
+                ox = oy = oz = 0.0
+            # SceneSpec positions (local)
+            scene_spec = None
+            if hasattr(env, "env") and hasattr(env.env, "scene_spec_cache"):
+                scene_spec = env.env.scene_spec_cache[env0]
+            if scene_spec is None:
+                print("[Debug] env0 scene_spec: None")
+            else:
+                num_static = len(scene_spec.static_obstacles)
+                print(f"[Debug] env0 scene_spec static_obstacles: {num_static}")
+                for idx, spec in enumerate(scene_spec.static_obstacles[:5]):
+                    wx = ox + float(spec.position[0])
+                    wy = oy + float(spec.position[1])
+                    wz = oz + float(spec.position[2])
+                    sx, sy, sz = spec.size
+                    print(
+                        f"[Debug] spec[{idx}] pos=({spec.position[0]:.3f},{spec.position[1]:.3f},{spec.position[2]:.3f}) "
+                        f"world=({wx:.3f},{wy:.3f},{wz:.3f}) size=({sx:.3f},{sy:.3f},{sz:.3f})"
+                    )
+            # Applied actor positions (static)
+            applied = []
+            if hasattr(env, "env"):
+                env_impl = env.env
+                all_root_states = getattr(env_impl, "all_root_states", None)
+                block_groups = getattr(env_impl, "static_block_groups", [])
+                for group in block_groups:
+                    active = getattr(env_impl, f"static_{group}_active", None)
+                    pos_local = getattr(env_impl, f"static_{group}_pos_local", None)
+                    indices = getattr(env_impl, f"static_{group}_actor_indices", None)
+                    if active is None or pos_local is None or indices is None:
+                        continue
+                    active_ids = torch.nonzero(active[env0], as_tuple=False).flatten()
+                    for local_id in active_ids.tolist():
+                        actor_index = int(indices[env0, local_id].item())
+                        pos = pos_local[env0, local_id]
+                        applied.append((f"{group}:{local_id}", actor_index, pos))
+                active = getattr(env_impl, "static_wall_active", None)
+                pos_local = getattr(env_impl, "static_wall_pos_local", None)
+                indices = getattr(env_impl, "static_wall_actor_indices", None)
+                if active is not None and pos_local is not None and indices is not None:
+                    active_ids = torch.nonzero(active[env0], as_tuple=False).flatten()
+                    for local_id in active_ids.tolist():
+                        actor_index = int(indices[env0, local_id].item())
+                        pos = pos_local[env0, local_id]
+                        applied.append((f"wall:{local_id}", actor_index, pos))
+                if applied:
+                    z_values = []
+                    print(f"[Debug] env0 applied static obstacles: {len(applied)} (show first 5)")
+                    for idx, (label, actor_index, pos) in enumerate(applied[:5]):
+                        wx = ox + float(pos[0].item())
+                        wy = oy + float(pos[1].item())
+                        wz = oz + float(pos[2].item())
+                        if all_root_states is not None:
+                            actual = all_root_states[actor_index, :3].detach().cpu()
+                            ax, ay, az = float(actual[0].item()), float(actual[1].item()), float(actual[2].item())
+                            z_values.append(az)
+                            print(
+                                f"[Debug] actor[{label}] idx={actor_index} "
+                                f"local=({pos[0]:.3f},{pos[1]:.3f},{pos[2]:.3f}) "
+                                f"world=({wx:.3f},{wy:.3f},{wz:.3f}) "
+                                f"root=({ax:.3f},{ay:.3f},{az:.3f})"
+                            )
+                        else:
+                            print(
+                                f"[Debug] actor[{label}] idx={actor_index} "
+                                f"local=({pos[0]:.3f},{pos[1]:.3f},{pos[2]:.3f}) "
+                                f"world=({wx:.3f},{wy:.3f},{wz:.3f})"
+                            )
+                    if z_values:
+                        print(f"[Debug] static root z: min={min(z_values):.3f} max={max(z_values):.3f} (ground_z={oz:.3f})")
+                else:
+                    print("[Debug] env0 applied static obstacles: 0")
+        except Exception as exc:
+            print(f"[Debug] obstacle position dump failed: {exc}")
     state_dim = obs_dict['state'].shape[1]
     goal_dim = obs_dict['goal'].shape[1]
     aff_shape = obs_dict['gt_affordance'].shape[1:]
@@ -2223,6 +2310,8 @@ if __name__ == "__main__":
                         help='日志间隔')
     parser.add_argument('--save_interval', type=int, default=200,
                         help='保存间隔')
+    parser.add_argument('--debug', action='store_true',
+                        help='debug 输出（场景/障碍位置等）')
     
     args, unknown = parser.parse_known_args()
     
