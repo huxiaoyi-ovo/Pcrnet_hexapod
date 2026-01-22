@@ -200,6 +200,22 @@ class HexGround(LeggedRobot):
             self.robot_actor_indices[env_id] = self.gym.get_actor_index(
                 env_handle, actor_handle, gymapi.DOMAIN_SIM
             )
+        # 机器人与障碍碰撞过滤（避免 actor 场景穿墙）
+        scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+        if scene_filter >= (1 << 31):
+            scene_filter = -1
+        try:
+            shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+            for prop in shape_props:
+                prop.filter = scene_filter
+            self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+            if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_robot_filter_logged", False):
+                print(f"[Debug] robot shape filter={scene_filter}")
+                self._robot_filter_logged = True
+        except Exception:
+            if getattr(self, "debug_viz", False) and not getattr(self, "_robot_filter_warned", False):
+                print("[Debug] robot shape filter update failed")
+                self._robot_filter_warned = True
 
     def _create_env_actors(self, env_id, env_handle):
         if self.scene_manager is None:
@@ -877,6 +893,15 @@ class HexGround(LeggedRobot):
                         self.gym.set_actor_rigid_shape_properties(self.envs[env_id], actor_handle, shape_props)
                     except Exception:
                         pass
+                if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_filter_logged", False):
+                    if env_handles:
+                        try:
+                            shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], env_handles[0])
+                            if shape_props:
+                                print(f"[Debug] wall shape filter={shape_props[0].filter}")
+                        except Exception:
+                            print("[Debug] wall shape filter query failed")
+                    self._wall_filter_logged = True
 
     def _sync_robot_root_states(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:

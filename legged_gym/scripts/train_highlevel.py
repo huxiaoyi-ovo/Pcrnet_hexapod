@@ -312,6 +312,8 @@ class HierarchicalHexapodEnv:
         self.env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
         self.num_envs = self.env.num_envs
         self.max_episode_length = self.env.max_episode_length
+        if hasattr(self.env, "debug_viz"):
+            self.env.debug_viz = bool(getattr(args, "debug", False))
 
         cam_cfg = getattr(getattr(env_cfg, "sensor", None), "depth_camera", None)
         nav_cfg = getattr(env_cfg, "navigation", None)
