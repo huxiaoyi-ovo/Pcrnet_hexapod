@@ -48,18 +48,6 @@ class HexS2Cfg(HexGroundCfg):
             "block_height_min": 0.35,
             "block_height_max": 0.4,
         }
-        scene_cfg = {
-            "clearance": 0.27,
-            "length_mul": (20.0, 30.0),
-            "width_mul": (16.0, 20.0),
-            "count_range": (40, 160),
-            "min_dist_mul": (3.0, 2.0),
-            "block_size_mul": (1.5, 2.5),
-            "pole_radius_mul": (0.6, 1.0),
-            "block_ratio": 0.5,
-            "spawn_clear_mul": 3.0,
-            "obs_height_mul": (2.0, 3.0),
-        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -116,18 +104,6 @@ class HexS2LargeCfg(HexGroundCfg):
             "block_size_max": 0.44,
             "block_height_min": 0.35,
             "block_height_max": 0.4,
-        }
-        scene_cfg = {
-            "clearance": 0.27,
-            "length_mul": (20.0, 30.0),
-            "width_mul": (16.0, 20.0),
-            "count_range": (40, 160),
-            "min_dist_mul": (3.0, 2.0),
-            "block_size_mul": (1.5, 2.5),
-            "pole_radius_mul": (0.6, 1.0),
-            "block_ratio": 0.5,
-            "spawn_clear_mul": 3.0,
-            "obs_height_mul": (2.0, 3.0),
         }
         num_cols = 3
         terrain_proportions = [1.0]

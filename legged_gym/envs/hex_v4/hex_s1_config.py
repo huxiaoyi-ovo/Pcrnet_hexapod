@@ -64,19 +64,6 @@ class HexS1Cfg(HexGroundCfg):
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
         }
-        scene_cfg = {
-            "clearance": 0.27,
-            "length_mul": (18.0, 28.0),
-            "half_width_mul": (6.0, 4.0),
-            "gate_half_width_mul": (4.0, 2.2),
-            "wall_thickness_mul": 2.0,
-            "gate_len_mul": (4.0, 2.5),
-            "gate_count": (2, 5),
-            "gate_min_gap_mul": 3.0,
-            "spawn_clear_mul": 3.0,
-            "goal_clear_mul": 3.0,
-            "wall_height_mul": (2.5, 3.5),
-        }
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
@@ -149,19 +136,6 @@ class HexS1FollowCfg(HexGroundCfg):
             "corridor_goal_margin": 0.2,
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
-        }
-        scene_cfg = {
-            "clearance": 0.27,
-            "length_mul": (18.0, 28.0),
-            "half_width_mul": (6.0, 4.0),
-            "gate_half_width_mul": (4.0, 2.2),
-            "wall_thickness_mul": 2.0,
-            "gate_len_mul": (4.0, 2.5),
-            "gate_count": (2, 5),
-            "gate_min_gap_mul": 3.0,
-            "spawn_clear_mul": 3.0,
-            "goal_clear_mul": 3.0,
-            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]
@@ -241,19 +215,6 @@ class HexS1LargeCfg(HexGroundCfg):
             "corridor_goal_margin": 0.2,
             "corridor_obstacle_count_min": 0,
             "corridor_obstacle_count_max": 0,
-        }
-        scene_cfg = {
-            "clearance": 0.27,
-            "length_mul": (18.0, 28.0),
-            "half_width_mul": (6.0, 4.0),
-            "gate_half_width_mul": (4.0, 2.2),
-            "wall_thickness_mul": 2.0,
-            "gate_len_mul": (4.0, 2.5),
-            "gate_count": (2, 5),
-            "gate_min_gap_mul": 3.0,
-            "spawn_clear_mul": 3.0,
-            "goal_clear_mul": 3.0,
-            "wall_height_mul": (2.5, 3.5),
         }
         num_cols = 3
         terrain_proportions = [1.0]

@@ -6,7 +6,6 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_s2_config.py")
-SCENE_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_manager.py")
 
 
 def load_hex_s2_cfg(path: str):
@@ -34,20 +33,23 @@ def main() -> int:
     print("[S2] scene_params_easy keys:", sorted(getattr(terrain, "scene_params_easy", {}).keys()))
     print("[S2] scene_params_hard keys:", sorted(getattr(terrain, "scene_params_hard", {}).keys()))
 
-    # Optional: try to sample a scene without importing isaacgym.
-    # This uses SceneManager directly; if it fails, it will print a warning.
     try:
         sys.path.insert(0, ROOT)
-        from legged_gym.envs.hex_v4.scene_manager import SceneManager
+        from legged_gym.envs.hex_v4.scene_gen_v2.scene_generator import SceneGenerator
+        from legged_gym.envs.hex_v4.scene_gen_v2.backend_heightfield import HeightfieldBackend
+        from legged_gym.envs.hex_v4.scene_gen_v2.contracts import check_scene
 
-        sm = SceneManager(terrain)
-        spec = sm.sample_scene(0.5, env_id=0, episode_idx=0)
+        env_dims = {"width": float(terrain.terrain_width), "length": float(terrain.terrain_length)}
+        gen = SceneGenerator(terrain, env_dims=env_dims, robot_envelope={"clearance": float(getattr(terrain, "scene_clearance", 0.27))})
+        backend = HeightfieldBackend(env_dims["width"], env_dims["length"], terrain.horizontal_scale, terrain.vertical_scale)
+        spec = gen.sample("s2_forest", 0.5, seed=terrain.scene_seed)
+        hf, spec = backend.render(spec, return_scene=True)
+        result = check_scene(spec, hf, terrain.horizontal_scale)
         print("[S2] sampled scene_type:", spec.scene_type)
         print("[S2] num_static:", len(spec.static_obstacles))
-        if spec.static_obstacles:
-            print("[S2] first3:", spec.static_obstacles[:3])
+        print("[S2] contract pass:", result["pass"])
     except Exception as exc:
-        print("[Warn] SceneManager sample failed:", repr(exc))
+        print("[Warn] scene_gen_v2 sample failed:", repr(exc))
         print("[Warn] This does not block config check.")
 
     return 0

@@ -4,7 +4,7 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils.actuator import Actuator
 from legged_gym.envs.hex_v4.expert import ExpertGround
-from legged_gym.envs.hex_v4.scene_manager import SceneSpec
+from legged_gym.envs.hex_v4.scene_gen_v2.scene_spec import SceneSpec
 import torch
 import numpy as np
 from typing import Optional
@@ -32,17 +32,17 @@ class HexGround(LeggedRobot):
         self.nav_cfg = getattr(cfg, "navigation", None)
         self.debug_viz = False
         self.foot_traj_viz=False
-        self.scene_manager = getattr(self, "scene_manager", None)
-        if self.scene_manager is None:
-            terrain_obj = getattr(self, "terrain", None)
-            self.scene_manager = getattr(terrain_obj, "scene_manager", None)
         terrain_obj = getattr(self, "terrain", None)
+        self.scene_generator = getattr(terrain_obj, "scene_generator", None)
+        self.scene_manager = None
         self.scene_specs = getattr(terrain_obj, "scene_specs", None)
         self.scene_meta = [None] * self.num_envs
         self.scene_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
         self.scene_spec_cache = [None] * self.num_envs
         self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        self.scene_margin = float(getattr(self.cfg.terrain, "scene_margin", 0.3))
+        self.scene_clearance = float(getattr(self.cfg.terrain, "scene_clearance", 0.27))
         self._init_scene_runtime()
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
         self.actuator=Actuator(self.cfg,self.device)
@@ -85,20 +85,10 @@ class HexGround(LeggedRobot):
         self.dynamic_actor_indices = None
         self.dynamic_asset = None
         terrain_obj = getattr(self, "terrain", None)
-        self.scene_manager = getattr(terrain_obj, "scene_manager", None)
-        if self.scene_manager is None:
-            try:
-                from legged_gym.envs.hex_v4.scene_manager import SceneManager
-                self.scene_manager = SceneManager(self.cfg.terrain)
-                if terrain_obj is not None:
-                    setattr(terrain_obj, "scene_manager", self.scene_manager)
-            except Exception:
-                self.scene_manager = None
-        if self.scene_manager is None:
+        self.scene_generator = getattr(terrain_obj, "scene_generator", None)
+        if self.scene_generator is None or not self.scene_generator.has_dynamic:
             return
-        if not self.scene_manager.has_dynamic:
-            return
-        max_dyn = int(self.scene_manager.max_dynamic_obstacles)
+        max_dyn = int(getattr(self.cfg.terrain, "scene_dynamic_max", 0))
         if max_dyn <= 0:
             return
         asset_options = gymapi.AssetOptions()
@@ -165,8 +155,6 @@ class HexGround(LeggedRobot):
         self._apply_actor_collision_filter(env_handle, actor_handle, scene_filter, env_id, debug_tag="robot")
 
     def _create_env_actors(self, env_id, env_handle):
-        if self.scene_manager is None:
-            return
         if self.dynamic_asset is None or self.dynamic_actor_indices is None:
             return
         group_id = self._scene_group_id(env_id)
@@ -406,7 +394,7 @@ class HexGround(LeggedRobot):
         return depth_normalized
 
     def _init_scene_runtime(self):
-        if self.scene_manager is None:
+        if self.scene_generator is None or not self.scene_generator.has_dynamic:
             return
         self._init_dynamic_runtime()
 
@@ -476,47 +464,9 @@ class HexGround(LeggedRobot):
         return params
 
     def _scene_spec_from_meta(self, meta: dict, env_id: int) -> Optional[SceneSpec]:
-        if not isinstance(meta, dict):
-            return None
-        scene_type = meta.get("scene_type", None)
-        difficulty = float(meta.get("difficulty", self._get_scene_difficulty(env_id)))
-        params = self._scene_meta_params(meta)
-        dynamic_template = None
-        if self.scene_manager is not None and scene_type == "s4_crossing":
-            try:
-                params_dyn = self.scene_manager._interpolate_params(difficulty, scene_type)
-                dynamic_template = {
-                    "count_min": float(params_dyn.get("dynamic_count_min", 2)),
-                    "count_max": float(params_dyn.get("dynamic_count_max", 6)),
-                    "cross_width": float(params_dyn.get("cross_width", 3.0)),
-                    "cross_span": float(params_dyn.get("cross_span", 2.5)),
-                    "react_steps_min": float(params_dyn.get("react_steps_min", 8)),
-                    "react_steps_max": float(params_dyn.get("react_steps_max", 20)),
-                    "size_xy": float(params_dyn.get("dynamic_size_xy", 0.35)),
-                    "height": float(params_dyn.get("dynamic_height", 0.5)),
-                    "axis": str(params_dyn.get("dynamic_axis", "x")),
-                    "dt_high": float(self.scene_manager.scene_high_dt),
-                }
-            except Exception:
-                dynamic_template = None
-        layout_seed = int(meta.get("layout_seed", meta.get("layout_id", 0)) or 0)
-        layout_id = meta.get("layout_id", layout_seed)
-        layout_hash = None
-        if self.scene_manager is not None:
-            try:
-                layout_hash = self.scene_manager._hash_layout((), dynamic_template)
-            except Exception:
-                layout_hash = None
-        return SceneSpec(
-            scene_type=scene_type or "unknown",
-            difficulty=difficulty,
-            params=params,
-            static_obstacles=tuple(),
-            dynamic_template=dynamic_template,
-            layout_seed=layout_seed,
-            layout_id=str(layout_id),
-            layout_hash=layout_hash,
-        )
+        if isinstance(meta, dict):
+            raise RuntimeError("legacy scene_meta dict detected; scene_gen_v2 required")
+        return None
 
     def _get_scene_difficulty(self, env_id: int) -> float:
         if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
@@ -576,7 +526,7 @@ class HexGround(LeggedRobot):
         )
 
     def _reset_scene(self, env_ids: torch.Tensor, force_resample: Optional[torch.Tensor] = None):
-        if self.scene_manager is None:
+        if self.scene_generator is None:
             return
         if len(env_ids) == 0:
             return
@@ -585,26 +535,22 @@ class HexGround(LeggedRobot):
             self.scene_episode_count[env_id] += 1
             episode_idx = int(self.scene_episode_count[env_id].item())
             raw_spec = self._get_scene_spec(env_id)
-            meta = raw_spec if isinstance(raw_spec, dict) else None
-            scene_spec = self._scene_spec_from_meta(meta, env_id) if meta is not None else raw_spec
+            if isinstance(raw_spec, dict):
+                raise RuntimeError("legacy scene_specs dict detected; scene_gen_v2 required")
+            scene_spec = raw_spec
             if scene_spec is None:
                 difficulty = self._get_scene_difficulty(env_id)
-                scene_spec = self.scene_manager.sample_scene(difficulty, env_id, episode_idx)
+                seed = self.scene_generator.seed_for_env(env_id, episode_idx)
+                rng = np.random.RandomState(seed)
+                scene_id = getattr(self.cfg.terrain, "scene_type", None)
+                if scene_id is None:
+                    scene_id = self.scene_generator._select_scene_type(rng, difficulty)
+                scene_spec = self.scene_generator.sample(scene_id, difficulty, seed)
             if scene_spec is not None:
+                from legged_gym.envs.hex_v4.scene_gen_v2.quantizer import quantize_scene
+                scene_spec = quantize_scene(scene_spec, self.cfg.terrain.horizontal_scale, self.cfg.terrain.vertical_scale)
                 self.scene_spec_cache[env_id] = scene_spec
-            dynamic_specs = []
-            if scene_spec is not None and self.scene_manager.has_dynamic and self.dynamic_actor_indices is not None:
-                dynamic_specs = self.scene_manager.sample_dynamic_obstacles(scene_spec, env_id, episode_idx)
-            if self.dynamic_actor_indices is not None:
-                self._fill_dynamic_buffers(env_id, dynamic_specs)
-            if scene_spec is not None:
-                base_meta = self.scene_manager.build_meta(scene_spec, dynamic_specs)
-                if meta is not None:
-                    base_meta = {**base_meta, **meta}
-                self.scene_meta[env_id] = base_meta
-        if self.dynamic_actor_indices is not None:
-            self.scene_dyn_time[env_ids] = 0.0
-            self._sync_dynamic_obstacles()
+                self.scene_meta[env_id] = scene_spec.to_meta()
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
             self.extras["scene_meta"] = self.scene_meta[sample_id]
@@ -782,9 +728,9 @@ class HexGround(LeggedRobot):
             return None
         width, length = bounds
         if self.nav_cfg is not None:
-            margin = float(getattr(self.nav_cfg, "goal_scene_margin", self.scene_manager.scene_margin))
+            margin = float(getattr(self.nav_cfg, "goal_scene_margin", self.scene_margin))
         else:
-            margin = float(self.scene_manager.scene_margin)
+            margin = float(self.scene_margin)
         if width <= 2.0 * margin or length <= 2.0 * margin:
             return None
         range_x = (-0.5 * width + margin, 0.5 * width - margin)
@@ -818,15 +764,15 @@ class HexGround(LeggedRobot):
         return True
 
     def _apply_scene_spawn(self, env_ids: torch.Tensor):
-        if self.scene_manager is None or self.scene_spec_cache is None or env_ids.numel() == 0:
+        if self.scene_generator is None or self.scene_spec_cache is None or env_ids.numel() == 0:
             return
         if self.nav_cfg is not None:
-            margin = float(getattr(self.nav_cfg, "spawn_scene_margin", self.scene_manager.scene_margin))
-            clearance = float(getattr(self.nav_cfg, "spawn_scene_clearance", self.scene_manager.scene_clearance))
+            margin = float(getattr(self.nav_cfg, "spawn_scene_margin", self.scene_margin))
+            clearance = float(getattr(self.nav_cfg, "spawn_scene_clearance", self.scene_clearance))
             max_tries = int(getattr(self.nav_cfg, "spawn_scene_max_tries", 30))
         else:
-            margin = float(self.scene_manager.scene_margin)
-            clearance = float(self.scene_manager.scene_clearance)
+            margin = float(self.scene_margin)
+            clearance = float(self.scene_clearance)
             max_tries = 30
 
         updated = []
@@ -1448,10 +1394,10 @@ class HexGround(LeggedRobot):
             length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
             y_start = -0.5 * length
             y_end = 0.5 * length
-            goal_buffer = float(params.get("corridor_goal_buffer", self.scene_manager.scene_margin))
+            goal_buffer = float(params.get("corridor_goal_buffer", self.scene_margin))
             goal_min_offset = float(params.get("corridor_goal_min_offset", min_dist))
             x_center = float(params.get("corridor_x_center", 0.0))
-            margin = float(params.get("corridor_goal_margin", self.scene_manager.scene_margin))
+            margin = float(params.get("corridor_goal_margin", self.scene_margin))
 
             pending = torch.tensor([env_id], device=self.device, dtype=torch.long)
             # 先检查可用 y 区间，避免 y_max <= y_min 导致卡死
