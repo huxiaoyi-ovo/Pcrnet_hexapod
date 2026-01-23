@@ -917,14 +917,14 @@ class LeggedRobot(BaseTask):
 
         points += self.terrain.cfg.border_size
         points = (points/self.terrain.cfg.horizontal_scale).long()
-        px = points[:, :, 0].view(-1)
-        py = points[:, :, 1].view(-1)
-        px = torch.clip(px, 0, self.height_samples.shape[0]-2)
-        py = torch.clip(py, 0, self.height_samples.shape[1]-2)
+        col = points[:, :, 0].view(-1)
+        row = points[:, :, 1].view(-1)
+        row = torch.clip(row, 0, self.height_samples.shape[0]-2)
+        col = torch.clip(col, 0, self.height_samples.shape[1]-2)
 
-        heights1 = self.height_samples[px, py]
-        heights2 = self.height_samples[px+1, py]
-        heights3 = self.height_samples[px, py+1]
+        heights1 = self.height_samples[row, col]
+        heights2 = self.height_samples[row+1, col]
+        heights3 = self.height_samples[row, col+1]
         heights = torch.min(heights1, heights2)
         heights = torch.min(heights, heights3)
 

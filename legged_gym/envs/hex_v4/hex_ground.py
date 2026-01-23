@@ -1343,9 +1343,9 @@ class HexGround(LeggedRobot):
         scale = self.cfg.terrain.horizontal_scale
         pts = points + border
         idx = (pts / scale).long()
-        px = torch.clamp(idx[..., 0], 0, self.height_samples.shape[0] - 2)
-        py = torch.clamp(idx[..., 1], 0, self.height_samples.shape[1] - 2)
-        heights = self.height_samples[px, py] * self.cfg.terrain.vertical_scale
+        col = torch.clamp(idx[..., 0], 0, self.height_samples.shape[1] - 2)
+        row = torch.clamp(idx[..., 1], 0, self.height_samples.shape[0] - 2)
+        heights = self.height_samples[row, col] * self.cfg.terrain.vertical_scale
 
         threshold = getattr(self.nav_cfg, "goal_obstacle_height_threshold", 0.08)
         return (heights >= threshold).any(dim=1)

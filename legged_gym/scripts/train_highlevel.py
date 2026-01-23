@@ -592,12 +592,12 @@ class HierarchicalHexapodEnv:
 
         border = self.env.cfg.terrain.border_size
         scale = self.env.cfg.terrain.horizontal_scale
-        max_x = self.env.height_samples.shape[0] - 2
-        max_y = self.env.height_samples.shape[1] - 2
-        idx_x = torch.clamp(((x_world + border) / scale).long(), 0, max_x)
-        idx_y = torch.clamp(((y_world + border) / scale).long(), 0, max_y)
+        max_row = self.env.height_samples.shape[0] - 2
+        max_col = self.env.height_samples.shape[1] - 2
+        idx_col = torch.clamp(((x_world + border) / scale).long(), 0, max_col)
+        idx_row = torch.clamp(((y_world + border) / scale).long(), 0, max_row)
 
-        heights = self.env.height_samples[idx_x, idx_y] * self.env.cfg.terrain.vertical_scale
+        heights = self.env.height_samples[idx_row, idx_col] * self.env.cfg.terrain.vertical_scale
         heights = heights.view(self.num_envs, map_size, map_size)
 
         occ_all = (heights > 1e-6).float()
