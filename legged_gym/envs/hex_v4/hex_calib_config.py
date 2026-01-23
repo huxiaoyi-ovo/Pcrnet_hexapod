@@ -7,6 +7,8 @@ class HexCalibCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
+        terrain_length = 12.0
+        terrain_width = 6.0
         scene_type = "calib_axis"
         scene_seed = 7
         scene_clearance = 0.27
