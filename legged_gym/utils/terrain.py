@@ -295,6 +295,28 @@ class Terrain:
             return
         self.env_length = cfg.terrain_length
         self.env_width = cfg.terrain_width
+        rows = int(getattr(cfg, "num_rows", 0) or 0)
+        cols = int(getattr(cfg, "num_cols", 0) or 0)
+        if num_robots is not None and rows > 0 and cols > 0:
+            required_cols = int(np.ceil(float(num_robots) / float(rows)))
+            if required_cols > cols:
+                auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
+                if not auto_expand:
+                    raise RuntimeError(
+                        f"num_envs={num_robots} exceeds terrain grid: "
+                        f"num_rows={rows}, num_cols={cols} (need num_cols>={required_cols})"
+                    )
+                old_cols = cols
+                cfg.num_cols = required_cols
+                if hasattr(cfg, "num_sub_terrains"):
+                    cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
+                if hasattr(cfg, "terrain_proportions") and cfg.terrain_proportions is not None:
+                    proportions = list(cfg.terrain_proportions)
+                    if len(proportions) < cfg.num_cols:
+                        fill = proportions[-1] if len(proportions) > 0 else 1.0
+                        proportions.extend([fill] * (cfg.num_cols - len(proportions)))
+                        cfg.terrain_proportions = proportions
+                print(f"[Warn] terrain grid expanded: num_cols {old_cols} -> {cfg.num_cols} (num_envs={num_robots})")
         self.proportions = [np.sum(cfg.terrain_proportions[:i+1]) for i in range(len(cfg.terrain_proportions))]
 
         self.cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols

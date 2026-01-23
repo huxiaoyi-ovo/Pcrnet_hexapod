@@ -233,7 +233,7 @@ class SceneGenerator:
             if half_gate < half_w - 1e-6:
                 primitives.append(
                     RectWall(
-                        x0=x_center - half_w,
+                        x0=x_center - half_w - wall_thickness,
                         x1=x_center - half_gate,
                         y0=y0,
                         y1=y1,
@@ -243,7 +243,7 @@ class SceneGenerator:
                 primitives.append(
                     RectWall(
                         x0=x_center + half_gate,
-                        x1=x_center + half_w,
+                        x1=x_center + half_w + wall_thickness,
                         y0=y0,
                         y1=y1,
                         height=wall_height,
