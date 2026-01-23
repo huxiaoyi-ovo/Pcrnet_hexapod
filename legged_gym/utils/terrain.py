@@ -395,8 +395,8 @@ class Terrain:
             difficulty = np.random.uniform(0.0, 1.0)
             terrain = terrain_utils.SubTerrain(
                 "terrain",
-                width=self.width_per_env_pixels,
-                length=self.length_per_env_pixels,
+                width=self.length_per_env_pixels,
+                length=self.width_per_env_pixels,
                 vertical_scale=self.cfg.vertical_scale,
                 horizontal_scale=self.cfg.horizontal_scale,
             )
@@ -413,8 +413,8 @@ class Terrain:
                 difficulty = i / max(1, (self.cfg.num_rows - 1))
                 terrain = terrain_utils.SubTerrain(
                     "terrain",
-                    width=self.width_per_env_pixels,
-                    length=self.length_per_env_pixels,
+                    width=self.length_per_env_pixels,
+                    length=self.width_per_env_pixels,
                     vertical_scale=self.cfg.vertical_scale,
                     horizontal_scale=self.cfg.horizontal_scale,
                 )
@@ -440,8 +440,8 @@ class Terrain:
             difficulty = np.random.uniform(0.0, 1.0)
             terrain = terrain_utils.SubTerrain(
                 "terrain",
-                width=self.width_per_env_pixels,
-                length=self.length_per_env_pixels,
+                width=self.length_per_env_pixels,
+                length=self.width_per_env_pixels,
                 vertical_scale=self.cfg.vertical_scale,
                 horizontal_scale=self.cfg.horizontal_scale,
             )
@@ -474,8 +474,8 @@ class Terrain:
                 difficulty = i / max(1, (self.cfg.num_rows - 1))
                 terrain = terrain_utils.SubTerrain(
                     "terrain",
-                    width=self.width_per_env_pixels,
-                    length=self.length_per_env_pixels,
+                    width=self.length_per_env_pixels,
+                    length=self.width_per_env_pixels,
                     vertical_scale=self.cfg.vertical_scale,
                     horizontal_scale=self.cfg.horizontal_scale,
                 )
