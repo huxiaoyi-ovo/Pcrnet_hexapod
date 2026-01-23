@@ -662,6 +662,10 @@ class LeggedRobot(BaseTask):
         height_samples = self.terrain.heightsamples
         if isinstance(height_samples, np.ndarray) and height_samples.ndim == 2:
             height_samples = height_samples.flatten(order="C")
+        expected = int(self.terrain.tot_rows * self.terrain.tot_cols)
+        actual = int(height_samples.size) if isinstance(height_samples, np.ndarray) else len(height_samples)
+        if actual != expected:
+            raise ValueError(f"height_samples size mismatch: got {actual}, expected {expected}")
         self.gym.add_heightfield(self.sim, height_samples, hf_params)
         self.height_samples = torch.tensor(height_samples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 

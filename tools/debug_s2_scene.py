@@ -1,19 +1,51 @@
 # Debug helper for S2 scene config without importing Isaac Gym.
 # Run: python3 tools/debug_s2_scene.py
 
+import importlib.util
 import os
 import sys
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_s2_config.py")
 
 
+def _ensure_pkg(name: str):
+    if name in sys.modules:
+        return sys.modules[name]
+    mod = types.ModuleType(name)
+    mod.__path__ = []
+    sys.modules[name] = mod
+    return mod
+
+
+def _load_module(name: str, path: str):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load module {name} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_hex_s2_cfg(path: str):
-    ns = {}
-    with open(path, "r", encoding="utf-8") as f:
-        code = f.read()
-    exec(code, ns)
-    return ns.get("HexS2Cfg")
+    _ensure_pkg("legged_gym")
+    _ensure_pkg("legged_gym.envs")
+    _ensure_pkg("legged_gym.envs.base")
+    _ensure_pkg("legged_gym.envs.hex_v4")
+    _ensure_pkg("legged_gym.envs.hex_v4.scene_gen_v2")
+    base_base = os.path.join(ROOT, "legged_gym", "envs", "base", "base_config.py")
+    _load_module("legged_gym.envs.base.base_config", base_base)
+    base_cfg = os.path.join(ROOT, "legged_gym", "envs", "base", "legged_robot_config.py")
+    _load_module("legged_gym.envs.base.legged_robot_config", base_cfg)
+    hex_ground_cfg = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_ground_config.py")
+    _load_module("legged_gym.envs.hex_v4.hex_ground_config", hex_ground_cfg)
+    _load_module("legged_gym.envs.hex_v4.hex_s2_config", path)
+    mod = sys.modules.get("legged_gym.envs.hex_v4.hex_s2_config")
+    return getattr(mod, "HexS2Cfg", None)
 
 
 def main() -> int:

@@ -25,16 +25,16 @@ def _rect_indices(x0: float, x1: float, y0: float, y1: float, x_min: float, y_mi
     iy1 = max(0, min(length, iy1))
     if ix1 <= ix0 or iy1 <= iy0:
         return None
-    return ix0, ix1, iy0, iy1
+    return iy0, iy1, ix0, ix1
 
 
 def _stamp_box(hf: np.ndarray, x0: float, x1: float, y0: float, y1: float, height_cells: int,
                x_min: float, y_min: float, h_scale: float):
-    idx = _rect_indices(x0, x1, y0, y1, x_min, y_min, h_scale, hf.shape[0], hf.shape[1])
+    idx = _rect_indices(x0, x1, y0, y1, x_min, y_min, h_scale, hf.shape[1], hf.shape[0])
     if idx is None:
         return
-    ix0, ix1, iy0, iy1 = idx
-    hf[ix0:ix1, iy0:iy1] = np.maximum(hf[ix0:ix1, iy0:iy1], height_cells)
+    iy0, iy1, ix0, ix1 = idx
+    hf[iy0:iy1, ix0:ix1] = np.maximum(hf[iy0:iy1, ix0:ix1], height_cells)
 
 
 def _stamp_cylinder(hf: np.ndarray, cx: float, cy: float, radius: float, height_cells: int,
@@ -45,18 +45,18 @@ def _stamp_cylinder(hf: np.ndarray, cx: float, cy: float, radius: float, height_
     iy = int(round((cy - y_min) / h_scale))
     r_cells = max(1, int(round(radius / h_scale)))
     x1 = max(0, ix - r_cells)
-    x2 = min(hf.shape[0], ix + r_cells + 1)
+    x2 = min(hf.shape[1], ix + r_cells + 1)
     y1 = max(0, iy - r_cells)
-    y2 = min(hf.shape[1], iy + r_cells + 1)
+    y2 = min(hf.shape[0], iy + r_cells + 1)
     if x2 <= x1 or y2 <= y1:
         return
     xs = np.arange(x1, x2) - ix
     ys = np.arange(y1, y2) - iy
-    xx, yy = np.meshgrid(xs, ys, indexing="ij")
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
     mask = (xx * xx + yy * yy) <= r_cells * r_cells
-    patch = hf[x1:x2, y1:y2]
+    patch = hf[y1:y2, x1:x2]
     patch[mask] = np.maximum(patch[mask], height_cells)
-    hf[x1:x2, y1:y2] = patch
+    hf[y1:y2, x1:x2] = patch
 
 
 class HeightfieldBackend:
@@ -70,9 +70,9 @@ class HeightfieldBackend:
         scene = quantize_scene(scene, self.horizontal_scale, self.vertical_scale)
         width = max(1, int(round(self.width_m / self.horizontal_scale)))
         length = max(1, int(round(self.length_m / self.horizontal_scale)))
-        hf = np.zeros((width, length), dtype=np.int16)
+        hf = np.zeros((length, width), dtype=np.int16)
         x_min = -0.5 * self.width_m
-        y_min = 0.0
+        y_min = -0.5 * self.length_m
         for primitive in scene.primitives:
             height = float(getattr(primitive, "height", 0.0))
             height_cells = max(1, int(round(height / self.vertical_scale))) if height > 0 else 0

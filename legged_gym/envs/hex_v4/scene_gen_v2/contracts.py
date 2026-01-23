@@ -15,7 +15,7 @@ def _free_mask(heightfield: np.ndarray) -> np.ndarray:
 def _rect_indices(rect, width_m: float, length_m: float, h_scale: float) -> Optional[Tuple[int, int, int, int]]:
     x0, x1, y0, y1 = rect
     x_min = -0.5 * width_m
-    y_min = 0.0
+    y_min = -0.5 * length_m
     if x1 < x0:
         x0, x1 = x1, x0
     if y1 < y0:
@@ -32,7 +32,7 @@ def _rect_indices(rect, width_m: float, length_m: float, h_scale: float) -> Opti
     iy1 = max(0, min(length_cells, iy1))
     if ix1 <= ix0 or iy1 <= iy0:
         return None
-    return ix0, ix1, iy0, iy1
+    return iy0, iy1, ix0, ix1
 
 
 def heightfield_width(width_m: float, h_scale: float) -> int:
@@ -45,13 +45,13 @@ def heightfield_length(length_m: float, h_scale: float) -> int:
 
 def _estimate_min_free_width(heightfield: np.ndarray, width_m: float, h_scale: float, x_center: float) -> float:
     free = _free_mask(heightfield)
-    width_cells = heightfield.shape[0]
+    width_cells = heightfield.shape[1]
     x_min = -0.5 * width_m
     ix = int(round((x_center - x_min) / h_scale))
     ix = max(0, min(width_cells - 1, ix))
     min_width = float(width_m)
-    for iy in range(heightfield.shape[1]):
-        row = free[:, iy]
+    for iy in range(heightfield.shape[0]):
+        row = free[iy, :]
         if not row[ix]:
             continue
         left = ix
@@ -66,24 +66,24 @@ def _estimate_min_free_width(heightfield: np.ndarray, width_m: float, h_scale: f
 
 
 def _reachable_from_mask(free: np.ndarray, start_mask: np.ndarray) -> np.ndarray:
-    h, w = free.shape[1], free.shape[0]
+    h, w = free.shape[0], free.shape[1]
     visited = np.zeros_like(free, dtype=np.bool_)
     q = deque()
     starts = np.argwhere(start_mask & free)
-    for x, y in starts:
-        q.append((x, y))
-        visited[x, y] = True
+    for y, x in starts:
+        q.append((y, x))
+        visited[y, x] = True
     while q:
-        x, y = q.popleft()
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx = x + dx
+        y, x = q.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             ny = y + dy
+            nx = x + dx
             if nx < 0 or nx >= w or ny < 0 or ny >= h:
                 continue
-            if visited[nx, ny] or not free[nx, ny]:
+            if visited[ny, nx] or not free[ny, nx]:
                 continue
-            visited[nx, ny] = True
-            q.append((nx, ny))
+            visited[ny, nx] = True
+            q.append((ny, nx))
     return visited
 
 
@@ -96,12 +96,12 @@ def _reachability_between_rects(heightfield: np.ndarray, spawn_rect, goal_rect, 
     goal_idx = _rect_indices(goal_rect, width_m, length_m, h_scale) if goal_rect else None
     if spawn_idx is None or goal_idx is None:
         return False
-    spawn_mask = np.zeros((w_cells, l_cells), dtype=np.bool_)
-    goal_mask = np.zeros((w_cells, l_cells), dtype=np.bool_)
-    sx0, sx1, sy0, sy1 = spawn_idx
-    gx0, gx1, gy0, gy1 = goal_idx
-    spawn_mask[sx0:sx1, sy0:sy1] = True
-    goal_mask[gx0:gx1, gy0:gy1] = True
+    spawn_mask = np.zeros((l_cells, w_cells), dtype=np.bool_)
+    goal_mask = np.zeros((l_cells, w_cells), dtype=np.bool_)
+    sy0, sy1, sx0, sx1 = spawn_idx
+    gy0, gy1, gx0, gx1 = goal_idx
+    spawn_mask[sy0:sy1, sx0:sx1] = True
+    goal_mask[gy0:gy1, gx0:gx1] = True
     visited = _reachable_from_mask(free, spawn_mask)
     return bool(np.any(visited & goal_mask))
 
@@ -134,11 +134,12 @@ def _check_s1(scene: SceneSpec, heightfield: np.ndarray, h_scale: float) -> Tupl
     tol = 2.0 * h_scale
     x_min = -0.5 * width_m
     x_center_idx = int(round((x_center - x_min) / h_scale))
-    x_center_idx = max(0, min(heightfield.shape[0] - 1, x_center_idx))
+    x_center_idx = max(0, min(heightfield.shape[1] - 1, x_center_idx))
     free = _free_mask(heightfield)
+    width_cells = heightfield.shape[1]
     widths = []
-    for iy in range(heightfield.shape[1]):
-        row = free[:, iy]
+    for iy in range(heightfield.shape[0]):
+        row = free[iy, :]
         if not row[x_center_idx]:
             widths.append(0.0)
             continue
@@ -146,7 +147,7 @@ def _check_s1(scene: SceneSpec, heightfield: np.ndarray, h_scale: float) -> Tupl
         right = x_center_idx
         while left - 1 >= 0 and row[left - 1]:
             left -= 1
-        while right + 1 < heightfield.shape[0] and row[right + 1]:
+        while right + 1 < width_cells and row[right + 1]:
             right += 1
         widths.append((right - left + 1) * h_scale)
     narrow_thresh = float(min_gate_width) + 2.0 * h_scale
@@ -161,10 +162,10 @@ def _check_s1(scene: SceneSpec, heightfield: np.ndarray, h_scale: float) -> Tupl
     spawn_idx = _rect_indices(spawn_rect, width_m, length_m, h_scale) if spawn_rect else None
     spawn_mask = np.zeros_like(free, dtype=np.bool_)
     if spawn_idx is not None:
-        sx0, sx1, sy0, sy1 = spawn_idx
-        spawn_mask[sx0:sx1, sy0:sy1] = True
+        sy0, sy1, sx0, sx1 = spawn_idx
+        spawn_mask[sy0:sy1, sx0:sx1] = True
     else:
-        spawn_mask[x_center_idx, heightfield.shape[1] // 2] = True
+        spawn_mask[heightfield.shape[0] // 2, x_center_idx] = True
     outside_escape_ok = not _escape_to_border(heightfield, spawn_mask)
     ok = outside_escape_ok and length_m > 0.1 and min_free_width >= max(0.05, min_gate_width - tol)
     metrics = {

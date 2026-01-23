@@ -1,4 +1,17 @@
-# 训练指令（TerrainBuilder heightfield）
+# 训练指令（scene_gen_v2 heightfield）
+
+## 说明
+
+- S1/S2 已切换到 `scene_gen_v2`（单一真源入口 + 统一量化 + guards）。
+- 运行时会打印一次：`[Init] 正在使用 scene_gen_v2 (...)`，用于确认未走旧链路。
+
+## 场景体检（scene_audit）
+
+python3 tools/scene_audit.py --scenes s1_corridor,s2_forest --seeds 101,102,103,104,105 --difficulties 0,0.5,1
+python3 tools/scene_audit.py --scenes s1_corridor,s2_forest --seeds 101,102,103,104,105 --difficulties 0,0.5,1 --write-golden tools/scene_golden.json
+- golden seeds 回归集：`tools/scene_golden.json`。
+- 备注：当前 golden seeds（s1/s2）为 `[101,102,103]`，若场景逻辑修改需重跑生成。
+- 备注：scene_gen_v2 tile 坐标系为中心原点（y∈[-L/2,+L/2]）。
 
 ## 最小验证（headless, 64 env, 3 iter）
 
