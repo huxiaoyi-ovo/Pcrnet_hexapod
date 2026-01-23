@@ -49,6 +49,10 @@ from .hex_v4.hex_s1_config import (
     HexS1LargeCfg,
     HexS1LargeCfgPPO,
 )
+from .hex_v4.hex_calib_config import (
+    HexCalibCfg,
+    HexCalibCfgPPO,
+)
 from .hex_v4.hex_s2_config import HexS2Cfg, HexS2CfgPPO, HexS2LargeCfg, HexS2LargeCfgPPO
 from .hex_v4.hex_s3_config import HexS3Cfg, HexS3CfgPPO, HexS3LargeCfg, HexS3LargeCfgPPO
 from .hex_v4.hex_s4_config import HexS4Cfg, HexS4CfgPPO, HexS4LargeCfg, HexS4LargeCfgPPO
@@ -95,4 +99,5 @@ task_registry.register("hex_s6", HexGround, HexS6Cfg(), HexS6CfgPPO())
 task_registry.register("hex_s6_large", HexGround, HexS6LargeCfg(), HexS6LargeCfgPPO())
 task_registry.register("hex_mix_gate", HexGround, HexMixGateCfg(), HexMixGateCfgPPO())
 task_registry.register("hex_mix_gate_large", HexGround, HexMixGateLargeCfg(), HexMixGateLargeCfgPPO())
+task_registry.register("hex_calib", HexGround, HexCalibCfg(), HexCalibCfgPPO())
 # print("Registered HexGround environment")

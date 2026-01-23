@@ -133,6 +133,8 @@ class SceneGenerator:
             return self._sample_s1(rng, difficulty, seed, env_dims, robot_envelope)
         if scene_id == "s2_forest":
             return self._sample_s2(rng, difficulty, seed, env_dims, robot_envelope)
+        if scene_id == "calib_axis":
+            return self._sample_calib(rng, difficulty, seed, env_dims, robot_envelope)
         raise RuntimeError(f"scene_gen_v2 unsupported scene_id={scene_id}")
 
     def _sample_s1(
@@ -422,6 +424,89 @@ class SceneGenerator:
             params_resolved=resolved,
             primitives=tuple(primitives),
             static_obstacles=tuple(static_obs),
+            dynamic_spec=None,
+            layout_seed=int(seed),
+            layout_id=str(seed),
+            layout_hash=None,
+        )
+        return scene.__class__(
+            scene_id=scene.scene_id,
+            scene_type=scene.scene_type,
+            seed=scene.seed,
+            difficulty=scene.difficulty,
+            params_resolved=scene.params_resolved,
+            primitives=scene.primitives,
+            static_obstacles=scene.static_obstacles,
+            dynamic_spec=scene.dynamic_spec,
+            layout_seed=scene.layout_seed,
+            layout_id=scene.layout_id,
+            layout_hash=compute_layout_hash(scene),
+        )
+
+    def _sample_calib(
+        self,
+        rng: np.random.RandomState,
+        difficulty: float,
+        seed: int,
+        env_dims: Dict[str, float],
+        robot_envelope: Optional[Dict[str, float]],
+    ) -> SceneSpec:
+        width_m = float(env_dims["width"])
+        length_m = float(env_dims["length"])
+        clearance = float((robot_envelope or {}).get("clearance", self.scene_clearance))
+        wall_height = float(getattr(self.cfg, "scene_static_wall_block_height", 0.35))
+        ridge_thickness = max(0.2, float(getattr(self.cfg, "scene_static_wall_block_size", 0.4)))
+
+        x_min = -0.5 * width_m
+        x_max = 0.5 * width_m
+        y_min = -0.5 * length_m
+        y_max = 0.5 * length_m
+
+        ridge_x = x_min + 0.25 * width_m
+        ridge_y = y_min + 0.25 * length_m
+
+        ridge_long = RectWall(
+            x0=ridge_x - 0.5 * ridge_thickness,
+            x1=ridge_x + 0.5 * ridge_thickness,
+            y0=y_min,
+            y1=y_max,
+            height=wall_height,
+        )
+        ridge_short = RectWall(
+            x0=x_min,
+            x1=x_max,
+            y0=ridge_y - 0.5 * ridge_thickness,
+            y1=ridge_y + 0.5 * ridge_thickness,
+            height=0.5 * wall_height,
+        )
+
+        spawn_y0 = y_min + 0.35 * length_m
+        spawn_y1 = y_min + 0.45 * length_m
+        goal_y0 = y_max - 0.45 * length_m
+        goal_y1 = y_max - 0.35 * length_m
+        spawn_rect = [x_min + clearance, x_max - clearance, spawn_y0, spawn_y1]
+        goal_rect = [x_min + clearance, x_max - clearance, goal_y0, goal_y1]
+
+        resolved = {
+            "clearance": clearance,
+            "width_m": width_m,
+            "length_m": length_m,
+            "spawn_rect_hf": spawn_rect,
+            "goal_rect_hf": goal_rect,
+            "calib_ridge_x": ridge_x,
+            "calib_ridge_y": ridge_y,
+            "calib_ridge_thickness": ridge_thickness,
+            "calib_wall_height": wall_height,
+        }
+
+        scene = SceneSpec(
+            scene_id="calib_axis",
+            scene_type="calib_axis",
+            seed=int(seed),
+            difficulty=float(difficulty),
+            params_resolved=resolved,
+            primitives=(ridge_long, ridge_short),
+            static_obstacles=tuple(),
             dynamic_spec=None,
             layout_seed=int(seed),
             layout_id=str(seed),
