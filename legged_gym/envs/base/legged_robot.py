@@ -660,11 +660,23 @@ class LeggedRobot(BaseTask):
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         hf_params.restitution = self.cfg.terrain.restitution
 
-        height_samples = self.terrain.heightsamples
-        if isinstance(height_samples, np.ndarray) and height_samples.ndim == 2:
-            height_samples = height_samples.flatten(order="C")
-        expected = int(self.terrain.tot_rows * self.terrain.tot_cols)
-        actual = int(height_samples.size) if isinstance(height_samples, np.ndarray) else len(height_samples)
+        height_samples = np.asarray(self.terrain.heightsamples)
+        expected = int(hf_params.nbRows * hf_params.nbColumns)
+        if height_samples.ndim == 2:
+            if height_samples.shape != (self.terrain.tot_rows, self.terrain.tot_cols):
+                raise ValueError(
+                    f"height_samples shape mismatch: got {height_samples.shape}, "
+                    f"expected {(self.terrain.tot_rows, self.terrain.tot_cols)}"
+                )
+            height_samples_2d = height_samples
+            height_samples = height_samples_2d.flatten(order="C")
+        elif height_samples.ndim == 1:
+            if int(height_samples.size) != expected:
+                raise ValueError(f"height_samples size mismatch: got {height_samples.size}, expected {expected}")
+            height_samples_2d = height_samples.reshape((self.terrain.tot_rows, self.terrain.tot_cols), order="C")
+        else:
+            raise ValueError(f"height_samples ndim invalid: got {height_samples.ndim}, expected 1 or 2")
+        actual = int(height_samples.size)
         if actual != expected:
             raise ValueError(f"height_samples size mismatch: got {actual}, expected {expected}")
         self.heightfield_bounds = (
@@ -674,7 +686,7 @@ class LeggedRobot(BaseTask):
             float(hf_params.transform.p.y) + float(hf_params.nbColumns) * float(hf_params.column_scale),
         )
         self.gym.add_heightfield(self.sim, height_samples, hf_params)
-        self.height_samples = torch.tensor(height_samples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        self.height_samples = torch.tensor(height_samples_2d).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
     def _create_trimesh(self):
         """ Adds a triangle mesh terrain to the simulation, sets parameters based on the cfg.

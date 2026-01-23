@@ -186,6 +186,7 @@ class SceneGenerator:
         for _ in range(gate_count):
             g_len = max(0.2, gate_length + rng.uniform(-gate_length_jitter, gate_length_jitter))
             g_width = max(min_width, gate_width + rng.uniform(-gate_width_jitter, gate_width_jitter))
+            g_width = min(g_width, width)
             placed = False
             for _ in range(80):
                 y_center_abs = float(rng.uniform(y_min, y_max))
@@ -229,24 +230,25 @@ class SceneGenerator:
             y0 = max(gate_y_start, y_center_abs - 0.5 * g_len)
             y1 = min(gate_y_end, y_center_abs + 0.5 * g_len)
             half_gate = 0.5 * g_width
-            primitives.append(
-                RectWall(
-                    x0=x_center - half_gate - wall_thickness,
-                    x1=x_center - half_gate,
-                    y0=y0,
-                    y1=y1,
-                    height=wall_height,
+            if half_gate < half_w - 1e-6:
+                primitives.append(
+                    RectWall(
+                        x0=x_center - half_w,
+                        x1=x_center - half_gate,
+                        y0=y0,
+                        y1=y1,
+                        height=wall_height,
+                    )
                 )
-            )
-            primitives.append(
-                RectWall(
-                    x0=x_center + half_gate,
-                    x1=x_center + half_gate + wall_thickness,
-                    y0=y0,
-                    y1=y1,
-                    height=wall_height,
+                primitives.append(
+                    RectWall(
+                        x0=x_center + half_gate,
+                        x1=x_center + half_w,
+                        y0=y0,
+                        y1=y1,
+                        height=wall_height,
+                    )
                 )
-            )
 
         spawn_y0 = max(gate_y_start, gate_y_start + spawn_buffer)
         spawn_y1 = min(gate_y_end, max(spawn_y0 + clearance, gate_y_start + spawn_span))

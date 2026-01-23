@@ -671,8 +671,27 @@ class HexClimb(BaseTask):
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         hf_params.restitution = self.cfg.terrain.restitution
 
-        self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
-        self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        height_samples = np.asarray(self.terrain.heightsamples)
+        expected = int(hf_params.nbRows * hf_params.nbColumns)
+        if height_samples.ndim == 2:
+            if height_samples.shape != (self.terrain.tot_rows, self.terrain.tot_cols):
+                raise ValueError(
+                    f"height_samples shape mismatch: got {height_samples.shape}, "
+                    f"expected {(self.terrain.tot_rows, self.terrain.tot_cols)}"
+                )
+            height_samples_2d = height_samples
+            height_samples = height_samples_2d.flatten(order="C")
+        elif height_samples.ndim == 1:
+            if int(height_samples.size) != expected:
+                raise ValueError(f"height_samples size mismatch: got {height_samples.size}, expected {expected}")
+            height_samples_2d = height_samples.reshape((self.terrain.tot_rows, self.terrain.tot_cols), order="C")
+        else:
+            raise ValueError(f"height_samples ndim invalid: got {height_samples.ndim}, expected 1 or 2")
+        actual = int(height_samples.size)
+        if actual != expected:
+            raise ValueError(f"height_samples size mismatch: got {actual}, expected {expected}")
+        self.gym.add_heightfield(self.sim, height_samples, hf_params)
+        self.height_samples = torch.tensor(height_samples_2d).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
     def _create_trimesh(self):
         """ Adds a triangle mesh terrain to the simulation, sets parameters based on the cfg.
