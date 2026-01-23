@@ -586,9 +586,9 @@ class SceneManager:
             return self._build_doorway(params, rng)
         if scene_type == "s4_crossing":
             return self._build_crossing(params, rng)
-        if scene_type == "s5_transition":
+        if scene_type in ("s5_transition", "s5_sparse_dense"):
             return self._build_density_transition(params, rng)
-        if scene_type == "s6_ood_structured":
+        if scene_type in ("s6_ood_structured", "s6_ood_cluster", "s6_ood_mix"):
             return self._build_structured_ood(params, rng)
         return []
 

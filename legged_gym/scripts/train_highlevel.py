@@ -557,10 +557,6 @@ class HierarchicalHexapodEnv:
             self.env.depth_images[:] = processed
 
     def _compute_gt_affordance_from_heightfield(self) -> Optional[torch.Tensor]:
-        if getattr(self.env.cfg.terrain, "scene_use_actors", False):
-            scene_aff = self._compute_gt_affordance_from_scene()
-            if scene_aff is not None:
-                return scene_aff
         if getattr(self.env, "height_samples", None) is None:
             return None
         map_size = self.affordance_map_size

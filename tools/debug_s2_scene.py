@@ -29,8 +29,6 @@ def main() -> int:
 
     terrain = HexS2Cfg.terrain
     print("[S2] scene_type:", getattr(terrain, "scene_type", None))
-    print("[S2] scene_use_actors:", getattr(terrain, "scene_use_actors", None))
-    print("[S2] scene_static_max:", getattr(terrain, "scene_static_max", None))
     print("[S2] scene_static_block_sizes:", getattr(terrain, "scene_static_block_sizes", None))
     print("[S2] scene_static_block_heights:", getattr(terrain, "scene_static_block_heights", None))
     print("[S2] scene_params_easy keys:", sorted(getattr(terrain, "scene_params_easy", {}).keys()))

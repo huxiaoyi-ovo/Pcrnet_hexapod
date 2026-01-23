@@ -12,14 +12,12 @@ class HexS4Cfg(HexGroundCfg):
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
-        scene_dynamic_max = 0
+        scene_dynamic_max = 6
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 40
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_params_easy = {
@@ -65,18 +63,14 @@ class HexS4LargeCfg(HexGroundCfg):
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
-        scene_dynamic_max = 0
+        scene_dynamic_max = 2
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 0
-        scene_static_block_max = 8
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
-        scene_actor_budget = 80
         scene_params_easy = {
             "cross_width": 3.0,
             "cross_span": 2.6,

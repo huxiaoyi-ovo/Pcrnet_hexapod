@@ -13,13 +13,9 @@ class HexS3Cfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 120
-        scene_static_block_max = 40
-        scene_static_wall_max = 160
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.28, 0.36, 0.44]
@@ -97,20 +93,15 @@ class HexS3LargeCfg(HexGroundCfg):
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 0
-        scene_static_block_max = 8
-        scene_static_wall_max = 40
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.28, 0.36, 0.44]
         scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_static_wall_block_size = 1.0
         scene_static_wall_block_height = 0.35
-        scene_actor_budget = 80
         scene_params_easy = {
             "room_width": 2.6,
             "wall_thickness": 0.25,

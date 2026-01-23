@@ -748,14 +748,12 @@ class LeggedRobot(BaseTask):
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
             group_id = i + 1
-            if getattr(self.cfg.terrain, "scene_use_actors", False):
-                group_id = 1
             robot_filter = self.cfg.asset.self_collisions
             try:
-                if getattr(self.cfg.terrain, "scene_use_actors", False):
-                    scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
-                    if scene_filter >= (1 << 31):
-                        scene_filter = -1
+                scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
+                if scene_filter >= (1 << 31):
+                    scene_filter = -1
+                if int(getattr(self.cfg.terrain, "scene_dynamic_max", 0) or 0) > 0:
                     robot_filter = scene_filter
             except Exception:
                 pass

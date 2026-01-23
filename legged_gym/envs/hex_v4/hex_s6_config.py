@@ -14,13 +14,9 @@ class HexS6Cfg(HexGroundCfg):
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 80
-        scene_static_block_max = 40
-        scene_static_wall_max = 200
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.32, 0.4, 0.48]
@@ -97,20 +93,15 @@ class HexS6LargeCfg(HexGroundCfg):
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_actors = False
         scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 0
-        scene_static_block_max = 16
-        scene_static_wall_max = 40
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.32, 0.4, 0.48]
         scene_static_block_heights = [0.35, 0.4, 0.45]
         scene_static_wall_block_size = 1.0
         scene_static_wall_block_height = 0.4
-        scene_actor_budget = 80
         scene_params_easy = {
             "ood_template": "cluster",
             "ood_template_probs": {"cluster": 1.0, "nonconvex": 1.0, "maze": 1.0},

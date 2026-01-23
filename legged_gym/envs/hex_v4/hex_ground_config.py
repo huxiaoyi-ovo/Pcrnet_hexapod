@@ -105,22 +105,16 @@ class HexGroundCfg(LeggedRobotCfg):
         }
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
-        scene_use_actors = False
         scene_use_heightfield = False
         scene_resample_on_reset = False
         scene_resample_on_level_change = True
         scene_collision_filter = 0xFFFFFFFF
-        scene_static_max = 0
-        scene_static_block_max = 0
-        scene_static_wall_max = 0
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = []
         scene_static_block_heights = []
         scene_static_wall_block_size = 1.0
         scene_static_wall_block_height = 0.35
-        # 训练规模预算（actors/env 上限；0 表示不限制）
-        scene_actor_budget = 0
         #mesh_type = 'plane'
         curriculum = True
         border_size=1.0

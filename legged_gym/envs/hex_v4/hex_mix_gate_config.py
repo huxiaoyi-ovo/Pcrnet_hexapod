@@ -5,7 +5,7 @@ class HexMixGateCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_types = ["s3_doorway", "s4_crossing", "s5_transition"]
         scene_seed = 120
@@ -15,13 +15,9 @@ class HexMixGateCfg(HexGroundCfg):
         scene_dynamic_max = 6
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 80
-        scene_static_block_max = 40
-        scene_static_wall_max = 120
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.28, 0.36, 0.44]
@@ -151,7 +147,7 @@ class HexMixGateLargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "plane"
+        mesh_type = "heightfield"
         fixed_layout_enable = False
         scene_types = ["s3_doorway", "s4_crossing", "s5_transition"]
         scene_seed = 120
@@ -161,20 +157,15 @@ class HexMixGateLargeCfg(HexGroundCfg):
         scene_dynamic_max = 2
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_actors = True
-        scene_use_heightfield = False
+        scene_use_heightfield = True
         scene_resample_on_reset = True
         scene_resample_on_level_change = True
-        scene_static_max = 0
-        scene_static_block_max = 32
-        scene_static_wall_max = 40
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = [0.28, 0.36, 0.44]
         scene_static_block_heights = [0.3, 0.35, 0.4]
         scene_static_wall_block_size = 1.0
         scene_static_wall_block_height = 0.35
-        scene_actor_budget = 80
 
         scene_probs_easy = {
             "s3_doorway": 0.2,

@@ -4,7 +4,7 @@ from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgP
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils.actuator import Actuator
 from legged_gym.envs.hex_v4.expert import ExpertGround
-from legged_gym.envs.hex_v4.scene_manager import SceneSpec, StaticObstacleSpec
+from legged_gym.envs.hex_v4.scene_manager import SceneSpec
 import torch
 import numpy as np
 from typing import Optional
@@ -16,7 +16,6 @@ from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
 import time
-from collections import deque
 class HexGround(LeggedRobot):
     def __init__(self,cfg:HexGroundCfg,sim_params,physics_engine,sim_device,headless):
         # 相机配置（在调用父类初始化前设置）
@@ -44,22 +43,6 @@ class HexGround(LeggedRobot):
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
         self.scene_spec_cache = [None] * self.num_envs
         self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
-        self.scene_stats = {
-            "total_envs": 0,
-            "scene_counts": {},
-            "wall_spawned_sum": 0,
-            "block_spawned_sum": 0,
-            "dyn_active_sum": 0,
-            "wall_spawned_max": 0,
-            "block_spawned_max": 0,
-            "dyn_active_max": 0,
-            "truncate_rate_max": 0.0,
-            "resets": 0,
-        }
-        self._scene_stats_print_every = 200
-        self.scene_stats_window = deque(maxlen=200)
-        # 按 env-reset 计数触发：训练更大阈值，debug 下保持较小阈值
-        self._scene_stats_window_every = 50000
         self._init_scene_runtime()
         #额外初始化电机类，可以计理想力矩或模拟的仿真力矩
         self.actuator=Actuator(self.cfg,self.device)
@@ -98,22 +81,9 @@ class HexGround(LeggedRobot):
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
-        self.static_block_groups = []
-        self.static_block_group_sizes = []
-        self.static_block_group_heights = []
-        self.static_block_group_max = []
-        self.static_block_assets = []
-        self.static_block_actor_handles = None
-        self.static_block_actor_indices = None
-        self.static_wall_actor_handles = None
-        self.static_wall_actor_indices = None
-        self.static_wall_asset = None
         self.dynamic_actor_handles = None
         self.dynamic_actor_indices = None
         self.dynamic_asset = None
-        if bool(getattr(self.cfg.terrain, "scene_use_heightfield", False)):
-            self.scene_manager = None
-            return
         terrain_obj = getattr(self, "terrain", None)
         self.scene_manager = getattr(terrain_obj, "scene_manager", None)
         if self.scene_manager is None:
@@ -124,74 +94,22 @@ class HexGround(LeggedRobot):
                     setattr(terrain_obj, "scene_manager", self.scene_manager)
             except Exception:
                 self.scene_manager = None
-        self.dynamic_actor_handles = None
-        self.dynamic_actor_indices = None
-        self.dynamic_asset = None
-
         if self.scene_manager is None:
             return
-
-        block_max = int(getattr(self.cfg.terrain, "scene_static_block_max", 0))
-        wall_max = int(getattr(self.cfg.terrain, "scene_static_wall_max", 0))
-        if block_max <= 0:
-            block_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
-        if wall_max <= 0:
-            wall_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
-
-        block_sizes = list(getattr(self.cfg.terrain, "scene_static_block_sizes", []) or [])
-        block_heights = list(getattr(self.cfg.terrain, "scene_static_block_heights", []) or [])
-        if not block_sizes:
-            block_sizes = [float(getattr(self.cfg.terrain, "scene_static_block_size", 0.4))]
-        if not block_heights:
-            block_heights = [float(getattr(self.cfg.terrain, "scene_static_block_height", 0.35))] * len(block_sizes)
-        if len(block_heights) < len(block_sizes):
-            block_heights.extend([block_heights[-1]] * (len(block_sizes) - len(block_heights)))
-
+        if not self.scene_manager.has_dynamic:
+            return
+        max_dyn = int(self.scene_manager.max_dynamic_obstacles)
+        if max_dyn <= 0:
+            return
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
         asset_options.disable_gravity = True
         asset_options.collapse_fixed_joints = True
-
-        if block_max > 0 and block_sizes:
-            self.static_block_groups = [f"block_{idx}" for idx in range(len(block_sizes))]
-            self.static_block_group_sizes = [float(v) for v in block_sizes]
-            self.static_block_group_heights = [float(v) for v in block_heights[:len(block_sizes)]]
-            per_group_max = int(math.ceil(block_max / float(len(self.static_block_groups))))
-            self.static_block_group_max = [per_group_max for _ in self.static_block_groups]
-            for idx, group in enumerate(self.static_block_groups):
-                size_xy = float(self.static_block_group_sizes[idx])
-                height = float(self.static_block_group_heights[idx])
-                block_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-                self.static_block_assets.append(block_asset)
-                handles = [[None for _ in range(per_group_max)] for _ in range(self.num_envs)]
-                indices = np.zeros((self.num_envs, per_group_max), dtype=np.int32)
-                setattr(self, f"static_{group}_actor_handles", handles)
-                setattr(self, f"static_{group}_actor_indices", indices)
-        else:
-            self.static_block_groups = []
-            self.static_block_group_sizes = []
-            self.static_block_group_heights = []
-            self.static_block_group_max = []
-
-        if wall_max > 0:
-            size_xy = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
-            height = float(getattr(self.cfg.terrain, "scene_static_wall_block_height", 0.35))
-            self.static_wall_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-            self.static_wall_actor_handles = [[None for _ in range(wall_max)] for _ in range(self.num_envs)]
-            self.static_wall_actor_indices = np.zeros((self.num_envs, wall_max), dtype=np.int32)
-        else:
-            self.static_wall_actor_indices = None
-            self.static_wall_actor_handles = None
-            self.static_wall_asset = None
-
-        if self.scene_manager.has_dynamic:
-            max_dyn = int(self.scene_manager.max_dynamic_obstacles)
-            if max_dyn > 0:
-                size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
-                height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
-                self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-                self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
-                self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
+        size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
+        height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
+        self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+        self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
+        self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
 
     def _post_create_envs(self):
         if not hasattr(self, "robot_actor_indices"):
@@ -205,48 +123,8 @@ class HexGround(LeggedRobot):
             raise RuntimeError(f"robot_actor_indices invalid: {indices}")
         if np.any(np.diff(indices) <= 0):
             raise RuntimeError(f"robot_actor_indices not strictly increasing: {indices}")
-        for env_id in range(self.num_envs):
-            robot_idx = int(indices[env_id])
-            other_indices = []
-            for group in getattr(self, "static_block_groups", []):
-                arr = getattr(self, f"static_{group}_actor_indices", None)
-                if arr is not None and arr.shape[1] > 0:
-                    other_indices.append(arr[env_id])
-            if self.static_wall_actor_indices is not None and self.static_wall_actor_indices.shape[1] > 0:
-                other_indices.append(self.static_wall_actor_indices[env_id])
-            if self.dynamic_actor_indices is not None and self.dynamic_actor_indices.shape[1] > 0:
-                other_indices.append(self.dynamic_actor_indices[env_id])
-            if other_indices:
-                min_other = int(np.min(np.concatenate(other_indices)))
-                if min_other <= robot_idx:
-                    raise RuntimeError(
-                        f"robot actor is not first in env {env_id}: "
-                        f"robot_idx={robot_idx}, min_other={min_other}"
-                    )
-
-        block_capacity = int(sum(getattr(self, "static_block_group_max", []) or []))
-        wall_capacity = int(self.static_wall_actor_indices.shape[1]) if self.static_wall_actor_indices is not None else 0
-        dyn_capacity = int(self.dynamic_actor_indices.shape[1]) if self.dynamic_actor_indices is not None else 0
-        actors_per_env = 1 + block_capacity + wall_capacity + dyn_capacity
-        total_actors = actors_per_env * self.num_envs
-        print(
-            "[ActorBudget] actors/env={} (robot=1, block={}, wall={}, dyn={}), total={}".format(
-                actors_per_env, block_capacity, wall_capacity, dyn_capacity, total_actors
-            )
-        )
-        budget = int(getattr(self.cfg.terrain, "scene_actor_budget", 0) or 0)
-        if budget > 0 and actors_per_env > budget:
-            raise RuntimeError(
-                f"actors/env {actors_per_env} exceeds budget {budget}. "
-                "Use train_large config or lower wall/block/dyn max."
-            )
-
-    def _scene_use_actors(self) -> bool:
-        return bool(getattr(self.cfg.terrain, "scene_use_actors", False))
 
     def _scene_group_id(self, env_id: int) -> int:
-        if self._scene_use_actors():
-            return 1
         return env_id + 1
 
     def _scene_collision_filter(self) -> int:
@@ -289,73 +167,28 @@ class HexGround(LeggedRobot):
     def _create_env_actors(self, env_id, env_handle):
         if self.scene_manager is None:
             return
+        if self.dynamic_asset is None or self.dynamic_actor_indices is None:
+            return
         group_id = self._scene_group_id(env_id)
         scene_filter = self._scene_collision_filter()
-        # 创建阶段用 scene_filter，hidden pool 会在同步时切换为 0
         create_filter = scene_filter
-        if self.static_block_groups:
-            for idx, group in enumerate(self.static_block_groups):
-                per_group_max = self.static_block_group_max[idx]
-                block_asset = self.static_block_assets[idx]
-                handles = getattr(self, f"static_{group}_actor_handles")
-                indices = getattr(self, f"static_{group}_actor_indices")
-                for obs_id in range(per_group_max):
-                    pose = gymapi.Transform()
-                    pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                    actor_handle = self.gym.create_actor(
-                        env_handle,
-                        block_asset,
-                        pose,
-                        f"static_{group}_{obs_id}",
-                        group_id,
-                        create_filter,
-                        0,
-                    )
-                    self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="block")
-                    handles[env_id][obs_id] = actor_handle
-                    actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                    indices[env_id, obs_id] = actor_index
-
-        if self.static_wall_asset is not None and self.static_wall_actor_indices is not None:
-            wall_max = int(self.static_wall_actor_indices.shape[1])
-            for obs_id in range(wall_max):
-                pose = gymapi.Transform()
-                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                actor_handle = self.gym.create_actor(
-                    env_handle,
-                    self.static_wall_asset,
-                    pose,
-                    f"static_wall_{obs_id}",
-                    group_id,
-                    create_filter,
-                    0,
-                )
-                self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="wall")
-                self.static_wall_actor_handles[env_id][obs_id] = actor_handle
-                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                self.static_wall_actor_indices[env_id, obs_id] = actor_index
-            if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_group_logged", False):
-                print(f"[Debug] wall collision_group={group_id}, create_filter={create_filter}, scene_filter={scene_filter}")
-                self._wall_group_logged = True
-
-        if self.dynamic_asset is not None and self.dynamic_actor_indices is not None:
-            max_dyn = int(self.dynamic_actor_indices.shape[1])
-            for obs_id in range(max_dyn):
-                pose = gymapi.Transform()
-                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                actor_handle = self.gym.create_actor(
-                    env_handle,
-                    self.dynamic_asset,
-                    pose,
-                    f"dyn_obs_{obs_id}",
-                    group_id,
-                    create_filter,
-                    0,
-                )
-                self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="dyn")
-                self.dynamic_actor_handles[env_id][obs_id] = actor_handle
-                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                self.dynamic_actor_indices[env_id, obs_id] = actor_index
+        max_dyn = int(self.dynamic_actor_indices.shape[1])
+        for obs_id in range(max_dyn):
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+            actor_handle = self.gym.create_actor(
+                env_handle,
+                self.dynamic_asset,
+                pose,
+                f"dyn_obs_{obs_id}",
+                group_id,
+                create_filter,
+                0,
+            )
+            self._apply_actor_collision_filter(env_handle, actor_handle, create_filter, env_id, debug_tag="dyn")
+            self.dynamic_actor_handles[env_id][obs_id] = actor_handle
+            actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+            self.dynamic_actor_indices[env_id, obs_id] = actor_index
 
     def _init_camera_buffers(self):
         """初始化相机图像接收buffer"""
@@ -575,33 +408,7 @@ class HexGround(LeggedRobot):
     def _init_scene_runtime(self):
         if self.scene_manager is None:
             return
-        self._init_static_runtime()
         self._init_dynamic_runtime()
-
-    def _init_static_runtime(self):
-        for group in getattr(self, "static_block_groups", []):
-            self._init_static_group(group)
-        self._init_static_group("wall")
-
-    def _init_static_group(self, group: str):
-        indices = getattr(self, f"static_{group}_actor_indices", None)
-        if indices is None:
-            return
-        if isinstance(indices, list):
-            indices = np.array(indices, dtype=np.int32)
-        if isinstance(indices, np.ndarray):
-            indices = torch.tensor(indices, device=self.device, dtype=torch.int32)
-        max_static = int(indices.shape[1]) if indices is not None else 0
-        if max_static <= 0:
-            return
-        setattr(self, f"static_{group}_actor_indices", indices)
-        setattr(self, f"static_{group}_actor_indices_flat", indices.reshape(-1).contiguous())
-        setattr(self, f"static_{group}_actor_indices_flat_long", indices.reshape(-1).contiguous().to(torch.long))
-        setattr(self, f"static_{group}_active", torch.zeros(self.num_envs, max_static, device=self.device, dtype=torch.bool))
-        setattr(self, f"static_{group}_pos_local", torch.zeros(self.num_envs, max_static, 3, device=self.device))
-        quat = torch.zeros(self.num_envs, max_static, 4, device=self.device)
-        quat[..., 3] = 1.0
-        setattr(self, f"static_{group}_quat", quat)
 
     def _init_dynamic_runtime(self):
         if self.dynamic_actor_indices is None:
@@ -627,131 +434,6 @@ class HexGround(LeggedRobot):
         self.dynamic_quat = torch.zeros(self.num_envs, max_dyn, 4, device=self.device)
         self.dynamic_quat[..., 3] = 1.0
 
-    def _create_static_obstacle_actors(self):
-        block_max = int(getattr(self.cfg.terrain, "scene_static_block_max", 0))
-        wall_max = int(getattr(self.cfg.terrain, "scene_static_wall_max", 0))
-        if block_max <= 0:
-            block_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
-        if wall_max <= 0:
-            wall_max = int(getattr(self.cfg.terrain, "scene_static_max", 0))
-
-        block_sizes = list(getattr(self.cfg.terrain, "scene_static_block_sizes", []) or [])
-        block_heights = list(getattr(self.cfg.terrain, "scene_static_block_heights", []) or [])
-        if not block_sizes:
-            block_sizes = [float(getattr(self.cfg.terrain, "scene_static_block_size", 0.4))]
-        if not block_heights:
-            block_heights = [float(getattr(self.cfg.terrain, "scene_static_block_height", 0.35))] * len(block_sizes)
-        if len(block_heights) < len(block_sizes):
-            block_heights.extend([block_heights[-1]] * (len(block_sizes) - len(block_heights)))
-        self.static_block_groups = [f"block_{idx}" for idx in range(len(block_sizes))]
-        self.static_block_group_sizes = [float(v) for v in block_sizes]
-        self.static_block_group_heights = [float(v) for v in block_heights[:len(block_sizes)]]
-        if block_max <= 0:
-            self.static_block_groups = []
-
-        if block_max <= 0 and wall_max <= 0:
-            self.static_block_actor_indices = None
-            self.static_block_actor_handles = None
-            self.static_wall_actor_indices = None
-            self.static_wall_actor_handles = None
-            return
-
-        asset_options = gymapi.AssetOptions()
-        asset_options.fix_base_link = True
-        asset_options.disable_gravity = True
-        asset_options.collapse_fixed_joints = True
-
-        if block_max > 0 and self.static_block_groups:
-            per_group_max = int(math.ceil(block_max / float(len(self.static_block_groups))))
-            for idx, group in enumerate(self.static_block_groups):
-                size_xy = float(self.static_block_group_sizes[idx])
-                height = float(self.static_block_group_heights[idx])
-                block_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-                handles = [[None for _ in range(per_group_max)] for _ in range(self.num_envs)]
-                indices = np.zeros((self.num_envs, per_group_max), dtype=np.int32)
-                for env_id in range(self.num_envs):
-                    env_handle = self.envs[env_id]
-                    for obs_id in range(per_group_max):
-                        pose = gymapi.Transform()
-                        pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                        actor_handle = self.gym.create_actor(
-                            env_handle,
-                            block_asset,
-                            pose,
-                            f"static_{group}_{obs_id}",
-                            env_id,
-                            0,
-                            0,
-                        )
-                        handles[env_id][obs_id] = actor_handle
-                        actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                        indices[env_id, obs_id] = actor_index
-                setattr(self, f"static_{group}_actor_handles", handles)
-                setattr(self, f"static_{group}_actor_indices", indices)
-        else:
-            self.static_block_actor_indices = None
-            self.static_block_actor_handles = None
-
-        if wall_max > 0:
-            size_xy = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
-            height = float(getattr(self.cfg.terrain, "scene_static_wall_block_height", 0.35))
-            wall_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-            self.static_wall_actor_handles = [[None for _ in range(wall_max)] for _ in range(self.num_envs)]
-            self.static_wall_actor_indices = np.zeros((self.num_envs, wall_max), dtype=np.int32)
-            for env_id in range(self.num_envs):
-                env_handle = self.envs[env_id]
-                for obs_id in range(wall_max):
-                    pose = gymapi.Transform()
-                    pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                    actor_handle = self.gym.create_actor(
-                        env_handle,
-                        wall_asset,
-                        pose,
-                        f"static_wall_{obs_id}",
-                        env_id,
-                        0,
-                        0,
-                    )
-                    self.static_wall_actor_handles[env_id][obs_id] = actor_handle
-                    actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                    self.static_wall_actor_indices[env_id, obs_id] = actor_index
-        else:
-            self.static_wall_actor_indices = None
-            self.static_wall_actor_handles = None
-
-    def _create_dynamic_obstacle_actors(self):
-        max_dyn = int(self.scene_manager.max_dynamic_obstacles)
-        if max_dyn <= 0:
-            self.dynamic_actor_indices = None
-            self.dynamic_actor_handles = None
-            return
-        size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
-        height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
-        asset_options = gymapi.AssetOptions()
-        asset_options.fix_base_link = True
-        asset_options.disable_gravity = True
-        asset_options.collapse_fixed_joints = True
-        obstacle_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-
-        self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
-        self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
-        for env_id in range(self.num_envs):
-            env_handle = self.envs[env_id]
-            for obs_id in range(max_dyn):
-                pose = gymapi.Transform()
-                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
-                actor_handle = self.gym.create_actor(
-                    env_handle,
-                    obstacle_asset,
-                    pose,
-                    f"dyn_obs_{obs_id}",
-                    env_id,
-                    0,
-                    0,
-                )
-                self.dynamic_actor_handles[env_id][obs_id] = actor_handle
-                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
-                self.dynamic_actor_indices[env_id, obs_id] = actor_index
 
     def _get_scene_spec(self, env_id: int):
         if self.scene_specs is None:
@@ -767,127 +449,6 @@ class HexGround(LeggedRobot):
             denom = max(1, int(self.max_terrain_level))
             return float(self.terrain_levels[env_id].item()) / denom
         return 0.0
-
-    def _fill_static_buffers(self, env_id: int, static_specs):
-        block_groups = getattr(self, "static_block_groups", [])
-        has_wall = self.static_wall_actor_indices is not None
-        has_block = bool(block_groups)
-        if not has_block and not has_wall:
-            return
-        for group in block_groups:
-            active = getattr(self, f"static_{group}_active", None)
-            pos_local = getattr(self, f"static_{group}_pos_local", None)
-            if active is not None:
-                active[env_id].fill_(False)
-            if pos_local is not None:
-                pos_local[env_id].zero_()
-        if has_wall:
-            self.static_wall_active[env_id].fill_(False)
-            self.static_wall_pos_local[env_id].zero_()
-
-        group_max = {}
-        group_idx = {}
-        for idx, group in enumerate(block_groups):
-            indices = getattr(self, f"static_{group}_actor_indices", None)
-            group_max[group] = int(indices.shape[1]) if indices is not None else 0
-            group_idx[group] = 0
-        wall_max = int(self.static_wall_actor_indices.shape[1]) if has_wall else 0
-        wall_idx = 0
-        block_sizes = getattr(self, "static_block_group_sizes", [])
-
-        for spec in static_specs:
-            pos = torch.tensor(spec.position, device=self.device, dtype=torch.float32)
-            if spec.kind == "wall" and has_wall and wall_idx < wall_max:
-                self.static_wall_active[env_id, wall_idx] = True
-                self.static_wall_pos_local[env_id, wall_idx] = pos
-                wall_idx += 1
-                continue
-            if not has_block:
-                continue
-            size_xy = float(max(spec.size[0], spec.size[1]))
-            height = float(spec.size[2])
-            if block_sizes:
-                diffs = []
-                for s, h in zip(block_sizes, self.static_block_group_heights):
-                    size_diff = abs(size_xy - s) / max(size_xy, 1e-6)
-                    height_diff = abs(height - h) / max(height, 1e-6)
-                    diffs.append(size_diff + height_diff)
-                sel_idx = int(np.argmin(diffs))
-            else:
-                sel_idx = 0
-            group = block_groups[sel_idx]
-            if group_idx[group] >= group_max[group]:
-                continue
-            active = getattr(self, f"static_{group}_active")
-            pos_local = getattr(self, f"static_{group}_pos_local")
-            active[env_id, group_idx[group]] = True
-            pos_local[env_id, group_idx[group]] = pos
-            group_idx[group] += 1
-
-    def _allocate_static_specs(self, static_specs):
-        block_groups = getattr(self, "static_block_groups", [])
-        has_block = bool(block_groups)
-        has_wall = self.static_wall_actor_indices is not None
-        if not has_block and not has_wall:
-            return list(static_specs), len(static_specs), len(static_specs), 0.0
-
-        wall_specs = [spec for spec in static_specs if spec.kind == "wall"]
-        block_specs = [spec for spec in static_specs if spec.kind != "wall"]
-        wall_max = int(self.static_wall_actor_indices.shape[1]) if has_wall else 0
-        if wall_max > 0:
-            wall_specs = wall_specs[:wall_max]
-        else:
-            wall_specs = []
-
-        group_caps = {}
-        group_used = {}
-        for group in block_groups:
-            indices = getattr(self, f"static_{group}_actor_indices", None)
-            group_caps[group] = int(indices.shape[1]) if indices is not None else 0
-            group_used[group] = 0
-
-        spawned = list(wall_specs)
-        for spec in block_specs:
-            if not has_block:
-                break
-            size_xy = float(max(spec.size[0], spec.size[1]))
-            height = float(spec.size[2])
-            best_group = None
-            best_score = None
-            for idx, group in enumerate(block_groups):
-                if group_used[group] >= group_caps[group]:
-                    continue
-                size = float(self.static_block_group_sizes[idx])
-                h = float(self.static_block_group_heights[idx])
-                size_diff = abs(size_xy - size) / max(size_xy, 1e-6)
-                height_diff = abs(height - h) / max(height, 1e-6)
-                score = size_diff + height_diff
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_group = group
-            if best_group is None:
-                break
-            idx = block_groups.index(best_group)
-            size = float(self.static_block_group_sizes[idx])
-            h = float(self.static_block_group_heights[idx])
-            if abs(size - size_xy) > 1e-6 or abs(h - height) > 1e-6:
-                raw_size = spec.raw_size if spec.raw_size is not None else spec.size
-                spec = StaticObstacleSpec(
-                    kind=spec.kind,
-                    position=spec.position,
-                    size=(size, size, h),
-                    yaw=spec.yaw,
-                    raw_size=raw_size,
-                )
-            spawned.append(spec)
-            group_used[best_group] += 1
-
-        num_target = len(static_specs)
-        num_spawned = len(spawned)
-        truncate_rate = 0.0
-        if num_target > 0:
-            truncate_rate = 1.0 - float(num_spawned) / float(num_target)
-        return spawned, num_target, num_spawned, truncate_rate
 
     def _fill_dynamic_buffers(self, env_id: int, dynamic_specs):
         if self.dynamic_actor_indices is None:
@@ -917,60 +478,6 @@ class HexGround(LeggedRobot):
             self.dynamic_period[env_id, idx] = float(spec.period)
             self.dynamic_height[env_id, idx] = float(spec.size[2])
 
-    def _sync_static_obstacles(self, env_ids: torch.Tensor):
-        for group in getattr(self, "static_block_groups", []):
-            self._sync_static_group(env_ids, group)
-        self._sync_static_group(env_ids, "wall")
-
-    def _sync_static_group(self, env_ids: torch.Tensor, group: str):
-        indices = getattr(self, f"static_{group}_actor_indices", None)
-        if indices is None or len(env_ids) == 0:
-            return
-        active = getattr(self, f"static_{group}_active")
-        pos_local = getattr(self, f"static_{group}_pos_local")
-        quat = getattr(self, f"static_{group}_quat")
-        handles = getattr(self, f"static_{group}_actor_handles", None)
-        max_static = int(indices.shape[1])
-        origins = self.env_origins[env_ids].repeat_interleave(max_static, dim=0)
-        pos_world = pos_local[env_ids].reshape(-1, 3) + origins[:, :3]
-        active_flat = active[env_ids].reshape(-1)
-        if (~active_flat).any():
-            pos_world[~active_flat] = 0.0
-            pos_world[~active_flat, 2] = -5.0
-        quat_flat = quat[env_ids].reshape(-1, 4)
-        indices_flat = indices[env_ids].reshape(-1)
-        indices_long = indices_flat.to(torch.long)
-        root_states = getattr(self, "all_root_states", self.root_states)
-        root_states[indices_long, :3] = pos_world
-        root_states[indices_long, 3:7] = quat_flat
-        root_states[indices_long, 7:13] = 0.0
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim,
-            gymtorch.unwrap_tensor(root_states),
-            gymtorch.unwrap_tensor(indices_flat),
-            len(indices_flat),
-        )
-        # 同步碰撞过滤：active 开碰撞，inactive 关碰撞
-        if handles is not None:
-            scene_filter = self._scene_collision_filter()
-            for env_id in env_ids.tolist():
-                env_handles = handles[env_id]
-                active_mask = active[env_id].tolist()
-                for local_id, actor_handle in enumerate(env_handles):
-                    target_filter = scene_filter if active_mask[local_id] else 0
-                    self._apply_actor_collision_filter(
-                        self.envs[env_id], actor_handle, target_filter, env_id, debug_tag=""
-                    )
-                if getattr(self, "debug_viz", False) and env_id == 0 and not getattr(self, "_wall_filter_logged", False):
-                    if env_handles:
-                        try:
-                            shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], env_handles[0])
-                            if shape_props:
-                                print(f"[Debug] wall shape filter={shape_props[0].filter}")
-                        except Exception:
-                            print("[Debug] wall shape filter query failed")
-                    self._wall_filter_logged = True
-
     def _sync_robot_root_states(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
             return
@@ -999,263 +506,29 @@ class HexGround(LeggedRobot):
             return
         if len(env_ids) == 0:
             return
-        if force_resample is None:
-            force_resample = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
-        use_actor_sampling = bool(getattr(self.cfg.terrain, "scene_use_actors", False))
-        resample_on_reset = bool(getattr(self.cfg.terrain, "scene_resample_on_reset", False))
-
         env_id_list = env_ids.tolist()
         for idx, env_id in enumerate(env_id_list):
             self.scene_episode_count[env_id] += 1
             episode_idx = int(self.scene_episode_count[env_id].item())
-            scene_spec = None
-            if use_actor_sampling:
-                need_resample = bool(force_resample[idx].item()) or resample_on_reset or self.scene_spec_cache[env_id] is None
-                if need_resample:
-                    difficulty = self._get_scene_difficulty(env_id)
-                    scene_spec = self.scene_manager.sample_scene(difficulty, env_id, episode_idx)
-                    self.scene_spec_cache[env_id] = scene_spec
-                else:
-                    scene_spec = self.scene_spec_cache[env_id]
-            else:
-                scene_spec = self._get_scene_spec(env_id)
-
-            static_specs = scene_spec.static_obstacles if scene_spec is not None else []
-            wall_target = len([spec for spec in static_specs if spec.kind == "wall"])
-            spawned_specs, num_target, num_spawned, truncate_rate = self._allocate_static_specs(static_specs)
-            wall_spawned = len([spec for spec in spawned_specs if spec.kind == "wall"])
-            wall_truncate_rate = 0.0
-            if wall_target > 0:
-                wall_truncate_rate = 1.0 - float(wall_spawned) / float(wall_target)
+            scene_spec = self._get_scene_spec(env_id)
+            if scene_spec is None:
+                difficulty = self._get_scene_difficulty(env_id)
+                scene_spec = self.scene_manager.sample_scene(difficulty, env_id, episode_idx)
             if scene_spec is not None:
-                layout_hash = self.scene_manager._hash_layout(list(spawned_specs), scene_spec.dynamic_template)
-                scene_spec = SceneSpec(
-                    scene_type=scene_spec.scene_type,
-                    difficulty=scene_spec.difficulty,
-                    params=scene_spec.params,
-                    static_obstacles=tuple(spawned_specs),
-                    dynamic_template=scene_spec.dynamic_template,
-                    layout_seed=scene_spec.layout_seed,
-                    layout_id=scene_spec.layout_id,
-                    layout_hash=layout_hash,
-                )
                 self.scene_spec_cache[env_id] = scene_spec
-            self._fill_static_buffers(env_id, spawned_specs)
-
             dynamic_specs = []
             if scene_spec is not None and self.scene_manager.has_dynamic and self.dynamic_actor_indices is not None:
                 dynamic_specs = self.scene_manager.sample_dynamic_obstacles(scene_spec, env_id, episode_idx)
             if self.dynamic_actor_indices is not None:
                 self._fill_dynamic_buffers(env_id, dynamic_specs)
-        if scene_spec is not None:
+            if scene_spec is not None:
                 self.scene_meta[env_id] = self.scene_manager.build_meta(scene_spec, dynamic_specs)
-                self.scene_meta[env_id]["num_static_target"] = int(num_target)
-                self.scene_meta[env_id]["num_static_spawned"] = int(num_spawned)
-                self.scene_meta[env_id]["truncate_rate"] = float(truncate_rate)
-                self.scene_meta[env_id]["num_wall_target"] = int(wall_target)
-                self.scene_meta[env_id]["num_wall_spawned"] = int(wall_spawned)
-                self.scene_meta[env_id]["wall_truncate_rate"] = float(wall_truncate_rate)
-                is_large = int(getattr(self.cfg.terrain, "scene_actor_budget", 0) or 0) > 0
-                if truncate_rate > 0.05:
-                    print(
-                        f"[Warn] static truncate_rate={truncate_rate:.3f} "
-                        f"(env={env_id}, target={num_target}, spawned={num_spawned})"
-                    )
-                if scene_spec.scene_type == "s1_corridor" and wall_target > 0 and wall_spawned < wall_target:
-                    raise RuntimeError(
-                        f"S1 corridor wall truncated: target={wall_target}, spawned={wall_spawned}"
-                    )
-                if scene_spec.scene_type in ("s3_doorway", "s6_ood_structured") and wall_target > 0 and wall_spawned < wall_target:
-                    if is_large:
-                        raise RuntimeError(
-                            f"{scene_spec.scene_type} wall truncated: target={wall_target}, spawned={wall_spawned}"
-                        )
-                    print(
-                        f"[Warn] {scene_spec.scene_type} wall truncated: "
-                        f"target={wall_target}, spawned={wall_spawned}"
-                    )
-                # 统计 mix 场景分布与 spawn 数
-                stats = self.scene_stats
-                stats["total_envs"] += 1
-                stats["resets"] += 1
-                counts = stats["scene_counts"]
-                counts[scene_spec.scene_type] = counts.get(scene_spec.scene_type, 0) + 1
-                block_spawned = int(num_spawned - wall_spawned)
-                dyn_active = int(len(dynamic_specs))
-                stats["wall_spawned_sum"] += int(wall_spawned)
-                stats["block_spawned_sum"] += int(block_spawned)
-                stats["dyn_active_sum"] += int(dyn_active)
-                stats["wall_spawned_max"] = max(stats["wall_spawned_max"], int(wall_spawned))
-                stats["block_spawned_max"] = max(stats["block_spawned_max"], int(block_spawned))
-                stats["dyn_active_max"] = max(stats["dyn_active_max"], int(dyn_active))
-                stats["truncate_rate_max"] = max(stats["truncate_rate_max"], float(truncate_rate))
-                stats_window = self.scene_stats_window
-                stats_window.append(
-                    {
-                        "scene_type": scene_spec.scene_type,
-                        "wall_spawned": int(wall_spawned),
-                        "block_spawned": int(block_spawned),
-                        "dyn_active": int(dyn_active),
-                        "truncate_rate": float(truncate_rate),
-                    }
-                )
-
-        if getattr(self, "static_block_groups", []) or self.static_wall_actor_indices is not None:
-            self._sync_static_obstacles(env_ids)
         if self.dynamic_actor_indices is not None:
             self.scene_dyn_time[env_ids] = 0.0
             self._sync_dynamic_obstacles()
-        # 强制全量写回（仅 reset/重采样时），避免静态障碍仍停留在隐藏池
-        if hasattr(self, "all_root_states"):
-            self.gym.set_actor_root_state_tensor(
-                self.sim,
-                gymtorch.unwrap_tensor(self.all_root_states),
-            )
-        # Debug 抽查障碍落地（仅 debug_viz 开关）
-        if getattr(self, "debug_viz", False):
-            try:
-                check_env = int(env_ids[0].item())
-                scene_spec = self.scene_spec_cache[check_env]
-                if scene_spec is not None and len(scene_spec.static_obstacles) > 0:
-                    # 取墙体尺度为主，block/pole 用自身尺度归一
-                    wall_scale = float(getattr(self.cfg.terrain, "scene_static_wall_block_size", 1.0))
-                    origins = self.env_origins[check_env]
-                    # 取前 3 个障碍做抽查
-                    for idx, spec in enumerate(scene_spec.static_obstacles[:3]):
-                        kind = spec.kind
-                        size_xy = float(max(spec.size[0], spec.size[1]))
-                        scale = wall_scale if kind == "wall" else max(size_xy, 1e-6)
-                        # 找到对应 actor 的 root_state：从缓存里找一个 active 的即可
-                        # 按 group 分配的场景，使用 local buffer 查询
-                        found = False
-                        if kind == "wall" and self.static_wall_actor_indices is not None:
-                            active = self.static_wall_active[check_env]
-                            pos_local = self.static_wall_pos_local[check_env]
-                            indices = self.static_wall_actor_indices[check_env]
-                            for local_id in torch.nonzero(active, as_tuple=False).flatten().tolist():
-                                pos = pos_local[local_id]
-                                if torch.allclose(pos, torch.tensor(spec.position, device=pos.device), atol=1e-3):
-                                    actor_idx = int(indices[local_id])
-                                    found = True
-                                    break
-                        if not found and getattr(self, "static_block_groups", []):
-                            for group in self.static_block_groups:
-                                active = getattr(self, f"static_{group}_active")[check_env]
-                                pos_local = getattr(self, f"static_{group}_pos_local")[check_env]
-                                indices = getattr(self, f"static_{group}_actor_indices")[check_env]
-                                for local_id in torch.nonzero(active, as_tuple=False).flatten().tolist():
-                                    pos = pos_local[local_id]
-                                    if torch.allclose(pos, torch.tensor(spec.position, device=pos.device), atol=1e-3):
-                                        actor_idx = int(indices[local_id])
-                                        found = True
-                                        break
-                                if found:
-                                    break
-                        if not found:
-                            continue
-                        root = self.all_root_states[actor_idx, :3]
-                        world = torch.tensor(
-                            [origins[0] + spec.position[0],
-                             origins[1] + spec.position[1],
-                             origins[2] + spec.position[2]],
-                            device=root.device,
-                        )
-                        err = torch.norm(root - world).item()
-                        if root[2].item() <= -4.0:
-                            print(f"[Debug] obstacle root z still hidden: env={check_env}, idx={idx}, z={root[2].item():.3f}")
-                        if err > 0.05 * scale:
-                            print(
-                                f"[Debug] obstacle pos err too large: env={check_env}, idx={idx}, "
-                                f"err={err:.3f}, scale={scale:.3f}"
-                            )
-            except Exception as exc:
-                print(f"[Debug] obstacle root_state check failed: {exc}")
-            if not getattr(self, "_collision_debug_logged", False):
-                try:
-                    group_id = self._scene_group_id(check_env)
-                    scene_filter = self._scene_collision_filter()
-                    print(f"[Debug] collision group (scene)={group_id}, scene_filter={scene_filter}")
-                    # robot shape filter
-                    try:
-                        r_props = self.gym.get_actor_rigid_shape_properties(
-                            self.envs[check_env], self.actor_handles[check_env]
-                        )
-                        if r_props:
-                            print(f"[Debug] robot shape filter={r_props[0].filter}")
-                    except Exception:
-                        print("[Debug] robot shape filter query failed")
-                    # wall shape filter
-                    wall_handle = None
-                    if self.static_wall_actor_handles is not None:
-                        for h in self.static_wall_actor_handles[check_env]:
-                            if h is not None:
-                                wall_handle = h
-                                break
-                    if wall_handle is not None:
-                        try:
-                            w_props = self.gym.get_actor_rigid_shape_properties(self.envs[check_env], wall_handle)
-                            if w_props:
-                                print(f"[Debug] wall shape filter={w_props[0].filter}")
-                        except Exception:
-                            print("[Debug] wall shape filter query failed")
-                except Exception as exc:
-                    print(f"[Debug] collision filter check failed: {exc}")
-                self._collision_debug_logged = True
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
             self.extras["scene_meta"] = self.scene_meta[sample_id]
-        # 汇总 mix 统计并写入 extras（debug 下打印）
-        stats = self.scene_stats
-        if stats["resets"] > 0 and stats["resets"] % self._scene_stats_print_every == 0:
-            total = max(1, stats["total_envs"])
-            scene_counts = {
-                k: float(v) / total for k, v in sorted(stats["scene_counts"].items(), key=lambda kv: kv[0])
-            }
-            summary = {
-                "scene_probs": scene_counts,
-                "wall_spawned_mean": stats["wall_spawned_sum"] / total,
-                "block_spawned_mean": stats["block_spawned_sum"] / total,
-                "dyn_active_mean": stats["dyn_active_sum"] / total,
-                "wall_spawned_max": stats["wall_spawned_max"],
-                "block_spawned_max": stats["block_spawned_max"],
-                "dyn_active_max": stats["dyn_active_max"],
-                "truncate_rate_max": stats["truncate_rate_max"],
-            }
-            self.extras["scene_stats"] = summary
-            if getattr(self, "debug_viz", False):
-                print(f"[Debug] scene_stats: {summary}")
-        # 最近窗口统计（按最近 N 次 reset）
-        window_every = 200 if getattr(self, "debug_viz", False) else self._scene_stats_window_every
-        if stats["resets"] > 0 and stats["resets"] % window_every == 0:
-            window = list(self.scene_stats_window)
-            window_total = max(1, len(window))
-            window_counts = {}
-            wall_vals = []
-            block_vals = []
-            dyn_vals = []
-            trunc_vals = []
-            for item in window:
-                key = item["scene_type"]
-                window_counts[key] = window_counts.get(key, 0) + 1
-                wall_vals.append(item["wall_spawned"])
-                block_vals.append(item["block_spawned"])
-                dyn_vals.append(item["dyn_active"])
-                trunc_vals.append(item["truncate_rate"])
-            window_probs = {k: v / window_total for k, v in sorted(window_counts.items(), key=lambda kv: kv[0])}
-            window_summary = {
-                "scene_probs": window_probs,
-                "wall_spawned_mean": float(np.mean(wall_vals)) if wall_vals else 0.0,
-                "block_spawned_mean": float(np.mean(block_vals)) if block_vals else 0.0,
-                "dyn_active_mean": float(np.mean(dyn_vals)) if dyn_vals else 0.0,
-                "wall_spawned_max": int(max(wall_vals)) if wall_vals else 0,
-                "block_spawned_max": int(max(block_vals)) if block_vals else 0,
-                "dyn_active_max": int(max(dyn_vals)) if dyn_vals else 0,
-                "truncate_rate_mean": float(np.mean(trunc_vals)) if trunc_vals else 0.0,
-                "truncate_rate_max": float(max(trunc_vals)) if trunc_vals else 0.0,
-            }
-            self.extras["scene_stats_window"] = window_summary
-            if getattr(self, "debug_viz", False):
-                print(f"[Debug] scene_stats_window: {window_summary}")
 
     def _update_dynamic_obstacles(self):
         if self.dynamic_actor_indices is None:
@@ -2035,37 +1308,6 @@ class HexGround(LeggedRobot):
         samples = int(getattr(self.nav_cfg, "goal_line_samples", 16))
         if samples <= 0:
             return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
-        use_actor = bool(getattr(self.cfg.terrain, "scene_use_actors", False))
-        if use_actor and hasattr(self, "scene_spec_cache") and self.scene_spec_cache is not None and env_ids is not None:
-            t = torch.linspace(0.0, 1.0, samples, device=self.device)
-            blocked = torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
-        for idx, env_id in enumerate(env_ids.tolist()):
-            scene_spec = self.scene_spec_cache[env_id]
-            if scene_spec is None:
-                continue
-                p0 = start_xy[idx]
-                p1 = goal_xy[idx]
-                points = p0 + (p1 - p0).unsqueeze(0) * t.view(-1, 1)
-                origin = self.env_origins[env_id, :2]
-                for spec in scene_spec.static_obstacles:
-                    center = origin + torch.tensor(spec.position[:2], device=self.device, dtype=torch.float32)
-                    size_xy = float(max(spec.size[0], spec.size[1]))
-                    if spec.kind == "pole":
-                        radius = 0.5 * size_xy
-                        dx = points[:, 0] - center[0]
-                        dy = points[:, 1] - center[1]
-                        inside = (dx * dx + dy * dy) <= (radius * radius)
-                    else:
-                        half_x = 0.5 * spec.size[0]
-                        half_y = 0.5 * spec.size[1]
-                        dx = torch.abs(points[:, 0] - center[0])
-                        dy = torch.abs(points[:, 1] - center[1])
-                        inside = (dx <= half_x) & (dy <= half_y)
-                    if inside.any():
-                        blocked[idx] = True
-                        break
-            return blocked
-
         if self.height_samples is None:
             return torch.zeros(start_xy.shape[0], dtype=torch.bool, device=self.device)
 

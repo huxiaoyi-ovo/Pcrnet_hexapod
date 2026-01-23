@@ -439,7 +439,7 @@ def build_heightfield(scene_type: str, d: float, rng, cfg, horizontal_scale: flo
         _build_s3_doorway(hf, scene_cfg, d, rng, meta, x_min, y_min, h_scale)
     elif scene_type in ("s4_crossing", "s4_crossing_static"):
         _build_s4_crossing_static(hf, scene_cfg, d, rng, meta, x_min, y_min, h_scale)
-    elif scene_type == "s5_sparse_dense":
+    elif scene_type in ("s5_sparse_dense", "s5_transition"):
         _build_s5_sparse_dense(hf, scene_cfg, d, rng, meta, x_min, y_min, h_scale)
     elif scene_type in ("s6_ood_cluster", "s6_ood_structured"):
         _build_s6_cluster(hf, scene_cfg, d, rng, meta, x_min, y_min, h_scale)
