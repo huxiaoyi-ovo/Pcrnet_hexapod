@@ -444,6 +444,80 @@ class HexGround(LeggedRobot):
         col = max(0, min(col, len(self.scene_specs[level]) - 1))
         return self.scene_specs[level][col]
 
+    def _scene_meta_params(self, meta: dict) -> dict:
+        scene_type = meta.get("scene_type", None)
+        params: dict = {}
+        if scene_type == "s1_corridor":
+            length = float(meta.get("L", self.cfg.terrain.terrain_length))
+            width_nom = float(meta.get("W0", 0.5 * self.cfg.terrain.terrain_width)) * 2.0
+            gate_width = float(meta.get("Wg", 0.5 * width_nom)) * 2.0
+            gates_meta = meta.get("gates", []) or []
+            gates = []
+            for gate in gates_meta:
+                try:
+                    y0, y1 = gate
+                except Exception:
+                    continue
+                y0 = float(y0)
+                y1 = float(y1)
+                length_gate = abs(y1 - y0)
+                y_center = 0.5 * (y0 + y1) - 0.5 * length
+                gates.append({"y0": y_center, "length": length_gate, "width": gate_width})
+            params.update(
+                {
+                    "corridor_length": length,
+                    "corridor_width_nom": width_nom,
+                    "corridor_gates": gates,
+                    "corridor_x_center": 0.0,
+                }
+            )
+        elif scene_type == "s3_doorway":
+            params["room_width"] = float(meta.get("W", self.cfg.terrain.terrain_width))
+        return params
+
+    def _scene_spec_from_meta(self, meta: dict, env_id: int) -> Optional[SceneSpec]:
+        if not isinstance(meta, dict):
+            return None
+        scene_type = meta.get("scene_type", None)
+        difficulty = float(meta.get("difficulty", self._get_scene_difficulty(env_id)))
+        params = self._scene_meta_params(meta)
+        dynamic_template = None
+        if self.scene_manager is not None and scene_type == "s4_crossing":
+            try:
+                params_dyn = self.scene_manager._interpolate_params(difficulty, scene_type)
+                dynamic_template = {
+                    "count_min": float(params_dyn.get("dynamic_count_min", 2)),
+                    "count_max": float(params_dyn.get("dynamic_count_max", 6)),
+                    "cross_width": float(params_dyn.get("cross_width", 3.0)),
+                    "cross_span": float(params_dyn.get("cross_span", 2.5)),
+                    "react_steps_min": float(params_dyn.get("react_steps_min", 8)),
+                    "react_steps_max": float(params_dyn.get("react_steps_max", 20)),
+                    "size_xy": float(params_dyn.get("dynamic_size_xy", 0.35)),
+                    "height": float(params_dyn.get("dynamic_height", 0.5)),
+                    "axis": str(params_dyn.get("dynamic_axis", "x")),
+                    "dt_high": float(self.scene_manager.scene_high_dt),
+                }
+            except Exception:
+                dynamic_template = None
+        layout_seed = int(meta.get("layout_seed", meta.get("layout_id", 0)) or 0)
+        layout_id = meta.get("layout_id", layout_seed)
+        layout_hash = None
+        if self.scene_manager is not None:
+            try:
+                layout_hash = self.scene_manager._hash_layout((), dynamic_template)
+            except Exception:
+                layout_hash = None
+        return SceneSpec(
+            scene_type=scene_type or "unknown",
+            difficulty=difficulty,
+            params=params,
+            static_obstacles=tuple(),
+            dynamic_template=dynamic_template,
+            layout_seed=layout_seed,
+            layout_id=str(layout_id),
+            layout_hash=layout_hash,
+        )
+
     def _get_scene_difficulty(self, env_id: int) -> float:
         if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
             denom = max(1, int(self.max_terrain_level))
@@ -510,7 +584,9 @@ class HexGround(LeggedRobot):
         for idx, env_id in enumerate(env_id_list):
             self.scene_episode_count[env_id] += 1
             episode_idx = int(self.scene_episode_count[env_id].item())
-            scene_spec = self._get_scene_spec(env_id)
+            raw_spec = self._get_scene_spec(env_id)
+            meta = raw_spec if isinstance(raw_spec, dict) else None
+            scene_spec = self._scene_spec_from_meta(meta, env_id) if meta is not None else raw_spec
             if scene_spec is None:
                 difficulty = self._get_scene_difficulty(env_id)
                 scene_spec = self.scene_manager.sample_scene(difficulty, env_id, episode_idx)
@@ -522,7 +598,10 @@ class HexGround(LeggedRobot):
             if self.dynamic_actor_indices is not None:
                 self._fill_dynamic_buffers(env_id, dynamic_specs)
             if scene_spec is not None:
-                self.scene_meta[env_id] = self.scene_manager.build_meta(scene_spec, dynamic_specs)
+                base_meta = self.scene_manager.build_meta(scene_spec, dynamic_specs)
+                if meta is not None:
+                    base_meta = {**base_meta, **meta}
+                self.scene_meta[env_id] = base_meta
         if self.dynamic_actor_indices is not None:
             self.scene_dyn_time[env_ids] = 0.0
             self._sync_dynamic_obstacles()

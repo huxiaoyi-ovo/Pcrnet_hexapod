@@ -650,8 +650,8 @@ class LeggedRobot(BaseTask):
         hf_params.column_scale = self.terrain.cfg.horizontal_scale
         hf_params.row_scale = self.terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self.terrain.cfg.vertical_scale
-        hf_params.nbRows = self.terrain.tot_cols
-        hf_params.nbColumns = self.terrain.tot_rows 
+        hf_params.nbRows = self.terrain.tot_rows
+        hf_params.nbColumns = self.terrain.tot_cols
         hf_params.transform.p.x = -self.terrain.cfg.border_size 
         hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
@@ -659,8 +659,11 @@ class LeggedRobot(BaseTask):
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         hf_params.restitution = self.cfg.terrain.restitution
 
-        self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
-        self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        height_samples = self.terrain.heightsamples
+        if isinstance(height_samples, np.ndarray) and height_samples.ndim == 2:
+            height_samples = height_samples.flatten(order="C")
+        self.gym.add_heightfield(self.sim, height_samples, hf_params)
+        self.height_samples = torch.tensor(height_samples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
     def _create_trimesh(self):
         """ Adds a triangle mesh terrain to the simulation, sets parameters based on the cfg.
