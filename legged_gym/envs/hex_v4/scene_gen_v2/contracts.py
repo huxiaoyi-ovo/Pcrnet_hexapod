@@ -119,10 +119,13 @@ def _escape_to_border(heightfield: np.ndarray, start_mask: np.ndarray) -> bool:
     return bool(np.any(visited & border))
 
 
+
+
 def _check_s1(scene: SceneSpec, heightfield: np.ndarray, h_scale: float) -> Tuple[bool, Dict[str, Any]]:
     params = scene.params_resolved
     width_m = float(params.get("width_m", 0.0))
-    length_m = float(params.get("corridor_length", params.get("length_m", 0.0)))
+    tile_length = float(params.get("length_m", 0.0))
+    corridor_length = float(params.get("corridor_length", tile_length))
     x_center = float(params.get("corridor_x_center", 0.0))
     gates = params.get("corridor_gates", [])
     min_gate_width = None
@@ -159,20 +162,33 @@ def _check_s1(scene: SceneSpec, heightfield: np.ndarray, h_scale: float) -> Tupl
             num_narrow += 1
         prev = flag
     spawn_rect = params.get("spawn_rect_hf", None)
-    spawn_idx = _rect_indices(spawn_rect, width_m, length_m, h_scale) if spawn_rect else None
+    spawn_idx = _rect_indices(spawn_rect, width_m, tile_length, h_scale) if spawn_rect else None
     spawn_mask = np.zeros_like(free, dtype=np.bool_)
     if spawn_idx is not None:
         sy0, sy1, sx0, sx1 = spawn_idx
         spawn_mask[sy0:sy1, sx0:sx1] = True
     else:
         spawn_mask[heightfield.shape[0] // 2, x_center_idx] = True
-    outside_escape_ok = not _escape_to_border(heightfield, spawn_mask)
-    ok = outside_escape_ok and length_m > 0.1 and min_free_width >= max(0.05, min_gate_width - tol)
+    corridor_mask = np.zeros_like(free, dtype=np.bool_)
+    for iy in range(heightfield.shape[0]):
+        row = free[iy, :]
+        if not row[x_center_idx]:
+            continue
+        left = x_center_idx
+        right = x_center_idx
+        while left - 1 >= 0 and row[left - 1]:
+            left -= 1
+        while right + 1 < width_cells and row[right + 1]:
+            right += 1
+        corridor_mask[iy, left:right + 1] = True
+    visited = _reachable_from_mask(free, spawn_mask)
+    outside_escape_ok = not bool(np.any(visited & free & (~corridor_mask)))
+    ok = outside_escape_ok and corridor_length > 0.1 and min_free_width >= max(0.05, min_gate_width - tol)
     metrics = {
         "gate_count": len(gates) if isinstance(gates, list) else 0,
         "min_gate_width": float(min_gate_width),
         "min_free_width": float(min_free_width),
-        "length": float(length_m),
+        "length": float(corridor_length),
         "num_narrow_segments": int(num_narrow),
         "outside_escape_ok": bool(outside_escape_ok),
     }

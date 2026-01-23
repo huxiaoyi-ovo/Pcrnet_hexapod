@@ -4,6 +4,7 @@
 
 - S1/S2 已切换到 `scene_gen_v2`（单一真源入口 + 统一量化 + guards）。
 - 运行时会打印一次：`[Init] 正在使用 scene_gen_v2 (...)`，用于确认未走旧链路。
+- 默认关闭外围墙（edge_pad=0），S1 仅靠走廊墙约束；env_origins 越界会直接报错。
 
 ## 场景体检（scene_audit）
 

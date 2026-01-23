@@ -430,7 +430,12 @@ class Terrain:
                 scene_choice = scene_generator._select_scene_type(rng, difficulty)
             scene = scene_generator.sample(scene_choice, difficulty, seed)
             scene = quantize_scene(scene, self.cfg.horizontal_scale, self.cfg.vertical_scale)
-            terrain.height_field_raw[:] = scene_backend.render(scene)
+            tile = scene_backend.render(scene)
+            if tile.shape != terrain.height_field_raw.shape:
+                raise RuntimeError(
+                    f"scene_gen_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
+                )
+            terrain.height_field_raw[:] = tile
             if self.scene_specs is not None:
                 self.scene_specs[i][j] = scene
             self.add_terrain_to_map(terrain, i, j)
@@ -459,7 +464,12 @@ class Terrain:
                     scene_choice = scene_generator._select_scene_type(rng, difficulty)
                 scene = scene_generator.sample(scene_choice, difficulty, seed)
                 scene = quantize_scene(scene, self.cfg.horizontal_scale, self.cfg.vertical_scale)
-                terrain.height_field_raw[:] = scene_backend.render(scene)
+                tile = scene_backend.render(scene)
+                if tile.shape != terrain.height_field_raw.shape:
+                    raise RuntimeError(
+                        f"scene_gen_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
+                    )
+                terrain.height_field_raw[:] = tile
                 if self.scene_specs is not None:
                     self.scene_specs[i][j] = scene
                 self.add_terrain_to_map(terrain, i, j)

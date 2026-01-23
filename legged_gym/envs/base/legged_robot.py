@@ -650,8 +650,9 @@ class LeggedRobot(BaseTask):
         hf_params.column_scale = self.terrain.cfg.horizontal_scale
         hf_params.row_scale = self.terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self.terrain.cfg.vertical_scale
-        hf_params.nbRows = self.terrain.tot_rows
-        hf_params.nbColumns = self.terrain.tot_cols
+        # Align with parkour reference: swap rows/cols semantics
+        hf_params.nbRows = self.terrain.tot_cols
+        hf_params.nbColumns = self.terrain.tot_rows
         hf_params.transform.p.x = -self.terrain.cfg.border_size 
         hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
@@ -666,6 +667,12 @@ class LeggedRobot(BaseTask):
         actual = int(height_samples.size) if isinstance(height_samples, np.ndarray) else len(height_samples)
         if actual != expected:
             raise ValueError(f"height_samples size mismatch: got {actual}, expected {expected}")
+        self.heightfield_bounds = (
+            float(hf_params.transform.p.x),
+            float(hf_params.transform.p.x) + float(hf_params.nbRows) * float(hf_params.row_scale),
+            float(hf_params.transform.p.y),
+            float(hf_params.transform.p.y) + float(hf_params.nbColumns) * float(hf_params.column_scale),
+        )
         self.gym.add_heightfield(self.sim, height_samples, hf_params)
         self.height_samples = torch.tensor(height_samples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
@@ -811,6 +818,19 @@ class LeggedRobot(BaseTask):
             self.max_terrain_level = self.cfg.terrain.num_rows
             self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
             self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
+            if hasattr(self, "heightfield_bounds"):
+                x_min, x_max, y_min, y_max = self.heightfield_bounds
+                min_x = float(self.env_origins[:, 0].min().item())
+                max_x = float(self.env_origins[:, 0].max().item())
+                min_y = float(self.env_origins[:, 1].min().item())
+                max_y = float(self.env_origins[:, 1].max().item())
+                if min_x < x_min or max_x > x_max or min_y < y_min or max_y > y_max:
+                    raise RuntimeError(
+                        "env_origins out of heightfield bounds: "
+                        f"x[{min_x:.3f},{max_x:.3f}] vs [{x_min:.3f},{x_max:.3f}], "
+                        f"y[{min_y:.3f},{max_y:.3f}] vs [{y_min:.3f},{y_max:.3f}] "
+                        f"(num_envs={self.num_envs})"
+                    )
         else:
             self.custom_origins = False
             self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)

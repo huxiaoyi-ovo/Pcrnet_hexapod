@@ -179,10 +179,10 @@ class SceneGenerator:
 
         gates: List[Dict[str, float]] = []
         centers: List[Tuple[float, float]] = []
-        y_start = -0.5 * length
-        y_end = 0.5 * length
-        y_min = y_start + gate_margin_y
-        y_max = y_end - gate_margin_y
+        gate_y_start = -0.5 * length
+        gate_y_end = 0.5 * length
+        y_min = gate_y_start + gate_margin_y
+        y_max = gate_y_end - gate_margin_y
         for _ in range(gate_count):
             g_len = max(0.2, gate_length + rng.uniform(-gate_length_jitter, gate_length_jitter))
             g_width = max(min_width, gate_width + rng.uniform(-gate_width_jitter, gate_width_jitter))
@@ -205,18 +205,20 @@ class SceneGenerator:
                 gates.append({"y0": y_center_abs, "length": g_len, "width": g_width})
 
         half_w = 0.5 * width
+        wall_y_start = -0.5 * length_m
+        wall_y_end = 0.5 * length_m
         left_wall = RectWall(
             x0=x_center - half_w - wall_thickness,
             x1=x_center - half_w,
-            y0=y_start,
-            y1=y_end,
+            y0=wall_y_start,
+            y1=wall_y_end,
             height=wall_height,
         )
         right_wall = RectWall(
             x0=x_center + half_w,
             x1=x_center + half_w + wall_thickness,
-            y0=y_start,
-            y1=y_end,
+            y0=wall_y_start,
+            y1=wall_y_end,
             height=wall_height,
         )
         primitives: List[object] = [left_wall, right_wall]
@@ -224,8 +226,8 @@ class SceneGenerator:
             y_center_abs = float(gate["y0"])
             g_len = float(gate["length"])
             g_width = float(gate["width"])
-            y0 = max(y_start, y_center_abs - 0.5 * g_len)
-            y1 = min(y_end, y_center_abs + 0.5 * g_len)
+            y0 = max(gate_y_start, y_center_abs - 0.5 * g_len)
+            y1 = min(gate_y_end, y_center_abs + 0.5 * g_len)
             half_gate = 0.5 * g_width
             primitives.append(
                 RectWall(
@@ -246,12 +248,16 @@ class SceneGenerator:
                 )
             )
 
-        spawn_y0 = max(y_start, y_start + spawn_buffer)
-        spawn_y1 = min(y_end, max(spawn_y0 + clearance, y_start + spawn_span))
-        goal_y1 = y_end
-        goal_y0 = max(y_start, y_end - max(goal_buffer, clearance))
+        spawn_y0 = max(gate_y_start, gate_y_start + spawn_buffer)
+        spawn_y1 = min(gate_y_end, max(spawn_y0 + clearance, gate_y_start + spawn_span))
+        goal_y1 = gate_y_end
+        goal_y0 = max(gate_y_start, gate_y_end - max(goal_buffer, clearance))
         edge_pad_width = max(self.scene_margin, clearance)
         edge_pad_height = wall_height
+        edge_pad_enable = bool(params.get("edge_pad_enable", getattr(self.cfg, "scene_edge_pad_enable", False)))
+        if not edge_pad_enable:
+            edge_pad_width = 0.0
+            edge_pad_height = 0.0
 
         resolved = {
             "clearance": clearance,
@@ -383,6 +389,10 @@ class SceneGenerator:
         goal_rect = [-0.5 * width_m, 0.5 * width_m, max(y_start, y_end - spawn_clear), y_end]
         edge_pad_width = max(self.scene_margin, clearance)
         edge_pad_height = max(pole_height_max, block_height_max, 0.2)
+        edge_pad_enable = bool(params.get("edge_pad_enable", getattr(self.cfg, "scene_edge_pad_enable", False)))
+        if not edge_pad_enable:
+            edge_pad_width = 0.0
+            edge_pad_height = 0.0
 
         resolved = {
             "clearance": clearance,
