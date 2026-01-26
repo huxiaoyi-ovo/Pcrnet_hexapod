@@ -1,13 +1,11 @@
 
 from legged_gym.envs import HexClimb, HexGround
-from legged_gym.envs import HexClimbCfg, HexGroundCfg, HexGroundCfgPPO
-from legged_gym.envs import HexTerrain, HexTerrainCfg, HexTerrainCfgPPO
+from legged_gym.envs import HexClimbCfg, HexDebugPlaneCfg, HexDebugPlaneCfgPPO
 from legged_gym.utils.joy_stick import JoyStick
 from legged_gym.utils import get_args
 from legged_gym.utils.helpers import update_cfg_from_args, class_to_dict, parse_sim_params,get_load_path
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from rsl_rl.modules import ActorCritic, ActorCriticEncoder
-from rsl_rl.storage import RolloutStorageMemory
+from rsl_rl.modules import ActorCritic
 
 from isaacgym import gymapi,gymutil
 
@@ -62,7 +60,7 @@ def WriteLog(title,vx,vy,q_list,step):
     pass
 
 #手柄控制测试程序
-def Expert_Play(env:HexGround,cfg:HexGroundCfg,mode):
+def Expert_Play(env: HexGround, cfg: HexDebugPlaneCfg, mode):
     reward_buffer = deque(maxlen=100)
     total_reward = torch.zeros(env.num_envs,dtype=torch.float,device=env.device)
     joystick = JoyStick()
@@ -168,7 +166,7 @@ def Expert_Play(env:HexGround,cfg:HexGroundCfg,mode):
 
 
 #在线生成数据行为克隆程序
-def BC_train(env_cfg:HexGroundCfg,train_cfg,device='cpu'):
+def BC_train(env_cfg: HexDebugPlaneCfg, train_cfg, device='cpu'):
     actor_critic = ActorCritic(env_cfg.env.num_observations,env_cfg.env.num_privileged_obs,
                                env_cfg.env.num_actions,**train_cfg['policy']).to(device)
     
@@ -294,7 +292,7 @@ def BC_play(env:HexGround,env_cfg,train_cfg,device='cpu'):
                         time_steps)
             time_steps+=1
 
-def Hex_Ground_Play(env:HexGround,env_cfg:HexGroundCfg,train_cfg,device='cpu'):
+def Hex_Ground_Play(env: HexGround, env_cfg: HexDebugPlaneCfg, train_cfg, device='cpu'):
     global last_dof_vel
     if env.num_privileged_obs==None:
         env.num_privileged_obs=env.num_obs
@@ -377,103 +375,6 @@ def Hex_Ground_Play(env:HexGround,env_cfg:HexGroundCfg,train_cfg,device='cpu'):
             # pub.publish(debug_msgs)
             # debug_msgs.data=[]
 
-def Hex_Terrain_Play(env:HexGround, env_cfg:HexGroundCfg,train_cfg_dict,device='cpu'):
-    actor_critic = ActorCriticEncoder(env.num_obs,env.num_actions,**train_cfg_dict['policy']).to(device)
-    actor_critic.eval()
-    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg_dict['runner']['experiment_name'])
-    resume_path = get_load_path(log_root, load_run=train_cfg_dict['runner']['load_run'], checkpoint=train_cfg_dict['runner']['checkpoint'])
-    print("============>load model {}<===============".format(resume_path))
-    actor_critic.load_state_dict(torch.load(resume_path,weights_only=True)['model_state_dict'])
-    storage=RolloutStorageMemory(env_cfg.env.num_envs,
-                                 train_cfg.runner.num_steps_per_env,
-                                 10,[env_cfg.env.num_observations+30],[11*13],[env_cfg.env.num_actions],device)
-    obs_dict = env.reset_separate()
-    obs = obs_dict['proprioception']
-    obs_vgf = obs_dict['privileged']
-    obs_terrain = obs_dict['terrain']
-    joystick = JoyStick()
-    # env.foot_traj_viz=True
-
-    time_steps=0
-    reset=False
-    while not env.gym.query_viewer_has_closed(env.viewer):
-        with torch.no_grad():
-            # if time_steps > 21/0.02:
-            #     print("time ends")
-            #     exit(0)
-            # if time_steps%(7/0.02)==0 and time_steps>0:
-            #     reset=True
-            #     print("reset robot")
-            # # reset,vx,vy,vz,yaw =joystick.get_commands()
-            # if reset:
-            #     obs,priv_obs = env.reset()
-            #     reset=False    
-
-            reset,vx,vy,vz,yaw =joystick.get_commands()
-            if reset:
-                obs_dict = env.reset_separate()
-                obs = obs_dict['proprioception']
-                obs_vgf = obs_dict['privileged']
-                obs_terrain = obs_dict['terrain']
-            else:
-
-                # vx,vy,yaw=GenCommand(time_steps)
-                vx = env_cfg.commands.ranges.lin_vel_x[1]*vx
-                vy = env_cfg.commands.ranges.lin_vel_y[1]*vy
-                yaw = env_cfg.commands.ranges.ang_vel_yaw[1]*yaw
-                # print("vx={},vy={},yaw={}".format(vx,vy,yaw))
-                # print("base_lin_acc=",env.base_lin_acc)
-                obs[:,-1]=yaw*env_cfg.normalization.obs_scales.command
-                obs[:,-2]=vy*env_cfg.normalization.obs_scales.command
-                obs[:,-3]=vx*env_cfg.normalization.obs_scales.command
-                obs_vgf_estimates=actor_critic.actor_obs_priv_estimator(obs)
-                # obs_vgf_estimates.fill_(0.0)
-                obs_splice=torch.cat([obs,obs_vgf_estimates],dim=-1)
-                storage.update_obs_hist(obs_splice)
-                obs_hist,mask=storage.get_current_obs_hist()
-                obs_terrain_lstm_latent=actor_critic.LSTM_encode(obs_hist,mask)
-                # obs_terrain_lstm_latent.fill_(0.0)
-                actions = actor_critic.act_inference(obs_splice,obs_terrain_lstm_latent)
-
-                obs_dict, reward, dones, infos = env.step_separate(actions)
-                obs = obs_dict['proprioception']
-                obs_vgf = obs_dict['privileged']
-                obs_terrain = obs_dict['terrain']
-                storage.update_dones_hist(dones)
-                
-
-
-                pos_des=(actions*env.cfg.control.action_scale+env.default_dof_pos)[0]
-                
-                base_msgs.data.extend(env.base_lin_vel[0])#xyz
-                estimates_xyz=obs_vgf_estimates[0,0:3]/env_cfg.normalization.obs_scales.lin_vel
-                base_msgs.data.extend(estimates_xyz)
-                # obs_vgf_estimates[0,2]/env_cfg.commands.ranges.lin_vel_
-                # base_msgs.data.extend([vx,vy])
-                joint_msgs.data.extend(env.dof_pos[0,0:3])
-                joint_msgs.data.extend(pos_des[0:3])
-
-                rb_msgs.data.extend(env.contact_forces[0,env.feet_indices[0],:]) #0个环境的第一个脚的xyz接触力
-                
-                base_pub.publish(base_msgs)
-                joint_pub.publish(joint_msgs)
-                rb_pub.publish(rb_msgs)
-                rb_msgs.data=[]
-                base_msgs.data=[] 
-                joint_msgs.data=[]
-                # writer.add_scalars('RL',{
-                #                     'vx':env.base_lin_vel[0,0],
-                #                     'vy':env.base_lin_vel[0,1],
-                #                     },time_steps)
-                # WriteLog('EGPO',env.base_lin_vel[0,0],
-                #         env.base_lin_vel[0,1],
-                #         [env.dof_pos[0,0],env.dof_pos[0,1],env.dof_pos[0,2]],
-                #         time_steps)
-            time_steps+=1
-            # debug_msgs.data.extend([vx,vy,0])
-            # debug_msgs.data.extend(env.base_lin_vel[0].cpu().numpy())
-            # pub.publish(debug_msgs)
-            # debug_msgs.data=[]
 if __name__ == '__main__':
     mode = 'expert_ground'
     for i, arg in enumerate(sys.argv):
@@ -481,11 +382,13 @@ if __name__ == '__main__':
             mode = arg.split('=')[1]
             sys.argv.pop(i)
             break
+    if mode in ("hex_terrain", "expert_terrain"):
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
     
 
     if 'terrain' in mode:
-        env_cfg = HexTerrainCfg()
-        train_cfg = HexTerrainCfgPPO()
+        env_cfg = HexDebugPlaneCfg()
+        train_cfg = HexDebugPlaneCfgPPO()
         env_cfg.env.num_envs = 3
         env_cfg.terrain.num_rows = 1
         env_cfg.terrain.num_cols = 1
@@ -494,8 +397,8 @@ if __name__ == '__main__':
         env_cfg.domain_rand.randomize_friction = False
         env_cfg.domain_rand.push_robots = False  
     else:
-        env_cfg = HexGroundCfg()
-        train_cfg = HexGroundCfgPPO()
+        env_cfg = HexDebugPlaneCfg()
+        train_cfg = HexDebugPlaneCfgPPO()
         env_cfg.env.num_envs = 3
         env_cfg.terrain.num_rows = 5
         env_cfg.terrain.num_cols = 5
@@ -515,7 +418,7 @@ if __name__ == '__main__':
         if 'ground' in mode:
             env = HexGround(env_cfg,sim_params,args.physics_engine,args.sim_device,args.headless)
         elif 'terrain' in mode:
-            env = HexTerrain(env_cfg,sim_params,args.physics_engine,args.sim_device,args.headless)
+            env = HexGround(env_cfg,sim_params,args.physics_engine,args.sim_device,args.headless)
     device=args.sim_device
 
     #用于记录tensorboard
@@ -535,10 +438,8 @@ if __name__ == '__main__':
 
 
     #用于计算expert能获得多少奖励
-    if mode == 'hex_ground':
+    if mode in ('hex_ground',):
         Hex_Ground_Play(env,env_cfg,train_cfg_dict,device='cuda')
-    elif mode == 'hex_terrain':
-        Hex_Terrain_Play(env,env_cfg,train_cfg_dict,device='cuda')        
     elif mode == 'expert_terrain' or mode == 'expert_ground':
         Expert_Play(env,env_cfg,mode)
     elif mode == 'bc_train':

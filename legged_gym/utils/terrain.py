@@ -291,12 +291,33 @@ class Terrain:
         self.cfg = cfg
         self.num_robots = num_robots
         self.type = cfg.mesh_type
+        self.terrain_v2_enable = bool(getattr(cfg, "terrain_v2_enable", False))
         if self.type in ["none", 'plane']:
             return
         self.env_length = cfg.terrain_length
         self.env_width = cfg.terrain_width
         rows = int(getattr(cfg, "num_rows", 0) or 0)
         cols = int(getattr(cfg, "num_cols", 0) or 0)
+        auto_rows = rows <= 0
+        auto_cols = cols <= 0
+        auto_grid = False
+        expanded_cols = False
+        if self.terrain_v2_enable and num_robots is not None:
+            min_rows = int(getattr(cfg, "terrain_v2_min_rows", 1) or 1)
+            min_cols = int(getattr(cfg, "terrain_v2_min_cols", 1) or 1)
+            if auto_rows and auto_cols:
+                rows = max(min_rows, int(np.ceil(np.sqrt(float(num_robots)))))
+                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
+                auto_grid = True
+            elif auto_rows:
+                rows = max(min_rows, int(np.ceil(float(num_robots) / float(cols))))
+                auto_grid = True
+            elif auto_cols:
+                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
+                auto_grid = True
+            if auto_grid:
+                cfg.num_rows = rows
+                cfg.num_cols = cols
         if num_robots is not None and rows > 0 and cols > 0:
             required_cols = int(np.ceil(float(num_robots) / float(rows)))
             if required_cols > cols:
@@ -317,6 +338,7 @@ class Terrain:
                         proportions.extend([fill] * (cfg.num_cols - len(proportions)))
                         cfg.terrain_proportions = proportions
                 print(f"[Warn] terrain grid expanded: num_cols {old_cols} -> {cfg.num_cols} (num_envs={num_robots})")
+                expanded_cols = True
         self.proportions = [np.sum(cfg.terrain_proportions[:i+1]) for i in range(len(cfg.terrain_proportions))]
 
         self.cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
@@ -335,27 +357,49 @@ class Terrain:
         self.scene_backend = None
         self.scene_use_heightfield = bool(getattr(cfg, "scene_use_heightfield", False))
         self._scene_heightfield_done = False
-        if getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None):
-            from legged_gym.envs.hex_v4.scene_gen_v2.scene_generator import SceneGenerator
-            from legged_gym.envs.hex_v4.scene_gen_v2.backend_heightfield import HeightfieldBackend
+        if self.terrain_v2_enable:
+            if not (getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None)):
+                raise RuntimeError(
+                    "terrain_v2 enabled but scene_type(s) not set. "
+                    "hex_ground 是容器任务，请显式使用 --task hex_s1 或 --task hex_debug_plane。 "
+                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
+                    "或 python legged_gym/scripts/train_highlevel.py "
+                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
+                )
+            if self.type != "heightfield":
+                raise RuntimeError("terrain_v2 requires mesh_type='heightfield'")
+            if not self.scene_use_heightfield:
+                raise RuntimeError("terrain_v2 requires scene_use_heightfield=True")
+            from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
+            from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
             env_dims = {"width": self.env_width, "length": self.env_length}
             robot_env = {"clearance": float(getattr(cfg, "scene_clearance", 0.27))}
             self.scene_generator = SceneGenerator(cfg, env_dims=env_dims, robot_envelope=robot_env)
-            if not self.scene_use_heightfield:
-                raise RuntimeError("scene_gen_v2 requires heightfield; legacy scene_manager disabled")
             self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
             self.scene_backend = HeightfieldBackend(self.env_width, self.env_length,
                                                    self.cfg.horizontal_scale, self.cfg.vertical_scale)
+            base_seed = int(getattr(cfg, "scene_seed", 0) or 0)
+            max_seed = base_seed + max(0, cfg.num_rows - 1) * 1000 + max(0, cfg.num_cols - 1) * 17
+            scene_tag = getattr(cfg, "scene_type", None) or ",".join(getattr(cfg, "scene_types", []) or []) or "unknown"
+            shuffle = bool(getattr(cfg, "terrain_v2_shuffle_tiles", False))
+            shuffle_seed = getattr(cfg, "terrain_v2_shuffle_seed", None)
+            if shuffle_seed is None:
+                shuffle_seed = getattr(cfg, "scene_seed", 0)
+            shuffle_seed = int(shuffle_seed or 0)
+            auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
+            print(
+                f"[TerrainV2] scene={scene_tag} grid={cfg.num_rows}x{cfg.num_cols} "
+                f"num_envs={num_robots} auto_grid={auto_grid} auto_expand={auto_expand} "
+                f"expanded_cols={expanded_cols} shuffle={shuffle} shuffle_seed={shuffle_seed} "
+                f"seed_range=[{base_seed},{max_seed}]"
+            )
             if cfg.curriculum:
                 self.scene_heightfield_curriculum()
             else:
                 self.scene_heightfield_randomized()
             self._scene_heightfield_done = True
-
         if not self._scene_heightfield_done:
-            if self.scene_generator is not None:
-                raise RuntimeError("scene_gen_v2 requires heightfield; set scene_use_heightfield=True")
-            elif cfg.curriculum:
+            if cfg.curriculum:
                 self.curiculum()
             elif cfg.selected:
                 self.selected_terrain()
@@ -389,14 +433,14 @@ class Terrain:
                 self.add_terrain_to_map(terrain, i, j)
 
     def scene_randomized(self):
-        raise RuntimeError("legacy scene_manager disabled; use scene_gen_v2 heightfield")
+        raise RuntimeError("legacy scene system removed; use terrain_v2 heightfield")
         for k in range(self.cfg.num_sub_terrains):
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
             difficulty = np.random.uniform(0.0, 1.0)
             terrain = terrain_utils.SubTerrain(
                 "terrain",
-                width=self.length_per_env_pixels,
-                length=self.width_per_env_pixels,
+                width=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
                 vertical_scale=self.cfg.vertical_scale,
                 horizontal_scale=self.cfg.horizontal_scale,
             )
@@ -407,14 +451,14 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
 
     def scene_curriculum(self):
-        raise RuntimeError("legacy scene_manager disabled; use scene_gen_v2 heightfield")
+        raise RuntimeError("legacy scene system removed; use terrain_v2 heightfield")
         for j in range(self.cfg.num_cols):
             for i in range(self.cfg.num_rows):
                 difficulty = i / max(1, (self.cfg.num_rows - 1))
                 terrain = terrain_utils.SubTerrain(
                     "terrain",
-                    width=self.length_per_env_pixels,
-                    length=self.width_per_env_pixels,
+                    width=self.width_per_env_pixels,
+                    length=self.length_per_env_pixels,
                     vertical_scale=self.cfg.vertical_scale,
                     horizontal_scale=self.cfg.horizontal_scale,
                 )
@@ -429,19 +473,18 @@ class Terrain:
         return base + i * 1000 + j * 17
 
     def scene_heightfield_randomized(self):
-        from legged_gym.envs.hex_v4.scene_gen_v2.quantizer import quantize_scene
         scene_type = getattr(self.cfg, "scene_type", None)
         scene_generator = self.scene_generator
         scene_backend = self.scene_backend
         if scene_generator is None or scene_backend is None:
-            raise RuntimeError("scene_gen_v2 not initialized")
+            raise RuntimeError("terrain_v2 not initialized")
         for k in range(self.cfg.num_sub_terrains):
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
             difficulty = np.random.uniform(0.0, 1.0)
             terrain = terrain_utils.SubTerrain(
                 "terrain",
-                width=self.length_per_env_pixels,
-                length=self.width_per_env_pixels,
+                width=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
                 vertical_scale=self.cfg.vertical_scale,
                 horizontal_scale=self.cfg.horizontal_scale,
             )
@@ -451,11 +494,10 @@ class Terrain:
             if scene_choice is None:
                 scene_choice = scene_generator._select_scene_type(rng, difficulty)
             scene = scene_generator.sample(scene_choice, difficulty, seed)
-            scene = quantize_scene(scene, self.cfg.horizontal_scale, self.cfg.vertical_scale)
             tile = scene_backend.render(scene)
             if tile.shape != terrain.height_field_raw.shape:
                 raise RuntimeError(
-                    f"scene_gen_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
+                    f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
                 )
             terrain.height_field_raw[:] = tile
             if self.scene_specs is not None:
@@ -463,19 +505,18 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
 
     def scene_heightfield_curriculum(self):
-        from legged_gym.envs.hex_v4.scene_gen_v2.quantizer import quantize_scene
         scene_type = getattr(self.cfg, "scene_type", None)
         scene_generator = self.scene_generator
         scene_backend = self.scene_backend
         if scene_generator is None or scene_backend is None:
-            raise RuntimeError("scene_gen_v2 not initialized")
+            raise RuntimeError("terrain_v2 not initialized")
         for j in range(self.cfg.num_cols):
             for i in range(self.cfg.num_rows):
                 difficulty = i / max(1, (self.cfg.num_rows - 1))
                 terrain = terrain_utils.SubTerrain(
                     "terrain",
-                    width=self.length_per_env_pixels,
-                    length=self.width_per_env_pixels,
+                    width=self.width_per_env_pixels,
+                    length=self.length_per_env_pixels,
                     vertical_scale=self.cfg.vertical_scale,
                     horizontal_scale=self.cfg.horizontal_scale,
                 )
@@ -485,11 +526,10 @@ class Terrain:
                 if scene_choice is None:
                     scene_choice = scene_generator._select_scene_type(rng, difficulty)
                 scene = scene_generator.sample(scene_choice, difficulty, seed)
-                scene = quantize_scene(scene, self.cfg.horizontal_scale, self.cfg.vertical_scale)
                 tile = scene_backend.render(scene)
                 if tile.shape != terrain.height_field_raw.shape:
                     raise RuntimeError(
-                        f"scene_gen_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
+                        f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
                     )
                 terrain.height_field_raw[:] = tile
                 if self.scene_specs is not None:

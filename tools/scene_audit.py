@@ -9,10 +9,10 @@ from typing import Dict, List
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-
 SCENE_CFG_MAP = {
-    "s1_corridor": ("legged_gym.envs.hex_v4.hex_s1_config", "HexS1Cfg"),
-    "s2_forest": ("legged_gym.envs.hex_v4.hex_s2_config", "HexS2Cfg"),
+    "debug_axis_calib": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexCalibCfg"),
+    "s1_corridor_gate": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexS1Cfg"),
+    "s2_forest": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexS2Cfg"),
 }
 
 
@@ -56,7 +56,7 @@ def _bootstrap_legged_gym():
     _ensure_pkg("legged_gym.envs")
     _ensure_pkg("legged_gym.envs.base")
     _ensure_pkg("legged_gym.envs.hex_v4")
-    _ensure_pkg("legged_gym.envs.hex_v4.scene_gen_v2")
+    _ensure_pkg("legged_gym.envs.hex_v4.terrain_v2")
 
     base_base = os.path.join(ROOT, "legged_gym", "envs", "base", "base_config.py")
     _load_module("legged_gym.envs.base.base_config", base_base)
@@ -65,18 +65,14 @@ def _bootstrap_legged_gym():
     hex_ground_cfg = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_ground_config.py")
     _load_module("legged_gym.envs.hex_v4.hex_ground_config", hex_ground_cfg)
 
-    scene_spec = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "scene_spec.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.scene_spec", scene_spec)
-    quantizer = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "quantizer.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.quantizer", quantizer)
-    guards = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "guards.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.guards", guards)
-    generator = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "scene_generator.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.scene_generator", generator)
-    backend = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "backend_heightfield.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.backend_heightfield", backend)
-    contracts = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "scene_gen_v2", "contracts.py")
-    _load_module("legged_gym.envs.hex_v4.scene_gen_v2.contracts", contracts)
+    scene_spec = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "scene_spec.py")
+    _load_module("legged_gym.envs.hex_v4.terrain_v2.scene_spec", scene_spec)
+    generator = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "scene_generator.py")
+    _load_module("legged_gym.envs.hex_v4.terrain_v2.scene_generator", generator)
+    backend = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "backend_heightfield.py")
+    _load_module("legged_gym.envs.hex_v4.terrain_v2.backend_heightfield", backend)
+    contracts = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "contracts.py")
+    _load_module("legged_gym.envs.hex_v4.terrain_v2.contracts", contracts)
 
     for mod_name, _ in SCENE_CFG_MAP.values():
         file_path = os.path.join(ROOT, *mod_name.split(".")) + ".py"
@@ -98,9 +94,9 @@ def _load_cfg(scene_id: str):
 def _run_scene(scene_id: str, difficulty: float, seed: int) -> Dict:
     cfg = _load_cfg(scene_id)
     env_dims = {"width": float(cfg.terrain_width), "length": float(cfg.terrain_length)}
-    from legged_gym.envs.hex_v4.scene_gen_v2.scene_generator import SceneGenerator
-    from legged_gym.envs.hex_v4.scene_gen_v2.backend_heightfield import HeightfieldBackend
-    from legged_gym.envs.hex_v4.scene_gen_v2.contracts import check_scene
+    from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
+    from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
+    from legged_gym.envs.hex_v4.terrain_v2.contracts import check_scene
 
     generator = SceneGenerator(cfg, env_dims=env_dims, robot_envelope={"clearance": float(getattr(cfg, "scene_clearance", 0.27))})
     backend = HeightfieldBackend(env_dims["width"], env_dims["length"], cfg.horizontal_scale, cfg.vertical_scale)
@@ -113,44 +109,84 @@ def _run_scene(scene_id: str, difficulty: float, seed: int) -> Dict:
         "seed": int(seed),
         "pass": bool(result["pass"]),
         "metrics": result["metrics"],
+        "reasons": result.get("reasons", []),
     }
+
+
+def _summarize(results: List[Dict]) -> Dict[str, Dict]:
+    summary: Dict[str, Dict] = {}
+    for item in results:
+        scene_id = item["scene_id"]
+        if scene_id not in summary:
+            summary[scene_id] = {
+                "pass": 0,
+                "total": 0,
+                "reasons": {},
+                "door_width_samples": [],
+            }
+        summary[scene_id]["total"] += 1
+        if item["pass"]:
+            summary[scene_id]["pass"] += 1
+        for reason in item.get("reasons", []):
+            summary[scene_id]["reasons"][reason] = summary[scene_id]["reasons"].get(reason, 0) + 1
+        metrics = item.get("metrics", {}) or {}
+        mean_gate_width = metrics.get("mean_gate_width", None)
+        if mean_gate_width is not None:
+            summary[scene_id]["door_width_samples"].append(float(mean_gate_width))
+    for scene_id, item in summary.items():
+        samples = item.get("door_width_samples", [])
+        if samples:
+            item["door_width_stats"] = {
+                "mean": float(sum(samples) / max(1, len(samples))),
+                "min": float(min(samples)),
+                "max": float(max(samples)),
+                "count": int(len(samples)),
+            }
+        item.pop("door_width_samples", None)
+    return summary
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenes", type=str, default="s1_corridor,s2_forest")
-    parser.add_argument("--seeds", type=str, default="101,102,103,104,105")
+    parser.add_argument("--scenes", type=str, default="s1_corridor_gate,s2_forest")
+    parser.add_argument("--seeds", type=str, default="")
+    parser.add_argument("--seed-start", type=int, default=100)
+    parser.add_argument("--seed-count", type=int, default=100)
     parser.add_argument("--difficulties", type=str, default="0,0.5,1")
-    parser.add_argument("--golden-count", type=int, default=3)
+    parser.add_argument("--golden-count", type=int, default=5)
     parser.add_argument("--write-golden", type=str, default="")
+    parser.add_argument("--out", type=str, default="")
     args = parser.parse_args()
 
     scenes = _parse_list(args.scenes, cast=str)
-    seeds = _parse_list(args.seeds, cast=int)
     diffs = _parse_list(args.difficulties, cast=float)
-    if not scenes:
-        scenes = ["s1_corridor", "s2_forest"]
+    if args.seeds:
+        seeds = _parse_list(args.seeds, cast=int)
+    else:
+        seeds = list(range(args.seed_start, args.seed_start + args.seed_count))
 
-    results = []
+    results: List[Dict] = []
     for scene_id in scenes:
         for seed in seeds:
             for diff in diffs:
                 results.append(_run_scene(scene_id, diff, seed))
 
-    for item in results:
-        metrics = item["metrics"]
-        metric_str = ", ".join([f"{k}={metrics[k]}" for k in sorted(metrics.keys())])
-        print(
-            f"[{item['scene_id']}] seed={item['seed']} diff={item['difficulty']:.2f} "
-            f"pass={item['pass']} {metric_str}"
-        )
-
+    summary = _summarize(results)
     for scene_id in scenes:
-        items = [r for r in results if r["scene_id"] == scene_id]
-        if not items:
+        if scene_id not in summary:
             continue
-        pass_rate = sum(1 for r in items if r["pass"]) / max(1, len(items))
-        print(f"[Summary] {scene_id} pass_rate={pass_rate:.2%} ({len(items)} cases)")
+        item = summary[scene_id]
+        pass_rate = item["pass"] / max(1, item["total"])
+        print(f"[Summary] {scene_id} pass_rate={pass_rate:.2%} ({item['total']} cases)")
+
+    report = {
+        "scenes": scenes,
+        "seed_start": args.seed_start,
+        "seed_count": len(seeds),
+        "difficulties": diffs,
+        "summary": summary,
+        "samples": results,
+    }
 
     if args.write_golden:
         golden: Dict[str, List[int]] = {scene: [] for scene in scenes}
@@ -168,7 +204,13 @@ def main() -> int:
                     break
         with open(args.write_golden, "w", encoding="utf-8") as f:
             json.dump(golden, f, indent=2, ensure_ascii=False)
+        report["golden_seeds"] = golden
         print(f"[OK] golden saved: {args.write_golden}")
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"[OK] report saved: {args.out}")
 
     return 0
 

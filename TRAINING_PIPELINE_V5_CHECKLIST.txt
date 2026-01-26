@@ -139,4 +139,4 @@ V5 训练链路与参数清单
 - S4：Crossing（动态横穿）
 - S5：Sparse→Dense（非平稳密度切换）
 - S6：结构化 OOD（cluster / nonconvex / maze 混合采样）
-- S6 模板消融：在 hex_s6_config.py 中用 ood_template 固定模板，或用 ood_template_probs 设置采样比例
+- S6 模板消融：在 hex_scenes_config.py 中用 ood_template 固定模板，或用 ood_template_probs 设置采样比例

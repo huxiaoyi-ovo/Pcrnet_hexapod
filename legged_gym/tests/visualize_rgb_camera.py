@@ -39,8 +39,8 @@ project_root = os.path.abspath(os.path.join(current_dir, '../../..'))
 sys.path.insert(0, project_root)
 print(f"[Debug] Project root: {project_root}")
 
-from legged_gym.envs.hex_v4.hex_terrain import HexTerrain
-from legged_gym.envs.hex_v4.hex_terrain_config import HexTerrainCfg
+from legged_gym.envs.hex_v4.hex_ground import HexGround
+from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugPlaneCfg
 from legged_gym.utils import get_args, class_to_dict
 from legged_gym.utils.helpers import parse_sim_params
 import torch
@@ -110,7 +110,7 @@ def prepare_env():
     args.headless = True  # 强制 headless
 
     # 配置相机与环境
-    cfg = HexTerrainCfg()
+    cfg = HexDebugPlaneCfg()
     cam_cfg = cfg.sensor.depth_camera
     cam_cfg.enable = True
     # 分辨率：若命令行未指定，则采用配置默认（通常为 128x128）
@@ -118,10 +118,7 @@ def prepare_env():
     cam_cfg.height = local_args.height or cam_cfg.height
     cam_cfg.capture_interval = 10  # 与深度测试保持一致，降低渲染频率
     cfg.env.num_envs = 1
-    cfg.terrain.mesh_type = 'plane'  # 使用平面地形减少内存/加快模拟
-    cfg.terrain.num_rows = 1
-    cfg.terrain.num_cols = 1
-    cfg.terrain.curriculum = False
+    # 使用 debug plane 任务配置（无需手动修改 mesh_type）
     cfg.terrain.measure_heights = True  # 保持高度测量以兼容噪声向量尺寸
     # 关闭执行器网络以减少显存占用
     cfg.control.use_actuator_net = False
@@ -130,7 +127,7 @@ def prepare_env():
     sim_params = {"sim": class_to_dict(cfg.sim)}
     sim_params = parse_sim_params(args, sim_params)
 
-    env = HexTerrain(
+    env = HexGround(
         cfg=cfg,
         sim_params=sim_params,
         physics_engine=args.physics_engine,

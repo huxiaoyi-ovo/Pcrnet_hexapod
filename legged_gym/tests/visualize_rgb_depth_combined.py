@@ -48,8 +48,8 @@ project_root = os.path.abspath(os.path.join(current_dir, '../../..'))
 sys.path.insert(0, project_root)
 print(f"[Debug] Project root: {project_root}")
 
-from legged_gym.envs.hex_v4.hex_terrain import HexTerrain
-from legged_gym.envs.hex_v4.hex_terrain_config import HexTerrainCfg
+from legged_gym.envs.hex_v4.hex_ground import HexGround
+from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugHeightfieldCfg
 from legged_gym.utils import get_args, class_to_dict
 from legged_gym.utils.helpers import parse_sim_params
 import torch  # Isaac Gym 要求 torch 在其后导入
@@ -111,7 +111,7 @@ def prepare_env(local_args):
     if hasattr(args,'use_gpu_pipeline'): args.use_gpu_pipeline = False
     args.headless = True
 
-    cfg = HexTerrainCfg()
+    cfg = HexDebugHeightfieldCfg()
     cam_cfg = cfg.sensor.depth_camera
     cam_cfg.enable = True
     cam_cfg.width = local_args.width
@@ -119,24 +119,13 @@ def prepare_env(local_args):
     cam_cfg.capture_interval = 10
     cfg.env.num_envs = 1
     
-    # 使用官方地形生成器创建向下阶梯
-    cfg.terrain.mesh_type = 'trimesh'  # 使用三角网格地形
-    cfg.terrain.num_rows = 1
-    cfg.terrain.num_cols = 1
-    cfg.terrain.curriculum = False
-    cfg.terrain.selected = True  # 使用指定地形
-    cfg.terrain.terrain_kwargs = {
-        "type": "terrain_utils.pyramid_stairs_terrain",
-        "step_width": 0.31,      # 每级台阶宽度
-        "step_height": -0.08,    # 负值表示向下阶梯
-        "platform_size": 1.0     # 中心平台大小
-    }
+    # 使用 debug heightfield 任务配置（非平整高度场）
     cfg.control.use_actuator_net = False
 
     sim_params = {"sim": class_to_dict(cfg.sim)}
     sim_params = parse_sim_params(args, sim_params)
 
-    env = HexTerrain(
+    env = HexGround(
         cfg=cfg,
         sim_params=sim_params,
         physics_engine=args.physics_engine,

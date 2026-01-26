@@ -38,8 +38,8 @@ project_root = os.path.abspath(os.path.join(current_dir, '../../..'))
 sys.path.insert(0, project_root)
 print(f"[Debug] Project root added to path: {project_root}")
 
-from legged_gym.envs.hex_v4.hex_terrain import HexTerrain
-from legged_gym.envs.hex_v4.hex_terrain_config import HexTerrainCfg
+from legged_gym.envs.hex_v4.hex_ground import HexGround
+from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugPlaneCfg
 from legged_gym.utils import get_args, class_to_dict
 from legged_gym.utils.helpers import parse_sim_params
 import torch
@@ -122,7 +122,7 @@ def visualize_depth():
     args.headless = True  # 使用 headless 配合相机传感器渲染
     
     # 创建配置
-    cfg = HexTerrainCfg()
+    cfg = HexDebugPlaneCfg()
     cfg.sensor.depth_camera.enable = True
     cfg.env.num_envs = 1  # 只用2个环境，节省显存
     # 可通过命令行覆盖分辨率
@@ -130,11 +130,7 @@ def visualize_depth():
     cfg.sensor.depth_camera.height = local_args.height or 64
     cfg.sensor.depth_camera.capture_interval = 10  # 每步都采集
     
-    # 使用平面地形，与RGB脚本保持一致，确保环境原点在(0,0,0)附近
-    cfg.terrain.mesh_type = 'plane'
-    cfg.terrain.num_rows = 1
-    cfg.terrain.num_cols = 1
-    cfg.terrain.curriculum = False
+    # 使用 debug plane 任务配置（无需手动修改 mesh_type）
     
     print("\n" + "="*70)
     print("Depth Camera Visualization")
@@ -145,7 +141,7 @@ def visualize_depth():
     sim_params = parse_sim_params(args, sim_params)
     
     print("\n[1] Creating environment...")
-    env = HexTerrain(
+    env = HexGround(
         cfg=cfg,
         sim_params=sim_params,
         physics_engine=args.physics_engine,

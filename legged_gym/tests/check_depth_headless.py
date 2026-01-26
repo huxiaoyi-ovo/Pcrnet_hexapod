@@ -10,8 +10,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '../../..'))
 sys.path.insert(0, project_root)
 
-from legged_gym.envs.hex_v4.hex_terrain import HexTerrain
-from legged_gym.envs.hex_v4.hex_terrain_config import HexTerrainCfg
+from legged_gym.envs.hex_v4.hex_ground import HexGround
+from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugPlaneCfg
 from legged_gym.utils import get_args, class_to_dict
 from legged_gym.utils.helpers import parse_sim_params
 import torch
@@ -25,7 +25,7 @@ def check_depth_headless():
     args.headless = True  # 使用headless模式
     
     # 创建配置
-    cfg = HexTerrainCfg()
+    cfg = HexDebugPlaneCfg()
     cfg.sensor.depth_camera.enable = False  # headless模式下禁用相机
     cfg.env.num_envs = 8
     
@@ -38,7 +38,7 @@ def check_depth_headless():
     sim_params = parse_sim_params(args, sim_params)
     
     print("\n[1] Creating environment (headless mode, no camera)...")
-    env = HexTerrain(
+    env = HexGround(
         cfg=cfg,
         sim_params=sim_params,
         physics_engine=args.physics_engine,

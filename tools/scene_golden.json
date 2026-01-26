@@ -1,12 +1,4 @@
 {
-  "s1_corridor": [
-    101,
-    102,
-    103
-  ],
-  "s2_forest": [
-    101,
-    102,
-    103
-  ]
+  "s1_corridor_gate": [],
+  "s2_forest": []
 }

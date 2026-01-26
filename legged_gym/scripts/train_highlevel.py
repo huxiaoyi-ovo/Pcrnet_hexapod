@@ -8,11 +8,11 @@ scripts/train_highlevel.py - V5 Command-Space MoE 训练脚本
 
 用法:
     Follow / Avoid:
-        python scripts/train_highlevel.py --mode teacher --skill follow --task hex_terrain \\
+        python scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1 \\
             --low_level_ckpt agents/fast_2000.pt
 
     Gate:
-        python scripts/train_highlevel.py --mode teacher --skill moe --task hex_terrain \\
+        python scripts/train_highlevel.py --mode teacher --skill moe --task hex_s1 \\
             --low_level_ckpt agents/fast_2000.pt \\
             --follow_ckpt outputs/planner/follow/best_model.pt \\
             --avoid_ckpt outputs/planner/avoid/best_model.pt
@@ -254,7 +254,7 @@ class HierarchicalHexapodEnv:
     V5 分层环境包装器
     
     职责:
-    1. 托管 Isaac Gym 底层环境 (hex_terrain)
+    1. 托管 Isaac Gym 底层环境 (hex_s1/hex_s2)
     2. 托管 Low-Level Controller (冻结的底层策略)
     3. 托管 Command Post-Processor (限幅/滤波/风险钳制)
     4. 托管 Reward Function (V5 gate_smooth + risk_barrier)
@@ -1307,8 +1307,14 @@ def train(args):
     def dprint(*vals, **kwargs):
         if debug:
             print(*vals, **kwargs)
-    if args.task != "hex_ground":
-        print(f"[Warn] V5 主线默认任务为 hex_ground，当前 task={args.task}（hex_terrain 视为 legacy）。")
+    if args.task == "hex_terrain":
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1 / hex_s2 / hex_calib")
+    if args.task in ("hex_s3", "hex_s4", "hex_s5", "hex_s6", "hex_mix_gate"):
+        raise RuntimeError(f"{args.task} 暂未实现（terrain_v2 Stage B/C 未完成），请先使用 hex_s1 / hex_s2 / hex_calib")
+    if args.task == "hex_ground":
+        print("[Warn] hex_ground 仅作为容器任务，请显式配置 scene_type/scene_types 或改用 hex_s1/hex_s2/hex_calib。")
+    if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
+        print(f"[Warn] 当前 task={args.task} 不在主线推荐列表（hex_s1/hex_s2/hex_calib）。")
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
     if getattr(args, "skill", "follow") == "moe":
@@ -2253,7 +2259,7 @@ if __name__ == "__main__":
                         help='训练技能: follow / avoid / moe (gate)')
     
     # 环境
-    parser.add_argument('--task', type=str, default='hex_ground',
+    parser.add_argument('--task', type=str, default='hex_s1',
                         help='Isaac Gym 任务名称')
     parser.add_argument('--aff_stack', type=int, default=1,
                         help='affordance 堆叠帧数 (短时记忆)')

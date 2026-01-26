@@ -1,26 +1,27 @@
-# 训练指令（scene_gen_v2 heightfield）
+# 训练指令（terrain_v2 heightfield）
 
 ## 说明
 
-- S1/S2 已切换到 `scene_gen_v2`（单一真源入口 + 统一量化 + guards）。
-- 运行时会打印一次：`[Init] 正在使用 scene_gen_v2 (...)`，用于确认未走旧链路。
+- S1/S2 已切换到 `terrain_v2`（单一真源入口 + 统一量化 + spawn/goal 清空）。
+- 运行时会打印一次：`[Init] 正在使用 terrain_v2 (...)`，用于确认未走旧链路。
 - 默认关闭外围墙（edge_pad=0），S1 仅靠走廊墙约束；env_origins 越界会直接报错。
 
 ## 场景体检（scene_audit）
 
-python3 tools/scene_audit.py --scenes s1_corridor,s2_forest --seeds 101,102,103,104,105 --difficulties 0,0.5,1
-python3 tools/scene_audit.py --scenes s1_corridor,s2_forest --seeds 101,102,103,104,105 --difficulties 0,0.5,1 --write-golden tools/scene_golden.json
+python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 100 --seed-count 100 --difficulties 0,0.5,1 --out tools/scene_report.json
+python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 100 --seed-count 100 --difficulties 0,0.5,1 --write-golden tools/scene_golden.json
 - golden seeds 回归集：`tools/scene_golden.json`。
-- 备注：当前 golden seeds（s1/s2）为 `[101,102,103]`，若场景逻辑修改需重跑生成。
-- 备注：scene_gen_v2 tile 坐标系为中心原点（y∈[-L/2,+L/2]）。
+- 备注：golden seeds 需在场景逻辑更新后重跑生成。
+- 备注：terrain_v2 tile 坐标系为中心原点（y∈[-L/2,+L/2]）。
 
 ## 最小验证（headless, 64 env, 3 iter）
 
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
+# 先跑 debug_axis_calib 校准，通过后再跑 S1/S2
+
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s3 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s5 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s6 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
+# S3/S5/S6/S4 留待阶段 B/C 接入后再验证
 
 ## 建议训练入口（示例）
 

@@ -27,8 +27,8 @@ def parse_args():
     parser.add_argument(
         "--task",
         type=str,
-        default="hex_ground",
-        help="Task name (hex_ground / hex_s1..hex_s6 / hex_mix_gate)",
+        default="hex_s1",
+        help="Task name (hex_s1 / hex_s2 / hex_calib)",
     )
     parser.add_argument(
         "--mode",
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--low_level_ckpt",
         type=str,
-        default="logs/hex_ground/Dec31_16-52-59_/model_6000.pt",
+        default="logs/hex_s1/Dec31_16-52-59_/model_6000.pt",
         help="Low-level policy checkpoint path",
     )
     parser.add_argument("--teacher_ckpt", type=str, required=True, help="Expert checkpoint path")
@@ -138,13 +138,15 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.task != "hex_ground":
-        raise ValueError("play_highlevel.py currently supports only --task hex_ground")
+    if args.task == "hex_terrain":
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
+    if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
+        raise ValueError("play_highlevel.py supports only --task hex_s1/hex_s2/hex_calib")
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
         if debug:
             print(*vals, **kwargs)
-    dprint("[PlayHigh] V5 主线任务默认 hex_ground；hex_terrain 视为 legacy。")
+    dprint("[PlayHigh] V5 主线任务默认 hex_s1；hex_terrain 已移除。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[PlayHigh] aff_stack={args.aff_stack}: 输入通道数改变，需与 ckpt 训练时一致，否则无法加载。")
 

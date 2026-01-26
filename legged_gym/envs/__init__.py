@@ -41,24 +41,39 @@ from .a1.a1_config import A1RoughCfg, A1RoughCfgPPO
 
 from .hex_v4.hex_ground import HexGround
 from .hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgPPO
-from .hex_v4.hex_s1_config import (
+from .hex_v4.hex_scenes_config import (
+    HexDebugPlaneCfg,
+    HexDebugPlaneCfgPPO,
+    HexDebugHeightfieldCfg,
+    HexDebugHeightfieldCfgPPO,
+    HexCalibCfg,
+    HexCalibCfgPPO,
     HexS1Cfg,
     HexS1CfgPPO,
     HexS1FollowCfg,
     HexS1FollowCfgPPO,
     HexS1LargeCfg,
     HexS1LargeCfgPPO,
-)
-from .hex_v4.hex_calib_config import (
-    HexCalibCfg,
-    HexCalibCfgPPO,
-)
-from .hex_v4.hex_s2_config import HexS2Cfg, HexS2CfgPPO, HexS2LargeCfg, HexS2LargeCfgPPO
-from .hex_v4.hex_s3_config import HexS3Cfg, HexS3CfgPPO, HexS3LargeCfg, HexS3LargeCfgPPO
-from .hex_v4.hex_s4_config import HexS4Cfg, HexS4CfgPPO, HexS4LargeCfg, HexS4LargeCfgPPO
-from .hex_v4.hex_s5_config import HexS5Cfg, HexS5CfgPPO, HexS5LargeCfg, HexS5LargeCfgPPO
-from .hex_v4.hex_s6_config import HexS6Cfg, HexS6CfgPPO, HexS6LargeCfg, HexS6LargeCfgPPO
-from .hex_v4.hex_mix_gate_config import (
+    HexS2Cfg,
+    HexS2CfgPPO,
+    HexS2LargeCfg,
+    HexS2LargeCfgPPO,
+    HexS3Cfg,
+    HexS3CfgPPO,
+    HexS3LargeCfg,
+    HexS3LargeCfgPPO,
+    HexS4Cfg,
+    HexS4CfgPPO,
+    HexS4LargeCfg,
+    HexS4LargeCfgPPO,
+    HexS5Cfg,
+    HexS5CfgPPO,
+    HexS5LargeCfg,
+    HexS5LargeCfgPPO,
+    HexS6Cfg,
+    HexS6CfgPPO,
+    HexS6LargeCfg,
+    HexS6LargeCfgPPO,
     HexMixGateCfg,
     HexMixGateCfgPPO,
     HexMixGateLargeCfg,
@@ -68,8 +83,6 @@ from .hex_v4.hex_mix_gate_config import (
 from .hex_v4.hex_climb import HexClimb
 from .hex_v4.hex_climb_config import HexClimbCfg, HexClimbCfgPPO
 
-from .hex_v4.hex_terrain import HexTerrain
-from .hex_v4.hex_terrain_config import HexTerrainCfg, HexTerrainCfgPPO
 
 import os
 
@@ -83,7 +96,9 @@ task_registry.register( "cassie", Cassie, CassieRoughCfg(), CassieRoughCfgPPO() 
 
 task_registry.register("hex_ground",HexGround,HexGroundCfg(),HexGroundCfgPPO())
 
-task_registry.register("hex_terrain",HexTerrain,HexTerrainCfg(),HexTerrainCfgPPO())
+task_registry.register("hex_debug_plane", HexGround, HexDebugPlaneCfg(), HexDebugPlaneCfgPPO())
+task_registry.register("hex_debug_heightfield", HexGround, HexDebugHeightfieldCfg(), HexDebugHeightfieldCfgPPO())
+
 task_registry.register("hex_s1", HexGround, HexS1Cfg(), HexS1CfgPPO())
 task_registry.register("hex_s1_follow", HexGround, HexS1FollowCfg(), HexS1FollowCfgPPO())
 task_registry.register("hex_s1_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())

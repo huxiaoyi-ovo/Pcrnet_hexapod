@@ -1,10 +1,11 @@
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.envs.hex_v4.hex_ground_config import HexGroundCfg, HexGroundCfgPPO
+from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugPlaneCfg
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils.actuator import Actuator
 from legged_gym.envs.hex_v4.expert import ExpertGround
-from legged_gym.envs.hex_v4.scene_gen_v2.scene_spec import SceneSpec
+from legged_gym.envs.hex_v4.terrain_v2.scene_spec import SceneSpec
 import torch
 import numpy as np
 from typing import Optional
@@ -27,6 +28,38 @@ class HexGround(LeggedRobot):
             self.camera_cfg = cfg.sensor.depth_camera
             self.enable_camera = bool(self.camera_cfg.enable)
             self._use_camera_in_headless = headless and self.enable_camera
+        if hasattr(cfg, "terrain") and getattr(cfg.terrain, "terrain_v2_shuffle_seed", None) is None:
+            cfg.terrain.terrain_v2_shuffle_seed = getattr(cfg, "seed", None)
+        scene_type = getattr(cfg.terrain, "scene_type", None) if hasattr(cfg, "terrain") else None
+        scene_types = getattr(cfg.terrain, "scene_types", None) if hasattr(cfg, "terrain") else None
+        debug_allow_plane = bool(getattr(cfg.terrain, "debug_allow_plane", False))
+        mesh_type = getattr(cfg.terrain, "mesh_type", None)
+        if debug_allow_plane:
+            if mesh_type not in ("plane", "none"):
+                raise RuntimeError("debug_allow_plane requires cfg.terrain.mesh_type='plane' (or 'none').")
+            if getattr(cfg.terrain, "terrain_v2_enable", False):
+                raise RuntimeError("debug_allow_plane requires terrain_v2_enable=False for plane debug.")
+        else:
+            if not getattr(cfg.terrain, "terrain_v2_enable", False):
+                raise RuntimeError(
+                    "hex_ground 是容器任务，需要显式启用 terrain_v2 并指定 scene_type(s)。"
+                    "建议使用: --task hex_s1 或 --task hex_debug_plane。"
+                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
+                    "或 python legged_gym/scripts/train_highlevel.py "
+                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
+                )
+            if mesh_type != "heightfield":
+                raise RuntimeError("hex_ground requires cfg.terrain.mesh_type='heightfield' for terrain_v2.")
+            if not getattr(cfg.terrain, "scene_use_heightfield", False):
+                raise RuntimeError("hex_ground requires cfg.terrain.scene_use_heightfield=True for terrain_v2.")
+            if not (scene_type or scene_types):
+                raise RuntimeError(
+                    "hex_ground 是容器任务，必须显式设置 scene_type/scene_types。"
+                    "建议使用: --task hex_s1 或 --task hex_debug_plane。"
+                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
+                    "或 python legged_gym/scripts/train_highlevel.py "
+                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
+                )
         super().__init__(cfg,sim_params,physics_engine,sim_device,headless)
         self.cfg:HexGroundCfg = cfg
         self.nav_cfg = getattr(cfg, "navigation", None)
@@ -435,7 +468,7 @@ class HexGround(LeggedRobot):
     def _scene_meta_params(self, meta: dict) -> dict:
         scene_type = meta.get("scene_type", None)
         params: dict = {}
-        if scene_type == "s1_corridor":
+        if scene_type == "s1_corridor_gate":
             length = float(meta.get("L", self.cfg.terrain.terrain_length))
             width_nom = float(meta.get("W0", 0.5 * self.cfg.terrain.terrain_width)) * 2.0
             gate_width = float(meta.get("Wg", 0.5 * width_nom)) * 2.0
@@ -450,7 +483,7 @@ class HexGround(LeggedRobot):
                 y1 = float(y1)
                 length_gate = abs(y1 - y0)
                 y_center = 0.5 * (y0 + y1) - 0.5 * length
-                gates.append({"y0": y_center, "length": length_gate, "width": gate_width})
+                gates.append({"y0": y_center, "length": length_gate, "door_width": gate_width})
             params.update(
                 {
                     "corridor_length": length,
@@ -459,13 +492,13 @@ class HexGround(LeggedRobot):
                     "corridor_x_center": 0.0,
                 }
             )
-        elif scene_type == "s3_doorway":
+        elif scene_type == "s3_doorway_rooms":
             params["room_width"] = float(meta.get("W", self.cfg.terrain.terrain_width))
         return params
 
     def _scene_spec_from_meta(self, meta: dict, env_id: int) -> Optional[SceneSpec]:
         if isinstance(meta, dict):
-            raise RuntimeError("legacy scene_meta dict detected; scene_gen_v2 required")
+            raise RuntimeError("legacy scene_meta dict detected; terrain_v2 required")
         return None
 
     def _get_scene_difficulty(self, env_id: int) -> float:
@@ -536,7 +569,7 @@ class HexGround(LeggedRobot):
             episode_idx = int(self.scene_episode_count[env_id].item())
             raw_spec = self._get_scene_spec(env_id)
             if isinstance(raw_spec, dict):
-                raise RuntimeError("legacy scene_specs dict detected; scene_gen_v2 required")
+                raise RuntimeError("legacy scene_specs dict detected; terrain_v2 required")
             scene_spec = raw_spec
             if scene_spec is None:
                 difficulty = self._get_scene_difficulty(env_id)
@@ -547,7 +580,7 @@ class HexGround(LeggedRobot):
                     scene_id = self.scene_generator._select_scene_type(rng, difficulty)
                 scene_spec = self.scene_generator.sample(scene_id, difficulty, seed)
             if scene_spec is not None:
-                from legged_gym.envs.hex_v4.scene_gen_v2.quantizer import quantize_scene
+                from legged_gym.envs.hex_v4.terrain_v2.quantizer import quantize_scene
                 scene_spec = quantize_scene(scene_spec, self.cfg.terrain.horizontal_scale, self.cfg.terrain.vertical_scale)
                 self.scene_spec_cache[env_id] = scene_spec
                 self.scene_meta[env_id] = scene_spec.to_meta()
@@ -715,7 +748,7 @@ class HexGround(LeggedRobot):
     def _scene_spawn_bounds(self, scene_spec: Optional[SceneSpec]):
         if scene_spec is None:
             return None
-        if scene_spec.scene_type == "s3_doorway":
+        if scene_spec.scene_type == "s3_doorway_rooms":
             width = float(scene_spec.params.get("room_width", self.cfg.terrain.terrain_width))
         else:
             return None
@@ -748,9 +781,11 @@ class HexGround(LeggedRobot):
         for gate in gates:
             y0 = float(gate.get("y0", 0.0))
             length = float(gate.get("length", 0.0))
-            width = float(gate.get("width", width_nom))
+            door_width = gate.get("door_width", None)
+            if door_width is None:
+                continue
             if abs(y_local - y0) <= 0.5 * length:
-                half_min = min(half_min, 0.5 * width)
+                half_min = min(half_min, 0.5 * min(width_nom, float(door_width)))
         return half_min
 
     def _is_scene_spawn_clear(self, scene_spec: SceneSpec, x_local: float, y_local: float, clearance: float) -> bool:
@@ -782,7 +817,7 @@ class HexGround(LeggedRobot):
             if scene_spec is not None:
                 seed = int((scene_spec.layout_seed or 0) + env_id * 131)
             rng = np.random.RandomState(seed)
-            if scene_spec is not None and scene_spec.scene_type == "s1_corridor":
+            if scene_spec is not None and scene_spec.scene_type == "s1_corridor_gate":
                 params = scene_spec.params or {}
                 length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
                 y_start = -0.5 * length
@@ -1377,7 +1412,7 @@ class HexGround(LeggedRobot):
         if self.scene_spec_cache is not None:
             for env_id in env_ids.tolist():
                 scene_spec = self.scene_spec_cache[env_id]
-                if scene_spec is not None and scene_spec.scene_type == "s1_corridor":
+                if scene_spec is not None and scene_spec.scene_type == "s1_corridor_gate":
                     s1_envs.append(env_id)
                 elif self._scene_goal_ranges(scene_spec) is not None:
                     corridor_envs.append(env_id)
@@ -1658,6 +1693,8 @@ class HexGround(LeggedRobot):
 
     def _update_terrain_curriculum(self, env_ids):
         #重新设计地形更新的规则
+        if getattr(self.cfg.terrain, "terrain_v2_enable", False) and getattr(self.cfg.terrain, "terrain_v2_unique_tiles", False):
+            return
         if not self.init_done:
             # don't change on initial reset
             return
@@ -1958,12 +1995,11 @@ class HexGround(LeggedRobot):
         
 
 if __name__ == '__main__':
-    args=get_args()
-    cfg = HexGroundCfg()
-
-    sim_params = {"sim":class_to_dict(cfg.sim)}
-    sim_params = parse_sim_params(args,sim_params)
-    env = HexGround(cfg,sim_params,args.physics_engine,args.sim_device,args.headless)
+    args = get_args()
+    cfg = HexDebugPlaneCfg()
+    sim_params = {"sim": class_to_dict(cfg.sim)}
+    sim_params = parse_sim_params(args, sim_params)
+    env = HexGround(cfg, sim_params, args.physics_engine, args.sim_device, args.headless)
     while not env.gym.query_viewer_has_closed(env.viewer):
-        env.step(torch.zeros(env.num_envs,env.num_actions,dtype=torch.float,device=env.device))
+        env.step(torch.zeros(env.num_envs, env.num_actions, dtype=torch.float, device=env.device))
         

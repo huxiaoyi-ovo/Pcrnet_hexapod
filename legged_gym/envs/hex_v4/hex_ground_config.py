@@ -104,8 +104,18 @@ class HexGroundCfg(LeggedRobotCfg):
             "velocity_scale": 0.0,
         }
     class terrain(LeggedRobotCfg.terrain):
-        mesh_type = "trimesh"
-        scene_use_heightfield = False
+        mesh_type = "heightfield"
+        # terrain_v2 gate (hex mainline only)
+        terrain_v2_enable = True
+        terrain_v2_unique_tiles = True
+        terrain_v2_no_jitter = True
+        terrain_v2_shuffle_tiles = False
+        terrain_v2_strict = True
+        terrain_v2_min_rows = 1
+        terrain_v2_min_cols = 1
+        terrain_v2_shuffle_seed = None
+        debug_allow_plane = False
+        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = True
         scene_collision_filter = 0xFFFFFFFF
@@ -121,8 +131,8 @@ class HexGroundCfg(LeggedRobotCfg):
         terrain_length=8.0
         terrain_width=8.0
         max_init_terrain_level=4 #这个必须比num_rows小，否则会超出索引边界
-        num_rows=5 #等级
-        num_cols=10 #不同地形种类的总数量，比例按照 terrain_proportions来
+        num_rows=0 # terrain_v2 自动 grid（按 num_envs 计算最小覆盖）
+        num_cols=0 # terrain_v2 自动 grid（按 num_envs 计算最小覆盖）
         measure_heights = True
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5] #11
         measured_points_y = [ -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] #13 1mx1.2m rectangle (without center line)        

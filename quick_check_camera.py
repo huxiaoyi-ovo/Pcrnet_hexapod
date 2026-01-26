@@ -20,7 +20,7 @@ def test_camera_disabled():
     print("="*60)
     
     args = get_args()
-    args.task = 'hex_terrain'
+    args.task = 'hex_debug_plane'
     args.headless = True
     args.num_envs = 64
     
@@ -66,7 +66,7 @@ def test_camera_enabled_headless():
     print("="*60)
     
     args = get_args()
-    args.task = 'hex_terrain'
+    args.task = 'hex_debug_plane'
     args.headless = True
     args.num_envs = 64
     

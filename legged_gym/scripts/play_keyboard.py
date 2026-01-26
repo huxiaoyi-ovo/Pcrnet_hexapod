@@ -28,6 +28,8 @@ from legged_gym.utils import get_args, task_registry
 from rsl_rl.modules import ActorCritic
 
 def play(args):
+    if getattr(args, "task", None) == "hex_terrain":
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
     # 1. 准备环境配置
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     
@@ -54,7 +56,7 @@ def play(args):
         sys.exit(1)
 
     # 初始化网络 (必须与训练时的结构一致)
-    # 根据 hex_terrain.py 或之前的描述，假设是 [512, 256, 128]
+    # 根据 hex_ground 配置，假设是 [512, 256, 128]
     policy = ActorCritic(
         num_actor_obs=env.num_obs,
         num_critic_obs=env.num_privileged_obs,
@@ -208,7 +210,7 @@ if __name__ == '__main__':
     
     # 默认值覆盖 (如果没有在命令行提供)
     if not hasattr(args, 'task') or not args.task:
-        args.task = "hex_ground"
+        args.task = "hex_debug_plane"
     if not hasattr(args, 'load_run') or not args.load_run:
         args.load_run = "agents/fast_2000.pt" # 默认路径
     

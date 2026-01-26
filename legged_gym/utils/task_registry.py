@@ -43,7 +43,7 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 
 #expert guided policy optimization
-from rsl_rl.runners import EGPORunner, EGPOEncoderRunner
+from rsl_rl.runners import EGPORunner
 from rsl_rl.runners import ExpertPreloadRunner
 
 class TaskRegistry():
@@ -85,6 +85,8 @@ class TaskRegistry():
         # if no args passed get command line arguments
         if args is None:
             args = get_args()
+        if name == "hex_terrain":
+            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
         # check if there is a registered env with that name
         if name in self.task_classes:
             task_class = self.get_task_class(name)
@@ -128,6 +130,8 @@ class TaskRegistry():
         # if no args passed get command line arguments
         if args is None:
             args = get_args()
+        if name == "hex_terrain":
+            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
         # if config files are passed use them, otherwise load from the name
         if train_cfg is None:
             if name is None:
@@ -153,8 +157,6 @@ class TaskRegistry():
         #使用单张卡训练时，使用agrs.rl_device
         if name == "hex_ground":
             runner = EGPORunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif name == "hex_terrain":
-            runner = EGPOEncoderRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         else:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         # runner = ExpertPreloadRunner(env, train_cfg_dict, log_dir,device=args.rl_device)

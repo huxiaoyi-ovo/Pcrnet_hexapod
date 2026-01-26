@@ -7,7 +7,7 @@ import sys
 import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CFG_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_s2_config.py")
+CFG_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_scenes_config.py")
 
 
 def _ensure_pkg(name: str):
@@ -36,21 +36,21 @@ def load_hex_s2_cfg(path: str):
     _ensure_pkg("legged_gym.envs")
     _ensure_pkg("legged_gym.envs.base")
     _ensure_pkg("legged_gym.envs.hex_v4")
-    _ensure_pkg("legged_gym.envs.hex_v4.scene_gen_v2")
+    _ensure_pkg("legged_gym.envs.hex_v4.terrain_v2")
     base_base = os.path.join(ROOT, "legged_gym", "envs", "base", "base_config.py")
     _load_module("legged_gym.envs.base.base_config", base_base)
     base_cfg = os.path.join(ROOT, "legged_gym", "envs", "base", "legged_robot_config.py")
     _load_module("legged_gym.envs.base.legged_robot_config", base_cfg)
     hex_ground_cfg = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_ground_config.py")
     _load_module("legged_gym.envs.hex_v4.hex_ground_config", hex_ground_cfg)
-    _load_module("legged_gym.envs.hex_v4.hex_s2_config", path)
-    mod = sys.modules.get("legged_gym.envs.hex_v4.hex_s2_config")
+    _load_module("legged_gym.envs.hex_v4.hex_scenes_config", path)
+    mod = sys.modules.get("legged_gym.envs.hex_v4.hex_scenes_config")
     return getattr(mod, "HexS2Cfg", None)
 
 
 def main() -> int:
     if not os.path.exists(CFG_PATH):
-        print(f"[Err] hex_s2_config.py not found: {CFG_PATH}")
+        print(f"[Err] hex_scenes_config.py not found: {CFG_PATH}")
         return 1
 
     HexS2Cfg = load_hex_s2_cfg(CFG_PATH)
@@ -67,9 +67,9 @@ def main() -> int:
 
     try:
         sys.path.insert(0, ROOT)
-        from legged_gym.envs.hex_v4.scene_gen_v2.scene_generator import SceneGenerator
-        from legged_gym.envs.hex_v4.scene_gen_v2.backend_heightfield import HeightfieldBackend
-        from legged_gym.envs.hex_v4.scene_gen_v2.contracts import check_scene
+        from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
+        from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
+        from legged_gym.envs.hex_v4.terrain_v2.contracts import check_scene
 
         env_dims = {"width": float(terrain.terrain_width), "length": float(terrain.terrain_length)}
         gen = SceneGenerator(terrain, env_dims=env_dims, robot_envelope={"clearance": float(getattr(terrain, "scene_clearance", 0.27))})
@@ -81,7 +81,7 @@ def main() -> int:
         print("[S2] num_static:", len(spec.static_obstacles))
         print("[S2] contract pass:", result["pass"])
     except Exception as exc:
-        print("[Warn] scene_gen_v2 sample failed:", repr(exc))
+        print("[Warn] terrain_v2 sample failed:", repr(exc))
         print("[Warn] This does not block config check.")
 
     return 0

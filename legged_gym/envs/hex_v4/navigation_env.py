@@ -256,8 +256,8 @@ class NavigationRewardFunction:
         【P0.1修复】格式约定: robot_quat = [x, y, z, w] (Isaac Gym标准)
         
         【全链路一致性 - CRITICAL】:
-        - HexTerrain.base_quat → [x,y,z,w]
-        - HexTerrain._yaw_from_quat() → 接受 [x,y,z,w]
+        - HexGround.base_quat → [x,y,z,w]
+        - HexGround._yaw_from_quat() → 接受 [x,y,z,w]
         - 此函数也必须使用 [x,y,z,w]
         - 禁止改回 [w,x,y,z]，否则会导致silent bug
         """
@@ -305,7 +305,7 @@ class NavigationRewardFunction:
         
         【禁止修改】:
         - 不要改回 [w,x,y,z]，否则会导致silent bug
-        - HexTerrain._yaw_from_quat() 使用相同格式
+        - HexGround._yaw_from_quat() 使用相同格式
         """
         x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         return torch.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
