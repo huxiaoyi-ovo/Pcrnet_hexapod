@@ -303,6 +303,9 @@ class Terrain:
         auto_grid = False
         max_rows = int(getattr(cfg, "terrain_v2_max_rows", 0) or 0)
         max_rows_applied = False
+        max_tot_rows = int(getattr(cfg, "terrain_v2_max_tot_rows", 0) or 0)
+        max_tot_cols = int(getattr(cfg, "terrain_v2_max_tot_cols", 0) or 0)
+        max_tot_applied = False
         expanded_cols = False
         if self.terrain_v2_enable and num_robots is not None:
             min_rows = int(getattr(cfg, "terrain_v2_min_rows", 1) or 1)
@@ -332,6 +335,105 @@ class Terrain:
                     f"[TerrainV2] max_rows clamp: rows {old_rows} -> {rows}, "
                     f"cols {old_cols} -> {cols} (max_rows={max_rows})"
                 )
+            if max_tot_rows > 0 or max_tot_cols > 0:
+                length_per_env_pixels = int(self.env_length / cfg.horizontal_scale)
+                width_per_env_pixels = int(self.env_width / cfg.horizontal_scale)
+                border_px = int(cfg.border_size / cfg.horizontal_scale)
+
+                if length_per_env_pixels <= 0 or width_per_env_pixels <= 0:
+                    raise RuntimeError(
+                        "terrain_v2 invalid pixel size: "
+                        f"length_px={length_per_env_pixels}, width_px={width_per_env_pixels}. "
+                        "请检查 terrain_length/terrain_width 与 horizontal_scale."
+                    )
+
+                min_tot_rows = length_per_env_pixels + 2 * border_px
+                min_tot_cols = width_per_env_pixels + 2 * border_px
+                if max_tot_rows > 0 and max_tot_rows < min_tot_rows:
+                    raise RuntimeError(
+                        "terrain_v2_max_tot_rows too small for a single tile: "
+                        f"max_tot_rows={max_tot_rows}, min_required={min_tot_rows}. "
+                        "请放宽阈值或调大 horizontal_scale（仅 calib）。"
+                    )
+                if max_tot_cols > 0 and max_tot_cols < min_tot_cols:
+                    raise RuntimeError(
+                        "terrain_v2_max_tot_cols too small for a single tile: "
+                        f"max_tot_cols={max_tot_cols}, min_required={min_tot_cols}. "
+                        "请放宽阈值或调大 horizontal_scale（仅 calib）。"
+                    )
+
+                def _tot_shape(r, c):
+                    return (
+                        int(r * length_per_env_pixels) + 2 * border_px,
+                        int(c * width_per_env_pixels) + 2 * border_px,
+                    )
+
+                max_rows_allowed = None
+                max_cols_allowed = None
+                if max_tot_rows > 0:
+                    max_rows_allowed = max(
+                        1,
+                        int(np.floor((max_tot_rows - 2 * border_px) / float(length_per_env_pixels))),
+                    )
+                if max_tot_cols > 0:
+                    max_cols_allowed = max(
+                        1,
+                        int(np.floor((max_tot_cols - 2 * border_px) / float(width_per_env_pixels))),
+                    )
+
+                before_rows = rows
+                before_cols = cols
+                before_tot_rows, before_tot_cols = _tot_shape(rows, cols)
+                for _ in range(8):
+                    tot_rows, tot_cols = _tot_shape(rows, cols)
+                    changed = False
+                    if max_tot_rows > 0 and tot_rows > max_tot_rows:
+                        rows = min(rows, max_rows_allowed)
+                        rows = max(min_rows, rows)
+                        cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
+                        cfg.num_rows = rows
+                        cfg.num_cols = cols
+                        max_tot_applied = True
+                        changed = True
+                    if max_tot_cols > 0 and tot_cols > max_tot_cols:
+                        cols = min(cols, max_cols_allowed)
+                        cols = max(min_cols, cols)
+                        rows = max(min_rows, int(np.ceil(float(num_robots) / float(cols))))
+                        cfg.num_rows = rows
+                        cfg.num_cols = cols
+                        max_tot_applied = True
+                        changed = True
+                    if not changed:
+                        break
+                    if max_tot_rows > 0 and rows > max_rows_allowed:
+                        raise RuntimeError(
+                            "terrain_v2 max_tot constraint unsatisfied (rows): "
+                            f"num_envs={num_robots}, rows={rows}, max_rows_allowed={max_rows_allowed}. "
+                            "请降低 num_envs，或放宽 max_tot_rows，或调大 horizontal_scale（仅 calib）。"
+                        )
+                    if max_tot_cols > 0 and cols > max_cols_allowed:
+                        raise RuntimeError(
+                            "terrain_v2 max_tot constraint unsatisfied (cols): "
+                            f"num_envs={num_robots}, cols={cols}, max_cols_allowed={max_cols_allowed}. "
+                            "请降低 num_envs，或放宽 max_tot_cols，或调大 horizontal_scale（仅 calib）。"
+                        )
+                tot_rows, tot_cols = _tot_shape(rows, cols)
+                if (max_tot_rows > 0 and tot_rows > max_tot_rows) or (max_tot_cols > 0 and tot_cols > max_tot_cols):
+                    raise RuntimeError(
+                        "terrain_v2 max_tot constraint unsatisfied after clamp: "
+                        f"tot_rows={tot_rows}, tot_cols={tot_cols}, "
+                        f"max_tot_rows={max_tot_rows}, max_tot_cols={max_tot_cols}. "
+                        "请降低 num_envs，或放宽 max_tot_*，或调大 horizontal_scale（仅 calib）。"
+                    )
+                if max_tot_applied:
+                    after_tot_rows, after_tot_cols = tot_rows, tot_cols
+                    print(
+                        f"[TerrainV2] max_tot clamp: rows {before_rows} -> {rows}, "
+                        f"cols {before_cols} -> {cols}, "
+                        f"tot_rows {before_tot_rows} -> {after_tot_rows}, "
+                        f"tot_cols {before_tot_cols} -> {after_tot_cols} "
+                        f"(max_tot_rows={max_tot_rows}, max_tot_cols={max_tot_cols})"
+                    )
         if num_robots is not None and rows > 0 and cols > 0:
             required_cols = int(np.ceil(float(num_robots) / float(rows)))
             if required_cols > cols:
@@ -403,12 +505,14 @@ class Terrain:
                 shuffle_seed = getattr(cfg, "scene_seed", 0)
             shuffle_seed = int(shuffle_seed or 0)
             auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
-            grid_order = "user->auto->max_rows"
+            grid_order = "user->auto->max_rows->max_tot"
             print(
                 f"[TerrainV2] scene={scene_tag} grid={cfg.num_rows}x{cfg.num_cols} "
                 f"num_envs={num_robots} auto_grid={auto_grid} auto_expand={auto_expand} "
                 f"expanded_cols={expanded_cols} shuffle={shuffle} shuffle_seed={shuffle_seed} "
                 f"max_rows={max_rows} max_rows_applied={max_rows_applied} "
+                f"max_tot_rows={max_tot_rows} max_tot_cols={max_tot_cols} "
+                f"max_tot_applied={max_tot_applied} "
                 f"grid_order={grid_order} seed_range=[{base_seed},{max_seed}]"
             )
             if cfg.curriculum:

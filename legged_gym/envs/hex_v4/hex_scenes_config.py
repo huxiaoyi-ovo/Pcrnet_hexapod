@@ -79,6 +79,8 @@ class HexCalibCfg(HexGroundCfg):
         num_rows = 0
         num_cols = 0
         terrain_v2_max_rows = 10
+        terrain_v2_max_tot_rows = 1220  # total heightfield rows (pixels)
+        terrain_v2_max_tot_cols = 620   # total heightfield cols (pixels)
         terrain_proportions = [1.0]
         max_init_terrain_level = 0
 
