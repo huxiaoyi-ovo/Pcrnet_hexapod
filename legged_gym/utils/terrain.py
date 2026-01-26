@@ -52,13 +52,25 @@ def _int_range(params_easy: dict, params_hard: dict, key: str, default, t: float
     return int(round(_param_range(params_easy, params_hard, key, default, t)))
 
 
+def _tile_contract_view(terrain, length_px: int, width_px: int):
+    """Return a heightfield view that follows the axis contract (length, width)."""
+    tile = terrain.height_field_raw
+    expected = (length_px, width_px)
+    alt = (width_px, length_px)
+    if tile.shape == expected:
+        return tile
+    if tile.shape == alt:
+        return tile.T
+    raise RuntimeError(f"SubTerrain shape mismatch: got {tile.shape}, expected {expected} or {alt}")
+
+
 def debug_axis_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
     """Only vary height along +Y (axis0), keep +X constant for axis calibration."""
     length_px = terrain.length
     width_px = terrain.width
     h_scale = terrain.horizontal_scale
     v_scale = terrain.vertical_scale
-    height_field = terrain.height_field_raw
+    height_field = _tile_contract_view(terrain, length_px, width_px)
     height_field[:] = 0
 
     params_easy = getattr(cfg, "scene_params_easy", {}) or {}
@@ -98,7 +110,7 @@ def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCf
     width_px = terrain.width
     h_scale = terrain.horizontal_scale
     v_scale = terrain.vertical_scale
-    height_field = terrain.height_field_raw
+    height_field = _tile_contract_view(terrain, length_px, width_px)
     height_field[:] = 0
 
     params_easy = getattr(cfg, "scene_params_easy", {}) or {}
@@ -195,7 +207,7 @@ def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terra
     width_px = terrain.width
     h_scale = terrain.horizontal_scale
     v_scale = terrain.vertical_scale
-    height_field = terrain.height_field_raw
+    height_field = _tile_contract_view(terrain, length_px, width_px)
     height_field[:] = 0
 
     params_easy = getattr(cfg, "scene_params_easy", {}) or {}
