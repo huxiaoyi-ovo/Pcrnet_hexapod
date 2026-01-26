@@ -357,6 +357,8 @@ class Terrain:
         self.scene_backend = None
         self.scene_use_heightfield = bool(getattr(cfg, "scene_use_heightfield", False))
         self._scene_heightfield_done = False
+        self._terrain_v2_axis_logged = False
+        self._terrain_v2_axis_info = None
         if self.terrain_v2_enable:
             if not (getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None)):
                 raise RuntimeError(
@@ -412,6 +414,80 @@ class Terrain:
                                                                                             self.cfg.horizontal_scale,
                                                                                             self.cfg.vertical_scale,
                                                                                             self.cfg.slope_treshold)
+    def _map_tile_to_subterrain(self, terrain, tile: np.ndarray) -> None:
+        length_px = int(self.length_per_env_pixels)
+        width_px = int(self.width_per_env_pixels)
+        expected_tile = (length_px, width_px)
+        if tile.shape != expected_tile:
+            raise RuntimeError(
+                f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {expected_tile}. "
+                "backend 输出必须为 (length_px, width_px) 以保持 axis0=+Y 语义。"
+            )
+        buffer_shape = terrain.height_field_raw.shape
+        expected_len = expected_tile
+        expected_wid = (width_px, length_px)
+        axis_cfg = str(getattr(self.cfg, "terrain_v2_subterrain_axis", "auto")).lower()
+        if axis_cfg not in ("auto", "length_first", "width_first"):
+            raise RuntimeError(
+                f"terrain_v2_subterrain_axis invalid: {axis_cfg}. "
+                "supported: auto / length_first / width_first"
+            )
+
+        if axis_cfg == "length_first":
+            if buffer_shape != expected_len:
+                raise RuntimeError(
+                    f"terrain_v2 subterrain axis mismatch (length_first): "
+                    f"buffer_shape={buffer_shape}, expected={expected_len}. "
+                    "请检查 IsaacGym 版本或改用 width_first."
+                )
+            mapping = "identity"
+            terrain.height_field_raw[:] = tile
+        elif axis_cfg == "width_first":
+            if buffer_shape != expected_wid:
+                raise RuntimeError(
+                    f"terrain_v2 subterrain axis mismatch (width_first): "
+                    f"buffer_shape={buffer_shape}, expected={expected_wid}. "
+                    "请检查 IsaacGym 版本或改用 length_first."
+                )
+            mapping = "transpose"
+            terrain.height_field_raw[:] = tile.T
+        else:
+            if buffer_shape == expected_len:
+                mapping = "identity"
+                terrain.height_field_raw[:] = tile
+            elif buffer_shape == expected_wid:
+                mapping = "transpose"
+                terrain.height_field_raw[:] = tile.T
+            else:
+                raise RuntimeError(
+                    f"terrain_v2 subterrain axis auto-detect failed: "
+                    f"buffer_shape={buffer_shape}, expected={expected_len} or {expected_wid}. "
+                    "请设置 cfg.terrain.terrain_v2_subterrain_axis='length_first' 或 'width_first'。"
+                )
+
+        if not self._terrain_v2_axis_logged:
+            env_w = float(getattr(self.cfg, "terrain_width", self.env_width))
+            env_l = float(getattr(self.cfg, "terrain_length", self.env_length))
+            h_scale = float(getattr(self.cfg, "horizontal_scale", 0.1))
+            print(
+                "[TerrainV2] subterrain_axis_map "
+                f"env_dims=({env_l:.3f}m,{env_w:.3f}m) "
+                f"px=({length_px},{width_px}) "
+                f"tile_shape={tile.shape} buffer_shape={buffer_shape} "
+                f"axis_cfg={axis_cfg} mapping={mapping}"
+            )
+            self._terrain_v2_axis_logged = True
+            self._terrain_v2_axis_info = {
+                "env_length_m": env_l,
+                "env_width_m": env_w,
+                "length_px": length_px,
+                "width_px": width_px,
+                "tile_shape": tuple(tile.shape),
+                "buffer_shape": tuple(buffer_shape),
+                "axis_cfg": axis_cfg,
+                "mapping": mapping,
+                "h_scale": h_scale,
+            }
     
     def randomized_terrain(self):
         for k in range(self.cfg.num_sub_terrains):
@@ -495,11 +571,7 @@ class Terrain:
                 scene_choice = scene_generator._select_scene_type(rng, difficulty)
             scene = scene_generator.sample(scene_choice, difficulty, seed)
             tile = scene_backend.render(scene)
-            if tile.shape != terrain.height_field_raw.shape:
-                raise RuntimeError(
-                    f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
-                )
-            terrain.height_field_raw[:] = tile
+            self._map_tile_to_subterrain(terrain, tile)
             if self.scene_specs is not None:
                 self.scene_specs[i][j] = scene
             self.add_terrain_to_map(terrain, i, j)
@@ -527,11 +599,7 @@ class Terrain:
                     scene_choice = scene_generator._select_scene_type(rng, difficulty)
                 scene = scene_generator.sample(scene_choice, difficulty, seed)
                 tile = scene_backend.render(scene)
-                if tile.shape != terrain.height_field_raw.shape:
-                    raise RuntimeError(
-                        f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {terrain.height_field_raw.shape}"
-                    )
-                terrain.height_field_raw[:] = tile
+                self._map_tile_to_subterrain(terrain, tile)
                 if self.scene_specs is not None:
                     self.scene_specs[i][j] = scene
                 self.add_terrain_to_map(terrain, i, j)

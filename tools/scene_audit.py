@@ -171,6 +171,23 @@ def main() -> int:
             for diff in diffs:
                 results.append(_run_scene(scene_id, diff, seed))
 
+    axis_details: Dict[str, Dict] = {}
+    for scene_id in scenes:
+        try:
+            cfg = _load_cfg(scene_id)
+            length_m = float(cfg.terrain_length)
+            width_m = float(cfg.terrain_width)
+            h_scale = float(cfg.horizontal_scale)
+            axis_details[scene_id] = {
+                "env_length_m": length_m,
+                "env_width_m": width_m,
+                "length_px": int(round(length_m / h_scale)),
+                "width_px": int(round(width_m / h_scale)),
+                "horizontal_scale": h_scale,
+            }
+        except Exception as exc:
+            axis_details[scene_id] = {"error": str(exc)}
+
     summary = _summarize(results)
     for scene_id in scenes:
         if scene_id not in summary:
@@ -184,6 +201,12 @@ def main() -> int:
         "seed_start": args.seed_start,
         "seed_count": len(seeds),
         "difficulties": diffs,
+        "axis_convention": {
+            "tile_axis0": "+Y(length)",
+            "tile_axis1": "+X(width)",
+            "note": "scene_audit uses backend tiles only (no SubTerrain buffer).",
+        },
+        "axis_details": axis_details,
         "summary": summary,
         "samples": results,
     }

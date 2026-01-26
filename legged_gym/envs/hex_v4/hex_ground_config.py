@@ -114,6 +114,7 @@ class HexGroundCfg(LeggedRobotCfg):
         terrain_v2_min_rows = 1
         terrain_v2_min_cols = 1
         terrain_v2_shuffle_seed = None
+        terrain_v2_subterrain_axis = "auto"
         debug_allow_plane = False
         scene_use_heightfield = True
         scene_resample_on_reset = False

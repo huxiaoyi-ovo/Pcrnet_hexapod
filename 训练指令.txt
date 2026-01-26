@@ -1,29 +1,71 @@
 # 训练指令（terrain_v2 heightfield）
 
-## 说明
+## 说明（以当前代码为准）
 
-- S1/S2 已切换到 `terrain_v2`（单一真源入口 + 统一量化 + spawn/goal 清空）。
-- 运行时会打印一次：`[Init] 正在使用 terrain_v2 (...)`，用于确认未走旧链路。
-- 默认关闭外围墙（edge_pad=0），S1 仅靠走廊墙约束；env_origins 越界会直接报错。
+- 训练主线任务：`hex_s1` / `hex_s2` / `hex_calib`（均使用 terrain_v2 + heightfield）。
+- `hex_ground` 是容器任务，不再推荐；必须显式配置 `scene_type/scene_types`，否则直接报错。
+- 工具/调试任务：
+  - `hex_debug_plane`：plane，禁 jitter，适合相机/脚本快速验证。
+  - `hex_debug_heightfield`：debug_axis_calib 的 heightfield，覆盖非平整深度/渲染。
+- S3/S4/S5/S6 目前在 terrain_v2 中未实现，使用 `hex_s3..hex_s6` 会直接报错（Stage B/C）。
+
+## 场景描述（按当前实现）
+
+- debug_axis_calib：
+  - 仅沿 world +Y 方向做阶梯（x 方向恒定），用于坐标轴/量化/flatten 校准。
+  - 生成 `spawn_rect_hf/goal_rect_hf`，保证 spawn/goal 平整。
+- S1 Corridor Gate（`s1_corridor_gate`）：
+  - 走廊沿 +Y，宽度 1.6 → 1.2（difficulty 0→1）。
+  - 2–3 个门段，门洞宽 0.9 → 0.65；门段长度带抖动。
+  - 关键字段：`corridor_width`、`corridor_gates[*].door_width`。
+  - `gate_width` 就是门洞宽度（door_width），最终会写入 SceneSpec 的 door_width。
+  - 场景生成以 `SceneSpec.resolved_params.door_width` 为准，配置键只是输入名。
+- S2 Forest（`s2_forest`）：
+  - 柱/方块混合；数量 8–12 → 16–24。
+  - 柱：半径 0.12–0.18 → 0.14–0.22，高 0.30–0.35 → 0.35–0.40。
+  - 方块：尺寸 0.28–0.40 → 0.30–0.44，高 0.30–0.35 → 0.35–0.40。
+  - `block_ratio` 0.2 → 0.4；含可达性检查（BFS）。
+- S3/S4/S5/S6：当前实现为 stub，调用会报错（未实现）。
+
+## 关键约束与可复现性
+
+- terrain_v2 必须：
+  - `mesh_type='heightfield'`
+  - `scene_use_heightfield=True`
+  - `scene_type/scene_types` 显式设置
+- `spawn_rect_hf/goal_rect_hf` 为唯一权威，缺失会 fail-fast。
+- `door_width` 为门洞可通行宽度权威字段，缺失会 fail-fast。
+- 自动 grid（可复现）：
+  - `rows = max(min_rows, ceil(sqrt(num_envs)))`
+  - `cols = max(min_cols, ceil(num_envs/rows))`
+  - 若只指定 rows 或 cols，则仅补齐缺失的一边。
+- 启动日志会打印：grid、num_envs、auto_expand、shuffle、shuffle_seed、seed_range。
 
 ## 场景体检（scene_audit）
 
 python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 100 --seed-count 100 --difficulties 0,0.5,1 --out tools/scene_report.json
 python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 100 --seed-count 100 --difficulties 0,0.5,1 --write-golden tools/scene_golden.json
-- golden seeds 回归集：`tools/scene_golden.json`。
-- 备注：golden seeds 需在场景逻辑更新后重跑生成。
-- 备注：terrain_v2 tile 坐标系为中心原点（y∈[-L/2,+L/2]）。
+- `tools/scene_report.json` 会包含 door_width 统计（min/max/mean）。
+- golden seeds 更新场景逻辑后需重跑。
 
-## 最小验证（headless, 64 env, 3 iter）
+## 最小验证（headless smoke）
 
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-# 先跑 debug_axis_calib 校准，通过后再跑 S1/S2
+# debug 轴向校准（建议先跑）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s2 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless
-# S3/S5/S6/S4 留待阶段 B/C 接入后再验证
+# S1 / S2 快速冒烟
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 
 ## 建议训练入口（示例）
 
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid --task hex_s1 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid  --task hex_s1 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+
+## 工具/调试任务（不走主线约束）
+
+# 平面调试（稳定复现）
+python legged_gym/envs/hex_v4/hex_ground.py --task hex_debug_plane
+
+# 非平整深度/渲染覆盖（heightfield）
+python legged_gym/tests/visualize_rgb_depth_combined.py --frames 3
