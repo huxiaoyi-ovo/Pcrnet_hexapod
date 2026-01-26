@@ -779,6 +779,15 @@ class HexGround(LeggedRobot):
         updated = []
         for env_id in env_ids.tolist():
             scene_spec = self.scene_spec_cache[env_id]
+            if scene_spec is None:
+                terrain_type = getattr(self.cfg.terrain, "terrain_type", None)
+                if terrain_type is not None and str(terrain_type).lower() in ("s1", "s1_corridor_gate"):
+                    mesh_type = getattr(self.cfg.terrain, "mesh_type", None)
+                    raise RuntimeError(
+                        "S1 spawn requires scene_spec_cache but got None. "
+                        f"mesh_type={mesh_type} terrain_type={terrain_type}. "
+                        "请确保使用 classic heightfield 且 tile_meta 由 Terrain 生成。"
+                    )
             seed = 0
             if scene_spec is not None:
                 seed = int((scene_spec.layout_seed or 0) + env_id * 131)
@@ -1144,7 +1153,7 @@ class HexGround(LeggedRobot):
                         (len(s1_ids), 1),
                         device=self.device,
                     ).squeeze(1)
-                    yaw = (0.5 * math.pi - yaw_offset) + jitter
+                    yaw = yaw_offset + jitter
                     qz = torch.sin(0.5 * yaw)
                     qw = torch.cos(0.5 * yaw)
                     quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
