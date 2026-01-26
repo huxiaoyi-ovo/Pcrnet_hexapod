@@ -816,7 +816,21 @@ class Terrain:
         end_x = self.border + (i + 1) * self.length_per_env_pixels
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
-        self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
+        tile = terrain.height_field_raw
+        expected = (self.length_per_env_pixels, self.width_per_env_pixels)
+        alt = (self.width_per_env_pixels, self.length_per_env_pixels)
+        if tile.shape == expected:
+            tile_view = tile
+        elif tile.shape == alt:
+            tile_view = tile.T
+            if not getattr(self, "_tile_axis_warned", False):
+                print(f"[Warn] SubTerrain axis mismatch: tile_shape={tile.shape}, expected={expected}, alt={alt}. Using transpose.")
+                self._tile_axis_warned = True
+        else:
+            raise RuntimeError(
+                f"tile shape mismatch: got {tile.shape}, expected {expected} or {alt}"
+            )
+        self.height_field_raw[start_x: end_x, start_y:end_y] = tile_view
 
         env_origin_x = (j + 0.5) * self.env_width
         env_origin_y = (i + 0.5) * self.env_length
@@ -824,7 +838,7 @@ class Terrain:
         x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
         y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
         y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
-        env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
+        env_origin_z = np.max(tile_view[x1:x2, y1:y2]) * terrain.vertical_scale
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
