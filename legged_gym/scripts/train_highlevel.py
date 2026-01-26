@@ -1310,9 +1310,9 @@ def train(args):
     if args.task == "hex_terrain":
         raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1 / hex_s2 / hex_calib")
     if args.task in ("hex_s3", "hex_s4", "hex_s5", "hex_s6", "hex_mix_gate"):
-        raise RuntimeError(f"{args.task} 暂未实现（terrain_v2 Stage B/C 未完成），请先使用 hex_s1 / hex_s2 / hex_calib")
+        raise RuntimeError(f"{args.task} 暂未实现（classic terrain_type 尚未落地），请先使用 hex_s1 / hex_s2 / hex_calib")
     if args.task == "hex_ground":
-        print("[Warn] hex_ground 仅作为容器任务，请显式配置 scene_type/scene_types 或改用 hex_s1/hex_s2/hex_calib。")
+        print("[Warn] hex_ground 仅作为容器任务，请显式配置 terrain_type 或改用 hex_s1/hex_s2/hex_calib。")
     if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
         print(f"[Warn] 当前 task={args.task} 不在主线推荐列表（hex_s1/hex_s2/hex_calib）。")
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))

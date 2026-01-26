@@ -771,7 +771,7 @@ class LeggedRobot(BaseTask):
             pos = self.env_origins[i].clone()
             if getattr(self.cfg.terrain, "debug_allow_plane", False):
                 pass
-            elif not (getattr(self.cfg.terrain, "terrain_v2_enable", False) and getattr(self.cfg.terrain, "terrain_v2_no_jitter", False)):
+            else:
                 pos[:2] += torch_rand_float(-1., 1., (2,1), device=self.device).squeeze(1)
             start_pose.p = gymapi.Vec3(*pos)
                 
@@ -826,42 +826,19 @@ class LeggedRobot(BaseTask):
         if self.cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
             self.custom_origins = True
             self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
-            if getattr(self.cfg.terrain, "terrain_v2_enable", False):
-                if not getattr(self.cfg.terrain, "terrain_v2_unique_tiles", True):
-                    raise RuntimeError("terrain_v2 requires terrain_v2_unique_tiles=True (unique tiles only).")
-            if getattr(self.cfg.terrain, "terrain_v2_enable", False) and getattr(self.cfg.terrain, "terrain_v2_unique_tiles", False):
-                total_tiles = int(self.cfg.terrain.num_rows * self.cfg.terrain.num_cols)
-                if self.num_envs > total_tiles:
-                    raise RuntimeError(
-                        f"terrain_v2 unique_tiles requires grid >= num_envs: "
-                        f"num_envs={self.num_envs}, tiles={total_tiles}"
-                    )
-                env_ids = torch.arange(self.num_envs, device=self.device)
-                if getattr(self.cfg.terrain, "terrain_v2_shuffle_tiles", False):
-                    seed = getattr(self.cfg.terrain, "terrain_v2_shuffle_seed", None)
-                    if seed is None:
-                        seed = getattr(self.cfg.terrain, "scene_seed", 0)
-                    seed = int(seed or 0)
-                    gen = torch.Generator(device=self.device)
-                    gen.manual_seed(seed)
-                    env_ids = env_ids[torch.randperm(self.num_envs, device=self.device, generator=gen)]
-                rows = torch.div(env_ids, self.cfg.terrain.num_cols, rounding_mode='floor').to(torch.long)
-                cols = torch.remainder(env_ids, self.cfg.terrain.num_cols).to(torch.long)
-                self.terrain_levels = rows
-                self.terrain_types = cols
-                self.max_terrain_level = self.cfg.terrain.num_rows
-                self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
-                self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
-            else:
-                # put robots at the origins defined by the terrain
-                max_init_level = self.cfg.terrain.max_init_terrain_level
-                if not self.cfg.terrain.curriculum:
-                    max_init_level = self.cfg.terrain.num_rows - 1
-                self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
-                self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
-                self.max_terrain_level = self.cfg.terrain.num_rows
-                self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
-                self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
+            # put robots at the origins defined by the terrain (classic hexpod mapping)
+            max_init_level = self.cfg.terrain.max_init_terrain_level
+            if not self.cfg.terrain.curriculum:
+                max_init_level = self.cfg.terrain.num_rows - 1
+            self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
+            self.terrain_types = torch.div(
+                torch.arange(self.num_envs, device=self.device),
+                (self.num_envs / self.cfg.terrain.num_cols),
+                rounding_mode='floor'
+            ).to(torch.long)
+            self.max_terrain_level = self.cfg.terrain.num_rows
+            self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
+            self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
             if hasattr(self, "heightfield_bounds"):
                 x_min, x_max, y_min, y_max = self.heightfield_bounds
                 min_x = float(self.env_origins[:, 0].min().item())

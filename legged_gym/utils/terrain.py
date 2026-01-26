@@ -35,6 +35,275 @@ import isaacgym.terrain_utils as terrain_utils
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
 
+def _lerp(a, b, t: float) -> float:
+    return float(a + (b - a) * float(t))
+
+
+def _param_range(params_easy: dict, params_hard: dict, key: str, default, t: float):
+    return _lerp(params_easy.get(key, default), params_hard.get(key, default), t)
+
+
+def _int_range(params_easy: dict, params_hard: dict, key: str, default, t: float) -> int:
+    return int(round(_param_range(params_easy, params_hard, key, default, t)))
+
+
+def debug_axis_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """Only vary height along +Y (axis0), keep +X constant for axis calibration."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = terrain.height_field_raw
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+    step_count = max(1, _int_range(params_easy, params_hard, "step_count", 6, difficulty))
+    step_height = _param_range(params_easy, params_hard, "step_height", 0.08, difficulty)
+    edge_margin = _param_range(params_easy, params_hard, "edge_margin", 0.8, difficulty)
+
+    margin_cells = max(0, int(round(edge_margin / h_scale)))
+    usable_len = max(1, length_px - 2 * margin_cells)
+    step_len = max(1, int(np.floor(usable_len / float(step_count))))
+    height_cells = max(1, int(round(step_height / v_scale)))
+
+    for k in range(step_count):
+        y0 = margin_cells + k * step_len
+        y1 = margin_cells + (k + 1) * step_len
+        if k == step_count - 1:
+            y1 = max(y1, length_px - margin_cells)
+        y1 = min(y1, length_px)
+        height_field[y0:y1, :] = np.maximum(height_field[y0:y1, :], (k + 1) * height_cells)
+
+    terrain.meta = {
+        "scene_type": "debug_axis",
+        "params": {
+            "step_count": step_count,
+            "step_height": float(step_height),
+            "edge_margin": float(edge_margin),
+        },
+        "layout_seed": int(seed or 0),
+    }
+    return terrain
+
+
+def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S1 corridor + shrinking gates along +Y."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = terrain.height_field_raw
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    corridor_width = _param_range(params_easy, params_hard, "corridor_width", 1.6, difficulty)
+    door_width = _param_range(params_easy, params_hard, "gate_width", 0.9, difficulty)
+    gate_count_min = int(min(params_easy.get("gate_count", 2), params_hard.get("gate_count", 3)))
+    gate_count_max = int(max(params_easy.get("gate_count", 2), params_hard.get("gate_count", 3)))
+    gate_count = int(rng.randint(gate_count_min, gate_count_max + 1))
+    gate_length = _param_range(params_easy, params_hard, "gate_length", 1.0, difficulty)
+    gate_length_jitter = _param_range(params_easy, params_hard, "gate_length_jitter", 0.2, difficulty)
+    gate_spacing_min = _param_range(params_easy, params_hard, "gate_spacing_min", 0.6, difficulty)
+    gate_margin_y = _param_range(params_easy, params_hard, "gate_margin_y", 0.8, difficulty)
+    wall_height = _param_range(params_easy, params_hard, "wall_height_m", 0.5, difficulty)
+    wall_thickness = _param_range(params_easy, params_hard, "wall_thickness_m", 0.16, difficulty)
+    corridor_spawn_buffer = _param_range(params_easy, params_hard, "corridor_spawn_buffer", 0.6, difficulty)
+    corridor_spawn_span = _param_range(params_easy, params_hard, "corridor_spawn_span", 2.0, difficulty)
+    corridor_goal_min_offset = _param_range(params_easy, params_hard, "corridor_goal_min_offset", 2.0, difficulty)
+    corridor_goal_buffer = _param_range(params_easy, params_hard, "corridor_goal_buffer", 0.6, difficulty)
+    corridor_goal_margin = _param_range(params_easy, params_hard, "corridor_goal_margin", 0.2, difficulty)
+
+    door_width = min(door_width, corridor_width)
+    half_corridor = max(1, int(round(0.5 * corridor_width / h_scale)))
+    half_door = max(1, int(round(0.5 * door_width / h_scale)))
+    half_door = min(half_door, half_corridor)
+    wall_cells = max(1, int(round(wall_height / v_scale)))
+    wall_thickness_cells = max(1, int(round(wall_thickness / h_scale)))
+    center_x = width_px // 2
+
+    left = max(0, center_x - half_corridor)
+    right = min(width_px, center_x + half_corridor)
+    left_wall_start = max(0, left - wall_thickness_cells)
+    left_wall_end = left
+    right_wall_start = right
+    right_wall_end = min(width_px, right + wall_thickness_cells)
+    if left_wall_end > left_wall_start:
+        height_field[:, left_wall_start:left_wall_end] = wall_cells
+    if right_wall_end > right_wall_start:
+        height_field[:, right_wall_start:right_wall_end] = wall_cells
+
+    length_m = length_px * h_scale
+    gate_length = max(0.1, gate_length + rng.uniform(-gate_length_jitter, gate_length_jitter))
+    y_min = -0.5 * length_m + gate_margin_y
+    y_max = 0.5 * length_m - gate_margin_y
+    gate_centers = []
+    for _ in range(gate_count):
+        placed = False
+        for _ in range(50):
+            y_center = rng.uniform(y_min, y_max)
+            if all(abs(y_center - c) >= (gate_spacing_min + 0.5 * gate_length) for c in gate_centers):
+                gate_centers.append(y_center)
+                placed = True
+                break
+        if not placed:
+            break
+
+    gates_meta = []
+    for y_center in gate_centers:
+        y0 = y_center - 0.5 * gate_length
+        y1 = y_center + 0.5 * gate_length
+        y0_idx = max(0, int(round((y0 + 0.5 * length_m) / h_scale)))
+        y1_idx = min(length_px, int(round((y1 + 0.5 * length_m) / h_scale)))
+        left_gate = max(left, center_x - half_door)
+        right_gate = min(right, center_x + half_door)
+        if left_gate > left:
+            height_field[y0_idx:y1_idx, left:left_gate] = wall_cells
+        if right > right_gate:
+            height_field[y0_idx:y1_idx, right_gate:right] = wall_cells
+        gates_meta.append({"y0": float(y_center), "length": float(gate_length), "door_width": float(door_width)})
+
+    terrain.meta = {
+        "scene_type": "s1_corridor_gate",
+        "params": {
+            "corridor_length": float(length_m),
+            "corridor_width_nom": float(corridor_width),
+            "corridor_gates": gates_meta,
+            "corridor_x_center": 0.0,
+            "corridor_spawn_buffer": float(corridor_spawn_buffer),
+            "corridor_spawn_span": float(corridor_spawn_span),
+            "corridor_goal_min_offset": float(corridor_goal_min_offset),
+            "corridor_goal_buffer": float(corridor_goal_buffer),
+            "corridor_goal_margin": float(corridor_goal_margin),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
+def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S2 forest: poles + blocks with a clear band around x=0."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = terrain.height_field_raw
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    count_min = _int_range(params_easy, params_hard, "count_min", 8, difficulty)
+    count_max = _int_range(params_easy, params_hard, "count_max", 12, difficulty)
+    if count_max < count_min:
+        count_max = count_min
+    total_count = int(rng.randint(count_min, count_max + 1))
+
+    block_ratio = _param_range(params_easy, params_hard, "block_ratio", 0.2, difficulty)
+    block_ratio = float(np.clip(block_ratio, 0.0, 1.0))
+    num_blocks = int(round(total_count * block_ratio))
+    num_poles = max(0, total_count - num_blocks)
+
+    pole_radius_min = _param_range(params_easy, params_hard, "pole_radius_min", 0.12, difficulty)
+    pole_radius_max = _param_range(params_easy, params_hard, "pole_radius_max", 0.18, difficulty)
+    pole_height_min = _param_range(params_easy, params_hard, "pole_height_min", 0.30, difficulty)
+    pole_height_max = _param_range(params_easy, params_hard, "pole_height_max", 0.35, difficulty)
+
+    block_size_min = _param_range(params_easy, params_hard, "block_size_min", 0.28, difficulty)
+    block_size_max = _param_range(params_easy, params_hard, "block_size_max", 0.40, difficulty)
+    block_height_min = _param_range(params_easy, params_hard, "block_height_min", 0.30, difficulty)
+    block_height_max = _param_range(params_easy, params_hard, "block_height_max", 0.35, difficulty)
+
+    min_dist = _param_range(params_easy, params_hard, "min_dist", 0.45, difficulty)
+    clear_band = max(
+        float(params_easy.get("spawn_clear", 1.0)),
+        float(params_hard.get("spawn_clear", 1.0)),
+        float(params_easy.get("goal_clear", 1.0)),
+        float(params_hard.get("goal_clear", 1.0)),
+    )
+
+    length_m = length_px * h_scale
+    width_m = width_px * h_scale
+    max_obs = max(pole_radius_max, 0.5 * block_size_max)
+    margin = max_obs + 0.1
+
+    centers = []
+    shapes = []
+    for _ in range(num_poles + num_blocks):
+        placed = False
+        for _ in range(60):
+            x = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
+            if abs(x) < 0.5 * clear_band:
+                continue
+            y = rng.uniform(-0.5 * length_m + margin, 0.5 * length_m - margin)
+            if min_dist > 0.0:
+                if any((x - cx) ** 2 + (y - cy) ** 2 < min_dist ** 2 for cx, cy in centers):
+                    continue
+            centers.append((x, y))
+            placed = True
+            break
+        if not placed:
+            centers.append((None, None))
+    centers = [c for c in centers if c[0] is not None]
+
+    shapes = (["pole"] * num_poles) + (["block"] * num_blocks)
+    rng.shuffle(shapes)
+    shapes = shapes[: len(centers)]
+    actual_total = len(centers)
+    actual_num_poles = int(sum(1 for s in shapes if s == "pole"))
+    actual_num_blocks = int(actual_total - actual_num_poles)
+    actual_block_ratio = float(actual_num_blocks / actual_total) if actual_total > 0 else 0.0
+
+    for (x, y), shape in zip(centers, shapes):
+        if shape == "pole":
+            radius = rng.uniform(pole_radius_min, pole_radius_max)
+            height_m = rng.uniform(pole_height_min, pole_height_max)
+            rad_cells = max(1, int(round(radius / h_scale)))
+            height_cells = max(1, int(round(height_m / v_scale)))
+            cx = int(round((x + 0.5 * width_m) / h_scale))
+            cy = int(round((y + 0.5 * length_m) / h_scale))
+            x1 = max(0, cx - rad_cells)
+            x2 = min(width_px, cx + rad_cells + 1)
+            y1 = max(0, cy - rad_cells)
+            y2 = min(length_px, cy + rad_cells + 1)
+            xs = np.arange(x1, x2)
+            ys = np.arange(y1, y2)
+            grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
+            mask = (grid_x - cx) ** 2 + (grid_y - cy) ** 2 <= rad_cells * rad_cells
+            patch = height_field[y1:y2, x1:x2]
+            patch[mask] = np.maximum(patch[mask], height_cells)
+            height_field[y1:y2, x1:x2] = patch
+        else:
+            size = rng.uniform(block_size_min, block_size_max)
+            height_m = rng.uniform(block_height_min, block_height_max)
+            hx = max(1, int(round(0.5 * size / h_scale)))
+            hy = max(1, int(round(0.5 * size / h_scale)))
+            height_cells = max(1, int(round(height_m / v_scale)))
+            cx = int(round((x + 0.5 * width_m) / h_scale))
+            cy = int(round((y + 0.5 * length_m) / h_scale))
+            x1 = max(0, cx - hx)
+            x2 = min(width_px, cx + hx + 1)
+            y1 = max(0, cy - hy)
+            y2 = min(length_px, cy + hy + 1)
+            height_field[y1:y2, x1:x2] = np.maximum(height_field[y1:y2, x1:x2], height_cells)
+
+    terrain.meta = {
+        "scene_type": "s2_forest",
+        "params": {
+            "count_total": int(actual_total),
+            "num_poles": int(actual_num_poles),
+            "num_blocks": int(actual_num_blocks),
+            "block_ratio": float(actual_block_ratio),
+            "clear_band": float(clear_band),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
 def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain):
     """固定布局地形：中心围挡+通道+低障碍"""
     # 基础网格信息
@@ -287,337 +556,64 @@ def _apply_mixed_overlays(terrain, difficulty: float, cfg: LeggedRobotCfg.terrai
 
 class Terrain:
     def __init__(self, cfg: LeggedRobotCfg.terrain, num_robots) -> None:
-
         self.cfg = cfg
         self.num_robots = num_robots
         self.type = cfg.mesh_type
-        self.terrain_v2_enable = bool(getattr(cfg, "terrain_v2_enable", False))
-        if self.type in ["none", 'plane']:
+        if self.type in ["none", "plane"]:
             return
         self.env_length = cfg.terrain_length
         self.env_width = cfg.terrain_width
-        rows = int(getattr(cfg, "num_rows", 0) or 0)
-        cols = int(getattr(cfg, "num_cols", 0) or 0)
-        auto_rows = rows <= 0
-        auto_cols = cols <= 0
-        auto_grid = False
-        max_rows = int(getattr(cfg, "terrain_v2_max_rows", 0) or 0)
-        max_rows_applied = False
-        max_tot_rows = int(getattr(cfg, "terrain_v2_max_tot_rows", 0) or 0)
-        max_tot_cols = int(getattr(cfg, "terrain_v2_max_tot_cols", 0) or 0)
-        max_tot_applied = False
-        expanded_cols = False
-        if self.terrain_v2_enable and num_robots is not None:
-            min_rows = int(getattr(cfg, "terrain_v2_min_rows", 1) or 1)
-            min_cols = int(getattr(cfg, "terrain_v2_min_cols", 1) or 1)
-            if auto_rows and auto_cols:
-                rows = max(min_rows, int(np.ceil(np.sqrt(float(num_robots)))))
-                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
-                auto_grid = True
-            elif auto_rows:
-                rows = max(min_rows, int(np.ceil(float(num_robots) / float(cols))))
-                auto_grid = True
-            elif auto_cols:
-                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
-                auto_grid = True
-            if auto_grid:
-                cfg.num_rows = rows
-                cfg.num_cols = cols
-            if max_rows > 0 and rows > max_rows:
-                old_rows = rows
-                old_cols = cols
-                rows = max_rows
-                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
-                cfg.num_rows = rows
-                cfg.num_cols = cols
-                max_rows_applied = True
-                print(
-                    f"[TerrainV2] max_rows clamp: rows {old_rows} -> {rows}, "
-                    f"cols {old_cols} -> {cols} (max_rows={max_rows})"
-                )
-            if max_tot_rows > 0 or max_tot_cols > 0:
-                length_per_env_pixels = int(self.env_length / cfg.horizontal_scale)
-                width_per_env_pixels = int(self.env_width / cfg.horizontal_scale)
-                border_px = int(cfg.border_size / cfg.horizontal_scale)
 
-                if length_per_env_pixels <= 0 or width_per_env_pixels <= 0:
-                    raise RuntimeError(
-                        "terrain_v2 invalid pixel size: "
-                        f"length_px={length_per_env_pixels}, width_px={width_per_env_pixels}. "
-                        "请检查 terrain_length/terrain_width 与 horizontal_scale."
-                    )
+        if int(getattr(cfg, "num_rows", 0) or 0) <= 0 or int(getattr(cfg, "num_cols", 0) or 0) <= 0:
+            raise RuntimeError(
+                f"classic terrain requires num_rows/num_cols > 0, "
+                f"got num_rows={getattr(cfg, 'num_rows', None)}, num_cols={getattr(cfg, 'num_cols', None)}"
+            )
 
-                min_tot_rows = length_per_env_pixels + 2 * border_px
-                min_tot_cols = width_per_env_pixels + 2 * border_px
-                if max_tot_rows > 0 and max_tot_rows < min_tot_rows:
-                    raise RuntimeError(
-                        "terrain_v2_max_tot_rows too small for a single tile: "
-                        f"max_tot_rows={max_tot_rows}, min_required={min_tot_rows}. "
-                        "请放宽阈值或调大 horizontal_scale（仅 calib）。"
-                    )
-                if max_tot_cols > 0 and max_tot_cols < min_tot_cols:
-                    raise RuntimeError(
-                        "terrain_v2_max_tot_cols too small for a single tile: "
-                        f"max_tot_cols={max_tot_cols}, min_required={min_tot_cols}. "
-                        "请放宽阈值或调大 horizontal_scale（仅 calib）。"
-                    )
-
-                def _tot_shape(r, c):
-                    return (
-                        int(r * length_per_env_pixels) + 2 * border_px,
-                        int(c * width_per_env_pixels) + 2 * border_px,
-                    )
-
-                max_rows_allowed = None
-                max_cols_allowed = None
-                if max_tot_rows > 0:
-                    max_rows_allowed = max(
-                        1,
-                        int(np.floor((max_tot_rows - 2 * border_px) / float(length_per_env_pixels))),
-                    )
-                if max_tot_cols > 0:
-                    max_cols_allowed = max(
-                        1,
-                        int(np.floor((max_tot_cols - 2 * border_px) / float(width_per_env_pixels))),
-                    )
-
-                before_rows = rows
-                before_cols = cols
-                before_tot_rows, before_tot_cols = _tot_shape(rows, cols)
-                for _ in range(8):
-                    tot_rows, tot_cols = _tot_shape(rows, cols)
-                    changed = False
-                    if max_tot_rows > 0 and tot_rows > max_tot_rows:
-                        rows = min(rows, max_rows_allowed)
-                        rows = max(min_rows, rows)
-                        cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
-                        cfg.num_rows = rows
-                        cfg.num_cols = cols
-                        max_tot_applied = True
-                        changed = True
-                    if max_tot_cols > 0 and tot_cols > max_tot_cols:
-                        cols = min(cols, max_cols_allowed)
-                        cols = max(min_cols, cols)
-                        rows = max(min_rows, int(np.ceil(float(num_robots) / float(cols))))
-                        cfg.num_rows = rows
-                        cfg.num_cols = cols
-                        max_tot_applied = True
-                        changed = True
-                    if not changed:
-                        break
-                    if max_tot_rows > 0 and rows > max_rows_allowed:
-                        raise RuntimeError(
-                            "terrain_v2 max_tot constraint unsatisfied (rows): "
-                            f"num_envs={num_robots}, rows={rows}, max_rows_allowed={max_rows_allowed}. "
-                            "请降低 num_envs，或放宽 max_tot_rows，或调大 horizontal_scale（仅 calib）。"
-                        )
-                    if max_tot_cols > 0 and cols > max_cols_allowed:
-                        raise RuntimeError(
-                            "terrain_v2 max_tot constraint unsatisfied (cols): "
-                            f"num_envs={num_robots}, cols={cols}, max_cols_allowed={max_cols_allowed}. "
-                            "请降低 num_envs，或放宽 max_tot_cols，或调大 horizontal_scale（仅 calib）。"
-                        )
-                tot_rows, tot_cols = _tot_shape(rows, cols)
-                if (max_tot_rows > 0 and tot_rows > max_tot_rows) or (max_tot_cols > 0 and tot_cols > max_tot_cols):
-                    raise RuntimeError(
-                        "terrain_v2 max_tot constraint unsatisfied after clamp: "
-                        f"tot_rows={tot_rows}, tot_cols={tot_cols}, "
-                        f"max_tot_rows={max_tot_rows}, max_tot_cols={max_tot_cols}. "
-                        "请降低 num_envs，或放宽 max_tot_*，或调大 horizontal_scale（仅 calib）。"
-                    )
-                if max_tot_applied:
-                    after_tot_rows, after_tot_cols = tot_rows, tot_cols
-                    print(
-                        f"[TerrainV2] max_tot clamp: rows {before_rows} -> {rows}, "
-                        f"cols {before_cols} -> {cols}, "
-                        f"tot_rows {before_tot_rows} -> {after_tot_rows}, "
-                        f"tot_cols {before_tot_cols} -> {after_tot_cols} "
-                        f"(max_tot_rows={max_tot_rows}, max_tot_cols={max_tot_cols})"
-                    )
-        if num_robots is not None and rows > 0 and cols > 0:
-            required_cols = int(np.ceil(float(num_robots) / float(rows)))
-            if required_cols > cols:
-                auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
-                if not auto_expand:
-                    raise RuntimeError(
-                        f"num_envs={num_robots} exceeds terrain grid: "
-                        f"num_rows={rows}, num_cols={cols} (need num_cols>={required_cols})"
-                    )
-                old_cols = cols
-                cfg.num_cols = required_cols
-                if hasattr(cfg, "num_sub_terrains"):
-                    cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
-                if hasattr(cfg, "terrain_proportions") and cfg.terrain_proportions is not None:
-                    proportions = list(cfg.terrain_proportions)
-                    if len(proportions) < cfg.num_cols:
-                        fill = proportions[-1] if len(proportions) > 0 else 1.0
-                        proportions.extend([fill] * (cfg.num_cols - len(proportions)))
-                        cfg.terrain_proportions = proportions
-                print(f"[Warn] terrain grid expanded: num_cols {old_cols} -> {cfg.num_cols} (num_envs={num_robots})")
-                expanded_cols = True
+        cfg.terrain_proportions = np.array(cfg.terrain_proportions) / np.sum(cfg.terrain_proportions)
         self.proportions = [np.sum(cfg.terrain_proportions[:i+1]) for i in range(len(cfg.terrain_proportions))]
-
         self.cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
         self.env_origins = np.zeros((cfg.num_rows, cfg.num_cols, 3))
+        self.tile_meta = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
 
         self.width_per_env_pixels = int(self.env_width / cfg.horizontal_scale)
         self.length_per_env_pixels = int(self.env_length / cfg.horizontal_scale)
 
-        self.border = int(cfg.border_size/self.cfg.horizontal_scale)
+        self.border = int(cfg.border_size / self.cfg.horizontal_scale)
         self.tot_cols = int(cfg.num_cols * self.width_per_env_pixels) + 2 * self.border
         self.tot_rows = int(cfg.num_rows * self.length_per_env_pixels) + 2 * self.border
 
-        self.height_field_raw = np.zeros((self.tot_rows , self.tot_cols), dtype=np.int16)
-        self.scene_specs = None
-        self.scene_generator = None
-        self.scene_backend = None
-        self.scene_use_heightfield = bool(getattr(cfg, "scene_use_heightfield", False))
-        self._scene_heightfield_done = False
-        self._terrain_v2_axis_logged = False
-        self._terrain_v2_axis_info = None
-        if self.terrain_v2_enable:
-            if not (getattr(cfg, "scene_type", None) or getattr(cfg, "scene_types", None)):
-                raise RuntimeError(
-                    "terrain_v2 enabled but scene_type(s) not set. "
-                    "hex_ground 是容器任务，请显式使用 --task hex_s1 或 --task hex_debug_plane。 "
-                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
-                    "或 python legged_gym/scripts/train_highlevel.py "
-                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
-                )
-            if self.type != "heightfield":
-                raise RuntimeError("terrain_v2 requires mesh_type='heightfield'")
-            if not self.scene_use_heightfield:
-                raise RuntimeError("terrain_v2 requires scene_use_heightfield=True")
-            from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
-            from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
-            env_dims = {"width": self.env_width, "length": self.env_length}
-            robot_env = {"clearance": float(getattr(cfg, "scene_clearance", 0.27))}
-            self.scene_generator = SceneGenerator(cfg, env_dims=env_dims, robot_envelope=robot_env)
-            self.scene_specs = [[None for _ in range(cfg.num_cols)] for _ in range(cfg.num_rows)]
-            self.scene_backend = HeightfieldBackend(self.env_width, self.env_length,
-                                                   self.cfg.horizontal_scale, self.cfg.vertical_scale)
-            base_seed = int(getattr(cfg, "scene_seed", 0) or 0)
-            max_seed = base_seed + max(0, cfg.num_rows - 1) * 1000 + max(0, cfg.num_cols - 1) * 17
-            scene_tag = getattr(cfg, "scene_type", None) or ",".join(getattr(cfg, "scene_types", []) or []) or "unknown"
-            shuffle = bool(getattr(cfg, "terrain_v2_shuffle_tiles", False))
-            shuffle_seed = getattr(cfg, "terrain_v2_shuffle_seed", None)
-            if shuffle_seed is None:
-                shuffle_seed = getattr(cfg, "scene_seed", 0)
-            shuffle_seed = int(shuffle_seed or 0)
-            auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
-            grid_order = "user->auto->max_rows->max_tot"
-            print(
-                f"[TerrainV2] scene={scene_tag} grid={cfg.num_rows}x{cfg.num_cols} "
-                f"num_envs={num_robots} auto_grid={auto_grid} auto_expand={auto_expand} "
-                f"expanded_cols={expanded_cols} shuffle={shuffle} shuffle_seed={shuffle_seed} "
-                f"max_rows={max_rows} max_rows_applied={max_rows_applied} "
-                f"max_tot_rows={max_tot_rows} max_tot_cols={max_tot_cols} "
-                f"max_tot_applied={max_tot_applied} "
-                f"grid_order={grid_order} seed_range=[{base_seed},{max_seed}]"
-            )
-            if cfg.curriculum:
-                self.scene_heightfield_curriculum()
-            else:
-                self.scene_heightfield_randomized()
-            self._scene_heightfield_done = True
-        if not self._scene_heightfield_done:
-            if cfg.curriculum:
-                self.curiculum()
-            elif cfg.selected:
-                self.selected_terrain()
-            else:
-                self.randomized_terrain()
-        
-        self.heightsamples = np.ascontiguousarray(self.height_field_raw, dtype=np.int16)
-        if self.type=="trimesh":
-            self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(   self.height_field_raw,
-                                                                                            self.cfg.horizontal_scale,
-                                                                                            self.cfg.vertical_scale,
-                                                                                            self.cfg.slope_treshold)
-    def _map_tile_to_subterrain(self, terrain, tile: np.ndarray) -> None:
-        length_px = int(self.length_per_env_pixels)
-        width_px = int(self.width_per_env_pixels)
-        expected_tile = (length_px, width_px)
-        if tile.shape != expected_tile:
-            raise RuntimeError(
-                f"terrain_v2 tile shape mismatch: got {tile.shape}, expected {expected_tile}. "
-                "backend 输出必须为 (length_px, width_px) 以保持 axis0=+Y 语义。"
-            )
-        buffer_shape = terrain.height_field_raw.shape
-        expected_len = expected_tile
-        expected_wid = (width_px, length_px)
-        axis_cfg = str(getattr(self.cfg, "terrain_v2_subterrain_axis", "auto")).lower()
-        if axis_cfg not in ("auto", "length_first", "width_first"):
-            raise RuntimeError(
-                f"terrain_v2_subterrain_axis invalid: {axis_cfg}. "
-                "supported: auto / length_first / width_first"
-            )
-
-        if axis_cfg == "length_first":
-            if buffer_shape != expected_len:
-                raise RuntimeError(
-                    f"terrain_v2 subterrain axis mismatch (length_first): "
-                    f"buffer_shape={buffer_shape}, expected={expected_len}. "
-                    "请检查 IsaacGym 版本或改用 width_first."
-                )
-            mapping = "identity"
-            terrain.height_field_raw[:] = tile
-        elif axis_cfg == "width_first":
-            if buffer_shape != expected_wid:
-                raise RuntimeError(
-                    f"terrain_v2 subterrain axis mismatch (width_first): "
-                    f"buffer_shape={buffer_shape}, expected={expected_wid}. "
-                    "请检查 IsaacGym 版本或改用 length_first."
-                )
-            mapping = "transpose"
-            terrain.height_field_raw[:] = tile.T
+        self.height_field_raw = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
+        if cfg.curriculum:
+            self.curiculum()
+        elif cfg.selected:
+            self.selected_terrain()
         else:
-            if buffer_shape == expected_len:
-                mapping = "identity"
-                terrain.height_field_raw[:] = tile
-            elif buffer_shape == expected_wid:
-                mapping = "transpose"
-                terrain.height_field_raw[:] = tile.T
-            else:
-                raise RuntimeError(
-                    f"terrain_v2 subterrain axis auto-detect failed: "
-                    f"buffer_shape={buffer_shape}, expected={expected_len} or {expected_wid}. "
-                    "请设置 cfg.terrain.terrain_v2_subterrain_axis='length_first' 或 'width_first'。"
-                )
+            self.randomized_terrain()
 
-        if not self._terrain_v2_axis_logged:
-            env_w = float(getattr(self.cfg, "terrain_width", self.env_width))
-            env_l = float(getattr(self.cfg, "terrain_length", self.env_length))
-            h_scale = float(getattr(self.cfg, "horizontal_scale", 0.1))
-            print(
-                "[TerrainV2] subterrain_axis_map "
-                f"env_dims=({env_l:.3f}m,{env_w:.3f}m) "
-                f"px=({length_px},{width_px}) "
-                f"tile_shape={tile.shape} buffer_shape={buffer_shape} "
-                f"axis_cfg={axis_cfg} mapping={mapping}"
+        self.heightsamples = np.ascontiguousarray(self.height_field_raw, dtype=np.int16)
+        if self.type == "trimesh":
+            self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(
+                self.height_field_raw,
+                self.cfg.horizontal_scale,
+                self.cfg.vertical_scale,
+                self.cfg.slope_treshold,
             )
-            self._terrain_v2_axis_logged = True
-            self._terrain_v2_axis_info = {
-                "env_length_m": env_l,
-                "env_width_m": env_w,
-                "length_px": length_px,
-                "width_px": width_px,
-                "tile_shape": tuple(tile.shape),
-                "buffer_shape": tuple(buffer_shape),
-                "axis_cfg": axis_cfg,
-                "mapping": mapping,
-                "h_scale": h_scale,
-            }
-    
+
+    def _tile_seed(self, i: int, j: int) -> int:
+        base = int(getattr(self.cfg, "terrain_seed", 0) or 0)
+        return base + i * 1000 + j * 17
     def randomized_terrain(self):
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
 
-            choice = np.random.uniform(0, 1)
-            # difficulty = np.random.choice([0.5, 0.75, 0.9])#对于六足，难度等级太高
-            difficulty = np.random.choice([0.1,0.3])
-            terrain = self.make_terrain(choice, difficulty)
+            seed = self._tile_seed(i, j)
+            rng = np.random.RandomState(seed)
+            choice = rng.uniform(0.0, 1.0)
+            difficulty = rng.uniform(0.0, 1.0)
+            terrain = self.make_terrain(choice, difficulty, rng=rng, seed=seed, row=i, col=j)
+            self.tile_meta[i][j] = getattr(terrain, "meta", None)
             self.add_terrain_to_map(terrain, i, j)
         
     def curiculum(self):
@@ -625,107 +621,17 @@ class Terrain:
             for i in range(self.cfg.num_rows):
                 difficulty = i / max(1, (self.cfg.num_rows - 1))
                 choice = j / self.cfg.num_cols + 0.001
-                terrain = self.make_terrain(choice, difficulty)
-                self.add_terrain_to_map(terrain, i, j)
-
-    def scene_randomized(self):
-        raise RuntimeError("legacy scene system removed; use terrain_v2 heightfield")
-        for k in range(self.cfg.num_sub_terrains):
-            (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
-            difficulty = np.random.uniform(0.0, 1.0)
-            terrain = terrain_utils.SubTerrain(
-                "terrain",
-                width=self.width_per_env_pixels,
-                length=self.length_per_env_pixels,
-                vertical_scale=self.cfg.vertical_scale,
-                horizontal_scale=self.cfg.horizontal_scale,
-            )
-            seed = self._scene_seed(i, j)
-            scene_spec = None
-            if self.scene_specs is not None:
-                self.scene_specs[i][j] = scene_spec
-            self.add_terrain_to_map(terrain, i, j)
-
-    def scene_curriculum(self):
-        raise RuntimeError("legacy scene system removed; use terrain_v2 heightfield")
-        for j in range(self.cfg.num_cols):
-            for i in range(self.cfg.num_rows):
-                difficulty = i / max(1, (self.cfg.num_rows - 1))
-                terrain = terrain_utils.SubTerrain(
-                    "terrain",
-                    width=self.width_per_env_pixels,
-                    length=self.length_per_env_pixels,
-                    vertical_scale=self.cfg.vertical_scale,
-                    horizontal_scale=self.cfg.horizontal_scale,
-                )
-                seed = self._scene_seed(i, j)
-                scene_spec = None
-                if self.scene_specs is not None:
-                    self.scene_specs[i][j] = scene_spec
-            self.add_terrain_to_map(terrain, i, j)
-
-    def _scene_seed(self, i: int, j: int) -> int:
-        base = int(getattr(self.cfg, "scene_seed", 0) or 0)
-        return base + i * 1000 + j * 17
-
-    def scene_heightfield_randomized(self):
-        scene_type = getattr(self.cfg, "scene_type", None)
-        scene_generator = self.scene_generator
-        scene_backend = self.scene_backend
-        if scene_generator is None or scene_backend is None:
-            raise RuntimeError("terrain_v2 not initialized")
-        for k in range(self.cfg.num_sub_terrains):
-            (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
-            difficulty = np.random.uniform(0.0, 1.0)
-            terrain = terrain_utils.SubTerrain(
-                "terrain",
-                width=self.width_per_env_pixels,
-                length=self.length_per_env_pixels,
-                vertical_scale=self.cfg.vertical_scale,
-                horizontal_scale=self.cfg.horizontal_scale,
-            )
-            seed = self._scene_seed(i, j)
-            rng = np.random.RandomState(seed)
-            scene_choice = scene_type
-            if scene_choice is None:
-                scene_choice = scene_generator._select_scene_type(rng, difficulty)
-            scene = scene_generator.sample(scene_choice, difficulty, seed)
-            tile = scene_backend.render(scene)
-            self._map_tile_to_subterrain(terrain, tile)
-            if self.scene_specs is not None:
-                self.scene_specs[i][j] = scene
-            self.add_terrain_to_map(terrain, i, j)
-
-    def scene_heightfield_curriculum(self):
-        scene_type = getattr(self.cfg, "scene_type", None)
-        scene_generator = self.scene_generator
-        scene_backend = self.scene_backend
-        if scene_generator is None or scene_backend is None:
-            raise RuntimeError("terrain_v2 not initialized")
-        for j in range(self.cfg.num_cols):
-            for i in range(self.cfg.num_rows):
-                difficulty = i / max(1, (self.cfg.num_rows - 1))
-                terrain = terrain_utils.SubTerrain(
-                    "terrain",
-                    width=self.width_per_env_pixels,
-                    length=self.length_per_env_pixels,
-                    vertical_scale=self.cfg.vertical_scale,
-                    horizontal_scale=self.cfg.horizontal_scale,
-                )
-                seed = self._scene_seed(i, j)
+                seed = self._tile_seed(i, j)
                 rng = np.random.RandomState(seed)
-                scene_choice = scene_type
-                if scene_choice is None:
-                    scene_choice = scene_generator._select_scene_type(rng, difficulty)
-                scene = scene_generator.sample(scene_choice, difficulty, seed)
-                tile = scene_backend.render(scene)
-                self._map_tile_to_subterrain(terrain, tile)
-                if self.scene_specs is not None:
-                    self.scene_specs[i][j] = scene
+                terrain = self.make_terrain(choice, difficulty, rng=rng, seed=seed, row=i, col=j)
+                self.tile_meta[i][j] = getattr(terrain, "meta", None)
                 self.add_terrain_to_map(terrain, i, j)
 
     def selected_terrain(self):
-        terrain_type = self.cfg.terrain_kwargs.pop('type')
+        terrain_type = self.cfg.terrain_kwargs.get('type', None)
+        if terrain_type is None:
+            raise RuntimeError("selected terrain requires terrain_kwargs['type']")
+        terrain_kwargs = {k: v for k, v in self.cfg.terrain_kwargs.items() if k != "type"}
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
@@ -736,15 +642,32 @@ class Terrain:
                               vertical_scale=self.cfg.vertical_scale,
                               horizontal_scale=self.cfg.horizontal_scale)
 
-            eval(terrain_type)(terrain, **self.cfg.terrain_kwargs)
+            eval(terrain_type)(terrain, **terrain_kwargs)
+            self.tile_meta[i][j] = getattr(terrain, "meta", None)
             self.add_terrain_to_map(terrain, i, j)
     
-    def make_terrain(self, choice, difficulty):
-        terrain = terrain_utils.SubTerrain(   "terrain",
-                                width=self.width_per_env_pixels,
-                                length=self.length_per_env_pixels,
-                                vertical_scale=self.cfg.vertical_scale,
-                                horizontal_scale=self.cfg.horizontal_scale)
+    def make_terrain(self, choice, difficulty, rng=None, seed=None, row=None, col=None):
+        rng = rng if rng is not None else np.random
+        terrain = terrain_utils.SubTerrain(
+            "terrain",
+            width=self.width_per_env_pixels,
+            length=self.length_per_env_pixels,
+            vertical_scale=self.cfg.vertical_scale,
+            horizontal_scale=self.cfg.horizontal_scale,
+        )
+        terrain_type = getattr(self.cfg, "terrain_type", None)
+        if terrain_type:
+            terrain_type = str(terrain_type).lower()
+            if terrain_type in ("debug_axis", "calib_axis"):
+                return debug_axis_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s1", "s1_corridor_gate"):
+                return s1_corridor_gate_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s2", "s2_forest"):
+                return s2_forest_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            raise RuntimeError(
+                f"unsupported terrain_type={terrain_type}. "
+                "supported: debug_axis, s1_corridor_gate, s2_forest"
+            )
         if getattr(self.cfg, "fixed_layout_enable", False):
             return fixed_layout_terrain(terrain, difficulty, self.cfg)
         #核心参数
@@ -893,43 +816,16 @@ class Terrain:
         end_x = self.border + (i + 1) * self.length_per_env_pixels
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
-        if self.terrain_v2_enable and self.scene_use_heightfield:
-            length_px = int(self.length_per_env_pixels)
-            width_px = int(self.width_per_env_pixels)
-            expected_len = (length_px, width_px)
-            expected_wid = (width_px, length_px)
-            buffer_shape = terrain.height_field_raw.shape
-            if buffer_shape == expected_len:
-                tile_view = terrain.height_field_raw
-            elif buffer_shape == expected_wid:
-                tile_view = terrain.height_field_raw.T
-            else:
-                raise RuntimeError(
-                    f"terrain_v2 subterrain axis mismatch in add_terrain_to_map: "
-                    f"buffer_shape={buffer_shape}, expected={expected_len} or {expected_wid}. "
-                    "请检查 IsaacGym 版本或设置 cfg.terrain.terrain_v2_subterrain_axis。"
-                )
-            self.height_field_raw[start_x: end_x, start_y:end_y] = tile_view
+        self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
 
-            env_origin_x = (j + 0.5) * self.env_width
-            env_origin_y = (i + 0.5) * self.env_length
-            x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
-            x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
-            y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
-            y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
-            env_origin_z = np.max(tile_view[x1:x2, y1:y2]) * terrain.vertical_scale
-            self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
-        else:
-            self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
-
-            env_origin_x = (j + 0.5) * self.env_width
-            env_origin_y = (i + 0.5) * self.env_length
-            x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
-            x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
-            y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
-            y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
-            env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
-            self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
+        env_origin_x = (j + 0.5) * self.env_width
+        env_origin_y = (i + 0.5) * self.env_length
+        x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
+        x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
+        y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
+        y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
+        env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
+        self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
     gap_size = int(gap_size / terrain.horizontal_scale)

@@ -1,16 +1,23 @@
 import argparse
-import importlib.util
 import json
 import os
 import sys
-import types
 from typing import Dict, List
+
+import numpy as np
+from isaacgym import terrain_utils
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from legged_gym.utils.terrain import (
+    debug_axis_terrain,
+    s1_corridor_gate_terrain,
+    s2_forest_terrain,
+)
+
 SCENE_CFG_MAP = {
-    "debug_axis_calib": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexCalibCfg"),
+    "debug_axis": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexCalibCfg"),
     "s1_corridor_gate": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexS1Cfg"),
     "s2_forest": ("legged_gym.envs.hex_v4.hex_scenes_config", "HexS2Cfg"),
 }
@@ -28,88 +35,65 @@ def _parse_list(value: str, cast=float) -> List:
     return items
 
 
-def _ensure_pkg(name: str):
-    if name in sys.modules:
-        return sys.modules[name]
-    mod = types.ModuleType(name)
-    mod.__path__ = []
-    sys.modules[name] = mod
-    return mod
-
-
-def _load_module(name: str, path: str):
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load module {name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _bootstrap_legged_gym():
-    pkg = _ensure_pkg("legged_gym")
-    pkg.LEGGED_GYM_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    pkg.LEGGED_GYM_ENVS_DIR = os.path.join(pkg.LEGGED_GYM_ROOT_DIR, "legged_gym", "envs")
-    _ensure_pkg("legged_gym.envs")
-    _ensure_pkg("legged_gym.envs.base")
-    _ensure_pkg("legged_gym.envs.hex_v4")
-    _ensure_pkg("legged_gym.envs.hex_v4.terrain_v2")
-
-    base_base = os.path.join(ROOT, "legged_gym", "envs", "base", "base_config.py")
-    _load_module("legged_gym.envs.base.base_config", base_base)
-    base_cfg = os.path.join(ROOT, "legged_gym", "envs", "base", "legged_robot_config.py")
-    _load_module("legged_gym.envs.base.legged_robot_config", base_cfg)
-    hex_ground_cfg = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_ground_config.py")
-    _load_module("legged_gym.envs.hex_v4.hex_ground_config", hex_ground_cfg)
-
-    scene_spec = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "scene_spec.py")
-    _load_module("legged_gym.envs.hex_v4.terrain_v2.scene_spec", scene_spec)
-    generator = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "scene_generator.py")
-    _load_module("legged_gym.envs.hex_v4.terrain_v2.scene_generator", generator)
-    backend = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "backend_heightfield.py")
-    _load_module("legged_gym.envs.hex_v4.terrain_v2.backend_heightfield", backend)
-    contracts = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "terrain_v2", "contracts.py")
-    _load_module("legged_gym.envs.hex_v4.terrain_v2.contracts", contracts)
-
-    for mod_name, _ in SCENE_CFG_MAP.values():
-        file_path = os.path.join(ROOT, *mod_name.split(".")) + ".py"
-        _load_module(mod_name, file_path)
-
-
 def _load_cfg(scene_id: str):
     if scene_id not in SCENE_CFG_MAP:
         raise RuntimeError(f"unsupported scene_id={scene_id}")
-    _bootstrap_legged_gym()
     mod_name, cls_name = SCENE_CFG_MAP[scene_id]
-    module = sys.modules.get(mod_name)
-    cfg_cls = getattr(module, cls_name, None) if module is not None else None
-    if cfg_cls is None:
-        raise RuntimeError(f"config class {cls_name} not found in {mod_name}")
+    module = __import__(mod_name, fromlist=[cls_name])
+    cfg_cls = getattr(module, cls_name)
     return cfg_cls.terrain
+
+
+def _make_subterrain(cfg):
+    width_px = int(cfg.terrain_width / cfg.horizontal_scale)
+    length_px = int(cfg.terrain_length / cfg.horizontal_scale)
+    return terrain_utils.SubTerrain(
+        "terrain",
+        width=width_px,
+        length=length_px,
+        vertical_scale=cfg.vertical_scale,
+        horizontal_scale=cfg.horizontal_scale,
+    )
 
 
 def _run_scene(scene_id: str, difficulty: float, seed: int) -> Dict:
     cfg = _load_cfg(scene_id)
-    env_dims = {"width": float(cfg.terrain_width), "length": float(cfg.terrain_length)}
-    from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
-    from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
-    from legged_gym.envs.hex_v4.terrain_v2.contracts import check_scene
+    rng = np.random.RandomState(seed)
+    terrain = _make_subterrain(cfg)
+    if scene_id == "debug_axis":
+        terrain = debug_axis_terrain(terrain, difficulty, rng, cfg, seed=seed)
+    elif scene_id == "s1_corridor_gate":
+        terrain = s1_corridor_gate_terrain(terrain, difficulty, rng, cfg, seed=seed)
+    elif scene_id == "s2_forest":
+        terrain = s2_forest_terrain(terrain, difficulty, rng, cfg, seed=seed)
+    else:
+        raise RuntimeError(f"unsupported scene_id={scene_id}")
 
-    generator = SceneGenerator(cfg, env_dims=env_dims, robot_envelope={"clearance": float(getattr(cfg, "scene_clearance", 0.27))})
-    backend = HeightfieldBackend(env_dims["width"], env_dims["length"], cfg.horizontal_scale, cfg.vertical_scale)
-    scene = generator.sample(scene_id, difficulty, seed)
-    heightfield, scene = backend.render(scene, return_scene=True)
-    result = check_scene(scene, heightfield, cfg.horizontal_scale)
+    meta = getattr(terrain, "meta", {}) or {}
+    params = meta.get("params", {}) or {}
+    metrics: Dict[str, float] = {}
+
+    if scene_id == "s1_corridor_gate":
+        gates = params.get("corridor_gates", []) or []
+        door_widths = [float(g.get("door_width", 0.0)) for g in gates if g.get("door_width") is not None]
+        metrics["corridor_width"] = float(params.get("corridor_width_nom", 0.0))
+        metrics["gate_count"] = float(len(gates))
+        if door_widths:
+            metrics["door_width_mean"] = float(sum(door_widths) / len(door_widths))
+            metrics["door_width_min"] = float(min(door_widths))
+            metrics["door_width_max"] = float(max(door_widths))
+    elif scene_id == "s2_forest":
+        metrics["count_total"] = float(params.get("count_total", 0))
+        metrics["num_poles"] = float(params.get("num_poles", 0))
+        metrics["num_blocks"] = float(params.get("num_blocks", 0))
+        metrics["block_ratio"] = float(params.get("block_ratio", 0.0))
+
     return {
         "scene_id": scene_id,
         "difficulty": float(difficulty),
         "seed": int(seed),
-        "pass": bool(result["pass"]),
-        "metrics": result["metrics"],
-        "reasons": result.get("reasons", []),
+        "metrics": metrics,
+        "meta": meta,
     }
 
 
@@ -119,30 +103,62 @@ def _summarize(results: List[Dict]) -> Dict[str, Dict]:
         scene_id = item["scene_id"]
         if scene_id not in summary:
             summary[scene_id] = {
-                "pass": 0,
                 "total": 0,
-                "reasons": {},
                 "door_width_samples": [],
+                "gate_count_samples": [],
+                "count_total_samples": [],
+                "block_ratio_samples": [],
             }
         summary[scene_id]["total"] += 1
-        if item["pass"]:
-            summary[scene_id]["pass"] += 1
-        for reason in item.get("reasons", []):
-            summary[scene_id]["reasons"][reason] = summary[scene_id]["reasons"].get(reason, 0) + 1
         metrics = item.get("metrics", {}) or {}
-        mean_gate_width = metrics.get("mean_gate_width", None)
-        if mean_gate_width is not None:
-            summary[scene_id]["door_width_samples"].append(float(mean_gate_width))
+        if "door_width_mean" in metrics:
+            summary[scene_id]["door_width_samples"].append(metrics["door_width_mean"])
+        if "gate_count" in metrics:
+            summary[scene_id]["gate_count_samples"].append(metrics["gate_count"])
+        if "count_total" in metrics:
+            summary[scene_id]["count_total_samples"].append(metrics["count_total"])
+        if "block_ratio" in metrics:
+            summary[scene_id]["block_ratio_samples"].append(metrics["block_ratio"])
+
     for scene_id, item in summary.items():
-        samples = item.get("door_width_samples", [])
-        if samples:
+        door_samples = item.get("door_width_samples", [])
+        if door_samples:
             item["door_width_stats"] = {
-                "mean": float(sum(samples) / max(1, len(samples))),
-                "min": float(min(samples)),
-                "max": float(max(samples)),
-                "count": int(len(samples)),
+                "mean": float(sum(door_samples) / len(door_samples)),
+                "min": float(min(door_samples)),
+                "max": float(max(door_samples)),
+                "count": int(len(door_samples)),
             }
+        gate_samples = item.get("gate_count_samples", [])
+        if gate_samples:
+            item["gate_count_stats"] = {
+                "mean": float(sum(gate_samples) / len(gate_samples)),
+                "min": float(min(gate_samples)),
+                "max": float(max(gate_samples)),
+                "count": int(len(gate_samples)),
+            }
+        count_samples = item.get("count_total_samples", [])
+        if count_samples:
+            item["count_total_stats"] = {
+                "mean": float(sum(count_samples) / len(count_samples)),
+                "min": float(min(count_samples)),
+                "max": float(max(count_samples)),
+                "count": int(len(count_samples)),
+            }
+        ratio_samples = item.get("block_ratio_samples", [])
+        if ratio_samples:
+            item["block_ratio_stats"] = {
+                "mean": float(sum(ratio_samples) / len(ratio_samples)),
+                "min": float(min(ratio_samples)),
+                "max": float(max(ratio_samples)),
+                "count": int(len(ratio_samples)),
+            }
+
         item.pop("door_width_samples", None)
+        item.pop("gate_count_samples", None)
+        item.pop("count_total_samples", None)
+        item.pop("block_ratio_samples", None)
+
     return summary
 
 
@@ -192,9 +208,7 @@ def main() -> int:
     for scene_id in scenes:
         if scene_id not in summary:
             continue
-        item = summary[scene_id]
-        pass_rate = item["pass"] / max(1, item["total"])
-        print(f"[Summary] {scene_id} pass_rate={pass_rate:.2%} ({item['total']} cases)")
+        print(f"[Summary] {scene_id} total={summary[scene_id]['total']}")
 
     report = {
         "scenes": scenes,
@@ -204,7 +218,7 @@ def main() -> int:
         "axis_convention": {
             "tile_axis0": "+Y(length)",
             "tile_axis1": "+X(width)",
-            "note": "scene_audit uses backend tiles only (no SubTerrain buffer).",
+            "note": "classic tile builder",
         },
         "axis_details": axis_details,
         "summary": summary,
@@ -214,26 +228,15 @@ def main() -> int:
     if args.write_golden:
         golden: Dict[str, List[int]] = {scene: [] for scene in scenes}
         for scene_id in scenes:
-            for seed in seeds:
-                pass_all = True
-                for diff in diffs:
-                    row = _run_scene(scene_id, diff, seed)
-                    if not row["pass"]:
-                        pass_all = False
-                        break
-                if pass_all:
-                    golden[scene_id].append(int(seed))
-                if len(golden[scene_id]) >= args.golden_count:
-                    break
+            golden[scene_id] = seeds[: max(0, int(args.golden_count))]
         with open(args.write_golden, "w", encoding="utf-8") as f:
             json.dump(golden, f, indent=2, ensure_ascii=False)
-        report["golden_seeds"] = golden
-        print(f"[OK] golden saved: {args.write_golden}")
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        print(f"[OK] report saved: {args.out}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
 
     return 0
 

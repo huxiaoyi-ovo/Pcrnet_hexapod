@@ -1,10 +1,13 @@
-# Debug helper for S2 scene config without importing Isaac Gym.
+# Debug helper for S2 scene config using classic builder.
 # Run: python3 tools/debug_s2_scene.py
 
 import importlib.util
 import os
 import sys
 import types
+
+import numpy as np
+from isaacgym import terrain_utils
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = os.path.join(ROOT, "legged_gym", "envs", "hex_v4", "hex_scenes_config.py")
@@ -36,7 +39,6 @@ def load_hex_s2_cfg(path: str):
     _ensure_pkg("legged_gym.envs")
     _ensure_pkg("legged_gym.envs.base")
     _ensure_pkg("legged_gym.envs.hex_v4")
-    _ensure_pkg("legged_gym.envs.hex_v4.terrain_v2")
     base_base = os.path.join(ROOT, "legged_gym", "envs", "base", "base_config.py")
     _load_module("legged_gym.envs.base.base_config", base_base)
     base_cfg = os.path.join(ROOT, "legged_gym", "envs", "base", "legged_robot_config.py")
@@ -58,31 +60,32 @@ def main() -> int:
         print("[Err] HexS2Cfg not found in config.")
         return 1
 
-    terrain = HexS2Cfg.terrain
-    print("[S2] scene_type:", getattr(terrain, "scene_type", None))
-    print("[S2] scene_static_block_sizes:", getattr(terrain, "scene_static_block_sizes", None))
-    print("[S2] scene_static_block_heights:", getattr(terrain, "scene_static_block_heights", None))
-    print("[S2] scene_params_easy keys:", sorted(getattr(terrain, "scene_params_easy", {}).keys()))
-    print("[S2] scene_params_hard keys:", sorted(getattr(terrain, "scene_params_hard", {}).keys()))
+    from legged_gym.utils.terrain import s2_forest_terrain
 
-    try:
-        sys.path.insert(0, ROOT)
-        from legged_gym.envs.hex_v4.terrain_v2.scene_generator import SceneGenerator
-        from legged_gym.envs.hex_v4.terrain_v2.backend_heightfield import HeightfieldBackend
-        from legged_gym.envs.hex_v4.terrain_v2.contracts import check_scene
+    cfg = HexS2Cfg.terrain
+    seed = int(getattr(cfg, "terrain_seed", 0) or 0)
+    rng = np.random.RandomState(seed)
 
-        env_dims = {"width": float(terrain.terrain_width), "length": float(terrain.terrain_length)}
-        gen = SceneGenerator(terrain, env_dims=env_dims, robot_envelope={"clearance": float(getattr(terrain, "scene_clearance", 0.27))})
-        backend = HeightfieldBackend(env_dims["width"], env_dims["length"], terrain.horizontal_scale, terrain.vertical_scale)
-        spec = gen.sample("s2_forest", 0.5, seed=terrain.scene_seed)
-        hf, spec = backend.render(spec, return_scene=True)
-        result = check_scene(spec, hf, terrain.horizontal_scale)
-        print("[S2] sampled scene_type:", spec.scene_type)
-        print("[S2] num_static:", len(spec.static_obstacles))
-        print("[S2] contract pass:", result["pass"])
-    except Exception as exc:
-        print("[Warn] terrain_v2 sample failed:", repr(exc))
-        print("[Warn] This does not block config check.")
+    width_px = int(cfg.terrain_width / cfg.horizontal_scale)
+    length_px = int(cfg.terrain_length / cfg.horizontal_scale)
+    terrain = terrain_utils.SubTerrain(
+        "terrain",
+        width=width_px,
+        length=length_px,
+        vertical_scale=cfg.vertical_scale,
+        horizontal_scale=cfg.horizontal_scale,
+    )
+    terrain = s2_forest_terrain(terrain, difficulty=0.5, rng=rng, cfg=cfg, seed=seed)
+
+    meta = getattr(terrain, "meta", {}) or {}
+    params = meta.get("params", {}) or {}
+    print("[S2] scene_type:", meta.get("scene_type"))
+    print("[S2] count_total:", params.get("count_total"))
+    print("[S2] num_poles:", params.get("num_poles"))
+    print("[S2] num_blocks:", params.get("num_blocks"))
+    print("[S2] block_ratio:", params.get("block_ratio"))
+    print("[S2] scene_params_easy keys:", sorted(getattr(cfg, "scene_params_easy", {}).keys()))
+    print("[S2] scene_params_hard keys:", sorted(getattr(cfg, "scene_params_hard", {}).keys()))
 
     return 0
 

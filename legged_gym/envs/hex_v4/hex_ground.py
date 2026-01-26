@@ -5,7 +5,7 @@ from legged_gym.envs.hex_v4.hex_scenes_config import HexDebugPlaneCfg
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils.actuator import Actuator
 from legged_gym.envs.hex_v4.expert import ExpertGround
-from legged_gym.envs.hex_v4.terrain_v2.scene_spec import SceneSpec
+from legged_gym.envs.hex_v4.scene_spec import SceneSpec
 import torch
 import numpy as np
 from typing import Optional
@@ -28,33 +28,18 @@ class HexGround(LeggedRobot):
             self.camera_cfg = cfg.sensor.depth_camera
             self.enable_camera = bool(self.camera_cfg.enable)
             self._use_camera_in_headless = headless and self.enable_camera
-        if hasattr(cfg, "terrain") and getattr(cfg.terrain, "terrain_v2_shuffle_seed", None) is None:
-            cfg.terrain.terrain_v2_shuffle_seed = getattr(cfg, "seed", None)
-        scene_type = getattr(cfg.terrain, "scene_type", None) if hasattr(cfg, "terrain") else None
-        scene_types = getattr(cfg.terrain, "scene_types", None) if hasattr(cfg, "terrain") else None
+        terrain_type = getattr(cfg.terrain, "terrain_type", None) if hasattr(cfg, "terrain") else None
         debug_allow_plane = bool(getattr(cfg.terrain, "debug_allow_plane", False))
         mesh_type = getattr(cfg.terrain, "mesh_type", None)
         if debug_allow_plane:
             if mesh_type not in ("plane", "none"):
                 raise RuntimeError("debug_allow_plane requires cfg.terrain.mesh_type='plane' (or 'none').")
-            if getattr(cfg.terrain, "terrain_v2_enable", False):
-                raise RuntimeError("debug_allow_plane requires terrain_v2_enable=False for plane debug.")
         else:
-            if not getattr(cfg.terrain, "terrain_v2_enable", False):
-                raise RuntimeError(
-                    "hex_ground 是容器任务，需要显式启用 terrain_v2 并指定 scene_type(s)。"
-                    "建议使用: --task hex_s1 或 --task hex_debug_plane。"
-                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
-                    "或 python legged_gym/scripts/train_highlevel.py "
-                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
-                )
             if mesh_type != "heightfield":
-                raise RuntimeError("hex_ground requires cfg.terrain.mesh_type='heightfield' for terrain_v2.")
-            if not getattr(cfg.terrain, "scene_use_heightfield", False):
-                raise RuntimeError("hex_ground requires cfg.terrain.scene_use_heightfield=True for terrain_v2.")
-            if not (scene_type or scene_types):
+                raise RuntimeError("hex_ground requires cfg.terrain.mesh_type='heightfield' for classic terrain.")
+            if not terrain_type:
                 raise RuntimeError(
-                    "hex_ground 是容器任务，必须显式设置 scene_type/scene_types。"
+                    "hex_ground 是容器任务，必须显式设置 terrain_type。"
                     "建议使用: --task hex_s1 或 --task hex_debug_plane。"
                     "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
                     "或 python legged_gym/scripts/train_highlevel.py "
@@ -66,9 +51,9 @@ class HexGround(LeggedRobot):
         self.debug_viz = False
         self.foot_traj_viz=False
         terrain_obj = getattr(self, "terrain", None)
-        self.scene_generator = getattr(terrain_obj, "scene_generator", None)
+        self.scene_generator = None
         self.scene_manager = None
-        self.scene_specs = getattr(terrain_obj, "scene_specs", None)
+        self.scene_specs = getattr(terrain_obj, "tile_meta", None)
         self.scene_meta = [None] * self.num_envs
         self.scene_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
@@ -497,9 +482,18 @@ class HexGround(LeggedRobot):
         return params
 
     def _scene_spec_from_meta(self, meta: dict, env_id: int) -> Optional[SceneSpec]:
-        if isinstance(meta, dict):
-            raise RuntimeError("legacy scene_meta dict detected; terrain_v2 required")
-        return None
+        if not isinstance(meta, dict):
+            return None
+        scene_type = meta.get("scene_type", None) or "unknown"
+        params = meta.get("params", {}) or {}
+        static_obstacles = meta.get("static_obstacles", []) or []
+        layout_seed = meta.get("layout_seed", None)
+        return SceneSpec(
+            scene_type=scene_type,
+            params=dict(params),
+            static_obstacles=list(static_obstacles),
+            layout_seed=layout_seed,
+        )
 
     def _get_scene_difficulty(self, env_id: int) -> float:
         if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
@@ -559,30 +553,20 @@ class HexGround(LeggedRobot):
         )
 
     def _reset_scene(self, env_ids: torch.Tensor, force_resample: Optional[torch.Tensor] = None):
-        if self.scene_generator is None:
-            return
         if len(env_ids) == 0:
             return
+        if self.scene_specs is None:
+            return
         env_id_list = env_ids.tolist()
-        for idx, env_id in enumerate(env_id_list):
+        for env_id in env_id_list:
             self.scene_episode_count[env_id] += 1
-            episode_idx = int(self.scene_episode_count[env_id].item())
             raw_spec = self._get_scene_spec(env_id)
-            if isinstance(raw_spec, dict):
-                raise RuntimeError("legacy scene_specs dict detected; terrain_v2 required")
-            scene_spec = raw_spec
-            if scene_spec is None:
-                difficulty = self._get_scene_difficulty(env_id)
-                seed = self.scene_generator.seed_for_env(env_id, episode_idx)
-                rng = np.random.RandomState(seed)
-                scene_id = getattr(self.cfg.terrain, "scene_type", None)
-                if scene_id is None:
-                    scene_id = self.scene_generator._select_scene_type(rng, difficulty)
-                scene_spec = self.scene_generator.sample(scene_id, difficulty, seed)
+            if isinstance(raw_spec, SceneSpec):
+                scene_spec = raw_spec
+            else:
+                scene_spec = self._scene_spec_from_meta(raw_spec, env_id)
+            self.scene_spec_cache[env_id] = scene_spec
             if scene_spec is not None:
-                from legged_gym.envs.hex_v4.terrain_v2.quantizer import quantize_scene
-                scene_spec = quantize_scene(scene_spec, self.cfg.terrain.horizontal_scale, self.cfg.terrain.vertical_scale)
-                self.scene_spec_cache[env_id] = scene_spec
                 self.scene_meta[env_id] = scene_spec.to_meta()
         sample_id = int(env_ids[0].item())
         if self.scene_meta[sample_id] is not None:
@@ -638,38 +622,20 @@ class HexGround(LeggedRobot):
                     )
 
     def _maybe_resample_scene_columns(self, env_ids: torch.Tensor):
-        if len(env_ids) == 0:
-            return
-        scene_type = getattr(self.cfg.terrain, "scene_type", None)
-        scene_types = getattr(self.cfg.terrain, "scene_types", None)
-        if not scene_type and not scene_types:
-            return
-        if not getattr(self.cfg.terrain, "scene_resample_on_reset", False):
-            return
-        if not hasattr(self, "terrain_types") or self.terrain_types is None:
-            return
-        num_cols = int(getattr(self.cfg.terrain, "num_cols", 1))
-        if num_cols <= 1:
-            return
-        if self.scene_specs is None:
-            return
-        new_cols = torch.randint(0, num_cols, (len(env_ids),), device=self.device)
-        self.terrain_types[env_ids] = new_cols
-        if not getattr(self.cfg.terrain, "curriculum", False) and hasattr(self, "terrain_origins"):
-            self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+        return
 
     def _reset_root_states(self, env_ids):
         """重置root状态，slalom地形时固定入口位姿"""
         if len(env_ids) == 0:
             return
-        scene_type = getattr(self.cfg.terrain, "scene_type", None)
+        terrain_type = getattr(self.cfg.terrain, "terrain_type", None)
         if self.custom_origins:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
             self.root_states[env_ids, :2] += torch_rand_float(
                 -1.0, 1.0, (len(env_ids), 2), device=self.device
             )
-            if not scene_type and hasattr(self, "terrain_types"):
+            if not terrain_type and hasattr(self, "terrain_types"):
                 proportions = []
                 running = 0.0
                 for p in self.cfg.terrain.terrain_proportions:
@@ -799,7 +765,7 @@ class HexGround(LeggedRobot):
         return True
 
     def _apply_scene_spawn(self, env_ids: torch.Tensor):
-        if self.scene_generator is None or self.scene_spec_cache is None or env_ids.numel() == 0:
+        if self.scene_spec_cache is None or env_ids.numel() == 0:
             return
         if self.nav_cfg is not None:
             margin = float(getattr(self.nav_cfg, "spawn_scene_margin", self.scene_margin))
@@ -1693,8 +1659,6 @@ class HexGround(LeggedRobot):
 
     def _update_terrain_curriculum(self, env_ids):
         #重新设计地形更新的规则
-        if getattr(self.cfg.terrain, "terrain_v2_enable", False) and getattr(self.cfg.terrain, "terrain_v2_unique_tiles", False):
-            return
         if not self.init_done:
             # don't change on initial reset
             return

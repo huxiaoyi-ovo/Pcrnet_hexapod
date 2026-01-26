@@ -6,8 +6,6 @@ class HexDebugPlaneCfg(HexGroundCfg):
         env_spacing = 8.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "plane"
-        terrain_v2_enable = False
-        scene_use_heightfield = False
         debug_allow_plane = True
         curriculum = False
         num_rows = 1
@@ -24,14 +22,12 @@ class HexDebugHeightfieldCfg(HexGroundCfg):
         env_spacing = 8.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
-        terrain_v2_enable = True
-        scene_type = "debug_axis_calib"
-        scene_seed = 7
-        scene_use_heightfield = True
+        terrain_type = "debug_axis"
+        terrain_seed = 7
         debug_allow_plane = False
         curriculum = False
-        num_rows = 0
-        num_cols = 0
+        num_rows = 1
+        num_cols = 1
 
 
 class HexDebugHeightfieldCfgPPO(HexGroundCfgPPO):
@@ -44,16 +40,14 @@ class HexCalibCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "debug_axis"
+        terrain_seed = 7
         fixed_layout_enable = False
         terrain_length = 12.0
         terrain_width = 6.0
-        terrain_v2_enable = True
-        scene_type = "debug_axis_calib"
-        scene_seed = 7
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -76,11 +70,8 @@ class HexCalibCfg(HexGroundCfg):
             "spawn_length": 1.0,
             "goal_length": 1.0,
         }
-        num_rows = 0
-        num_cols = 0
-        terrain_v2_max_rows = 10
-        terrain_v2_max_tot_rows = 1220  # total heightfield rows (pixels)
-        terrain_v2_max_tot_cols = 620   # total heightfield cols (pixels)
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 0
 
@@ -95,15 +86,13 @@ class HexS1Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s1_corridor_gate"
+        terrain_seed = 101
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s1_corridor_gate"
-        scene_seed = 101
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -144,8 +133,8 @@ class HexS1Cfg(HexGroundCfg):
             "corridor_goal_buffer": 0.6,
             "corridor_goal_margin": 0.2,
         }
-        num_rows = 0
-        num_cols = 0
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
 
@@ -160,15 +149,13 @@ class HexS1FollowCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s1_corridor_gate"
+        terrain_seed = 101
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s1_corridor_gate"
-        scene_seed = 101
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -209,8 +196,8 @@ class HexS1FollowCfg(HexGroundCfg):
             "corridor_goal_buffer": 0.6,
             "corridor_goal_margin": 0.2,
         }
-        num_rows = 0
-        num_cols = 0
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
 
@@ -229,15 +216,13 @@ class HexS1LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s1_corridor_gate"
+        terrain_seed = 101
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s1_corridor_gate"
-        scene_seed = 101
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -278,8 +263,8 @@ class HexS1LargeCfg(HexGroundCfg):
             "corridor_goal_buffer": 0.6,
             "corridor_goal_margin": 0.2,
         }
-        num_rows = 0
-        num_cols = 0
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
 
@@ -294,15 +279,13 @@ class HexS2Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s2_forest"
+        terrain_seed = 201
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s2_forest"
-        scene_seed = 102
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -341,8 +324,8 @@ class HexS2Cfg(HexGroundCfg):
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
         }
-        num_rows = 0
-        num_cols = 0
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
 
@@ -357,15 +340,13 @@ class HexS2LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s2_forest"
+        terrain_seed = 201
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s2_forest"
-        scene_seed = 102
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -404,8 +385,8 @@ class HexS2LargeCfg(HexGroundCfg):
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
         }
-        num_rows = 0
-        num_cols = 0
+        num_rows = 5
+        num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
 
@@ -421,14 +402,10 @@ class HexS3Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s3_doorway_rooms"
-        scene_seed = 103
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -502,14 +479,10 @@ class HexS3LargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s3_doorway_rooms"
-        scene_seed = 103
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -583,16 +556,12 @@ class HexS4Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s4_crossing"
-        scene_seed = 104
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 6
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -635,16 +604,12 @@ class HexS4LargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s4_crossing"
-        scene_seed = 104
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 2
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -689,14 +654,10 @@ class HexS5Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s5_sparse_dense"
-        scene_seed = 105
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -764,14 +725,10 @@ class HexS5LargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s5_sparse_dense"
-        scene_seed = 105
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -839,15 +796,11 @@ class HexS6Cfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s6_structured_ood"
-        scene_seed = 106
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -919,15 +872,11 @@ class HexS6LargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_type = "s6_structured_ood"
-        scene_seed = 106
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 0
         scene_holdout = True
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -999,16 +948,12 @@ class HexMixGateCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_types = ["s3_doorway_rooms", "s4_crossing", "s5_sparse_dense"]
-        scene_seed = 120
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 6
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
@@ -1142,16 +1087,12 @@ class HexMixGateLargeCfg(HexGroundCfg):
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
         fixed_layout_enable = False
-        terrain_v2_enable = True
-        scene_types = ["s3_doorway_rooms", "s4_crossing", "s5_sparse_dense"]
-        scene_seed = 120
         scene_clearance = 0.27
         scene_margin = 0.3
         scene_high_dt = 0.1
         scene_dynamic_max = 2
         scene_dynamic_size = 0.4
         scene_dynamic_height = 0.5
-        scene_use_heightfield = True
         scene_resample_on_reset = False
         scene_resample_on_level_change = False
         scene_static_block_size = 0.4
