@@ -137,6 +137,10 @@ class HexS1Cfg(HexGroundCfg):
         num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS1CfgPPO(HexGroundCfgPPO):
@@ -204,6 +208,9 @@ class HexS1FollowCfg(HexGroundCfg):
     class navigation(HexGroundCfg.navigation):
         goal_force_blocking_line = False
         goal_force_blocking_prob = 0.0
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS1FollowCfgPPO(HexGroundCfgPPO):
@@ -267,6 +274,10 @@ class HexS1LargeCfg(HexGroundCfg):
         num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS1LargeCfgPPO(HexGroundCfgPPO):
