@@ -676,6 +676,7 @@ class LeggedRobot(BaseTask):
             height_samples_2d = height_samples.reshape((self.terrain.tot_rows, self.terrain.tot_cols), order="C")
         else:
             raise ValueError(f"height_samples ndim invalid: got {height_samples.ndim}, expected 1 or 2")
+        height_samples = np.ascontiguousarray(height_samples, dtype=np.int16)
         actual = int(height_samples.size)
         if actual != expected:
             raise ValueError(f"height_samples size mismatch: got {actual}, expected {expected}")

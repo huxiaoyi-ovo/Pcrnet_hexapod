@@ -408,7 +408,7 @@ class Terrain:
             else:
                 self.randomized_terrain()
         
-        self.heightsamples = self.height_field_raw
+        self.heightsamples = np.ascontiguousarray(self.height_field_raw, dtype=np.int16)
         if self.type=="trimesh":
             self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(   self.height_field_raw,
                                                                                             self.cfg.horizontal_scale,

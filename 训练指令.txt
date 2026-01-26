@@ -61,7 +61,7 @@ python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --tas
 
 # GPU PhysX + GPU pipeline（显式）
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cuda:0 --pipeline gpu --use_gpu --use_gpu_pipeline
-
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cuda:0 --pipeline gpu --physx
 # CPU PhysX + CPU pipeline（显式）
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cpu --pipeline cpu
 注：若提示 unknown arguments，请去掉 --pipeline/--sim_device，仅保留 --use_gpu/--use_gpu_pipeline 相关开关。
