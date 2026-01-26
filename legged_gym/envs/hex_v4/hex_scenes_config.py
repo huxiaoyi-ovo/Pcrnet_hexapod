@@ -76,8 +76,8 @@ class HexCalibCfg(HexGroundCfg):
             "spawn_length": 1.0,
             "goal_length": 1.0,
         }
-        num_rows = 1
-        num_cols = 1
+        num_rows = 0
+        num_cols = 0
         terrain_proportions = [1.0]
         max_init_terrain_level = 0
 

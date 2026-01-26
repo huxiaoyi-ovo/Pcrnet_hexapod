@@ -650,9 +650,9 @@ class LeggedRobot(BaseTask):
         hf_params.column_scale = self.terrain.cfg.horizontal_scale
         hf_params.row_scale = self.terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self.terrain.cfg.vertical_scale
-        # Official IsaacGym convention: nbRows aligns with axis0 (heightfield rows)
-        hf_params.nbRows = self.terrain.tot_rows
-        hf_params.nbColumns = self.terrain.tot_cols
+        # Align with current hex semantics: axis0=+Y(length), axis1=+X(width)
+        hf_params.nbRows = self.terrain.tot_cols
+        hf_params.nbColumns = self.terrain.tot_rows
         hf_params.transform.p.x = -self.terrain.cfg.border_size 
         hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
