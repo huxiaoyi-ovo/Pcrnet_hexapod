@@ -791,6 +791,14 @@ class HexGround(LeggedRobot):
                 spawn_buffer = float(params.get("corridor_spawn_buffer", margin))
                 spawn_span = float(params.get("corridor_spawn_span", max(1.0, 0.3 * length)))
                 x_center = float(params.get("corridor_x_center", 0.0))
+                width_nom = float(params.get("corridor_width_nom", self.cfg.terrain.terrain_width))
+                door_width = None
+                gates = params.get("corridor_gates", []) or []
+                if gates:
+                    try:
+                        door_width = float(gates[0].get("door_width", None))
+                    except Exception:
+                        door_width = None
                 x_local = 0.0
                 y_local = 0.0
                 placed = False
@@ -798,24 +806,47 @@ class HexGround(LeggedRobot):
                     y_min = y_start + spawn_buffer
                     y_max = min(y_start + spawn_span, y_end - spawn_buffer)
                     if y_max <= y_min:
-                        break
+                        raise RuntimeError(
+                            "S1 spawn invalid y-range: "
+                            f"y_min={y_min:.3f} y_max={y_max:.3f} "
+                            f"length={length:.3f} spawn_buffer={spawn_buffer:.3f} spawn_span={spawn_span:.3f}"
+                        )
                     y_local = rng.uniform(y_min, y_max)
                     half_w = self._corridor_half_width_at_y(scene_spec, y_local)
                     x_min = x_center - (half_w - margin)
                     x_max = x_center + (half_w - margin)
                     if x_max <= x_min:
-                        continue
+                        raise RuntimeError(
+                            "S1 spawn invalid x-range: "
+                            f"half_w={half_w:.3f} margin={margin:.3f} "
+                            f"x_min={x_min:.3f} x_max={x_max:.3f} "
+                            f"corridor_width={width_nom:.3f} door_width={door_width}"
+                        )
                     x_local = rng.uniform(x_min, x_max)
                     if self._is_scene_spawn_clear(scene_spec, x_local, y_local, clearance):
                         placed = True
                         break
                 if not placed:
-                    y_local = float(np.clip(y_local, y_start + spawn_buffer, y_end - spawn_buffer))
+                    y_min = y_start + spawn_buffer
+                    y_max = min(y_start + spawn_span, y_end - spawn_buffer)
+                    if y_max <= y_min:
+                        raise RuntimeError(
+                            "S1 spawn invalid y-range (fallback): "
+                            f"y_min={y_min:.3f} y_max={y_max:.3f} "
+                            f"length={length:.3f} spawn_buffer={spawn_buffer:.3f} spawn_span={spawn_span:.3f}"
+                        )
+                    y_local = float(np.clip(y_local, y_min, y_max))
                     half_w = self._corridor_half_width_at_y(scene_spec, y_local)
                     x_min = x_center - (half_w - margin)
                     x_max = x_center + (half_w - margin)
-                    if x_max > x_min:
-                        x_local = float(np.clip(x_local, x_min, x_max))
+                    if x_max <= x_min:
+                        raise RuntimeError(
+                            "S1 spawn invalid x-range (fallback): "
+                            f"half_w={half_w:.3f} margin={margin:.3f} "
+                            f"x_min={x_min:.3f} x_max={x_max:.3f} "
+                            f"corridor_width={width_nom:.3f} door_width={door_width}"
+                        )
+                    x_local = float(np.clip(x_local, x_min, x_max))
                 self.root_states[env_id] = self.base_init_state
                 self.root_states[env_id, :3] += self.env_origins[env_id]
                 self.root_states[env_id, 0] += x_local
@@ -1096,22 +1127,54 @@ class HexGround(LeggedRobot):
             self._apply_scene_spawn(env_ids)
             self._resample_nav_goals(env_ids)
             if hasattr(self, "goal_world"):
-                # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
-                goal_delta = self.goal_world[env_ids] - self.root_states[env_ids, :2]
                 yaw_offset = float(getattr(self.nav_cfg, "heading_offset_rad", 0.0)) if self.nav_cfg is not None else 0.0
                 jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
-                jitter = torch_rand_float(
-                    -math.radians(jitter_deg),
-                    math.radians(jitter_deg),
-                    (len(env_ids), 1),
-                    device=self.device,
-                ).squeeze(1)
-                yaw = torch.atan2(goal_delta[:, 1], goal_delta[:, 0]) - yaw_offset + jitter
-                qz = torch.sin(0.5 * yaw)
-                qw = torch.cos(0.5 * yaw)
-                quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
-                self.root_states[env_ids, 3:7] = quat
-                self._sync_robot_root_states(env_ids)
+
+                s1_ids = []
+                if self.scene_spec_cache is not None:
+                    for env_id in env_ids.tolist():
+                        scene_spec = self.scene_spec_cache[env_id]
+                        if scene_spec is not None and scene_spec.scene_type == "s1_corridor_gate":
+                            s1_ids.append(env_id)
+                if s1_ids:
+                    s1_tensor = torch.tensor(s1_ids, device=self.device, dtype=torch.long)
+                    jitter = torch_rand_float(
+                        -math.radians(jitter_deg),
+                        math.radians(jitter_deg),
+                        (len(s1_ids), 1),
+                        device=self.device,
+                    ).squeeze(1)
+                    yaw = (0.5 * math.pi - yaw_offset) + jitter
+                    qz = torch.sin(0.5 * yaw)
+                    qw = torch.cos(0.5 * yaw)
+                    quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+                    self.root_states[s1_tensor, 3:7] = quat
+                    self._sync_robot_root_states(s1_tensor)
+
+                other_ids = env_ids
+                if s1_ids:
+                    s1_set = set(s1_ids)
+                    rest = [env_id for env_id in env_ids.tolist() if env_id not in s1_set]
+                    if rest:
+                        other_ids = torch.tensor(rest, device=self.device, dtype=torch.long)
+                    else:
+                        other_ids = None
+
+                if other_ids is not None and other_ids.numel() > 0:
+                    # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
+                    goal_delta = self.goal_world[other_ids] - self.root_states[other_ids, :2]
+                    jitter = torch_rand_float(
+                        -math.radians(jitter_deg),
+                        math.radians(jitter_deg),
+                        (len(other_ids), 1),
+                        device=self.device,
+                    ).squeeze(1)
+                    yaw = torch.atan2(goal_delta[:, 1], goal_delta[:, 0]) - yaw_offset + jitter
+                    qz = torch.sin(0.5 * yaw)
+                    qw = torch.cos(0.5 * yaw)
+                    quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+                    self.root_states[other_ids, 3:7] = quat
+                    self._sync_robot_root_states(other_ids)
             self.get_expert_actions()
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:

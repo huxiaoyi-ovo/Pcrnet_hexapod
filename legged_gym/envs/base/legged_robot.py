@@ -769,9 +769,13 @@ class LeggedRobot(BaseTask):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
             pos = self.env_origins[i].clone()
-            if getattr(self.cfg.terrain, "debug_allow_plane", False):
-                pass
-            else:
+            terrain_type = getattr(self.cfg.terrain, "terrain_type", None)
+            disable_jitter = bool(getattr(self.cfg.terrain, "debug_allow_plane", False))
+            if terrain_type is not None:
+                terrain_type = str(terrain_type).lower()
+                if terrain_type in ("s1", "s1_corridor_gate"):
+                    disable_jitter = True
+            if not disable_jitter:
                 pos[:2] += torch_rand_float(-1., 1., (2,1), device=self.device).squeeze(1)
             start_pose.p = gymapi.Vec3(*pos)
                 
