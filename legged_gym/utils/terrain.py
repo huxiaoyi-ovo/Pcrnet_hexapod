@@ -34,6 +34,11 @@ from scipy import interpolate
 import isaacgym.terrain_utils as terrain_utils
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
+# Axis contract (classic, single source of truth):
+# - World: +Y forward (corridor axis), +X lateral.
+# - Tile grid: row i -> +Y (length), col j -> +X (width).
+# - Heightfield array: height_field_raw[a, b] where a=length(+Y), b=width(+X).
+
 
 def _lerp(a, b, t: float) -> float:
     return float(a + (b - a) * float(t))
@@ -591,6 +596,8 @@ class Terrain:
         else:
             self.randomized_terrain()
 
+        self._check_axis_calib_if_needed()
+
         self.heightsamples = np.ascontiguousarray(self.height_field_raw, dtype=np.int16)
         if self.type == "trimesh":
             self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(
@@ -807,6 +814,74 @@ class Terrain:
 
         return terrain
         
+    def _resolve_tile_view(self, tile: np.ndarray):
+        expected = (self.length_per_env_pixels, self.width_per_env_pixels)
+        alt = (self.width_per_env_pixels, self.length_per_env_pixels)
+        if tile.shape == expected:
+            tile_view = tile
+            map_mode = "none"
+        elif tile.shape == alt:
+            tile_view = tile.T
+            map_mode = "transpose"
+            if not getattr(self, "_tile_axis_warned", False):
+                print(
+                    f"[Warn] SubTerrain axis mismatch: tile_shape={tile.shape}, "
+                    f"expected={expected}, alt={alt}. Using transpose."
+                )
+                self._tile_axis_warned = True
+        else:
+            raise RuntimeError(
+                f"tile shape mismatch: got {tile.shape}, expected {expected} or {alt}"
+            )
+        if not getattr(self, "_tile_axis_logged", False):
+            print(
+                "[Terrain] axis_map env_dims="
+                f"({self.env_length:.3f}m,{self.env_width:.3f}m) "
+                f"px=({self.length_per_env_pixels},{self.width_per_env_pixels}) "
+                f"tile_shape={tile.shape} map={map_mode}"
+            )
+            self._tile_axis_logged = True
+        return tile_view, map_mode
+
+    def _check_axis_calib_if_needed(self):
+        terrain_type = getattr(self.cfg, "terrain_type", None)
+        if terrain_type is None:
+            return
+        if str(terrain_type).lower() not in ("debug_axis", "calib_axis"):
+            return
+        # Check axis contract on the first tile (0,0).
+        len_px = self.length_per_env_pixels
+        wid_px = self.width_per_env_pixels
+        if len_px <= 2 or wid_px <= 2:
+            raise RuntimeError("axis calib failed: tile resolution too small.")
+        row0 = self.border + max(1, int(0.2 * len_px))
+        row1 = self.border + max(1, int(0.8 * len_px))
+        col0 = self.border + max(1, int(0.5 * wid_px))
+        col1 = self.border + max(1, int(0.25 * wid_px))
+        col2 = self.border + max(1, int(0.75 * wid_px))
+        row0 = min(row0, self.border + len_px - 1)
+        row1 = min(row1, self.border + len_px - 1)
+        col0 = min(col0, self.border + wid_px - 1)
+        col1 = min(col1, self.border + wid_px - 1)
+        col2 = min(col2, self.border + wid_px - 1)
+
+        h_low = int(self.height_field_raw[row0, col0])
+        h_high = int(self.height_field_raw[row1, col0])
+        h_left = int(self.height_field_raw[row0, col1])
+        h_right = int(self.height_field_raw[row0, col2])
+        tol = 1
+        if h_high <= h_low:
+            raise RuntimeError(
+                "axis calib failed: +Y not increasing. "
+                f"h_low={h_low} h_high={h_high} row0={row0} row1={row1} "
+                f"col0={col0} len_px={len_px} wid_px={wid_px}"
+            )
+        if abs(h_left - h_right) > tol:
+            raise RuntimeError(
+                "axis calib failed: +X not constant. "
+                f"h_left={h_left} h_right={h_right} row0={row0} "
+                f"col1={col1} col2={col2} tol={tol}"
+            )
 
     def add_terrain_to_map(self, terrain, row, col):
         i = row
@@ -817,19 +892,7 @@ class Terrain:
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
         tile = terrain.height_field_raw
-        expected = (self.length_per_env_pixels, self.width_per_env_pixels)
-        alt = (self.width_per_env_pixels, self.length_per_env_pixels)
-        if tile.shape == expected:
-            tile_view = tile
-        elif tile.shape == alt:
-            tile_view = tile.T
-            if not getattr(self, "_tile_axis_warned", False):
-                print(f"[Warn] SubTerrain axis mismatch: tile_shape={tile.shape}, expected={expected}, alt={alt}. Using transpose.")
-                self._tile_axis_warned = True
-        else:
-            raise RuntimeError(
-                f"tile shape mismatch: got {tile.shape}, expected {expected} or {alt}"
-            )
+        tile_view, _ = self._resolve_tile_view(tile)
         self.height_field_raw[start_x: end_x, start_y:end_y] = tile_view
 
         env_origin_x = (j + 0.5) * self.env_width
