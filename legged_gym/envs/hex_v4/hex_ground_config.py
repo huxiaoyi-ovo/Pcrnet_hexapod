@@ -115,6 +115,8 @@ class HexGroundCfg(LeggedRobotCfg):
         terrain_v2_min_cols = 1
         terrain_v2_shuffle_seed = None
         terrain_v2_subterrain_axis = "auto"
+        # max tile rows (grid rows). 0 disables the clamp.
+        terrain_v2_max_rows = 0
         debug_allow_plane = False
         scene_use_heightfield = True
         scene_resample_on_reset = False

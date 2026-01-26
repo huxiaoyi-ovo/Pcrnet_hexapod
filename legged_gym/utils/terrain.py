@@ -301,6 +301,8 @@ class Terrain:
         auto_rows = rows <= 0
         auto_cols = cols <= 0
         auto_grid = False
+        max_rows = int(getattr(cfg, "terrain_v2_max_rows", 0) or 0)
+        max_rows_applied = False
         expanded_cols = False
         if self.terrain_v2_enable and num_robots is not None:
             min_rows = int(getattr(cfg, "terrain_v2_min_rows", 1) or 1)
@@ -318,6 +320,18 @@ class Terrain:
             if auto_grid:
                 cfg.num_rows = rows
                 cfg.num_cols = cols
+            if max_rows > 0 and rows > max_rows:
+                old_rows = rows
+                old_cols = cols
+                rows = max_rows
+                cols = max(min_cols, int(np.ceil(float(num_robots) / float(rows))))
+                cfg.num_rows = rows
+                cfg.num_cols = cols
+                max_rows_applied = True
+                print(
+                    f"[TerrainV2] max_rows clamp: rows {old_rows} -> {rows}, "
+                    f"cols {old_cols} -> {cols} (max_rows={max_rows})"
+                )
         if num_robots is not None and rows > 0 and cols > 0:
             required_cols = int(np.ceil(float(num_robots) / float(rows)))
             if required_cols > cols:
@@ -389,11 +403,13 @@ class Terrain:
                 shuffle_seed = getattr(cfg, "scene_seed", 0)
             shuffle_seed = int(shuffle_seed or 0)
             auto_expand = bool(getattr(cfg, "auto_expand_terrain_cols", True))
+            grid_order = "user->auto->max_rows"
             print(
                 f"[TerrainV2] scene={scene_tag} grid={cfg.num_rows}x{cfg.num_cols} "
                 f"num_envs={num_robots} auto_grid={auto_grid} auto_expand={auto_expand} "
                 f"expanded_cols={expanded_cols} shuffle={shuffle} shuffle_seed={shuffle_seed} "
-                f"seed_range=[{base_seed},{max_seed}]"
+                f"max_rows={max_rows} max_rows_applied={max_rows_applied} "
+                f"grid_order={grid_order} seed_range=[{base_seed},{max_seed}]"
             )
             if cfg.curriculum:
                 self.scene_heightfield_curriculum()
