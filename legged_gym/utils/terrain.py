@@ -773,16 +773,43 @@ class Terrain:
         end_x = self.border + (i + 1) * self.length_per_env_pixels
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
-        self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
+        if self.terrain_v2_enable and self.scene_use_heightfield:
+            length_px = int(self.length_per_env_pixels)
+            width_px = int(self.width_per_env_pixels)
+            expected_len = (length_px, width_px)
+            expected_wid = (width_px, length_px)
+            buffer_shape = terrain.height_field_raw.shape
+            if buffer_shape == expected_len:
+                tile_view = terrain.height_field_raw
+            elif buffer_shape == expected_wid:
+                tile_view = terrain.height_field_raw.T
+            else:
+                raise RuntimeError(
+                    f"terrain_v2 subterrain axis mismatch in add_terrain_to_map: "
+                    f"buffer_shape={buffer_shape}, expected={expected_len} or {expected_wid}. "
+                    "请检查 IsaacGym 版本或设置 cfg.terrain.terrain_v2_subterrain_axis。"
+                )
+            self.height_field_raw[start_x: end_x, start_y:end_y] = tile_view
 
-        env_origin_x = (j + 0.5) * self.env_width
-        env_origin_y = (i + 0.5) * self.env_length
-        x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
-        x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
-        y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
-        y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
-        env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
-        self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
+            env_origin_x = (j + 0.5) * self.env_width
+            env_origin_y = (i + 0.5) * self.env_length
+            x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
+            x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
+            y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
+            y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
+            env_origin_z = np.max(tile_view[x1:x2, y1:y2]) * terrain.vertical_scale
+            self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
+        else:
+            self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
+
+            env_origin_x = (j + 0.5) * self.env_width
+            env_origin_y = (i + 0.5) * self.env_length
+            x1 = int((self.env_length/2. - 1) / terrain.horizontal_scale)
+            x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
+            y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
+            y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
+            env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
+            self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
     gap_size = int(gap_size / terrain.horizontal_scale)
