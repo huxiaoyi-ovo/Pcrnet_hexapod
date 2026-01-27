@@ -811,51 +811,75 @@ class HexGround(LeggedRobot):
                 x_local = 0.0
                 y_local = 0.0
                 placed = False
+                if not hasattr(self, "_s1_spawn_warned"):
+                    self._s1_spawn_warned = False
+                def _warn_once(msg: str):
+                    if not self._s1_spawn_warned:
+                        print(msg)
+                        self._s1_spawn_warned = True
+                y_min = y_start + spawn_buffer
+                y_max = min(y_start + spawn_span, y_end - spawn_buffer)
+                forbid_pad = max(margin, clearance)
+                forbidden = []
+                if gates:
+                    for gate in gates:
+                        try:
+                            gy = float(gate.get("y0", 0.0))
+                            gl = float(gate.get("length", 0.0))
+                        except Exception:
+                            continue
+                        if gl <= 0.0:
+                            continue
+                        forbidden.append((gy - 0.5 * gl - forbid_pad, gy + 0.5 * gl + forbid_pad))
                 for _ in range(max_tries):
-                    y_min = y_start + spawn_buffer
-                    y_max = min(y_start + spawn_span, y_end - spawn_buffer)
                     if y_max <= y_min:
-                        raise RuntimeError(
-                            "S1 spawn invalid y-range: "
+                        _warn_once(
+                            "[Warn] S1 spawn invalid y-range, falling back. "
                             f"y_min={y_min:.3f} y_max={y_max:.3f} "
                             f"length={length:.3f} spawn_buffer={spawn_buffer:.3f} spawn_span={spawn_span:.3f}"
                         )
+                        break
                     y_local = rng.uniform(y_min, y_max)
+                    if forbidden:
+                        hit = False
+                        for y0, y1 in forbidden:
+                            if y0 <= y_local <= y1:
+                                hit = True
+                                break
+                        if hit:
+                            continue
                     half_w = self._corridor_half_width_at_y(scene_spec, y_local)
-                    x_min = x_center - (half_w - margin)
-                    x_max = x_center + (half_w - margin)
-                    if x_max <= x_min:
-                        raise RuntimeError(
-                            "S1 spawn invalid x-range: "
-                            f"half_w={half_w:.3f} margin={margin:.3f} "
-                            f"x_min={x_min:.3f} x_max={x_max:.3f} "
-                            f"corridor_width={width_nom:.3f} door_width={door_width}"
-                        )
+                    usable_half = half_w - margin - clearance
+                    if usable_half <= 0.0:
+                        continue
+                    x_min = x_center - usable_half
+                    x_max = x_center + usable_half
                     x_local = rng.uniform(x_min, x_max)
                     if self._is_scene_spawn_clear(scene_spec, x_local, y_local, clearance):
                         placed = True
                         break
                 if not placed:
-                    y_min = y_start + spawn_buffer
-                    y_max = min(y_start + spawn_span, y_end - spawn_buffer)
-                    if y_max <= y_min:
-                        raise RuntimeError(
-                            "S1 spawn invalid y-range (fallback): "
-                            f"y_min={y_min:.3f} y_max={y_max:.3f} "
-                            f"length={length:.3f} spawn_buffer={spawn_buffer:.3f} spawn_span={spawn_span:.3f}"
-                        )
-                    y_local = float(np.clip(y_local, y_min, y_max))
-                    half_w = self._corridor_half_width_at_y(scene_spec, y_local)
-                    x_min = x_center - (half_w - margin)
-                    x_max = x_center + (half_w - margin)
-                    if x_max <= x_min:
-                        raise RuntimeError(
-                            "S1 spawn invalid x-range (fallback): "
-                            f"half_w={half_w:.3f} margin={margin:.3f} "
-                            f"x_min={x_min:.3f} x_max={x_max:.3f} "
-                            f"corridor_width={width_nom:.3f} door_width={door_width}"
-                        )
-                    x_local = float(np.clip(x_local, x_min, x_max))
+                    _warn_once(
+                        "[Warn] S1 spawn fallback triggered; using deterministic safe point. "
+                        f"length={length:.3f} spawn_buffer={spawn_buffer:.3f} spawn_span={spawn_span:.3f} "
+                        f"margin={margin:.3f} clearance={clearance:.3f} door_width={door_width}"
+                    )
+                    span_mid = 0.5 * min(spawn_span, 1.0)
+                    y_local = y_start + spawn_buffer + span_mid
+                    if y_max > y_min:
+                        y_local = float(np.clip(y_local, y_min, y_max))
+                    if forbidden:
+                        inside = False
+                        for y0, y1 in forbidden:
+                            if y0 <= y_local <= y1:
+                                inside = True
+                                break
+                        if inside:
+                            if y_min < y_max and all(not (y0 <= y_min <= y1) for y0, y1 in forbidden):
+                                y_local = y_min
+                            elif y_min < y_max and all(not (y0 <= y_max <= y1) for y0, y1 in forbidden):
+                                y_local = y_max
+                    x_local = x_center
                 self.root_states[env_id] = self.base_init_state
                 self.root_states[env_id, :3] += self.env_origins[env_id]
                 self.root_states[env_id, 0] += x_local
