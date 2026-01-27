@@ -19,6 +19,8 @@ experiments/
 videos/
 *.pt
 *.pth
+.pyc
+__pycache__/
 *.onnx
 
 # 3. 编译文件 (Isaac Gym 的 C++ 扩展)

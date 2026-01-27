@@ -71,7 +71,7 @@ class HexGround(LeggedRobot):
         #额外初始化相机类
         cam_prop=gymapi.CameraProperties()
         # print("sim_params.use_gpu_pipline=",sim_params.use_gpu_pipline)
-        if self.camera_cfg is not None:
+        if self.camera_cfg is not None and self.enable_camera:
             self._init_camera_buffers()
 
     def create_sim(self):
@@ -862,6 +862,27 @@ class HexGround(LeggedRobot):
                 self.root_states[env_id, 1] += y_local
                 updated.append(env_id)
                 continue
+            if scene_spec is not None and scene_spec.scene_type == "s2_forest":
+                params = scene_spec.params or {}
+                clear_band = float(params.get("clear_band", 1.0))
+                length = float(self.cfg.terrain.terrain_length)
+                safe_half_width = max(0.0, 0.5 * clear_band - margin)
+                y_min = -0.5 * length + margin
+                y_max = 0.5 * length - margin
+                if y_max <= y_min:
+                    y_local = 0.0
+                else:
+                    y_local = rng.uniform(y_min, y_max)
+                if safe_half_width <= 0.0:
+                    x_local = 0.0
+                else:
+                    x_local = rng.uniform(-safe_half_width, safe_half_width)
+                self.root_states[env_id] = self.base_init_state
+                self.root_states[env_id, :3] += self.env_origins[env_id]
+                self.root_states[env_id, 0] += x_local
+                self.root_states[env_id, 1] += y_local
+                updated.append(env_id)
+                continue
             bounds = self._scene_spawn_bounds(scene_spec)
             if bounds is None:
                 continue
@@ -947,12 +968,10 @@ class HexGround(LeggedRobot):
         self.obs_vgf_buf = torch.clip(self.obs_vgf_buf, -clip_obs, clip_obs)
         self.obs_terrain_buf = torch.clip(self.obs_terrain_buf, -clip_obs, clip_obs)
 
-        if self.camera_cfg is not None:
-            if not self.enable_camera:
-                self.depth_raw.fill_(self.camera_cfg.far_clip)
-                processed = self._process_depth_for_network(self.depth_raw)
-                self.depth_images[:] = processed
-            elif self.common_step_counter % self.camera_cfg.capture_interval == 0:
+        if self.enable_camera and self.camera_cfg is not None:
+            if not hasattr(self, "depth_raw") or not hasattr(self, "depth_images"):
+                self._init_camera_buffers()
+            if self.common_step_counter % self.camera_cfg.capture_interval == 0:
                 depth_raw = self._get_depth_images()
                 processed = self._process_depth_for_network(depth_raw)
                 self.depth_images[:] = processed

@@ -125,12 +125,15 @@ def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCf
     gate_length_jitter = _param_range(params_easy, params_hard, "gate_length_jitter", 0.2, difficulty)
     gate_spacing_min = _param_range(params_easy, params_hard, "gate_spacing_min", 0.6, difficulty)
     gate_margin_y = _param_range(params_easy, params_hard, "gate_margin_y", 0.8, difficulty)
+    gate_clear_from_spawn = _param_range(params_easy, params_hard, "gate_clear_from_spawn_m", 0.2, difficulty)
+    gate_clear_from_goal = _param_range(params_easy, params_hard, "gate_clear_from_goal_m", 0.2, difficulty)
     wall_height = _param_range(params_easy, params_hard, "wall_height_m", 0.5, difficulty)
     wall_thickness = _param_range(params_easy, params_hard, "wall_thickness_m", 0.16, difficulty)
     corridor_spawn_buffer = _param_range(params_easy, params_hard, "corridor_spawn_buffer", 0.6, difficulty)
     corridor_spawn_span = _param_range(params_easy, params_hard, "corridor_spawn_span", 2.0, difficulty)
     corridor_goal_min_offset = _param_range(params_easy, params_hard, "corridor_goal_min_offset", 2.0, difficulty)
-    corridor_goal_buffer = _param_range(params_easy, params_hard, "corridor_goal_buffer", 0.6, difficulty)
+    goal_buffer_default = float(getattr(cfg, "scene_margin", 0.3))
+    corridor_goal_buffer = _param_range(params_easy, params_hard, "corridor_goal_buffer", goal_buffer_default, difficulty)
     corridor_goal_margin = _param_range(params_easy, params_hard, "corridor_goal_margin", 0.2, difficulty)
 
     door_width = min(door_width, corridor_width)
@@ -153,9 +156,31 @@ def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCf
         height_field[:, right_wall_start:right_wall_end] = wall_cells
 
     length_m = length_px * h_scale
+    y_start = -0.5 * length_m
+    y_end = 0.5 * length_m
+    spawn_y0 = y_start + corridor_spawn_buffer
+    spawn_y1 = min(y_start + corridor_spawn_span, y_end)
+    goal_y0 = y_end - corridor_goal_buffer
+    goal_y1 = y_end
     gate_length = max(0.1, gate_length + rng.uniform(-gate_length_jitter, gate_length_jitter))
-    y_min = -0.5 * length_m + gate_margin_y
-    y_max = 0.5 * length_m - gate_margin_y
+    gate_y_min = max(y_start + gate_margin_y, spawn_y1 + gate_clear_from_spawn)
+    gate_y_max = min(y_end - gate_margin_y, goal_y0 - gate_clear_from_goal)
+    if gate_y_max <= gate_y_min:
+        raise RuntimeError(
+            "S1 gate sampling has empty mid-range (before gate length). "
+            f"length_m={length_m:.3f} gate_margin_y={gate_margin_y:.3f} "
+            f"corridor_spawn_buffer={corridor_spawn_buffer:.3f} corridor_spawn_span={corridor_spawn_span:.3f} "
+            f"corridor_goal_buffer={corridor_goal_buffer:.3f} gate_length={gate_length:.3f}"
+        )
+    y_min = gate_y_min + 0.5 * gate_length
+    y_max = gate_y_max - 0.5 * gate_length
+    if y_max <= y_min:
+        raise RuntimeError(
+            "S1 gate sampling has empty mid-range (after gate length). "
+            f"length_m={length_m:.3f} gate_margin_y={gate_margin_y:.3f} "
+            f"corridor_spawn_buffer={corridor_spawn_buffer:.3f} corridor_spawn_span={corridor_spawn_span:.3f} "
+            f"corridor_goal_buffer={corridor_goal_buffer:.3f} gate_length={gate_length:.3f}"
+        )
     gate_centers = []
     for _ in range(gate_count):
         placed = False
@@ -181,6 +206,8 @@ def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCf
         if right > right_gate:
             height_field[y0_idx:y1_idx, right_gate:right] = wall_cells
         gates_meta.append({"y0": float(y_center), "length": float(gate_length), "door_width": float(door_width)})
+
+    gates_meta.sort(key=lambda g: g.get("y0", 0.0))
 
     terrain.meta = {
         "scene_type": "s1_corridor_gate",

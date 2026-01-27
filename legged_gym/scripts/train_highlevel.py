@@ -303,11 +303,18 @@ class HierarchicalHexapodEnv:
                 if getattr(args, "camera_interval", None) is not None:
                     env_cfg.sensor.depth_camera.capture_interval = args.camera_interval
 
-        if args.task == "hex_ground" and hasattr(env_cfg, "navigation"):
-            env_cfg.navigation.goal_reached_threshold = 0.1
+        if hasattr(env_cfg, "navigation") and hasattr(env_cfg.navigation, "reward_cfg"):
+            reward_goal_th = float(env_cfg.navigation.reward_cfg.get("goal_reach_threshold", 0.1))
+            env_cfg.navigation.goal_reached_threshold = reward_goal_th
+            if getattr(env_cfg.navigation, "resample_on_reach", False):
+                if abs(env_cfg.navigation.goal_reached_threshold - reward_goal_th) > 1e-6:
+                    raise RuntimeError(
+                        "goal_reached_threshold must match reward_cfg.goal_reach_threshold when resample_on_reach=True"
+                    )
 
         # 覆盖配置以适配高层训练
-        env_cfg.env.num_envs = min(env_cfg.env.num_envs, args.num_envs)
+        if args.num_envs is not None:
+            env_cfg.env.num_envs = args.num_envs
         
         self.env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
         self.num_envs = self.env.num_envs
@@ -1310,7 +1317,9 @@ def train(args):
     if args.task == "hex_terrain":
         raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1 / hex_s2 / hex_calib")
     if args.task in ("hex_s3", "hex_s4", "hex_s5", "hex_s6", "hex_mix_gate"):
-        raise RuntimeError(f"{args.task} 暂未实现（classic terrain_type 尚未落地），请先使用 hex_s1 / hex_s2 / hex_calib")
+        print(
+            f"[Warn] {args.task} 尚未验证完成。如遇 terrain_type/场景错误，请先确认 classic terrain_type 已落地。"
+        )
     if args.task == "hex_ground":
         print("[Warn] hex_ground 仅作为容器任务，请显式配置 terrain_type 或改用 hex_s1/hex_s2/hex_calib。")
     if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
@@ -2263,7 +2272,7 @@ if __name__ == "__main__":
                         help='Isaac Gym 任务名称')
     parser.add_argument('--aff_stack', type=int, default=1,
                         help='affordance 堆叠帧数 (短时记忆)')
-    parser.add_argument('--num_envs', type=int, default=4096,
+    parser.add_argument('--num_envs', type=int, default=None,
                         help='并行环境数量')
     parser.add_argument('--decimation', type=int, default=5,
                         help='高层/低层频率比 (50Hz / 10Hz = 5)')

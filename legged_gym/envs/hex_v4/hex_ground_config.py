@@ -48,7 +48,7 @@ class HexGroundCfg(LeggedRobotCfg):
         goal_range_x = [2.0, 5.0]
         goal_range_y = [-3.0, 3.0]
         goal_min_distance = 2.0
-        goal_reached_threshold = 0.5
+        goal_reached_threshold = 0.1
         # 采样控制：确保直线路径被障碍物阻挡（需要绕行）
         goal_sample_max_tries = 20
         goal_line_samples = 16
