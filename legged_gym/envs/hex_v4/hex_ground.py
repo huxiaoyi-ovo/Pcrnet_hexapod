@@ -1340,9 +1340,19 @@ class HexGround(LeggedRobot):
         self.obs_terrain_buf = height*self.obs_scales.height_measurements
 
         if self.add_noise:
-            self.obs_buf += (2*torch.rand_like(self.obs_buf)-1)*self.noise_scale_vec[:self.num_obs]
-            self.obs_vgf_buf += (2*torch.rand_like(self.obs_vgf_buf)-1)*self.noise_scale_vec[self.num_obs : self.num_obs+12]
-            self.obs_terrain_buf += (2*torch.rand_like(self.obs_terrain_buf)-1)*self.noise_scale_vec[self.num_obs+12:]
+            # NOTE: separated obs dims are not aligned with cfg.env.num_observations.
+            obs_dim = int(self.obs_buf.shape[1])
+            vgf_dim = int(self.obs_vgf_buf.shape[1])
+            terrain_dim = int(self.obs_terrain_buf.shape[1])
+            needed = obs_dim + vgf_dim + terrain_dim
+            if self.noise_scale_vec.shape[0] < needed:
+                raise RuntimeError(
+                    f"noise_scale_vec too short for separated obs: "
+                    f"len={self.noise_scale_vec.shape[0]} needed={needed}"
+                )
+            self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec[:obs_dim]
+            self.obs_vgf_buf += (2 * torch.rand_like(self.obs_vgf_buf) - 1) * self.noise_scale_vec[obs_dim:obs_dim + vgf_dim]
+            self.obs_terrain_buf += (2 * torch.rand_like(self.obs_terrain_buf) - 1) * self.noise_scale_vec[obs_dim + vgf_dim:obs_dim + vgf_dim + terrain_dim]
 
         self._extract_robot_state()
         self._update_goal_buffer()
