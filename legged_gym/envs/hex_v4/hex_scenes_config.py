@@ -412,6 +412,7 @@ class HexS3Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s3_doorway_rooms"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -489,6 +490,7 @@ class HexS3LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s3_doorway_rooms"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -566,6 +568,7 @@ class HexS4Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s4_crossing"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -614,6 +617,7 @@ class HexS4LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s4_crossing"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -664,6 +668,7 @@ class HexS5Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s5_sparse_dense"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -735,6 +740,7 @@ class HexS5LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s5_sparse_dense"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -806,6 +812,7 @@ class HexS6Cfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s6_ood_cluster"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3
@@ -882,6 +889,7 @@ class HexS6LargeCfg(HexGroundCfg):
         env_spacing = 12.0
     class terrain(HexGroundCfg.terrain):
         mesh_type = "heightfield"
+        terrain_type = "s6_ood_cluster"
         fixed_layout_enable = False
         scene_clearance = 0.27
         scene_margin = 0.3

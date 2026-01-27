@@ -321,6 +321,332 @@ def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terra
     }
     return terrain
 
+def _range_to_indices(start: float, end: float, extent_m: float, scale: float, max_px: int):
+    if end < start:
+        start, end = end, start
+    i0 = int(np.floor((start + 0.5 * extent_m) / scale))
+    i1 = int(np.ceil((end + 0.5 * extent_m) / scale))
+    i0 = max(0, min(max_px, i0))
+    i1 = max(0, min(max_px, i1))
+    return i0, i1
+
+
+def _stamp_rect(height_field, x0, x1, y0, y1, height_cells, width_m, length_m, h_scale):
+    length_px, width_px = height_field.shape
+    x0i, x1i = _range_to_indices(x0, x1, width_m, h_scale, width_px)
+    y0i, y1i = _range_to_indices(y0, y1, length_m, h_scale, length_px)
+    if x1i <= x0i or y1i <= y0i:
+        return
+    height_field[y0i:y1i, x0i:x1i] = np.maximum(height_field[y0i:y1i, x0i:x1i], height_cells)
+
+
+def _clear_rect(height_field, x0, x1, y0, y1, width_m, length_m, h_scale):
+    length_px, width_px = height_field.shape
+    x0i, x1i = _range_to_indices(x0, x1, width_m, h_scale, width_px)
+    y0i, y1i = _range_to_indices(y0, y1, length_m, h_scale, length_px)
+    if x1i <= x0i or y1i <= y0i:
+        return
+    height_field[y0i:y1i, x0i:x1i] = 0
+
+
+def _stamp_cylinder(height_field, cx, cy, radius, height_cells, width_m, length_m, h_scale):
+    length_px, width_px = height_field.shape
+    cx_idx = int(round((cx + 0.5 * width_m) / h_scale))
+    cy_idx = int(round((cy + 0.5 * length_m) / h_scale))
+    rad_cells = max(1, int(round(radius / h_scale)))
+    x1 = max(0, cx_idx - rad_cells)
+    x2 = min(width_px, cx_idx + rad_cells + 1)
+    y1 = max(0, cy_idx - rad_cells)
+    y2 = min(length_px, cy_idx + rad_cells + 1)
+    xs = np.arange(x1, x2)
+    ys = np.arange(y1, y2)
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
+    mask = (grid_x - cx_idx) ** 2 + (grid_y - cy_idx) ** 2 <= rad_cells * rad_cells
+    patch = height_field[y1:y2, x1:x2]
+    patch[mask] = np.maximum(patch[mask], height_cells)
+    height_field[y1:y2, x1:x2] = patch
+
+
+def _sample_points(rng, count, bounds, min_dist: float, max_tries: int):
+    points = []
+    if count <= 0:
+        return points
+    min_dist = max(0.0, float(min_dist))
+    min_dist2 = min_dist * min_dist
+    tries = 0
+    while len(points) < count and tries < max_tries:
+        x = rng.uniform(bounds[0][0], bounds[0][1])
+        y = rng.uniform(bounds[1][0], bounds[1][1])
+        if min_dist2 > 0.0:
+            if any((x - cx) ** 2 + (y - cy) ** 2 < min_dist2 for cx, cy in points):
+                tries += 1
+                continue
+        points.append((x, y))
+        tries += 1
+    return points
+
+
+def s3_doorway_rooms_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S3 doorway rooms: multiple transverse walls with door gaps along +Y."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    width_m = width_px * h_scale
+    length_m = length_px * h_scale
+    room_width = _param_range(params_easy, params_hard, "room_width", width_m, difficulty)
+    room_width = min(float(room_width), width_m)
+    wall_thickness = _param_range(params_easy, params_hard, "wall_thickness", 0.25, difficulty)
+    door_thickness = _param_range(params_easy, params_hard, "door_thickness", wall_thickness, difficulty)
+    room_count = _int_range(params_easy, params_hard, "room_count", 3, difficulty)
+    jitter = _param_range(params_easy, params_hard, "room_boundary_jitter", 0.4, difficulty)
+    door_min = _param_range(params_easy, params_hard, "door_width_min", 0.8, difficulty)
+    door_max = _param_range(params_easy, params_hard, "door_width_max", 1.2, difficulty)
+    door_offset_max = _param_range(params_easy, params_hard, "door_offset_max", 0.5, difficulty)
+
+    wall_height = float(getattr(cfg, "scene_static_wall_block_height", getattr(cfg, "scene_static_block_height", 0.35)))
+    wall_cells = max(1, int(round(wall_height / v_scale)))
+
+    half_w = 0.5 * room_width
+    if wall_thickness > 0.0 and half_w > 0.0:
+        _stamp_rect(height_field, -half_w, -half_w + wall_thickness, -0.5 * length_m, 0.5 * length_m,
+                    wall_cells, width_m, length_m, h_scale)
+        _stamp_rect(height_field, half_w - wall_thickness, half_w, -0.5 * length_m, 0.5 * length_m,
+                    wall_cells, width_m, length_m, h_scale)
+
+    doors_meta = []
+    if room_count > 0:
+        y_positions = np.linspace(-0.5 * length_m + length_m / (room_count + 1),
+                                  0.5 * length_m - length_m / (room_count + 1),
+                                  room_count)
+        for y_center in y_positions:
+            y_center = float(y_center + rng.uniform(-0.5 * jitter, 0.5 * jitter))
+            y_center = float(np.clip(y_center, -0.5 * length_m + 0.5 * door_thickness,
+                                     0.5 * length_m - 0.5 * door_thickness))
+            _stamp_rect(height_field, -half_w, half_w,
+                        y_center - 0.5 * door_thickness, y_center + 0.5 * door_thickness,
+                        wall_cells, width_m, length_m, h_scale)
+            door_width = float(rng.uniform(door_min, door_max))
+            door_width = min(door_width, max(0.0, 2.0 * half_w - 0.1))
+            if door_width <= 0.0:
+                continue
+            max_offset = max(0.0, half_w - 0.5 * door_width - 0.05)
+            offset = float(rng.uniform(-door_offset_max, door_offset_max))
+            offset = float(np.clip(offset, -max_offset, max_offset))
+            _clear_rect(height_field, offset - 0.5 * door_width, offset + 0.5 * door_width,
+                        y_center - 0.5 * door_thickness, y_center + 0.5 * door_thickness,
+                        width_m, length_m, h_scale)
+            doors_meta.append({"y0": float(y_center), "door_width": float(door_width), "x_center": float(offset)})
+
+    terrain.meta = {
+        "scene_type": "s3_doorway_rooms",
+        "params": {
+            "room_width": float(room_width),
+            "door_count": int(room_count),
+            "door_width_min": float(door_min),
+            "door_width_max": float(door_max),
+            "doors": doors_meta,
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
+def s4_crossing_static_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S4 crossing (static): a transverse wall band with gaps."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    width_m = width_px * h_scale
+    length_m = length_px * h_scale
+    cross_width = _param_range(params_easy, params_hard, "cross_width", 3.0, difficulty)
+    cross_span = _param_range(params_easy, params_hard, "cross_span", 2.6, difficulty)
+    count_min = int(params_easy.get("dynamic_count_min", 2))
+    count_max = int(params_hard.get("dynamic_count_max", count_min))
+    if count_max < count_min:
+        count_max = count_min
+    gap_count = int(rng.randint(count_min, count_max + 1)) if count_max > 0 else 0
+    wall_height = _param_range(
+        params_easy,
+        params_hard,
+        "dynamic_height",
+        getattr(cfg, "scene_static_block_height", 0.5),
+        difficulty,
+    )
+    wall_cells = max(1, int(round(float(wall_height) / v_scale)))
+
+    band_th = max(float(cross_span), h_scale)
+    y_center = float(rng.uniform(-0.15 * length_m, 0.15 * length_m))
+    _stamp_rect(height_field, -0.5 * width_m, 0.5 * width_m,
+                y_center - 0.5 * band_th, y_center + 0.5 * band_th,
+                wall_cells, width_m, length_m, h_scale)
+
+    if gap_count > 0:
+        gap_w = min(float(cross_width), width_m * 0.9)
+        if gap_count == 1:
+            centers = [0.0]
+        else:
+            centers = np.linspace(-0.35 * width_m, 0.35 * width_m, gap_count)
+        for gx in centers:
+            _clear_rect(height_field, float(gx) - 0.5 * gap_w, float(gx) + 0.5 * gap_w,
+                        y_center - 0.5 * band_th, y_center + 0.5 * band_th,
+                        width_m, length_m, h_scale)
+
+    terrain.meta = {
+        "scene_type": "s4_crossing",
+        "params": {
+            "cross_width": float(cross_width),
+            "cross_span": float(cross_span),
+            "gap_count": int(gap_count),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
+def s5_sparse_dense_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S5 sparse->dense: two bands with different obstacle densities."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    width_m = width_px * h_scale
+    length_m = length_px * h_scale
+    sparse_count = _int_range(params_easy, params_hard, "sparse_count", 6, difficulty)
+    dense_count = _int_range(params_easy, params_hard, "dense_count", 14, difficulty)
+    boundary_offset = _param_range(params_easy, params_hard, "boundary_offset", 0.0, difficulty)
+    boundary_jitter = _param_range(params_easy, params_hard, "boundary_jitter", 0.4, difficulty)
+    y_split = float(boundary_offset + rng.uniform(-boundary_jitter, boundary_jitter))
+    y_split = float(np.clip(y_split, -0.3 * length_m, 0.3 * length_m))
+
+    pole_r_min = _param_range(params_easy, params_hard, "pole_radius_min", 0.12, difficulty)
+    pole_r_max = _param_range(params_easy, params_hard, "pole_radius_max", 0.18, difficulty)
+    pole_height = _param_range(params_easy, params_hard, "pole_height", 0.3, difficulty)
+    block_size_min = _param_range(params_easy, params_hard, "block_size_min", 0.28, difficulty)
+    block_size_max = _param_range(params_easy, params_hard, "block_size_max", 0.4, difficulty)
+    block_h_min = _param_range(params_easy, params_hard, "block_height_min", 0.3, difficulty)
+    block_h_max = _param_range(params_easy, params_hard, "block_height_max", 0.35, difficulty)
+    sparse_ratio = _param_range(params_easy, params_hard, "sparse_block_ratio", 0.1, difficulty)
+    dense_ratio = _param_range(params_easy, params_hard, "dense_block_ratio", 0.3, difficulty)
+
+    max_obs = max(float(pole_r_max), 0.5 * float(block_size_max))
+    min_dist_sparse = max_obs * 3.0
+    min_dist_dense = max_obs * 2.0
+    y_min = -0.5 * length_m + max_obs
+    y_max = 0.5 * length_m - max_obs
+    y_split = float(np.clip(y_split, y_min + max_obs, y_max - max_obs))
+
+    bounds_sparse = ((-0.5 * width_m + max_obs, 0.5 * width_m - max_obs), (y_min, y_split))
+    bounds_dense = ((-0.5 * width_m + max_obs, 0.5 * width_m - max_obs), (y_split, y_max))
+
+    sparse_pts = _sample_points(rng, sparse_count, bounds_sparse, min_dist_sparse, max_tries=sparse_count * 40 + 200)
+    dense_pts = _sample_points(rng, dense_count, bounds_dense, min_dist_dense, max_tries=dense_count * 40 + 200)
+
+    def _stamp_points(points, block_ratio):
+        for x, y in points:
+            if rng.rand() < block_ratio:
+                size = rng.uniform(block_size_min, block_size_max)
+                height_m = rng.uniform(block_h_min, block_h_max)
+                height_cells = max(1, int(round(height_m / v_scale)))
+                _stamp_rect(height_field, x - 0.5 * size, x + 0.5 * size,
+                            y - 0.5 * size, y + 0.5 * size,
+                            height_cells, width_m, length_m, h_scale)
+            else:
+                radius = rng.uniform(pole_r_min, pole_r_max)
+                height_cells = max(1, int(round(pole_height / v_scale)))
+                _stamp_cylinder(height_field, x, y, radius, height_cells, width_m, length_m, h_scale)
+
+    _stamp_points(sparse_pts, sparse_ratio)
+    _stamp_points(dense_pts, dense_ratio)
+
+    terrain.meta = {
+        "scene_type": "s5_sparse_dense",
+        "params": {
+            "y_split": float(y_split),
+            "sparse_count": int(sparse_count),
+            "dense_count": int(dense_count),
+            "placed_sparse": int(len(sparse_pts)),
+            "placed_dense": int(len(dense_pts)),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
+def s6_ood_cluster_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S6 OOD cluster: clustered static obstacles."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    params_easy = getattr(cfg, "scene_params_easy", {}) or {}
+    params_hard = getattr(cfg, "scene_params_hard", {}) or {}
+
+    width_m = width_px * h_scale
+    length_m = length_px * h_scale
+    cluster_count = _int_range(params_easy, params_hard, "cluster_count", 6, difficulty)
+    cluster_radius = _param_range(params_easy, params_hard, "cluster_radius", 0.18, difficulty)
+    cluster_spread = _param_range(params_easy, params_hard, "cluster_spread", 0.6, difficulty)
+    obstacle_height = _param_range(params_easy, params_hard, "obstacle_height", 0.35, difficulty)
+    height_cells = max(1, int(round(float(obstacle_height) / v_scale)))
+
+    max_obs = max(0.2, float(cluster_radius))
+    bounds = ((-0.5 * width_m + max_obs, 0.5 * width_m - max_obs),
+              (-0.5 * length_m + max_obs, 0.5 * length_m - max_obs))
+    centers = _sample_points(rng, cluster_count, bounds, min_dist=2.0 * cluster_radius, max_tries=400)
+    count_per_cluster = max(6, int(round(10 + 6 * difficulty)))
+
+    for cx, cy in centers:
+        for _ in range(count_per_cluster):
+            x = float(np.clip(rng.normal(cx, cluster_spread), bounds[0][0], bounds[0][1]))
+            y = float(np.clip(rng.normal(cy, cluster_spread), bounds[1][0], bounds[1][1]))
+            if rng.rand() < 0.5:
+                size = rng.uniform(0.8 * cluster_radius * 2.0, 1.2 * cluster_radius * 2.0)
+                _stamp_rect(height_field, x - 0.5 * size, x + 0.5 * size,
+                            y - 0.5 * size, y + 0.5 * size,
+                            height_cells, width_m, length_m, h_scale)
+            else:
+                radius = rng.uniform(0.6 * cluster_radius, 1.0 * cluster_radius)
+                _stamp_cylinder(height_field, x, y, radius, height_cells, width_m, length_m, h_scale)
+
+    terrain.meta = {
+        "scene_type": "s6_ood_cluster",
+        "params": {
+            "cluster_count": int(cluster_count),
+            "cluster_radius": float(cluster_radius),
+            "cluster_spread": float(cluster_spread),
+            "placed": int(len(centers) * count_per_cluster),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
 def fixed_layout_terrain(terrain, difficulty: float, cfg: LeggedRobotCfg.terrain):
     """固定布局地形：中心围挡+通道+低障碍"""
     # 基础网格信息
@@ -683,9 +1009,18 @@ class Terrain:
                 return s1_corridor_gate_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s2", "s2_forest"):
                 return s2_forest_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s3", "s3_doorway_rooms"):
+                return s3_doorway_rooms_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s4", "s4_crossing", "s4_crossing_static"):
+                return s4_crossing_static_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s5", "s5_sparse_dense"):
+                return s5_sparse_dense_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s6", "s6_ood_cluster"):
+                return s6_ood_cluster_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             raise RuntimeError(
                 f"unsupported terrain_type={terrain_type}. "
-                "supported: debug_axis, s1_corridor_gate, s2_forest"
+                "supported: debug_axis, s1_corridor_gate, s2_forest, "
+                "s3_doorway_rooms, s4_crossing, s5_sparse_dense, s6_ood_cluster"
             )
         if getattr(self.cfg, "fixed_layout_enable", False):
             return fixed_layout_terrain(terrain, difficulty, self.cfg)
