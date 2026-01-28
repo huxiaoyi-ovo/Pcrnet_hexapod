@@ -1446,7 +1446,7 @@ class HexGround(LeggedRobot):
 
         if getattr(self.nav_cfg, "resample_on_reach", False):
             dist = torch.norm(delta_world, dim=1)
-            reached = dist < getattr(self.nav_cfg, "goal_reached_threshold", 0.5)
+            reached = dist < getattr(self.nav_cfg, "goal_reached_threshold", 0.1)
             if reached.any():
                 self._resample_nav_goals(reached.nonzero(as_tuple=False).flatten())
 

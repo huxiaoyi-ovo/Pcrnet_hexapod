@@ -134,7 +134,7 @@ class HexTerrainCfg(LeggedRobotCfg):
         
         #  奖励相关 
         goal_reached_reward = 10.0
-        goal_reached_threshold = 0.5  # 到达判定距离（米）
+        goal_reached_threshold = 0.1  # 到达判定距离（米）
         
         #  Affordance相关
         affordance_grid_size = 16  # 16×16网格

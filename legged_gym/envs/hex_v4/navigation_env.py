@@ -21,7 +21,7 @@ class NavigationRewardConfig:
     # 目标接近奖励
     goal_approach_scale: float = 2.0      # 接近目标的奖励系数
     goal_reach_bonus: float = 10.0        # 到达目标的额外奖励
-    goal_reach_threshold: float = 0.3     # 到达判定阈值 (m)
+    goal_reach_threshold: float = 0.1     # 到达判定阈值 (m)
 
     # 碰撞惩罚
     collision_penalty: float = -10.0
@@ -339,7 +339,7 @@ class NavigationTaskManager:
         num_envs: int,
         device: torch.device,
         map_size: Tuple[float, float] = (10.0, 10.0),
-        goal_reach_threshold: float = 0.3,
+        goal_reach_threshold: float = 0.1,
         max_episode_length: int = 500,
         curriculum_enabled: bool = True,
     ):

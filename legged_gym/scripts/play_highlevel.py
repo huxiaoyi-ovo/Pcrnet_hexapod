@@ -30,6 +30,7 @@ def parse_args():
         default="hex_s1",
         help="Task name (hex_s1 / hex_s2 / hex_calib)",
     )
+    parser.add_argument("--seed", type=int, default=None, help="随机种子（None 使用默认）")
     parser.add_argument(
         "--mode",
         type=str,
@@ -177,7 +178,13 @@ def main():
     if args.camera_save:
         os.makedirs(args.camera_dir, exist_ok=True)
 
-    env = th.HierarchicalHexapodEnv(args, device)
+    env_cfg = None
+    train_cfg = None
+    if getattr(th, "task_registry", None) is not None:
+        env_cfg, train_cfg = th.task_registry.get_cfgs(name=args.task)
+        if args.seed is not None:
+            env_cfg.seed = int(args.seed)
+    env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
     if hasattr(env, "env") and hasattr(env.env, "cfg") and hasattr(env.env.cfg, "terrain"):
         env.env.cfg.terrain.curriculum = False
     if hasattr(env.env, "_update_terrain_curriculum"):

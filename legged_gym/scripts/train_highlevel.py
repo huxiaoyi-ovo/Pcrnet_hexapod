@@ -51,6 +51,8 @@ sys.path.insert(0, PROJECT_ROOT)
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
 GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
 AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
+GOAL_TH_DEFAULT = 0.1
+GATE_SWITCH_DY_DEFAULT = 0.2
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -267,7 +269,7 @@ class HierarchicalHexapodEnv:
         terrain_difficulty: (N,)
     """
     
-    def __init__(self, args, device: torch.device):
+    def __init__(self, args, device: torch.device, env_cfg=None, train_cfg=None):
         self.args = args
         self.device = device
         self.mode = args.mode
@@ -282,7 +284,10 @@ class HierarchicalHexapodEnv:
         # 初始化 Isaac Gym 环境
         if self.debug:
             print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
-        env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+        if env_cfg is None:
+            env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+        if getattr(args, "seed", None) is not None:
+            env_cfg.seed = int(args.seed)
         if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
             if hasattr(env_cfg.navigation, "follow_goal_force_blocking_line"):
                 env_cfg.navigation.goal_force_blocking_line = bool(
@@ -304,7 +309,7 @@ class HierarchicalHexapodEnv:
                     env_cfg.sensor.depth_camera.capture_interval = args.camera_interval
 
         if hasattr(env_cfg, "navigation") and hasattr(env_cfg.navigation, "reward_cfg"):
-            reward_goal_th = float(env_cfg.navigation.reward_cfg.get("goal_reach_threshold", 0.1))
+            reward_goal_th = float(env_cfg.navigation.reward_cfg.get("goal_reach_threshold", GOAL_TH_DEFAULT))
             env_cfg.navigation.goal_reached_threshold = reward_goal_th
             if getattr(env_cfg.navigation, "resample_on_reach", False):
                 if abs(env_cfg.navigation.goal_reached_threshold - reward_goal_th) > 1e-6:
@@ -1064,6 +1069,36 @@ class HierarchicalHexapodEnv:
         elif self.last_obs is not None and 'gt_affordance' in self.last_obs:
             clearance_pp = self._compute_clearance_from_affordance(self.last_obs['gt_affordance'])
         velocity_cmd, post_info = self.post_processor.process(cmd_vel, clearance_pp)
+        post_info_payload = {}
+        if isinstance(post_info, dict):
+            post_info_payload.update(post_info)
+        post_info_payload.setdefault("cmd_raw", cmd_vel)
+        post_info_payload.setdefault("cmd_slew", velocity_cmd)
+        if "cmd_clamped" not in post_info_payload:
+            post_info_payload["cmd_clamped"] = velocity_cmd
+        post_info_payload["clearance_pp"] = clearance_pp
+        safe_distance = getattr(self.post_processor, "safe_distance", None)
+        free_distance = getattr(self.post_processor, "free_distance", None)
+        max_cmd = getattr(self.post_processor, "max_cmd", None)
+        max_delta = getattr(self.post_processor, "max_delta", None)
+        if safe_distance is not None:
+            post_info_payload["post_safe_distance"] = (
+                float(safe_distance.item()) if torch.is_tensor(safe_distance) else float(safe_distance)
+            )
+        if free_distance is not None:
+            post_info_payload["post_free_distance"] = (
+                float(free_distance.item()) if torch.is_tensor(free_distance) else float(free_distance)
+            )
+        if max_cmd is not None:
+            if torch.is_tensor(max_cmd):
+                post_info_payload["post_max_cmd"] = max_cmd.detach().clone()
+            else:
+                post_info_payload["post_max_cmd"] = torch.as_tensor(max_cmd, device=self.device)
+        if max_delta is not None:
+            if torch.is_tensor(max_delta):
+                post_info_payload["post_max_delta"] = max_delta.detach().clone()
+            else:
+                post_info_payload["post_max_delta"] = torch.as_tensor(max_delta, device=self.device)
 
         # 2. Low-Level 控制循环 (50Hz)
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
@@ -1271,7 +1306,7 @@ class HierarchicalHexapodEnv:
         next_obs = self._get_high_level_obs()
 
         info = {
-            'post_info': post_info,
+            'post_info': post_info_payload,
             'episode_length': length_snapshot,
             'reward_terms': reward_terms,
             'gate_y': gate_y,
@@ -1684,9 +1719,15 @@ def train(args):
         passable_occ_ratio_sum = torch.zeros((), device=device)
         crossable_width_sum = torch.zeros((), device=device)
         risk_scale_sum = torch.zeros((), device=device)
+        cmd_jerk_lin_sum = torch.zeros((), device=device)
+        cmd_jerk_ang_sum = torch.zeros((), device=device)
+        near_miss_excess_sum = torch.zeros((), device=device)
+        gate_switch_count = torch.zeros((), device=device)
         aff_stack_delta_sum = torch.zeros((), device=device)
         aff_stack_std_sum = torch.zeros((), device=device)
         aff_stack_filled_sum = torch.zeros((), device=device)
+        prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
+        reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
         
         for step in range(args.num_steps):
             # 准备输入
@@ -1868,7 +1909,12 @@ def train(args):
             if is_gate:
                 gate_y_sum += gate_y.sum()
                 if gate_y_prev is not None:
-                    gate_y_change_sum += torch.abs(gate_y - gate_y_prev).sum()
+                    delta_gate = gate_y - gate_y_prev
+                    if reset_mask_prev.any():
+                        # 使用上一轮 reset_mask_prev，屏蔽跨 episode 的 Δy
+                        delta_gate[reset_mask_prev] = 0.0
+                    gate_y_change_sum += torch.abs(delta_gate).sum()
+                    gate_switch_count += (torch.abs(delta_gate) > GATE_SWITCH_DY_DEFAULT).float().sum()
             if hasattr(env.env, "commands"):
                 cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
             else:
@@ -1902,6 +1948,35 @@ def train(args):
             clearance = env_info.get('clearance', None) if env_info is not None else None
             if clearance is not None:
                 clearance_sum += clearance.sum()
+            post_info = env_info.get('post_info', None) if env_info is not None else None
+            if post_info is not None:
+                cmd_slew = post_info.get('cmd_slew', None)
+                if cmd_slew is not None:
+                    if not torch.is_tensor(cmd_slew):
+                        cmd_slew = torch.as_tensor(cmd_slew, device=device)
+                    if cmd_slew.dim() == 1:
+                        cmd_slew = cmd_slew.unsqueeze(0)
+                    delta_cmd = cmd_slew - prev_cmd_slew
+                    if reset_mask_prev.any():
+                        delta_cmd[reset_mask_prev] = 0.0
+                    cmd_jerk_lin_sum += torch.norm(delta_cmd[:, :2], dim=1).sum()
+                    cmd_jerk_ang_sum += torch.abs(delta_cmd[:, 2]).sum()
+                    prev_cmd_slew = cmd_slew.detach()
+                clearance_pp = post_info.get('clearance_pp', None)
+                if clearance_pp is not None:
+                    if not torch.is_tensor(clearance_pp):
+                        clearance_pp = torch.as_tensor(clearance_pp, device=device)
+                    c_thr = post_info.get('post_safe_distance', None)
+                    if c_thr is None:
+                        c_thr = getattr(env.post_processor, "safe_distance", None)
+                    if c_thr is not None:
+                        if torch.is_tensor(c_thr):
+                            c_thr_tensor = c_thr.to(device=device)
+                        else:
+                            c_thr_tensor = torch.tensor(float(c_thr), device=device)
+                        near_miss_excess = torch.clamp(c_thr_tensor - clearance_pp, min=0.0)
+                        near_miss_excess_sum += near_miss_excess.sum()
+            reset_mask_prev = dones.clone()
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
             done_ids = dones.nonzero(as_tuple=False).flatten()
@@ -2097,6 +2172,10 @@ def train(args):
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
+        cmd_jerk_lin_mean = (cmd_jerk_lin_sum / total_samples).item()
+        cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
+        near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
+        gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
@@ -2160,6 +2239,10 @@ def train(args):
         writer.add_scalar('Stats/PassableOccRatio', passable_occ_ratio_mean, iteration)
         writer.add_scalar('Stats/CrossableWidth', crossable_width_mean, iteration)
         writer.add_scalar('Stats/RiskScale', risk_scale_mean, iteration)
+        writer.add_scalar('Stats/CmdJerkLin', cmd_jerk_lin_mean, iteration)
+        writer.add_scalar('Stats/CmdJerkAng', cmd_jerk_ang_mean, iteration)
+        writer.add_scalar('Stats/NearMissExcess', near_miss_excess_mean, iteration)
+        writer.add_scalar('Stats/GateSwitchRate', gate_switch_rate_mean, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
@@ -2270,6 +2353,8 @@ if __name__ == "__main__":
     # 环境
     parser.add_argument('--task', type=str, default='hex_s1',
                         help='Isaac Gym 任务名称')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='随机种子（None 使用默认）')
     parser.add_argument('--aff_stack', type=int, default=1,
                         help='affordance 堆叠帧数 (短时记忆)')
     parser.add_argument('--num_envs', type=int, default=None,

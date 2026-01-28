@@ -137,7 +137,7 @@ class HexTerrain(LeggedRobot):
             num_envs=self.num_envs,
             device=self.device,
             map_size=(self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width),
-            goal_reach_threshold=self.nav_cfg.goal_reached_threshold if hasattr(self.nav_cfg, "goal_reached_threshold") else 0.3,
+            goal_reach_threshold=self.nav_cfg.goal_reached_threshold if hasattr(self.nav_cfg, "goal_reached_threshold") else 0.1,
             max_episode_length=int(self.max_episode_length),
             curriculum_enabled=True,
         )
