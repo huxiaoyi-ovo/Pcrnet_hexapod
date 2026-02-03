@@ -92,10 +92,83 @@ class HexGround(LeggedRobot):
         return obs_dict
 
     def _draw_debug_vis(self):
+        # In viewer debug mode, prefer visualizing moving-target/robot trajectories over
+        # the default height-sampling points (which would also clear lines every frame).
+        if self.viewer and self.enable_viewer_sync and self.debug_viz and self._moving_target_enabled():
+            self._debug_draw_target_and_robot_trajectories()
+            return
+
         terrain_obj = getattr(self, "terrain", None)
         if terrain_obj is None or not hasattr(terrain_obj, "cfg"):
             return
         super()._draw_debug_vis()
+
+    def _debug_draw_target_and_robot_trajectories(self):
+        """Draw moving target (point + trajectory) and robot trajectory for all envs.
+
+        Notes:
+        - This is for interactive debugging only; it is guarded by viewer + debug_viz.
+        - We draw incrementally at scene dt (~10Hz) and periodically clear lines to avoid
+          unbounded accumulation.
+        """
+        if self.viewer is None or not hasattr(self, "envs"):
+            return
+        if not hasattr(self, "target_world"):
+            return
+
+        if not hasattr(self, "_viz_traj_time_accum"):
+            self._viz_traj_time_accum = 0.0
+            self._viz_traj_tick = 0
+            self._viz_traj_clear_every = 300  # ~30s window at 10Hz
+            self._viz_prev_robot = np.zeros((self.num_envs, 3), dtype=np.float32)
+            self._viz_prev_target = np.zeros((self.num_envs, 3), dtype=np.float32)
+            self._viz_prev_valid = np.zeros((self.num_envs,), dtype=np.bool_)
+            self._viz_color_robot = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+            self._viz_color_target = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
+            self._viz_target_sphere = gymutil.WireframeSphereGeometry(
+                0.04, 6, 6, color=(0.0, 1.0, 0.0)
+            )
+
+        self._viz_traj_time_accum += float(self.dt)
+        dt_high = float(getattr(self.cfg.terrain, "scene_high_dt", 0.1))
+        if self._viz_traj_time_accum + 1e-9 < dt_high:
+            return
+        self._viz_traj_time_accum = 0.0
+        self._viz_traj_tick += 1
+
+        if self._viz_traj_tick % int(self._viz_traj_clear_every) == 0:
+            self.gym.clear_lines(self.viewer)
+            self._viz_prev_valid[:] = False
+
+        # Pull positions to CPU for rendering.
+        robot_pos = self.root_states[:, 0:3].detach().cpu().numpy().astype(np.float32, copy=False)
+        target_xy = self.target_world.detach().cpu().numpy().astype(np.float32, copy=False)
+
+        target_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
+        target_pos[:, 0:2] = target_xy[:, 0:2]
+        # Lift target a bit above ground for visibility.
+        target_pos[:, 2] = robot_pos[:, 2] + 0.06
+
+        # Draw per-env incremental segments.
+        for i in range(self.num_envs):
+            if not self._viz_prev_valid[i]:
+                self._viz_prev_robot[i] = robot_pos[i]
+                self._viz_prev_target[i] = target_pos[i]
+                self._viz_prev_valid[i] = True
+            else:
+                v_robot = np.stack([self._viz_prev_robot[i], robot_pos[i]], axis=0)
+                v_target = np.stack([self._viz_prev_target[i], target_pos[i]], axis=0)
+                self.gym.add_lines(self.viewer, self.envs[i], 1, v_robot, self._viz_color_robot)
+                self.gym.add_lines(self.viewer, self.envs[i], 1, v_target, self._viz_color_target)
+                self._viz_prev_robot[i] = robot_pos[i]
+                self._viz_prev_target[i] = target_pos[i]
+
+            # Draw current target position marker.
+            pose = gymapi.Transform(
+                gymapi.Vec3(float(target_pos[i, 0]), float(target_pos[i, 1]), float(target_pos[i, 2])),
+                r=None,
+            )
+            gymutil.draw_lines(self._viz_target_sphere, self.gym, self.viewer, self.envs[i], pose)
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
@@ -1645,6 +1718,10 @@ class HexGround(LeggedRobot):
             #可视化的轨迹线条清楚
             if self.viewer and self.foot_traj_viz:
                 self.gym.clear_lines(self.viewer)            
+            # Reset per-env debug trajectory state to avoid cross-episode line segments.
+            if hasattr(self, "_viz_prev_valid"):
+                ids = env_ids.detach().cpu().numpy()
+                self._viz_prev_valid[ids] = False
         
             # print("reset ids=",env_ids)
             # print("resample commands\n",self.commands)
