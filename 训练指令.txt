@@ -16,6 +16,7 @@
 - S0 Follow Plane（`terrain_type=s0_follow_plane`，任务 `hex_s0_follow`）：
   - 平地 + 移动目标全向运动（前进/后退/横移/组合变速）。
   - 训练目的：先把稳定跟随（1m）与视野居中练稳，再 resume 到 S1 强冲突。
+  - 训练稳定性：S0 预训练阶段不做 target_lost 硬重置（target_lost_k=0），仅保留 view-centering shaping；S1 再启用硬重置。
 - S1 Corridor Gate（`terrain_type=s1_corridor_gate`）：
   - 走廊沿 +Y，宽度 1.6 → 1.2（difficulty 0→1）。
   - 2–3 个门段，门洞宽 1.0 → 0.85；门段长度带抖动。

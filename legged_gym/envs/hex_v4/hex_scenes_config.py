@@ -121,7 +121,8 @@ class HexS0FollowCfg(HexGroundCfg):
         # Target-in-view contract: use camera FOV but enforce a tighter center window.
         target_fov_soft_scale = 0.35
         target_fov_hard_scale = 0.70
-        target_lost_k = 5
+        # S0 pretraining should not be dominated by early "lost" resets; keep it as shaping only.
+        target_lost_k = 0
         # Reward weights for view centering (penalties are negative values).
         target_center_scale = 2.0
         target_visible_scale = 1.0
