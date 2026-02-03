@@ -876,12 +876,16 @@ class HexGround(LeggedRobot):
         if self._moving_target_mode() == "s1_gate_script":
             self._reset_moving_target_s1(env_ids)
             return
-        # Robot local position.
+        # Place target straight ahead of the robot (camera center) at reset.
         robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
         desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.0))
-        # Start target in front of robot by desired distance.
-        target_local = robot_local.clone()
-        target_local[:, 1] += desired
+
+        # Heading from root quat (world +Y forward contract): heading=0 means +Y.
+        quat = self.root_states[env_ids, 3:7]
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        heading = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        fwd = torch.stack([torch.sin(heading), torch.cos(heading)], dim=-1)  # +Y forward when heading=0
+        target_local = robot_local + desired * fwd  # no lateral bias
 
         # Clamp into scene bounds.
         half_len = 0.5 * float(self.cfg.terrain.terrain_length)
@@ -901,6 +905,8 @@ class HexGround(LeggedRobot):
         self.target_speed[env_ids] = v_typ
         self.target_speed_des[env_ids] = v_typ
         self.target_cmd_timer[env_ids] = 0.0
+        freeze_s = float(getattr(self.nav_cfg, "moving_target_freeze_s", 0.0))
+        self.target_freeze_timer[env_ids] = freeze_s
 
         # Store world state and expose as goal_world for high-level.
         self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
@@ -934,6 +940,19 @@ class HexGround(LeggedRobot):
             self._update_moving_target_s1(dt=dt, d=d)
             return
 
+        # Freeze after reset for early-stage learnability.
+        if hasattr(self, "target_freeze_timer"):
+            frozen = self.target_freeze_timer > 0.0
+            if frozen.any():
+                self.target_freeze_timer = torch.clamp(self.target_freeze_timer - dt, min=0.0)
+                self.target_vel_world[frozen].zero_()
+                self.goal_world[frozen] = self.target_world[frozen]
+                if (~frozen).any():
+                    d = d.clone()
+                    d[frozen] = 0.0
+                else:
+                    return
+
         v_max = float(getattr(self.nav_cfg, "moving_target_v_max", 1.2))
         v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
         turn_rate_max = float(getattr(self.nav_cfg, "moving_target_turn_rate_max", 1.0))
@@ -949,9 +968,10 @@ class HexGround(LeggedRobot):
         need_cmd = self.target_cmd_timer <= 0.0
         if need_cmd.any():
             # Choose motion primitive probabilities (difficulty-dependent).
-            p_lat = 0.10 + 0.40 * d
-            p_back = 0.05 + 0.15 * d
-            p_diag = 0.00 + 0.30 * d
+            # At difficulty=0, only forward motion (no lateral/back/diag).
+            p_lat = 0.50 * d
+            p_back = 0.20 * d
+            p_diag = 0.30 * d
             p_sum = p_lat + p_back + p_diag
             p_sum = torch.clamp(p_sum, 0.0, 0.9)
             p_fwd = 1.0 - p_sum
@@ -997,7 +1017,7 @@ class HexGround(LeggedRobot):
             theta = torch.atan2(torch.sin(theta), torch.cos(theta))
 
             # Speed command: wider range + more variation at higher difficulty.
-            v_lo = 0.15
+            v_lo = float(getattr(self.nav_cfg, "moving_target_v_min", 0.05))
             v_hi = torch.clamp(v_typ + (v_max - v_typ) * (0.3 + 0.7 * d), v_lo, v_max)
             v_cmd = v_lo + (v_hi - v_lo) * torch.rand(self.num_envs, device=device)
 
@@ -2224,6 +2244,10 @@ class HexGround(LeggedRobot):
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.target_cmd_timer = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        # Freeze timer after reset to keep the target stationary (S0 learnability).
+        self.target_freeze_timer = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         # S1 moving target scripted gate traversal (always allocated; used only when enabled).
