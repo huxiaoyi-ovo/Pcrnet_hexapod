@@ -99,7 +99,8 @@ class HexS0FollowCfg(HexGroundCfg):
         num_rows = 5
         num_cols = 10
         terrain_proportions = [1.0]
-        max_init_terrain_level = 4
+        # Start from the easiest curriculum level for S0 pretraining.
+        max_init_terrain_level = 0
     class navigation(HexGroundCfg.navigation):
         # Disable edge spawn: S0 wants centered tracking, not ring spawns.
         spawn_edge_enable = False
@@ -111,9 +112,16 @@ class HexS0FollowCfg(HexGroundCfg):
         # Moving target curriculum (difficulty controls switching frequency/complexity).
         moving_target_enable = True
         moving_target_v_max = 1.2
-        moving_target_v_typical = 0.6
-        moving_target_turn_rate_max = 1.0
-        moving_target_accel_max = 2.0
+        # Make early training learnable: slow + gentle, then scale up with difficulty.
+        moving_target_v_typical = 0.2
+        moving_target_turn_rate_max = 0.35
+        moving_target_accel_max = 1.0
+        moving_target_cmd_period_slow = 3.0
+        moving_target_cmd_period_fast = 0.8
+
+        # High-level command bounds (must cover the target speed envelope).
+        max_lin_vel_command = 1.2
+        max_ang_vel_command = 1.5
         # Following distance contract (paper + code unified).
         follow_distance_desired = 1.0
         follow_distance_min = 0.7

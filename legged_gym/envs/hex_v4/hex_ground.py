@@ -1722,6 +1722,13 @@ class HexGround(LeggedRobot):
             if hasattr(self, "_viz_prev_valid"):
                 ids = env_ids.detach().cpu().numpy()
                 self._viz_prev_valid[ids] = False
+                # Clear all trajectory lines after a reset to keep the viewer readable.
+                # This is for debugging only; it is guarded by debug_viz.
+                if getattr(self, "debug_viz", False) and self.viewer is not None and self._moving_target_enabled():
+                    self.gym.clear_lines(self.viewer)
+                    self._viz_prev_valid[:] = False
+                    if hasattr(self, "_viz_traj_tick"):
+                        self._viz_traj_tick = 0
         
             # print("reset ids=",env_ids)
             # print("resample commands\n",self.commands)
@@ -1931,9 +1938,15 @@ class HexGround(LeggedRobot):
         heading = self.robot_state_buf[:, 2]
         cos_h = torch.cos(heading)
         sin_h = torch.sin(heading)
+        # dx_body/dy_body are (x_forward, y_left) in the body frame.
         dx_body = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]
         dy_body = -sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
-        self.goal_buf[:] = torch.stack([dx_body, dy_body], dim=1)
+
+        # Project-wide contract (align with S1): goal_buf is (x_right, y_forward),
+        # so bearing can be computed as atan2(x_right, y_forward) with +Y forward.
+        x_right = -dy_body
+        y_forward = dx_body
+        self.goal_buf[:] = torch.stack([x_right, y_forward], dim=1)
 
         if getattr(self.nav_cfg, "resample_on_reach", False):
             dist = torch.norm(delta_world, dim=1)
