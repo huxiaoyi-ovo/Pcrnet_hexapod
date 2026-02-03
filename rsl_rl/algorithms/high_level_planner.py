@@ -740,27 +740,106 @@ class CommandPostProcessor:
         free_distance: float = 0.6,
         enable_risk_scale: bool = True,
     ):
-        self.max_cmd = torch.tensor(max_cmd)
-        self.max_delta = torch.tensor(max_delta)
+        # Keep float32 by default; in process() we will align dtype with cmd.dtype.
+        self.max_cmd = torch.tensor(max_cmd, dtype=torch.float32)
+        self.max_delta = torch.tensor(max_delta, dtype=torch.float32)
         self.safe_distance = safe_distance
         self.free_distance = max(free_distance, safe_distance + 1e-6)
         self.enable_risk_scale = enable_risk_scale
         self.last_cmd = None
+        # Beta-controlled "constraint family" endpoints (V7 defaults).
+        # Only used when process(..., beta=...) is provided; otherwise old behavior is preserved.
+        self._beta_safe_dist = (0.35, 1.00)
+        self._beta_max_lin = (1.00, 0.35)
+        self._beta_max_ang = (1.50, 0.50)
+        self._beta_max_delta_lin = (0.15, 0.05)
+        self._beta_max_delta_ang = (0.30, 0.10)
+        self._beta_risk_gain = (1.0, 3.0)
+        self._beta_free_margin = 0.25
 
     def reset(self, num_envs: int, device: torch.device):
         self.last_cmd = torch.zeros(num_envs, 3, device=device)
+
+    def _normalize_beta(self, beta: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        beta_t = beta
+        if not torch.is_tensor(beta_t):
+            beta_t = torch.tensor(beta_t, device=device, dtype=dtype)
+        beta_t = beta_t.to(device=device, dtype=dtype)
+        if beta_t.dim() == 0:
+            beta_t = beta_t.view(1)
+        return torch.clamp(beta_t, 0.0, 1.0)
+
+    def _compute_beta_params(
+        self,
+        beta_t: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Dict:
+        safe0, safe1 = self._beta_safe_dist
+        v_fast, v_safe = self._beta_max_lin
+        w_fast, w_safe = self._beta_max_ang
+        dv_fast, dv_safe = self._beta_max_delta_lin
+        dw_fast, dw_safe = self._beta_max_delta_ang
+        g0, g1 = self._beta_risk_gain
+
+        safe_distance = (safe0 + (safe1 - safe0) * beta_t).to(device=device, dtype=dtype)
+        free_distance = safe_distance + float(self._beta_free_margin)
+
+        vmax = (v_fast + (v_safe - v_fast) * beta_t).to(device=device, dtype=dtype)
+        wmax = (w_fast + (w_safe - w_fast) * beta_t).to(device=device, dtype=dtype)
+        max_cmd = torch.stack([vmax, vmax, wmax], dim=-1)
+
+        dvmax = (dv_fast + (dv_safe - dv_fast) * beta_t).to(device=device, dtype=dtype)
+        dwmax = (dw_fast + (dw_safe - dw_fast) * beta_t).to(device=device, dtype=dtype)
+        max_delta = torch.stack([dvmax, dvmax, dwmax], dim=-1)
+
+        risk_clamp_gain = (g0 + (g1 - g0) * beta_t).to(device=device, dtype=dtype)
+
+        return {
+            "safe_distance": safe_distance,
+            "free_distance": free_distance,
+            "max_cmd": max_cmd,
+            "max_delta": max_delta,
+            "risk_clamp_gain": risk_clamp_gain,
+        }
+
+    def get_effective_params(self, beta: torch.Tensor) -> Dict:
+        """
+        Return beta-adjusted constraint parameters without mutating internal state.
+
+        beta=0 -> fast/aggressive, beta=1 -> safe/conservative.
+        """
+        beta_t = self._normalize_beta(beta, device=torch.device("cpu"), dtype=torch.float32)
+        return self._compute_beta_params(beta_t, device=beta_t.device, dtype=beta_t.dtype)
+
+    def get_effective_safe_distance(self, beta: torch.Tensor) -> torch.Tensor:
+        return self.get_effective_params(beta)["safe_distance"]
 
     def process(
         self,
         cmd: torch.Tensor,
         clearance: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         if cmd.dim() == 1:
             cmd = cmd.unsqueeze(0)
 
         device = cmd.device
-        max_cmd = self.max_cmd.to(device)
-        max_delta = self.max_delta.to(device)
+        max_cmd = self.max_cmd.to(device=device, dtype=cmd.dtype)
+        max_delta = self.max_delta.to(device=device, dtype=cmd.dtype)
+        safe_distance = self.safe_distance
+        free_distance = self.free_distance
+        risk_clamp_gain = None
+
+        # Beta override: beta=0 -> fast/aggressive, beta=1 -> safe/conservative.
+        if beta is not None:
+            beta_t = self._normalize_beta(beta, device=device, dtype=cmd.dtype)
+            beta_params = self._compute_beta_params(beta_t, device=device, dtype=cmd.dtype)
+            safe_distance = beta_params["safe_distance"]
+            free_distance = beta_params["free_distance"]
+            max_cmd = beta_params["max_cmd"]
+            max_delta = beta_params["max_delta"]
+            risk_clamp_gain = beta_params["risk_clamp_gain"]
 
         # 1) Clamp to limits
         cmd_clamped = torch.clamp(cmd, -max_cmd, max_cmd)
@@ -776,12 +855,29 @@ class CommandPostProcessor:
         scale = None
         if clearance is not None and self.enable_risk_scale:
             clearance = clearance.to(device)
+            safe = safe_distance
+            free = free_distance
+            if torch.is_tensor(safe):
+                safe = safe.to(device=device, dtype=clearance.dtype)
+            else:
+                safe = torch.tensor(float(safe), device=device, dtype=clearance.dtype)
+            if torch.is_tensor(free):
+                free = free.to(device=device, dtype=clearance.dtype)
+            else:
+                free = torch.tensor(float(free), device=device, dtype=clearance.dtype)
+            free = torch.maximum(free, safe + 1e-6)
             scale = torch.clamp(
-                (clearance - self.safe_distance) / (self.free_distance - self.safe_distance),
+                (clearance - safe) / (free - safe),
                 0.0,
                 1.0,
             )
-            cmd_slew = cmd_slew * scale.unsqueeze(-1)
+            if risk_clamp_gain is None:
+                cmd_slew = cmd_slew * scale.unsqueeze(-1)
+            else:
+                gain = risk_clamp_gain
+                if gain.dim() == 1:
+                    gain = gain.view(-1, 1)
+                cmd_slew = cmd_slew * torch.pow(scale.unsqueeze(-1), gain)
 
         info = {
             "cmd_raw": cmd,
@@ -789,6 +885,14 @@ class CommandPostProcessor:
             "cmd_slew": cmd_slew,
             "risk_scale": scale,
         }
+        if beta is not None:
+            info["beta"] = beta_t
+            info["safe_distance"] = safe_distance
+            info["free_distance"] = free_distance
+            info["max_cmd"] = max_cmd
+            info["max_delta"] = max_delta
+            if risk_clamp_gain is not None:
+                info["risk_clamp_gain"] = risk_clamp_gain
         return cmd_slew, info
 
     def reset_numpy(self):

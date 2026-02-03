@@ -274,6 +274,8 @@ class HierarchicalHexapodEnv:
         self.device = device
         self.mode = args.mode
         self.debug = bool(getattr(args, "debug", False))
+        beta_arg = getattr(args, "beta", None)
+        self.beta_override = None if beta_arg is None else float(beta_arg)
 
         from legged_gym.utils import get_args as get_isaac_args
         isaac_args = get_isaac_args()
@@ -377,6 +379,13 @@ class HierarchicalHexapodEnv:
             yaw_deg = float(getattr(cam_cfg, "yaw_deg", 0.0))
             # Convert camera yaw to bearing_y convention (0 means +Y forward).
             self.camera_bearing_rad = math.radians(yaw_deg) - 0.5 * math.pi
+        # S0 moving-target following: keep target centered using a tighter FOV window.
+        self.moving_target_enable = bool(getattr(nav_cfg, "moving_target_enable", False)) if nav_cfg is not None else False
+        self.target_fov_soft_scale = float(getattr(nav_cfg, "target_fov_soft_scale", 1.0)) if nav_cfg is not None else 1.0
+        self.target_fov_hard_scale = float(getattr(nav_cfg, "target_fov_hard_scale", 1.0)) if nav_cfg is not None else 1.0
+        self.target_lost_k = int(getattr(nav_cfg, "target_lost_k", 0)) if nav_cfg is not None else 0
+        self.target_center_scale = float(getattr(nav_cfg, "target_center_scale", 0.0)) if nav_cfg is not None else 0.0
+        self.target_visible_scale = float(getattr(nav_cfg, "target_visible_scale", 0.0)) if nav_cfg is not None else 0.0
         (self.affordance_x_map,
          self.affordance_y_map,
          self.affordance_bearing_map,
@@ -433,6 +442,7 @@ class HierarchicalHexapodEnv:
         self.goal_change_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
@@ -531,6 +541,7 @@ class HierarchicalHexapodEnv:
         self.prev_gate_y.zero_()
         self.reach_given.zero_()
         self.goal_change_count.zero_()
+        self.target_lost_steps.zero_()
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
 
@@ -829,6 +840,75 @@ class HierarchicalHexapodEnv:
             min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
         return min_dist
 
+    def _compute_clearance_along_cmd(
+        self,
+        aff_map: torch.Tensor,
+        cmd_xy: torch.Tensor,
+        cone_half_angle_deg: float = 25.0,
+    ) -> torch.Tensor:
+        """
+        A light-weight, command-conditioned clearance proxy.
+
+        Returns the min distance to occupied cells within a cone aligned with cmd_xy.
+        This is used as a consistent proxy for (risk_F, risk_A) until RiskAlong is
+        implemented.
+        """
+        if aff_map.ndim != 4 or aff_map.size(1) < 1:
+            return torch.full((cmd_xy.shape[0],), self.affordance_map_extent, device=cmd_xy.device)
+        if cmd_xy.dim() != 2 or cmd_xy.size(1) != 2:
+            raise ValueError("cmd_xy must have shape (N, 2)")
+
+        occ = aff_map[:, 0] > 0.5
+        dist_map = self.affordance_dist_map
+        bearing_map = self.affordance_bearing_map
+        visible = self.affordance_visible_mask
+        if dist_map.device != aff_map.device:
+            dist_map = dist_map.to(aff_map.device)
+        if bearing_map.device != aff_map.device:
+            bearing_map = bearing_map.to(aff_map.device)
+        if visible is None:
+            visible = torch.ones_like(dist_map, dtype=torch.bool)
+        elif visible.device != aff_map.device:
+            visible = visible.to(aff_map.device)
+
+        # cmd bearing is defined w.r.t +Y forward: atan2(x, y)
+        cmd_bearing = torch.atan2(cmd_xy[:, 0], cmd_xy[:, 1]).view(-1, 1, 1)
+        bearing = bearing_map.view(1, *bearing_map.shape)
+        angle = torch.atan2(torch.sin(bearing - cmd_bearing), torch.cos(bearing - cmd_bearing))
+        cone_half = math.radians(cone_half_angle_deg)
+        sector = (torch.abs(angle) <= cone_half) & visible.view(1, *visible.shape)
+
+        # If cmd is (near) zero, fall back to global clearance.
+        cmd_norm = torch.norm(cmd_xy, dim=-1)
+        active = cmd_norm > 1e-3
+        if not active.any():
+            return self._compute_clearance_from_affordance(aff_map)
+
+        dist = torch.where(sector & occ, dist_map.view(1, *dist_map.shape), torch.full_like(dist_map, self.affordance_map_extent).view(1, *dist_map.shape))
+        min_dist = dist.amin(dim=(1, 2))
+        no_obs = ~(sector & occ).flatten(1).any(dim=1)
+        if no_obs.any():
+            min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
+        if (~active).any():
+            global_clear = self._compute_clearance_from_affordance(aff_map)
+            min_dist = torch.where(active, min_dist, global_clear)
+        return min_dist
+
+    @staticmethod
+    def _risk_from_clearance(
+        clearance: torch.Tensor,
+        safe_distance: float,
+        free_distance: float,
+    ) -> torch.Tensor:
+        """
+        Map clearance to a [0,1] risk scalar: 1 at/below safe_distance, 0 at/above free_distance.
+        """
+        safe = float(safe_distance)
+        free = max(float(free_distance), safe + 1e-6)
+        x = (clearance - safe) / (free - safe)
+        x = torch.clamp(x, 0.0, 1.0)
+        return 1.0 - x
+
     def _compute_passable_guidance(
         self,
         aff_map: torch.Tensor,
@@ -1068,7 +1148,9 @@ class HierarchicalHexapodEnv:
             clearance_pp = self.clearance_override
         elif self.last_obs is not None and 'gt_affordance' in self.last_obs:
             clearance_pp = self._compute_clearance_from_affordance(self.last_obs['gt_affordance'])
-        velocity_cmd, post_info = self.post_processor.process(cmd_vel, clearance_pp)
+        velocity_cmd, post_info = self.post_processor.process(
+            cmd_vel, clearance_pp, beta=self.beta_override
+        )
         post_info_payload = {}
         if isinstance(post_info, dict):
             post_info_payload.update(post_info)
@@ -1077,10 +1159,13 @@ class HierarchicalHexapodEnv:
         if "cmd_clamped" not in post_info_payload:
             post_info_payload["cmd_clamped"] = velocity_cmd
         post_info_payload["clearance_pp"] = clearance_pp
-        safe_distance = getattr(self.post_processor, "safe_distance", None)
-        free_distance = getattr(self.post_processor, "free_distance", None)
-        max_cmd = getattr(self.post_processor, "max_cmd", None)
-        max_delta = getattr(self.post_processor, "max_delta", None)
+        # Prefer per-call effective params (beta-adjusted) when available.
+        safe_distance = post_info_payload.get("safe_distance", getattr(self.post_processor, "safe_distance", None))
+        free_distance = post_info_payload.get("free_distance", getattr(self.post_processor, "free_distance", None))
+        max_cmd = post_info_payload.get("max_cmd", getattr(self.post_processor, "max_cmd", None))
+        max_delta = post_info_payload.get("max_delta", getattr(self.post_processor, "max_delta", None))
+        risk_clamp_gain = post_info_payload.get("risk_clamp_gain", None)
+
         if safe_distance is not None:
             post_info_payload["post_safe_distance"] = (
                 float(safe_distance.item()) if torch.is_tensor(safe_distance) else float(safe_distance)
@@ -1099,6 +1184,10 @@ class HierarchicalHexapodEnv:
                 post_info_payload["post_max_delta"] = max_delta.detach().clone()
             else:
                 post_info_payload["post_max_delta"] = torch.as_tensor(max_delta, device=self.device)
+        if risk_clamp_gain is not None:
+            post_info_payload["post_risk_clamp_gain"] = (
+                float(risk_clamp_gain.item()) if torch.is_tensor(risk_clamp_gain) else float(risk_clamp_gain)
+            )
 
         # 2. Low-Level 控制循环 (50Hz)
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
@@ -1266,6 +1355,57 @@ class HierarchicalHexapodEnv:
         else:
             total_reward = accumulated_reward / self.decimation
             reward_terms = {"total": total_reward}
+
+        # S0: add target-in-view centering penalties and optional "lost" reset.
+        if self.moving_target_enable and (self.camera_fov_rad is not None):
+            goal_rel = reward_obs.get("goal", None) if isinstance(reward_obs, dict) else None
+            if goal_rel is not None:
+                bearing_body = torch.atan2(goal_rel[:, 0], goal_rel[:, 1])  # 0 means +Y forward
+                bearing_cam = bearing_body - float(self.camera_bearing_rad)
+                bearing_cam = torch.atan2(torch.sin(bearing_cam), torch.cos(bearing_cam))
+                fov = float(self.camera_fov_rad)
+                soft_half = max(1e-3, 0.5 * fov * float(self.target_fov_soft_scale))
+                hard_half = max(1e-3, 0.5 * fov * float(self.target_fov_hard_scale))
+
+                # Centering penalty: normalized by the soft window.
+                center_margin = torch.abs(bearing_cam) / soft_half
+                r_center = -(center_margin ** 2)
+                # Visibility penalty: only active outside hard window.
+                visible_excess = torch.clamp(torch.abs(bearing_cam) - hard_half, min=0.0) / soft_half
+                r_visible = -(visible_excess ** 2)
+
+                if self.target_center_scale != 0.0:
+                    term = float(self.target_center_scale) * r_center
+                    total_reward = total_reward + term
+                    reward_terms["target_center"] = term
+                    reward_terms["total"] = total_reward
+                if self.target_visible_scale != 0.0:
+                    term = float(self.target_visible_scale) * r_visible
+                    total_reward = total_reward + term
+                    reward_terms["target_visible"] = term
+                    reward_terms["total"] = total_reward
+
+                if self.target_lost_k > 0:
+                    out_hard = torch.abs(bearing_cam) > hard_half
+                    # Ignore envs already terminated by physics this high-level step.
+                    if done_during.any():
+                        out_hard = out_hard & (~done_during)
+                        self.target_lost_steps[done_during] = 0
+                    self.target_lost_steps = torch.where(
+                        out_hard,
+                        self.target_lost_steps + 1,
+                        torch.zeros_like(self.target_lost_steps),
+                    )
+                    lost = self.target_lost_steps >= int(self.target_lost_k)
+                    if lost.any():
+                        lost_ids = lost.nonzero(as_tuple=False).flatten()
+                        # Force reset to keep the loop stable (train loop does not auto-reset on dones).
+                        self.env.reset_idx(lost_ids)
+                        done_any |= lost
+                        # Extra penalty on loss event to discourage drifting out of view.
+                        total_reward = torch.where(lost, total_reward - 2.0, total_reward)
+                        reward_terms["target_lost"] = lost.float() * (-2.0)
+                        reward_terms["total"] = total_reward
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
@@ -1296,6 +1436,7 @@ class HierarchicalHexapodEnv:
             self.prev_gate_y[done_any] = 0
             self.reach_given[done_any] = False
             self.goal_change_count[done_any] = 0
+            self.target_lost_steps[done_any] = 0
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
@@ -1357,8 +1498,8 @@ def train(args):
         )
     if args.task == "hex_ground":
         print("[Warn] hex_ground 仅作为容器任务，请显式配置 terrain_type 或改用 hex_s1/hex_s2/hex_calib。")
-    if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
-        print(f"[Warn] 当前 task={args.task} 不在主线推荐列表（hex_s1/hex_s2/hex_calib）。")
+    if args.task not in ("hex_s0_follow", "hex_s1", "hex_s1_follow_moving", "hex_s2", "hex_calib"):
+        print(f"[Warn] 当前 task={args.task} 不在主线推荐列表（hex_s0_follow/hex_s1/hex_s1_follow_moving/hex_s2/hex_calib）。")
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
     if getattr(args, "skill", "follow") == "moe":
@@ -1697,6 +1838,9 @@ def train(args):
             'passable_gate',
             'crossable_align',
             'crossable_gate',
+            'target_center',
+            'target_visible',
+            'target_lost',
             'risk_barrier',
             'gate_smooth',
             'collision',
@@ -1844,20 +1988,59 @@ def train(args):
                 gate_y, _ = policy.get_action(
                     aff_stack_buf, state, goal, gate_difficulty, deterministic=False
                 )
+                gate_y_raw = gate_y
+                # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
+                # For now, y_eff = y (raw). Later (PCR-Net++), y_eff blends (y, w) and can be smoothed/hysteretic.
+                y_eff = gate_y_raw
                 gate_y_prev = env.prev_gate_y.clone()
                 if getattr(args, "gate_safe_clamp", False):
                     safe_max = float(getattr(args, "gate_safe_max", 0.3))
                     clearance_gate = env._compute_clearance_from_affordance(aff_map)
+                    # Keep clamp threshold consistent with the active post-processor (beta-adjusted).
+                    safe_thr = getattr(env.post_processor, "safe_distance", 0.25)
+                    if getattr(args, "beta", None) is not None:
+                        beta_v = float(getattr(args, "beta"))
+                        beta_v = float(np.clip(beta_v, 0.0, 1.0))
+                        if hasattr(env.post_processor, "get_effective_safe_distance"):
+                            safe_thr_t = env.post_processor.get_effective_safe_distance(beta_v)
+                            safe_thr = float(safe_thr_t.squeeze().detach().cpu().item())
                     gate_y = torch.where(
-                        clearance_gate < env.post_processor.safe_distance,
+                        clearance_gate < safe_thr,
                         torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
                         gate_y,
                     )
+                    gate_y_raw = gate_y
+                    y_eff = gate_y_raw
                 log_prob, value, _, _ = policy.evaluate_actions(
                     aff_stack_buf, state, goal, gate_difficulty, gate_y
                 )
-                cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
-                next_obs, rewards, dones, env_info = env.step(cmd, gate_y)
+                cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
+                next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
+                # Record raw/effective gate and command-conditioned risk proxies for diagnostics.
+                if env_info is not None and isinstance(env_info, dict):
+                    post_info = env_info.get("post_info", None)
+                    if post_info is not None and isinstance(post_info, dict):
+                        post_info["gate_y_raw"] = gate_y_raw.detach().clone()
+                        post_info["y_eff"] = y_eff.detach().clone()
+                        # Command-conditioned clearance/risk proxies (cone-min over occupancy).
+                        safe_d = float(
+                            post_info.get(
+                                "post_safe_distance",
+                                getattr(env.post_processor, "safe_distance", 0.25),
+                            )
+                        )
+                        free_d = float(
+                            post_info.get(
+                                "post_free_distance",
+                                getattr(env.post_processor, "free_distance", 0.6),
+                            )
+                        )
+                        clr_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
+                        clr_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
+                        post_info["clearance_F"] = clr_f.detach().clone()
+                        post_info["clearance_A"] = clr_a.detach().clone()
+                        post_info["risk_F"] = env._risk_from_clearance(clr_f, safe_d, free_d).detach().clone()
+                        post_info["risk_A"] = env._risk_from_clearance(clr_a, safe_d, free_d).detach().clone()
                 action = gate_y.unsqueeze(-1)
                 cmd_used = cmd
             else:
@@ -2411,6 +2594,12 @@ if __name__ == "__main__":
                         help='安全距离阈值（None 使用默认 clearance）')
     parser.add_argument('--cmd_free_dist', type=float, default=None,
                         help='安全全速距离（None 使用默认 clearance_free）')
+    parser.add_argument(
+        '--beta',
+        type=float,
+        default=None,
+        help='(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）',
+    )
     parser.add_argument('--gate_safe_clamp', action='store_true',
                         help='Gate 训练早期启用安全 clamp')
     parser.add_argument('--gate_safe_max', type=float, default=0.3,

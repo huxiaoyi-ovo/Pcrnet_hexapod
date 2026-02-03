@@ -23,6 +23,13 @@ class NavigationRewardConfig:
     goal_reach_bonus: float = 10.0        # 到达目标的额外奖励
     goal_reach_threshold: float = 0.1     # 到达判定阈值 (m)
 
+    # Follow-mode (moving target) reward: track a desired distance instead of "reach goal".
+    follow_enable: bool = False
+    follow_distance_desired: float = 1.0
+    follow_distance_sigma: float = 0.25
+    follow_distance_scale: float = 6.0
+    follow_outside_penalty: float = -1.0  # extra penalty when far outside follow band
+
     # 碰撞惩罚
     collision_penalty: float = -10.0
 
@@ -121,14 +128,26 @@ class NavigationRewardFunction:
         dist_to_goal = torch.norm(robot_pos[:, :2] - goal_pos, dim=-1)
         prev_dist = torch.norm(prev_robot_pos[:, :2] - goal_pos, dim=-1)
 
-        # 进度奖励: 距离减少则正奖励
-        approach_reward = (prev_dist - dist_to_goal) * self.cfg.goal_approach_scale
-        rewards['approach'] = approach_reward
+        if self.cfg.follow_enable:
+            # Follow-mode: reward reduction of distance error w.r.t desired following distance.
+            desired = float(self.cfg.follow_distance_desired)
+            sigma = max(float(self.cfg.follow_distance_sigma), 1e-3)
+            err = torch.abs(dist_to_goal - desired)
+            prev_err = torch.abs(prev_dist - desired)
+            approach_reward = (prev_err - err) * float(self.cfg.follow_distance_scale)
+            # Encourage staying near the band center.
+            band_reward = torch.exp(-0.5 * (err / sigma) ** 2)
+            rewards['approach'] = approach_reward + band_reward
+            rewards['reach'] = torch.zeros_like(dist_to_goal)
+        else:
+            # 进度奖励: 距离减少则正奖励
+            approach_reward = (prev_dist - dist_to_goal) * self.cfg.goal_approach_scale
+            rewards['approach'] = approach_reward
 
-        # 到达目标奖励
-        reached = dist_to_goal < self.cfg.goal_reach_threshold
-        reach_reward = reached.float() * self.cfg.goal_reach_bonus
-        rewards['reach'] = reach_reward
+            # 到达目标奖励
+            reached = dist_to_goal < self.cfg.goal_reach_threshold
+            reach_reward = reached.float() * self.cfg.goal_reach_bonus
+            rewards['reach'] = reach_reward
 
         # 2. 朝向奖励
         heading = self._quat_to_heading(robot_quat)

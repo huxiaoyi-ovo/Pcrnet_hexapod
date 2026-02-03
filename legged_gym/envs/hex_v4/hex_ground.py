@@ -578,6 +578,416 @@ class HexGround(LeggedRobot):
         self.scene_dyn_time += self.dt
         self._sync_dynamic_obstacles()
 
+    def _moving_target_enabled(self) -> bool:
+        return self.nav_cfg is not None and bool(getattr(self.nav_cfg, "moving_target_enable", False))
+
+    def _moving_target_mode(self) -> str:
+        if self.nav_cfg is None:
+            return "disabled"
+        mode = getattr(self.nav_cfg, "moving_target_mode", None)
+        if mode is None:
+            return "random_plane"
+        return str(mode)
+
+    def _reset_moving_target_s1(self, env_ids: torch.Tensor):
+        """Reset scripted gate-traversal moving target for S1 corridor."""
+        if env_ids.numel() == 0:
+            return
+        if self.scene_spec_cache is None:
+            return
+
+        # Fill per-env gate arrays (small loop on reset only).
+        max_gates = int(getattr(self, "_s1_gate_max", 4))
+        for env_id in env_ids.tolist():
+            scene_spec = self.scene_spec_cache[env_id]
+            if scene_spec is None or scene_spec.scene_type != "s1_corridor_gate":
+                self.s1_gate_count[env_id] = 0
+                self.s1_gate_idx[env_id] = 0
+                self.s1_path_dir[env_id] = 1.0
+                continue
+            params = scene_spec.params or {}
+            length = float(params.get("corridor_length", self.cfg.terrain.terrain_length))
+            width_nom = float(params.get("corridor_width_nom", params.get("corridor_width", self.cfg.terrain.terrain_width)))
+            self.s1_corridor_half_len[env_id] = 0.5 * length
+            self.s1_corridor_half_w[env_id] = 0.5 * width_nom
+
+            gates = params.get("corridor_gates", []) or []
+            if not isinstance(gates, list):
+                gates = []
+            count = min(len(gates), max_gates)
+            self.s1_gate_count[env_id] = int(count)
+            if count <= 0:
+                self.s1_gate_idx[env_id] = 0
+                self.s1_path_dir[env_id] = 1.0
+                continue
+
+            # Deterministic, per-env RNG for gate bias. RandomState(seed) is independent of global numpy state.
+            seed = int((scene_spec.layout_seed or 0) + env_id * 131)
+            rng = np.random.RandomState(seed)
+
+            # Difficulty in [0,1] from curriculum (per-env).
+            d = self._get_scene_difficulty(env_id)
+            bias_base = 0.06 + 0.06 * float(np.clip(d, 0.0, 1.0))  # meters
+
+            for j in range(max_gates):
+                if j < count:
+                    g = gates[j]
+                    y0 = float(g.get("y0", 0.0))
+                    glen = float(g.get("length", 1.0))
+                    door_w = float(g.get("door_width", width_nom))
+                    door_half = 0.5 * min(width_nom, door_w)
+
+                    # Small lateral bias inside the doorway opening.
+                    margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.25))
+                    bias_max = max(0.0, min(bias_base, door_half - margin - 0.02))
+                    bias = float(rng.uniform(-bias_max, bias_max)) if bias_max > 0 else 0.0
+
+                    self.s1_gate_y[env_id, j] = y0
+                    self.s1_gate_len[env_id, j] = glen
+                    self.s1_gate_door_half[env_id, j] = door_half
+                    self.s1_gate_bias_x[env_id, j] = bias
+                    self.s1_gate_post_side[env_id, j] = float(rng.choice([-1.0, 1.0]))
+                else:
+                    self.s1_gate_y[env_id, j] = 0.0
+                    self.s1_gate_len[env_id, j] = 0.0
+                    self.s1_gate_door_half[env_id, j] = 0.0
+                    self.s1_gate_bias_x[env_id, j] = 0.0
+                    self.s1_gate_post_side[env_id, j] = 1.0
+
+            self.s1_gate_idx[env_id] = 0
+            self.s1_path_dir[env_id] = 1.0
+
+        # Initialize target position in front of robot, clamped to corridor bounds.
+        robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
+        desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.0))
+        target_local = robot_local.clone()
+        target_local[:, 1] += desired
+
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.25))
+        half_len = self.s1_corridor_half_len[env_ids]
+        half_w = self.s1_corridor_half_w[env_ids]
+        x_min = -half_w + margin
+        x_max = half_w - margin
+        y_min = -half_len + margin
+        y_max = half_len - margin
+        target_local[:, 0] = torch.clamp(target_local[:, 0], x_min, x_max)
+        target_local[:, 1] = torch.clamp(target_local[:, 1], y_min, y_max)
+
+        self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        self.target_vel_world[env_ids].zero_()
+        self.goal_world[env_ids] = self.target_world[env_ids]
+
+    def _update_moving_target_s1(self, dt: float, d: torch.Tensor):
+        """
+        Scripted S1 gate traversal.
+
+        Target moves along +Y, aligns to a slightly biased doorway center in advance,
+        passes the gate, and then performs a small lateral move after the gate.
+        """
+        # If gates are not available, do nothing.
+        gate_count = self.s1_gate_count
+        active = gate_count > 0
+        if not active.any():
+            return
+
+        pos_local = self.target_world - self.env_origins[:, :2]
+        x = pos_local[:, 0]
+        y = pos_local[:, 1]
+
+        dir_y = self.s1_path_dir  # +1 or -1
+        dir_y = torch.where(active, dir_y, torch.ones_like(dir_y))
+
+        # Gather current gate parameters.
+        idx = torch.clamp(self.s1_gate_idx, 0, self.s1_gate_y.shape[1] - 1).to(torch.long)
+        gather_idx = idx.view(-1, 1)
+        y_gate = torch.gather(self.s1_gate_y, 1, gather_idx).squeeze(1)
+        gate_len = torch.gather(self.s1_gate_len, 1, gather_idx).squeeze(1).clamp(min=0.1)
+        x_bias = torch.gather(self.s1_gate_bias_x, 1, gather_idx).squeeze(1)
+        post_side = torch.gather(self.s1_gate_post_side, 1, gather_idx).squeeze(1)
+
+        y_f = dir_y * y
+        gate_y_f = dir_y * y_gate
+        half_len = 0.5 * gate_len
+
+        align_dist = 1.0 + 0.6 * d
+        post_dist = 0.8 + 0.4 * d
+        align_start = gate_y_f - half_len - align_dist
+        pass_start = gate_y_f - half_len
+        pass_end = gate_y_f + half_len
+        post_end = gate_y_f + half_len + post_dist
+
+        # Stage masks in forward coordinate.
+        m_approach = y_f < align_start
+        m_align = (y_f >= align_start) & (y_f < pass_start)
+        m_pass = (y_f >= pass_start) & (y_f <= pass_end)
+        m_post = (y_f > pass_end) & (y_f <= post_end)
+
+        x_center = torch.zeros_like(x)
+        x_post_amp = 0.06 + 0.06 * d
+        x_post = post_side * x_post_amp
+        x_des = torch.where(m_align | m_pass, x_bias, torch.where(m_post, x_post, x_center))
+
+        v_max = float(getattr(self.nav_cfg, "moving_target_v_max", 1.2))
+        v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
+        v_base = torch.clamp(v_typ + (v_max - v_typ) * (0.2 + 0.8 * d), 0.2, v_max)
+        v_align = 0.85 * v_base
+        v_pass = 0.75 * v_base
+        vy_mag = torch.where(m_align, v_align, torch.where(m_pass, v_pass, v_base))
+        vy = dir_y * vy_mag
+
+        kp_x = 2.0 + 1.0 * d
+        v_lat_max = 0.22 + 0.10 * d
+        vx = torch.clamp(kp_x * (x_des - x), -v_lat_max, v_lat_max)
+
+        vel_local = torch.stack([vx, vy], dim=-1)
+        pos_local = pos_local + vel_local * float(dt)
+
+        # Corridor boundary clamp (account for narrower doorways).
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.25))
+        half_nom = self.s1_corridor_half_w
+        inside = torch.abs(pos_local[:, 1].unsqueeze(1) - self.s1_gate_y) <= 0.5 * self.s1_gate_len.clamp(min=0.0)
+        door_half = self.s1_gate_door_half
+        # Prefer the current gate's doorway constraint to avoid being overly conservative.
+        # Edge-case fallback: if we are inside any gate (but not the current one), use the most
+        # conservative doorway width (min over gates) to avoid passing through blocked regions.
+        ar = torch.arange(self.s1_gate_y.shape[1], device=self.device).view(1, -1)
+        curr_mask = (idx.view(-1, 1) == ar)
+        inside_curr = inside & curr_mask
+        in_curr_gate = inside_curr.any(dim=1)
+        curr_half = torch.gather(door_half, 1, idx.view(-1, 1)).squeeze(1)
+        half_gate = torch.where(inside, door_half, torch.full_like(door_half, 1e9))
+        half_min = half_gate.min(dim=1).values
+        in_any_gate = inside.any(dim=1)
+        half_w = torch.where(
+            in_curr_gate,
+            torch.minimum(half_nom, curr_half),
+            torch.where(in_any_gate, torch.minimum(half_nom, half_min), half_nom),
+        )
+        half_w = torch.clamp(half_w, min=margin + 0.05)
+
+        pos_local[:, 0] = torch.clamp(pos_local[:, 0], -half_w + margin, half_w - margin)
+
+        # Y boundary: clamp and flip direction at ends.
+        half_len_corr = self.s1_corridor_half_len
+        y_min = -half_len_corr + margin
+        y_max = half_len_corr - margin
+        hit_hi = pos_local[:, 1] > y_max
+        hit_lo = pos_local[:, 1] < y_min
+        if hit_hi.any() or hit_lo.any():
+            pos_local[:, 1] = torch.clamp(pos_local[:, 1], y_min, y_max)
+            dir_y = torch.where(hit_hi, -torch.ones_like(dir_y), dir_y)
+            dir_y = torch.where(hit_lo, torch.ones_like(dir_y), dir_y)
+            # Reset to the nearest end gate when flipping.
+            last_idx = torch.clamp(gate_count - 1, min=0).to(torch.long)
+            idx = torch.where(hit_hi, last_idx, idx)
+            idx = torch.where(hit_lo, torch.zeros_like(idx), idx)
+
+        # Advance gate index after the post segment, if another gate exists in current direction.
+        advance = y_f > post_end
+        dir_int = dir_y.to(torch.long)
+        next_idx = idx + dir_int
+        valid_next = (next_idx >= 0) & (next_idx < gate_count)
+        idx = torch.where(advance & valid_next, next_idx, idx)
+
+        # Commit state.
+        self.s1_path_dir = torch.where(active, dir_y, self.s1_path_dir)
+        self.s1_gate_idx = torch.where(active, idx, self.s1_gate_idx)
+        self.target_world = self.env_origins[:, :2] + pos_local
+        self.target_vel_world = vel_local
+        self.goal_world[:] = self.target_world
+
+    def _reset_moving_target(self, env_ids: torch.Tensor):
+        """Reset moving target state for selected envs."""
+        if env_ids.numel() == 0 or not self._moving_target_enabled():
+            return
+        if self._moving_target_mode() == "s1_gate_script":
+            self._reset_moving_target_s1(env_ids)
+            return
+        # Robot local position.
+        robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
+        desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.0))
+        # Start target in front of robot by desired distance.
+        target_local = robot_local.clone()
+        target_local[:, 1] += desired
+
+        # Clamp into scene bounds.
+        half_len = 0.5 * float(self.cfg.terrain.terrain_length)
+        half_wid = 0.5 * float(self.cfg.terrain.terrain_width)
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.6))
+        x_min = -half_wid + margin
+        x_max = half_wid - margin
+        y_min = -half_len + margin
+        y_max = half_len - margin
+        target_local[:, 0] = torch.clamp(target_local[:, 0], x_min, x_max)
+        target_local[:, 1] = torch.clamp(target_local[:, 1], y_min, y_max)
+
+        # Initialize heading/speed.
+        self.target_heading[env_ids] = 0.0
+        self.target_heading_des[env_ids] = 0.0
+        v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
+        self.target_speed[env_ids] = v_typ
+        self.target_speed_des[env_ids] = v_typ
+        self.target_cmd_timer[env_ids] = 0.0
+
+        # Store world state and expose as goal_world for high-level.
+        self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        self.target_vel_world[env_ids].zero_()
+        self.goal_world[env_ids] = self.target_world[env_ids]
+
+    def _update_moving_target(self):
+        """Vectorized moving target update (called at low-level frequency)."""
+        if not self._moving_target_enabled():
+            return
+        device = self.device
+        # Update at high-level scene dt for performance (default 10Hz).
+        if not hasattr(self, "_moving_target_time_accum"):
+            self._moving_target_time_accum = 0.0
+        self._moving_target_time_accum += float(self.dt)
+        dt_high = float(getattr(self.cfg.terrain, "scene_high_dt", 0.1))
+        if self._moving_target_time_accum + 1e-9 < dt_high:
+            return
+        dt = float(self._moving_target_time_accum)
+        self._moving_target_time_accum = 0.0
+
+        # Difficulty in [0,1] from curriculum (per-env).
+        if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
+            denom = max(1, int(self.max_terrain_level))
+            d = self.terrain_levels.float() / float(denom)
+        else:
+            d = torch.zeros(self.num_envs, device=device)
+        d = torch.clamp(d, 0.0, 1.0)
+
+        if self._moving_target_mode() == "s1_gate_script":
+            self._update_moving_target_s1(dt=dt, d=d)
+            return
+
+        v_max = float(getattr(self.nav_cfg, "moving_target_v_max", 1.2))
+        v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
+        turn_rate_max = float(getattr(self.nav_cfg, "moving_target_turn_rate_max", 1.0))
+        accel_max = float(getattr(self.nav_cfg, "moving_target_accel_max", 2.0))
+
+        # More frequent command changes at higher difficulty.
+        period_fast = float(getattr(self.nav_cfg, "moving_target_cmd_period_fast", 0.6))
+        period_slow = float(getattr(self.nav_cfg, "moving_target_cmd_period_slow", 2.0))
+        period = period_slow + (period_fast - period_slow) * d
+
+        # Countdown.
+        self.target_cmd_timer -= dt
+        need_cmd = self.target_cmd_timer <= 0.0
+        if need_cmd.any():
+            # Choose motion primitive probabilities (difficulty-dependent).
+            p_lat = 0.10 + 0.40 * d
+            p_back = 0.05 + 0.15 * d
+            p_diag = 0.00 + 0.30 * d
+            p_sum = p_lat + p_back + p_diag
+            p_sum = torch.clamp(p_sum, 0.0, 0.9)
+            p_fwd = 1.0 - p_sum
+
+            u = torch.rand(self.num_envs, device=device)
+            # Forward/back/lat/diag selection.
+            theta = torch.zeros(self.num_envs, device=device)
+
+            # Forward (around 0 with jitter).
+            jitter = (0.10 + 0.70 * d)  # rad
+            theta_fwd = (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
+
+            # Backward (around pi).
+            theta_back = math.pi + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
+
+            # Lateral (left/right).
+            lr = torch.randint(0, 2, (self.num_envs,), device=device)
+            theta_lat = torch.where(lr == 0, 0.5 * math.pi, -0.5 * math.pi)
+            theta_lat = theta_lat + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
+
+            # Diagonal (4 choices).
+            diag_idx = torch.randint(0, 4, (self.num_envs,), device=device)
+            diag_angles = torch.tensor(
+                [0.25 * math.pi, -0.25 * math.pi, 0.75 * math.pi, -0.75 * math.pi],
+                device=device,
+            )
+            theta_diag = diag_angles[diag_idx]
+            theta_diag = theta_diag + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
+
+            # Map u into categories.
+            t0 = p_fwd
+            t1 = t0 + p_back
+            t2 = t1 + p_lat
+            fwd_mask = u < t0
+            back_mask = (u >= t0) & (u < t1)
+            lat_mask = (u >= t1) & (u < t2)
+            diag_mask = u >= t2
+
+            theta = torch.where(fwd_mask, theta_fwd, theta)
+            theta = torch.where(back_mask, theta_back, theta)
+            theta = torch.where(lat_mask, theta_lat, theta)
+            theta = torch.where(diag_mask, theta_diag, theta)
+            theta = torch.atan2(torch.sin(theta), torch.cos(theta))
+
+            # Speed command: wider range + more variation at higher difficulty.
+            v_lo = 0.15
+            v_hi = torch.clamp(v_typ + (v_max - v_typ) * (0.3 + 0.7 * d), v_lo, v_max)
+            v_cmd = v_lo + (v_hi - v_lo) * torch.rand(self.num_envs, device=device)
+
+            self.target_heading_des = torch.where(need_cmd, theta, self.target_heading_des)
+            self.target_speed_des = torch.where(need_cmd, v_cmd, self.target_speed_des)
+            # Reset timer with some jitter.
+            self.target_cmd_timer = torch.where(
+                need_cmd,
+                period * (0.6 + 0.8 * torch.rand(self.num_envs, device=device)),
+                self.target_cmd_timer,
+            )
+
+        # Smoothly turn toward desired heading.
+        dtheta = torch.atan2(
+            torch.sin(self.target_heading_des - self.target_heading),
+            torch.cos(self.target_heading_des - self.target_heading),
+        )
+        max_turn = (0.3 + 0.7 * d) * turn_rate_max * dt
+        dtheta = torch.clamp(dtheta, -max_turn, max_turn)
+        self.target_heading = self.target_heading + dtheta
+        self.target_heading = torch.atan2(torch.sin(self.target_heading), torch.cos(self.target_heading))
+
+        # Smoothly change speed.
+        dv = self.target_speed_des - self.target_speed
+        max_dv = (0.4 + 0.6 * d) * accel_max * dt
+        dv = torch.clamp(dv, -max_dv, max_dv)
+        self.target_speed = torch.clamp(self.target_speed + dv, 0.0, v_max)
+
+        # Integrate position in local env frame.
+        dir_x = torch.sin(self.target_heading)
+        dir_y = torch.cos(self.target_heading)
+        vel_local = torch.stack([self.target_speed * dir_x, self.target_speed * dir_y], dim=-1)
+
+        pos_local = self.target_world - self.env_origins[:, :2]
+        pos_local = pos_local + vel_local * dt
+
+        # Keep within bounds with reflection.
+        half_len = 0.5 * float(self.cfg.terrain.terrain_length)
+        half_wid = 0.5 * float(self.cfg.terrain.terrain_width)
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.6))
+        x_min = -half_wid + margin
+        x_max = half_wid - margin
+        y_min = -half_len + margin
+        y_max = half_len - margin
+
+        hit_x = (pos_local[:, 0] < x_min) | (pos_local[:, 0] > x_max)
+        hit_y = (pos_local[:, 1] < y_min) | (pos_local[:, 1] > y_max)
+        if hit_x.any():
+            pos_local[:, 0] = torch.clamp(pos_local[:, 0], x_min, x_max)
+            self.target_heading = torch.where(hit_x, -self.target_heading, self.target_heading)
+            self.target_heading_des = torch.where(hit_x, -self.target_heading_des, self.target_heading_des)
+        if hit_y.any():
+            pos_local[:, 1] = torch.clamp(pos_local[:, 1], y_min, y_max)
+            self.target_heading = torch.where(hit_y, math.pi - self.target_heading, self.target_heading)
+            self.target_heading_des = torch.where(hit_y, math.pi - self.target_heading_des, self.target_heading_des)
+        self.target_heading = torch.atan2(torch.sin(self.target_heading), torch.cos(self.target_heading))
+        self.target_heading_des = torch.atan2(torch.sin(self.target_heading_des), torch.cos(self.target_heading_des))
+
+        # Commit world state.
+        self.target_world = self.env_origins[:, :2] + pos_local
+        self.target_vel_world = vel_local
+        self.goal_world[:] = self.target_world
+
     def _sync_dynamic_obstacles(self):
         if self.dynamic_actor_indices is None:
             return
@@ -1037,6 +1447,8 @@ class HexGround(LeggedRobot):
         return torques
 
     def _post_physics_step_callback(self):
+        if self._moving_target_enabled():
+            self._update_moving_target()
         self._update_dynamic_obstacles()
         super()._post_physics_step_callback()
     
@@ -1178,6 +1590,8 @@ class HexGround(LeggedRobot):
                 self.scene_level_cache[env_ids] = self.terrain_levels[env_ids]
             self._apply_scene_spawn(env_ids)
             self._resample_nav_goals(env_ids)
+            if self._moving_target_enabled():
+                self._reset_moving_target(env_ids)
             if hasattr(self, "goal_world"):
                 yaw_offset = float(getattr(self.nav_cfg, "heading_offset_rad", 0.0)) if self.nav_cfg is not None else 0.0
                 jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
@@ -1699,6 +2113,60 @@ class HexGround(LeggedRobot):
         )
         self.goal_world = torch.zeros(
             self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        # Moving target buffers (S0 mainline; always allocated for simplicity).
+        self.target_world = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_vel_world = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_heading = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_heading_des = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_speed = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_speed_des = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_cmd_timer = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        # S1 moving target scripted gate traversal (always allocated; used only when enabled).
+        self._s1_gate_max = 4
+        self.s1_gate_y = torch.zeros(
+            self.num_envs, self._s1_gate_max, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_gate_len = torch.zeros(
+            self.num_envs, self._s1_gate_max, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_gate_door_half = torch.zeros(
+            self.num_envs, self._s1_gate_max, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_gate_bias_x = torch.zeros(
+            self.num_envs, self._s1_gate_max, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_gate_post_side = torch.ones(
+            self.num_envs, self._s1_gate_max, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_gate_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device, requires_grad=False
+        )
+        self.s1_gate_idx = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device, requires_grad=False
+        )
+        self.s1_path_dir = torch.ones(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_corridor_half_len = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.s1_corridor_half_w = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
 
         #设置记录观测的最大和最小和平均值，用于判断观测归一化合理程度

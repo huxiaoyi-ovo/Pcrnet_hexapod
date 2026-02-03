@@ -81,6 +81,69 @@ class HexCalibCfgPPO(HexGroundCfgPPO):
         experiment_name = "hex_calib"
 
 
+class HexS0FollowCfg(HexGroundCfg):
+    """S0: flat ground + moving target, train stable following before S1 resume."""
+    class env(HexGroundCfg.env):
+        env_spacing = 10.0
+    class terrain(HexGroundCfg.terrain):
+        mesh_type = "heightfield"
+        terrain_type = "s0_follow_plane"
+        terrain_seed = 1
+        fixed_layout_enable = False
+        scene_clearance = 0.27
+        scene_margin = 0.3
+        scene_high_dt = 0.1
+        scene_dynamic_max = 0
+        scene_resample_on_reset = False
+        scene_resample_on_level_change = False
+        num_rows = 5
+        num_cols = 10
+        terrain_proportions = [1.0]
+        max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        # Disable edge spawn: S0 wants centered tracking, not ring spawns.
+        spawn_edge_enable = False
+        heading_offset_rad = 0.0
+        # Keep legacy goal sampling off; goal_world will be overridden by moving target.
+        goal_mode = "fixed"
+        fixed_goal = [0.0, 0.0]
+        resample_on_reach = False
+        # Moving target curriculum (difficulty controls switching frequency/complexity).
+        moving_target_enable = True
+        moving_target_v_max = 1.2
+        moving_target_v_typical = 0.6
+        moving_target_turn_rate_max = 1.0
+        moving_target_accel_max = 2.0
+        # Following distance contract (paper + code unified).
+        follow_distance_desired = 1.0
+        follow_distance_min = 0.7
+        follow_distance_max = 1.4
+        # Target-in-view contract: use camera FOV but enforce a tighter center window.
+        target_fov_soft_scale = 0.35
+        target_fov_hard_scale = 0.70
+        target_lost_k = 5
+        # Reward weights for view centering (penalties are negative values).
+        target_center_scale = 2.0
+        target_visible_scale = 1.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
+        # Follow-mode reward: track a desired distance instead of "reach goal".
+        reward_cfg["follow_enable"] = True
+        reward_cfg["follow_distance_desired"] = 1.0
+        reward_cfg["follow_distance_sigma"] = 0.25
+        reward_cfg["follow_distance_scale"] = 6.0
+        # Disable reach logic in S0 (we don't want to "reach target point").
+        reward_cfg["goal_reach_threshold"] = 0.0
+        reward_cfg["goal_reach_bonus"] = 0.0
+        # Use view-centering instead of heading-to-goal for orientation.
+        reward_cfg["heading_scale"] = 0.0
+
+
+class HexS0FollowCfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "hex_s0_follow"
+
+
 class HexS1Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
@@ -103,7 +166,7 @@ class HexS1Cfg(HexGroundCfg):
         scene_static_wall_block_height = 0.35
         scene_params_easy = {
             "corridor_width": 1.6,
-            "gate_width": 0.9,
+            "gate_width": 1.0,
             "gate_count": 2,
             "gate_length": 1.0,
             "gate_length_jitter": 0.2,
@@ -119,7 +182,7 @@ class HexS1Cfg(HexGroundCfg):
         }
         scene_params_hard = {
             "corridor_width": 1.2,
-            "gate_width": 0.65,
+            "gate_width": 0.85,
             "gate_count": 3,
             "gate_length": 1.2,
             "gate_length_jitter": 0.25,
@@ -170,7 +233,7 @@ class HexS1FollowCfg(HexGroundCfg):
         scene_static_wall_block_height = 0.35
         scene_params_easy = {
             "corridor_width": 1.6,
-            "gate_width": 0.9,
+            "gate_width": 1.0,
             "gate_count": 2,
             "gate_length": 1.0,
             "gate_length_jitter": 0.2,
@@ -186,7 +249,7 @@ class HexS1FollowCfg(HexGroundCfg):
         }
         scene_params_hard = {
             "corridor_width": 1.2,
-            "gate_width": 0.65,
+            "gate_width": 0.85,
             "gate_count": 3,
             "gate_length": 1.2,
             "gate_length_jitter": 0.25,
@@ -218,6 +281,52 @@ class HexS1FollowCfgPPO(HexGroundCfgPPO):
         experiment_name = "hex_s1_follow"
 
 
+class HexS1FollowMovingCfg(HexS1FollowCfg):
+    """
+    S1-moving: corridor gates + moving target that must traverse the gates.
+
+    This is used to force consistent follow-vs-avoid conflicts.
+    """
+    class navigation(HexS1FollowCfg.navigation):
+        # Moving target scripted by gates (force conflicts).
+        moving_target_enable = True
+        moving_target_mode = "s1_gate_script"
+        moving_target_v_max = 1.2
+        moving_target_v_typical = 0.6
+        moving_target_turn_rate_max = 0.0  # scripted mode does not use turn_rate
+        moving_target_accel_max = 3.0
+        moving_target_margin = 0.25
+
+        # Following distance contract (paper + code unified).
+        follow_distance_desired = 1.0
+        follow_distance_min = 0.7
+        follow_distance_max = 1.4
+
+        # Target-in-view contract (use camera FOV but enforce a tighter center window).
+        target_fov_soft_scale = 0.35
+        target_fov_hard_scale = 0.70
+        target_lost_k = 5
+        target_center_scale = 2.0
+        target_visible_scale = 1.0
+
+        reward_cfg = dict(HexS1FollowCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
+        reward_cfg["follow_enable"] = True
+        reward_cfg["follow_distance_desired"] = 1.0
+        reward_cfg["follow_distance_sigma"] = 0.25
+        reward_cfg["follow_distance_scale"] = 6.0
+        # Disable reach logic in moving-target follow.
+        reward_cfg["goal_reach_threshold"] = 0.0
+        reward_cfg["goal_reach_bonus"] = 0.0
+        # Use view-centering instead of heading-to-goal for orientation.
+        reward_cfg["heading_scale"] = 0.0
+
+
+class HexS1FollowMovingCfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "hex_s1_follow_moving"
+
+
 class HexS1LargeCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
@@ -240,7 +349,7 @@ class HexS1LargeCfg(HexGroundCfg):
         scene_static_wall_block_height = 0.35
         scene_params_easy = {
             "corridor_width": 1.6,
-            "gate_width": 0.9,
+            "gate_width": 1.0,
             "gate_count": 2,
             "gate_length": 1.0,
             "gate_length_jitter": 0.2,
@@ -256,7 +365,7 @@ class HexS1LargeCfg(HexGroundCfg):
         }
         scene_params_hard = {
             "corridor_width": 1.2,
-            "gate_width": 0.65,
+            "gate_width": 0.85,
             "gate_count": 3,
             "gate_length": 1.2,
             "gate_length_jitter": 0.25,
@@ -318,6 +427,13 @@ class HexS2Cfg(HexGroundCfg):
             "min_dist": 0.45,
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
+            "layout_modes": ["poisson", "cluster", "lane"],
+            "layout_mode_probs": [0.5, 0.25, 0.25],
+            "cluster_count_min": 2,
+            "cluster_count_max": 4,
+            "cluster_sigma": 0.6,
+            "lane_cycles": 1.0,
+            "lane_amplitude": 0.8,
         }
         scene_params_hard = {
             "count_min": 16,
@@ -334,6 +450,13 @@ class HexS2Cfg(HexGroundCfg):
             "min_dist": 0.40,
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
+            "layout_modes": ["poisson", "cluster", "lane"],
+            "layout_mode_probs": [0.35, 0.35, 0.30],
+            "cluster_count_min": 3,
+            "cluster_count_max": 5,
+            "cluster_sigma": 0.55,
+            "lane_cycles": 1.2,
+            "lane_amplitude": 0.9,
         }
         num_rows = 5
         num_cols = 10
@@ -379,6 +502,13 @@ class HexS2LargeCfg(HexGroundCfg):
             "min_dist": 0.40,
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
+            "layout_modes": ["poisson", "cluster", "lane"],
+            "layout_mode_probs": [0.5, 0.25, 0.25],
+            "cluster_count_min": 3,
+            "cluster_count_max": 5,
+            "cluster_sigma": 0.7,
+            "lane_cycles": 1.0,
+            "lane_amplitude": 0.9,
         }
         scene_params_hard = {
             "count_min": 40,
@@ -395,6 +525,13 @@ class HexS2LargeCfg(HexGroundCfg):
             "min_dist": 0.36,
             "spawn_clear": 1.0,
             "goal_clear": 1.0,
+            "layout_modes": ["poisson", "cluster", "lane"],
+            "layout_mode_probs": [0.35, 0.35, 0.30],
+            "cluster_count_min": 4,
+            "cluster_count_max": 6,
+            "cluster_sigma": 0.6,
+            "lane_cycles": 1.2,
+            "lane_amplitude": 1.0,
         }
         num_rows = 5
         num_cols = 10

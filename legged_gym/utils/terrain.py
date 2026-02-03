@@ -228,6 +228,26 @@ def s1_corridor_gate_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCf
     return terrain
 
 
+def s0_follow_plane_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """S0: flat ground for moving-target following (no obstacles)."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    terrain.meta = {
+        "scene_type": "s0_follow_plane",
+        "params": {
+            "terrain_length": float(length_px * h_scale),
+            "terrain_width": float(width_px * h_scale),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
 def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
     """S2 forest: poles + blocks with a clear band around x=0."""
     length_px = terrain.length
@@ -274,15 +294,94 @@ def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terra
     max_obs = max(pole_radius_max, 0.5 * block_size_max)
     margin = max_obs + 0.1
 
+    def _lane_center_x(y_local: float, lane_amp: float, lane_cycles: float, phase: float) -> float:
+        # y_local in [-L/2, L/2]
+        if length_m <= 1e-6:
+            return 0.0
+        t = (y_local + 0.5 * length_m) / length_m
+        return float(lane_amp * np.sin(2.0 * np.pi * lane_cycles * t + phase))
+
+    # Layout mode should follow the same easy/hard selection rule as other S2 parameters.
+    params = params_hard if difficulty > 0.5 else params_easy
+    layout_modes = params.get("layout_modes", None)
+    layout_mode_probs = params.get("layout_mode_probs", None)
+    if isinstance(layout_modes, (list, tuple)) and len(layout_modes) > 0:
+        if isinstance(layout_mode_probs, (list, tuple)) and len(layout_mode_probs) == len(layout_modes):
+            probs = np.asarray(layout_mode_probs, dtype=np.float64)
+            probs = np.clip(probs, 0.0, None)
+            if probs.sum() <= 0:
+                probs = np.ones_like(probs) / len(probs)
+            else:
+                probs = probs / probs.sum()
+            layout_mode = str(rng.choice(layout_modes, p=probs))
+        else:
+            layout_mode = str(rng.choice(layout_modes))
+    else:
+        layout_mode = "poisson"
+
+    # Cluster parameters (used only in cluster mode).
+    cluster_count_min = int(params_easy.get("cluster_count_min", 2))
+    cluster_count_max = int(params_easy.get("cluster_count_max", 4))
+    cluster_sigma = float(params_easy.get("cluster_sigma", 0.6))
+    if difficulty > 0.5:
+        cluster_count_min = int(params_hard.get("cluster_count_min", cluster_count_min))
+        cluster_count_max = int(params_hard.get("cluster_count_max", cluster_count_max))
+        cluster_sigma = float(params_hard.get("cluster_sigma", cluster_sigma))
+    cluster_count_max = max(cluster_count_min, cluster_count_max)
+
+    # Lane parameters (used only in lane mode).
+    lane_cycles = float(params_easy.get("lane_cycles", 1.0))
+    lane_amplitude = float(params_easy.get("lane_amplitude", 0.8))
+    if difficulty > 0.5:
+        lane_cycles = float(params_hard.get("lane_cycles", lane_cycles))
+        lane_amplitude = float(params_hard.get("lane_amplitude", lane_amplitude))
+
+    max_lane_amp = max(0.0, 0.5 * (width_m - clear_band) - margin - 0.05)
+    lane_amplitude = float(np.clip(lane_amplitude, 0.0, max_lane_amp))
+    lane_phase = float(rng.uniform(0.0, 2.0 * np.pi))
+
     centers = []
     shapes = []
-    for _ in range(num_poles + num_blocks):
+    cluster_centers = []
+    if layout_mode == "cluster":
+        k = int(rng.randint(cluster_count_min, cluster_count_max + 1))
+        for _ in range(k):
+            cx = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
+            cy = rng.uniform(-0.5 * length_m + margin, 0.5 * length_m - margin)
+            # avoid placing clusters in the clear band
+            if abs(cx) < 0.5 * clear_band:
+                side = np.sign(cx)
+                if abs(side) < 1e-6:
+                    side = float(rng.choice([-1.0, 1.0]))
+                cx = side * (0.5 * clear_band + margin + 0.05)
+            cluster_centers.append((float(cx), float(cy)))
+
+    for idx in range(num_poles + num_blocks):
         placed = False
         for _ in range(60):
-            x = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
+            if layout_mode == "cluster" and len(cluster_centers) > 0:
+                ccx, ccy = cluster_centers[int(idx) % len(cluster_centers)]
+                x = rng.normal(ccx, cluster_sigma)
+                y = rng.normal(ccy, cluster_sigma)
+            else:
+                x = rng.uniform(-0.5 * width_m + margin, 0.5 * width_m - margin)
+                y = rng.uniform(-0.5 * length_m + margin, 0.5 * length_m - margin)
+
+            # keep within boundaries
+            if not (-0.5 * width_m + margin <= x <= 0.5 * width_m - margin):
+                continue
+            if not (-0.5 * length_m + margin <= y <= 0.5 * length_m - margin):
+                continue
+
+            # Clear region (global band) always exists.
             if abs(x) < 0.5 * clear_band:
                 continue
-            y = rng.uniform(-0.5 * length_m + margin, 0.5 * length_m - margin)
+            # Lane mode adds a meandering clear corridor for stronger structure.
+            if layout_mode == "lane" and lane_amplitude > 0.0:
+                lane_x = _lane_center_x(float(y), lane_amplitude, lane_cycles, lane_phase)
+                if abs(x - lane_x) < 0.5 * clear_band:
+                    continue
+
             if min_dist > 0.0:
                 if any((x - cx) ** 2 + (y - cy) ** 2 < min_dist ** 2 for cx, cy in centers):
                     continue
@@ -342,6 +441,11 @@ def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terra
             "num_blocks": int(actual_num_blocks),
             "block_ratio": float(actual_block_ratio),
             "clear_band": float(clear_band),
+            "layout_mode": str(layout_mode),
+            "cluster_count": int(len(cluster_centers)),
+            "cluster_sigma": float(cluster_sigma),
+            "lane_cycles": float(lane_cycles),
+            "lane_amplitude": float(lane_amplitude),
         },
         "layout_seed": int(seed or 0),
         "static_obstacles": [],
@@ -1032,6 +1136,8 @@ class Terrain:
             terrain_type = str(terrain_type).lower()
             if terrain_type in ("debug_axis", "calib_axis"):
                 return debug_axis_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("s0", "s0_follow_plane"):
+                return s0_follow_plane_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s1", "s1_corridor_gate"):
                 return s1_corridor_gate_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s2", "s2_forest"):
@@ -1046,7 +1152,7 @@ class Terrain:
                 return s6_ood_cluster_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             raise RuntimeError(
                 f"unsupported terrain_type={terrain_type}. "
-                "supported: debug_axis, s1_corridor_gate, s2_forest, "
+                "supported: debug_axis, s0_follow_plane, s1_corridor_gate, s2_forest, "
                 "s3_doorway_rooms, s4_crossing, s5_sparse_dense, s6_ood_cluster"
             )
         if getattr(self.cfg, "fixed_layout_enable", False):

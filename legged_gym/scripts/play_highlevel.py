@@ -28,7 +28,7 @@ def parse_args():
         "--task",
         type=str,
         default="hex_s1",
-        help="Task name (hex_s1 / hex_s2 / hex_calib)",
+        help="Task name (hex_s0_follow / hex_s1 / hex_s1_follow_moving / hex_s2 / hex_calib)",
     )
     parser.add_argument("--seed", type=int, default=None, help="随机种子（None 使用默认）")
     parser.add_argument(
@@ -72,6 +72,12 @@ def parse_args():
     parser.add_argument("--cmd_slew_ang", type=float, default=0.4, help="命令角速度变化率限制")
     parser.add_argument("--cmd_safe_dist", type=float, default=None, help="安全距离阈值（None 使用默认 clearance）")
     parser.add_argument("--cmd_free_dist", type=float, default=None, help="安全全速距离（None 使用默认 clearance_free）")
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=None,
+        help="(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）",
+    )
     parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
         "--debug_cmd",
@@ -141,8 +147,8 @@ def main():
     args = parse_args()
     if args.task == "hex_terrain":
         raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
-    if args.task not in ("hex_s1", "hex_s2", "hex_calib"):
-        raise ValueError("play_highlevel.py supports only --task hex_s1/hex_s2/hex_calib")
+    if args.task not in ("hex_s0_follow", "hex_s1", "hex_s1_follow_moving", "hex_s2", "hex_calib"):
+        raise ValueError("play_highlevel.py supports only --task hex_s0_follow/hex_s1/hex_s1_follow_moving/hex_s2/hex_calib")
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
         if debug:

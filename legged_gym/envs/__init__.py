@@ -48,10 +48,14 @@ from .hex_v4.hex_scenes_config import (
     HexDebugHeightfieldCfgPPO,
     HexCalibCfg,
     HexCalibCfgPPO,
+    HexS0FollowCfg,
+    HexS0FollowCfgPPO,
     HexS1Cfg,
     HexS1CfgPPO,
     HexS1FollowCfg,
     HexS1FollowCfgPPO,
+    HexS1FollowMovingCfg,
+    HexS1FollowMovingCfgPPO,
     HexS1LargeCfg,
     HexS1LargeCfgPPO,
     HexS2Cfg,
@@ -99,8 +103,10 @@ task_registry.register("hex_ground",HexGround,HexGroundCfg(),HexGroundCfgPPO())
 task_registry.register("hex_debug_plane", HexGround, HexDebugPlaneCfg(), HexDebugPlaneCfgPPO())
 task_registry.register("hex_debug_heightfield", HexGround, HexDebugHeightfieldCfg(), HexDebugHeightfieldCfgPPO())
 
+task_registry.register("hex_s0_follow", HexGround, HexS0FollowCfg(), HexS0FollowCfgPPO())
 task_registry.register("hex_s1", HexGround, HexS1Cfg(), HexS1CfgPPO())
 task_registry.register("hex_s1_follow", HexGround, HexS1FollowCfg(), HexS1FollowCfgPPO())
+task_registry.register("hex_s1_follow_moving", HexGround, HexS1FollowMovingCfg(), HexS1FollowMovingCfgPPO())
 task_registry.register("hex_s1_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())
 task_registry.register("hex_s2", HexGround, HexS2Cfg(), HexS2CfgPPO())
 task_registry.register("hex_s2_large", HexGround, HexS2LargeCfg(), HexS2LargeCfgPPO())

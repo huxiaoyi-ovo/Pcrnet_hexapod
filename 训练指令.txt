@@ -2,27 +2,34 @@
 
 ## 说明（以当前代码为准）
 
-- 训练主线任务：`hex_s1` / `hex_s2` / `hex_calib`（classic heightfield）。
+- 训练主线任务：`hex_s0_follow` / `hex_s1` / `hex_s1_follow_moving` / `hex_s2` / `hex_calib`（classic heightfield）。
 - `hex_ground` 是容器任务，不再推荐；必须显式配置 `terrain_type`，否则直接报错。
 - 工具/调试任务：
   - `hex_debug_plane`：plane，禁 jitter，适合相机/脚本快速验证。
   - `hex_debug_heightfield`：debug_axis heightfield，覆盖非平整深度/渲染。
-- S3/S4/S5/S6 目前 classic terrain_type 未实现，使用 `hex_s3..hex_s6` 会直接报错。
+- S3/S4/S5/S6 classic heightfield 已打通（建议先小 num_envs 启动验证）。
 
 ## 场景描述（按当前实现）
 
 - debug_axis（hex_calib/hex_debug_heightfield）：
   - 仅沿 world +Y 方向做阶梯（x 方向恒定），用于坐标轴/量化/flatten 校准。
+- S0 Follow Plane（`terrain_type=s0_follow_plane`，任务 `hex_s0_follow`）：
+  - 平地 + 移动目标全向运动（前进/后退/横移/组合变速）。
+  - 训练目的：先把稳定跟随（1m）与视野居中练稳，再 resume 到 S1 强冲突。
 - S1 Corridor Gate（`terrain_type=s1_corridor_gate`）：
   - 走廊沿 +Y，宽度 1.6 → 1.2（difficulty 0→1）。
-  - 2–3 个门段，门洞宽 0.9 → 0.65；门段长度带抖动。
+  - 2–3 个门段，门洞宽 1.0 → 0.85；门段长度带抖动。
   - 关键字段：`corridor_width`、`corridor_gates[*].door_width`。
   - `gate_width` 就是门洞宽度（door_width），classic builder 会写入 tile_meta.params.corridor_gates[*].door_width。
+- S1 Follow Moving（任务 `hex_s1_follow_moving`）：
+  - S1 门洞走廊 + 脚本化移动目标：目标必须穿越门洞，保证稳定产生 Follow vs Avoid 冲突段。
+  - 目标行为：门洞处小偏置对齐；出门洞后小横移；目标更新频率对齐 scene_high_dt=0.1（10Hz）。
 - S2 Forest（`terrain_type=s2_forest`）：
   - 柱/方块混合；数量 8–12 → 16–24。
   - 柱：半径 0.12–0.18 → 0.14–0.22，高 0.30–0.35 → 0.35–0.40。
   - 方块：尺寸 0.28–0.40 → 0.30–0.44，高 0.30–0.35 → 0.35–0.40。
   - `block_ratio` 0.2 → 0.4；默认保留中心可通行带。
+  - layout_modes：poisson/cluster/lane；概率随 difficulty 切换（easy/hard 各自独立概率分布）。
 
 ## 关键约束与可复现性
 
@@ -42,23 +49,29 @@ python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 10
 ## 最小验证（headless smoke）
 
 # debug 轴向校准（建议先跑）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 
-# S1 / S2 快速冒烟
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+# S0 / S1 / S1-moving / S2 快速冒烟
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s0_follow --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1_follow_moving --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 
 ## GPU/CPU 物理管线 A/B（同一地形/num_envs）
 
 # GPU PhysX + GPU pipeline（显式）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cuda:0 --pipeline gpu --physx
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cuda:0 --pipeline gpu --physx
 # CPU PhysX + CPU pipeline（显式）
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cpu --pipeline cpu --physx --rl_device cpu
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --sim_device cpu --pipeline cpu --physx --rl_device cpu
 
 ## 建议训练入口（示例）
 
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s2 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
-python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid  --task hex_s1 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+# Follow expert：先 S0（稳定跟随），再 finetune 到 S1-moving（强冲突门洞）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s0_follow --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1_follow_moving --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --finetune_from outputs/planner/follow/best_model.pt
+
+# Avoid expert（示例）
+python legged_gym/scripts/train_highlevel.py --mode teacher --skill avoid  --task hex_s1 --num_envs 256 --num_steps 24 --num_iterations 200 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 
 ## 工具/调试任务（不走主线约束）
 
