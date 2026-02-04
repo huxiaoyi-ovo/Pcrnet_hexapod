@@ -28,6 +28,7 @@ class NavigationRewardConfig:
     follow_distance_desired: float = 1.0
     follow_distance_sigma: float = 0.25
     follow_distance_scale: float = 6.0
+    follow_band_scale: float = 1.0  # scale for the Gaussian band reward term
     follow_outside_penalty: float = -1.0  # extra penalty when far outside follow band
 
     # 碰撞惩罚
@@ -136,7 +137,8 @@ class NavigationRewardFunction:
             prev_err = torch.abs(prev_dist - desired)
             approach_reward = (prev_err - err) * float(self.cfg.follow_distance_scale)
             # Encourage staying near the band center.
-            band_reward = torch.exp(-0.5 * (err / sigma) ** 2)
+            band_scale = float(getattr(self.cfg, "follow_band_scale", 1.0))
+            band_reward = band_scale * torch.exp(-0.5 * (err / sigma) ** 2)
             rewards['approach'] = approach_reward + band_reward
             rewards['reach'] = torch.zeros_like(dist_to_goal)
         else:

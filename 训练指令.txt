@@ -49,6 +49,9 @@ python3 tools/scene_audit.py --scenes s1_corridor_gate,s2_forest --seed-start 10
 
 ## 最小验证（headless smoke）
 
+# 注：如果你观察到低层步态明显“变慢”，通常是 decimation 偏大导致的（高层每步对应的低层控制周期更多）。
+# S0 建议先用 decimation=4（更灵敏），再根据吞吐与稳定性权衡到 5/6。
+
 # debug 轴向校准（建议先跑）
 python legged_gym/scripts/train_highlevel.py --mode teacher --skill follow --task hex_calib --num_envs 64 --num_steps 24 --num_iterations 3 --decimation 5 --seed 0 --headless --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt
 

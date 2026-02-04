@@ -981,7 +981,8 @@ class HexGround(LeggedRobot):
             theta = torch.zeros(self.num_envs, device=device)
 
             # Forward (around 0 with jitter).
-            jitter = (0.10 + 0.70 * d)  # rad
+            # Early-stage learnability: at difficulty=0, keep heading almost straight (+Y).
+            jitter = (0.02 + 0.70 * d)  # rad
             theta_fwd = (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
 
             # Backward (around pi).
@@ -1018,7 +1019,9 @@ class HexGround(LeggedRobot):
 
             # Speed command: wider range + more variation at higher difficulty.
             v_lo = float(getattr(self.nav_cfg, "moving_target_v_min", 0.05))
-            v_hi = torch.clamp(v_typ + (v_max - v_typ) * (0.3 + 0.7 * d), v_lo, v_max)
+            # At difficulty=0, keep v_cmd=v_typ; ramp up faster at higher difficulty (quadratic).
+            v_scale = d * d
+            v_hi = torch.clamp(v_typ + (v_max - v_typ) * v_scale, v_lo, v_max)
             v_cmd = v_lo + (v_hi - v_lo) * torch.rand(self.num_envs, device=device)
 
             self.target_heading_des = torch.where(need_cmd, theta, self.target_heading_des)
@@ -1690,11 +1693,14 @@ class HexGround(LeggedRobot):
                 jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
 
                 s1_ids = []
+                s0_ids = []
                 if self.scene_spec_cache is not None:
                     for env_id in env_ids.tolist():
                         scene_spec = self.scene_spec_cache[env_id]
                         if scene_spec is not None and scene_spec.scene_type == "s1_corridor_gate":
                             s1_ids.append(env_id)
+                        elif scene_spec is not None and scene_spec.scene_type == "s0_follow_plane":
+                            s0_ids.append(env_id)
                 if s1_ids:
                     s1_tensor = torch.tensor(s1_ids, device=self.device, dtype=torch.long)
                     jitter = torch_rand_float(
@@ -1711,9 +1717,48 @@ class HexGround(LeggedRobot):
                     self._sync_robot_root_states(s1_tensor)
 
                 other_ids = env_ids
-                if s1_ids:
-                    s1_set = set(s1_ids)
-                    rest = [env_id for env_id in env_ids.tolist() if env_id not in s1_set]
+                if s0_ids:
+                    # S0: lock spawn yaw to +Y forward with small jitter, then re-place the target
+                    # to keep robot/target consistent (avoid "reset mismatch" and early target loss).
+                    s0_tensor = torch.tensor(s0_ids, device=self.device, dtype=torch.long)
+                    jitter = torch_rand_float(
+                        -math.radians(jitter_deg),
+                        math.radians(jitter_deg),
+                        (len(s0_ids), 1),
+                        device=self.device,
+                    ).squeeze(1)
+                    yaw = yaw_offset + jitter
+                    qz = torch.sin(0.5 * yaw)
+                    qw = torch.cos(0.5 * yaw)
+                    quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+                    self.root_states[s0_tensor, 3:7] = quat
+                    self._sync_robot_root_states(s0_tensor)
+                    if self._moving_target_enabled():
+                        self._reset_moving_target(s0_tensor)
+
+                    if getattr(self, "debug_viz", False) and hasattr(self, "target_world"):
+                        if not getattr(self, "_s0_reset_align_warned", False):
+                            delta = self.target_world[s0_tensor] - self.root_states[s0_tensor, :2]
+                            cos_h = torch.cos(yaw)
+                            sin_h = torch.sin(yaw)
+                            x_r = cos_h * delta[:, 0] - sin_h * delta[:, 1]
+                            y_f = sin_h * delta[:, 0] + cos_h * delta[:, 1]
+                            bearing = torch.atan2(x_r, y_f)
+                            too_far = torch.abs(bearing) > 0.35  # ~20deg
+                            behind = y_f < 0.0
+                            if bool((too_far | behind).any().item()):
+                                import warnings
+                                warnings.warn(
+                                    f"[S0 reset] target not centered/forward for some envs: "
+                                    f"bearing_deg(p95)={float(torch.quantile(torch.abs(bearing), 0.95).item() * 180.0 / math.pi):.1f}, "
+                                    f"behind_frac={float(behind.float().mean().item()):.3f}.",
+                                    stacklevel=1,
+                                )
+                            self._s0_reset_align_warned = True
+
+                if s1_ids or s0_ids:
+                    skip = set(s1_ids) | set(s0_ids)
+                    rest = [env_id for env_id in env_ids.tolist() if env_id not in skip]
                     if rest:
                         other_ids = torch.tensor(rest, device=self.device, dtype=torch.long)
                     else:
@@ -1958,14 +2003,14 @@ class HexGround(LeggedRobot):
         heading = self.robot_state_buf[:, 2]
         cos_h = torch.cos(heading)
         sin_h = torch.sin(heading)
-        # dx_body/dy_body are (x_forward, y_left) in the body frame.
-        dx_body = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]
-        dy_body = -sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
-
-        # Project-wide contract (align with S1): goal_buf is (x_right, y_forward),
-        # so bearing can be computed as atan2(x_right, y_forward) with +Y forward.
-        x_right = -dy_body
-        y_forward = dx_body
+        # Project-wide contract (align with S1):
+        # - heading=0 means world +Y is forward
+        # - goal_buf is (x_right, y_forward) so bearing = atan2(x_right, y_forward)
+        #
+        # Build world-frame right/forward unit vectors from heading and project delta.
+        # heading=0 => forward=(0,+1), right=(+1,0).
+        x_right = cos_h * delta_world[:, 0] - sin_h * delta_world[:, 1]
+        y_forward = sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
         self.goal_buf[:] = torch.stack([x_right, y_forward], dim=1)
 
         if getattr(self.nav_cfg, "resample_on_reach", False):

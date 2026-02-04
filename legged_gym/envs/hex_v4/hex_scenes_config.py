@@ -106,6 +106,8 @@ class HexS0FollowCfg(HexGroundCfg):
         # Disable edge spawn: S0 wants centered tracking, not ring spawns.
         spawn_edge_enable = False
         heading_offset_rad = 0.0
+        # S0: lock spawn yaw close to +Y forward (heading=0) to keep the moving target in view.
+        spawn_yaw_jitter_deg = 2.0
         # Keep legacy goal sampling off; goal_world will be overridden by moving target.
         goal_mode = "fixed"
         fixed_goal = [0.0, 0.0]
@@ -142,8 +144,9 @@ class HexS0FollowCfg(HexGroundCfg):
         # Follow-mode reward: track a desired distance instead of "reach goal".
         reward_cfg["follow_enable"] = True
         reward_cfg["follow_distance_desired"] = 1.0
-        reward_cfg["follow_distance_sigma"] = 0.25
-        reward_cfg["follow_distance_scale"] = 6.0
+        reward_cfg["follow_distance_sigma"] = 0.20
+        reward_cfg["follow_distance_scale"] = 12.0
+        reward_cfg["follow_band_scale"] = 4.0
         # Disable reach logic in S0 (we don't want to "reach target point").
         reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["goal_reach_bonus"] = 0.0
