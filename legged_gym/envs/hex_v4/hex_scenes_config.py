@@ -90,6 +90,7 @@ class HexS0FollowCfg(HexGroundCfg):
         # S0 is a flat, obstacle-free pretrain bed: use plane to ensure env origins are
         # separated by env_spacing (avoid overlapping origins and improve stability).
         mesh_type = "plane"
+        debug_allow_plane = True
         terrain_type = "s0_follow_plane"
         terrain_seed = 1
         fixed_layout_enable = False
