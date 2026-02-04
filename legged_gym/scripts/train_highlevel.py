@@ -1142,6 +1142,16 @@ class HierarchicalHexapodEnv:
         Returns:
             obs_dict, rewards, dones, info
         """
+        # Debug: force a constant forward command along +Y to validate command direction/axis.
+        if bool(getattr(self.args, "force_cmd_y", False)):
+            v = 0.3
+            if cmd_vel is None:
+                cmd_vel = torch.zeros(self.num_envs, 3, device=self.device)
+            else:
+                cmd_vel = cmd_vel.detach()
+            cmd_vel = torch.zeros_like(cmd_vel)
+            cmd_vel[:, 1] = float(v)
+
         # 1. Command Post-Processor
         clearance_pp = None
         if self.clearance_override is not None:
@@ -2628,6 +2638,11 @@ if __name__ == "__main__":
                         help='保存间隔')
     parser.add_argument('--debug', action='store_true',
                         help='debug 输出（场景/障碍位置等）')
+    parser.add_argument(
+        '--force_cmd_y',
+        action='store_true',
+        help='Debug: 强制全程发送 +Y 前进命令 cmd=[0,+v,0] 以验证命令方向（不依赖策略输出）',
+    )
     
     args, unknown = parser.parse_known_args()
     

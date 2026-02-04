@@ -1721,6 +1721,11 @@ class HexGround(LeggedRobot):
                     # S0: lock spawn yaw to +Y forward with small jitter, then re-place the target
                     # to keep robot/target consistent (avoid "reset mismatch" and early target loss).
                     s0_tensor = torch.tensor(s0_ids, device=self.device, dtype=torch.long)
+                    # Force-reset robot root state for S0. This avoids a failure mode where
+                    # moving target resets (buffer) but the robot remains at the last episode pose.
+                    self.root_states[s0_tensor] = self.base_init_state
+                    self.root_states[s0_tensor, :3] += self.env_origins[s0_tensor]
+                    self.root_states[s0_tensor, 7:13] = 0.0
                     jitter = torch_rand_float(
                         -math.radians(jitter_deg),
                         math.radians(jitter_deg),
@@ -1780,9 +1785,15 @@ class HexGround(LeggedRobot):
                     self.root_states[other_ids, 3:7] = quat
                     self._sync_robot_root_states(other_ids)
             self.get_expert_actions()
-            #可视化的轨迹线条清楚
-            if self.viewer and self.foot_traj_viz:
-                self.gym.clear_lines(self.viewer)            
+            # Debug viz: clear viewer lines once per reset (avoid double clear_lines()).
+            if self.viewer is not None:
+                need_clear = False
+                if bool(getattr(self, "foot_traj_viz", False)):
+                    need_clear = True
+                if bool(getattr(self, "debug_viz", False)) and self._moving_target_enabled():
+                    need_clear = True
+                if need_clear:
+                    self.gym.clear_lines(self.viewer)
             # Reset per-env debug trajectory state to avoid cross-episode line segments.
             if hasattr(self, "_viz_prev_valid"):
                 ids = env_ids.detach().cpu().numpy()
@@ -1790,7 +1801,6 @@ class HexGround(LeggedRobot):
                 # Clear all trajectory lines after a reset to keep the viewer readable.
                 # This is for debugging only; it is guarded by debug_viz.
                 if getattr(self, "debug_viz", False) and self.viewer is not None and self._moving_target_enabled():
-                    self.gym.clear_lines(self.viewer)
                     self._viz_prev_valid[:] = False
                     if hasattr(self, "_viz_traj_tick"):
                         self._viz_traj_tick = 0
