@@ -1379,9 +1379,12 @@ class HierarchicalHexapodEnv:
 
                 # Centering penalty: normalized by the soft window.
                 center_margin = torch.abs(bearing_cam) / soft_half
+                # Prevent reward explosion (squared penalty can dominate PPO and blow up KL).
+                center_margin = torch.clamp(center_margin, max=3.0)
                 r_center = -(center_margin ** 2)
                 # Visibility penalty: only active outside hard window.
                 visible_excess = torch.clamp(torch.abs(bearing_cam) - hard_half, min=0.0) / soft_half
+                visible_excess = torch.clamp(visible_excess, max=3.0)
                 r_visible = -(visible_excess ** 2)
 
                 if self.target_center_scale != 0.0:

@@ -87,7 +87,9 @@ class HexS0FollowCfg(HexGroundCfg):
         env_spacing = 10.0
         episode_length_s = 45
     class terrain(HexGroundCfg.terrain):
-        mesh_type = "heightfield"
+        # S0 is a flat, obstacle-free pretrain bed: use plane to ensure env origins are
+        # separated by env_spacing (avoid overlapping origins and improve stability).
+        mesh_type = "plane"
         terrain_type = "s0_follow_plane"
         terrain_seed = 1
         fixed_layout_enable = False
@@ -139,7 +141,9 @@ class HexS0FollowCfg(HexGroundCfg):
         # Reward weights for view centering (penalties are negative values).
         # Keep this small: too strong encourages early-stage "spin in place" solutions.
         target_center_scale = 0.2
-        target_visible_scale = 1.0
+        # Visibility penalty can easily dominate early training when the target drifts out of the
+        # (tight) soft/hard window; keep it small for S0 and rely on shaping/curriculum.
+        target_visible_scale = 0.2
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         # Follow-mode reward: track a desired distance instead of "reach goal".

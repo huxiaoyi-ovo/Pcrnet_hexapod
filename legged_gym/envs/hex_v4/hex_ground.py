@@ -1677,6 +1677,8 @@ class HexGround(LeggedRobot):
         super().reset_idx(env_ids)
 
         if len(env_ids) !=0:
+            terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
+            is_s0_follow_plane = terrain_type in ("s0_follow_plane", "s0")
             force_resample = None
             if prev_levels is not None and bool(getattr(self.cfg.terrain, "scene_resample_on_level_change", False)):
                 level_changed = self.terrain_levels[env_ids] != prev_levels
@@ -1687,14 +1689,20 @@ class HexGround(LeggedRobot):
             self._apply_scene_spawn(env_ids)
             self._resample_nav_goals(env_ids)
             if self._moving_target_enabled():
-                self._reset_moving_target(env_ids)
+                # For S0, we re-place the target after locking spawn yaw; avoid double-reset here.
+                if not is_s0_follow_plane:
+                    self._reset_moving_target(env_ids)
             if hasattr(self, "goal_world"):
                 yaw_offset = float(getattr(self.nav_cfg, "heading_offset_rad", 0.0)) if self.nav_cfg is not None else 0.0
                 jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
 
                 s1_ids = []
                 s0_ids = []
-                if self.scene_spec_cache is not None:
+                if is_s0_follow_plane:
+                    # S0 may run without scene_spec_cache (e.g., mesh_type=plane), so treat all
+                    # env_ids as S0 for spawn-yaw locking and moving-target placement.
+                    s0_ids = env_ids.tolist()
+                elif self.scene_spec_cache is not None:
                     for env_id in env_ids.tolist():
                         scene_spec = self.scene_spec_cache[env_id]
                         if scene_spec is not None and scene_spec.scene_type == "s1_corridor_gate":
