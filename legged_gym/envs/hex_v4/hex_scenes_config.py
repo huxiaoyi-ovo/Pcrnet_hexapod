@@ -137,7 +137,8 @@ class HexS0FollowCfg(HexGroundCfg):
         # S0 pretraining should not be dominated by early "lost" resets; keep it as shaping only.
         target_lost_k = 0
         # Reward weights for view centering (penalties are negative values).
-        target_center_scale = 2.0
+        # Keep this small: too strong encourages early-stage "spin in place" solutions.
+        target_center_scale = 0.2
         target_visible_scale = 1.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
@@ -152,6 +153,14 @@ class HexS0FollowCfg(HexGroundCfg):
         reward_cfg["goal_reach_bonus"] = 0.0
         # Use view-centering instead of heading-to-goal for orientation.
         reward_cfg["heading_scale"] = 0.0
+        # S0 is a clean following pretrain bed: disable navigation/obstacle terms to avoid noisy gradients.
+        reward_cfg["passable_align_scale"] = 0.0
+        reward_cfg["crossable_align_scale"] = 0.0
+        reward_cfg["gate_smooth_penalty"] = 0.0
+        reward_cfg["risk_barrier_scale"] = 0.0
+        reward_cfg["time_penalty"] = 0.0
+        # Disable collision penalty in S0 until collision_mask is fully validated (avoid "don't move" collapse).
+        reward_cfg["collision_penalty"] = 0.0
 
 
 class HexS0FollowCfgPPO(HexGroundCfgPPO):
