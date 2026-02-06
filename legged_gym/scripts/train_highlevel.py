@@ -1235,6 +1235,7 @@ class HierarchicalHexapodEnv:
         length_snapshot = self.episode_length_buf.clone()
 
         done_during = done_any.clone()
+        manual_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         if hasattr(self.env, "goal_world"):
             current_goal_world = self.env.goal_world.clone()
@@ -1354,6 +1355,7 @@ class HierarchicalHexapodEnv:
                 reach_now = dist_to_goal < self.reward_cfg.goal_reach_threshold
                 if reach_now.any():
                     done_any |= reach_now
+                    manual_reset_mask |= reach_now
                 reach_mask = reach_now & (~self.reach_given)
                 if reach_now.any():
                     repeated = reach_now & self.reach_given
@@ -1411,10 +1413,8 @@ class HierarchicalHexapodEnv:
                     )
                     lost = self.target_lost_steps >= int(self.target_lost_k)
                     if lost.any():
-                        lost_ids = lost.nonzero(as_tuple=False).flatten()
-                        # Force reset to keep the loop stable (train loop does not auto-reset on dones).
-                        self.env.reset_idx(lost_ids)
                         done_any |= lost
+                        manual_reset_mask |= lost
                         # Extra penalty on loss event to discourage drifting out of view.
                         total_reward = torch.where(lost, total_reward - 2.0, total_reward)
                         reward_terms["target_lost"] = lost.float() * (-2.0)
@@ -1438,6 +1438,17 @@ class HierarchicalHexapodEnv:
         # 5. 处理超时
         timeout = self.episode_length_buf >= self.max_episode_length
         done_any |= timeout
+        manual_reset_mask |= timeout
+
+        # 低层已 auto-reset 的 env 不再重复 reset；高层触发的 done 在这里统一 reset。
+        manual_reset_mask = manual_reset_mask & (~done_during)
+        if manual_reset_mask.any():
+            reset_ids = manual_reset_mask.nonzero(as_tuple=False).flatten()
+            self.env.reset_idx(reset_ids)
+            # reset_idx 仅重置状态，不会刷新 high-level 观测缓存；这里显式刷新一次。
+            if hasattr(self.env, "compute_observations"):
+                self.env.compute_observations()
+            self._refresh_depth_images(force=True)
         
         episode_info = None
         if done_any.any():
@@ -1458,6 +1469,7 @@ class HierarchicalHexapodEnv:
             self.post_processor.last_cmd[done_any] = 0.0
 
         next_obs = self._get_high_level_obs()
+        self.last_obs = next_obs
 
         info = {
             'post_info': post_info_payload,
@@ -1472,6 +1484,8 @@ class HierarchicalHexapodEnv:
             'collision_threshold_src': collision_threshold_src,
             'collision_indices_src': collision_indices_src,
             'clearance': clearance,
+            'done_during': done_during,
+            'manual_reset_mask': manual_reset_mask,
         }
 
         return next_obs, total_reward, done_any, info
