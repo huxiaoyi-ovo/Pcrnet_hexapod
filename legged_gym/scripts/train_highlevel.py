@@ -53,6 +53,11 @@ GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
 AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
 GOAL_TH_DEFAULT = 0.1
 GATE_SWITCH_DY_DEFAULT = 0.2
+SCENE_CURRIC_ITERS = 1000
+EXPERT_INTERFACE_ITER = 200
+EXPERT_ALPHA_MIN = 0.0
+EXPERT_ALPHA_SCHEDULE = "cosine"
+EXPERT_BC_COEF = 2.0
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -86,6 +91,17 @@ def apply_goal_occlusion(
     occlude_mask = occlude_mask.view(-1, 1)
     masked_goal = torch.where(occlude_mask, prev_goal, goal)
     return masked_goal, masked_goal.detach()
+
+
+def _get_expert_alpha(iteration: int) -> float:
+    if EXPERT_INTERFACE_ITER <= 0:
+        return 0.0
+    progress = min(float(iteration) / float(EXPERT_INTERFACE_ITER), 1.0)
+    if EXPERT_ALPHA_SCHEDULE == "cosine":
+        alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
+    else:
+        alpha = 1.0 - progress
+    return max(alpha, EXPERT_ALPHA_MIN)
 
 
 def import_modules():
@@ -185,6 +201,8 @@ class RolloutBuffer:
         
         # 蒸馏目标 (Student 模式)
         self.teacher_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
+        # EGPO 目标 (S0 follow expert 命令)
+        self.expert_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
 
     def add(
         self,
@@ -198,6 +216,7 @@ class RolloutBuffer:
         reward,
         done,
         teacher_action=None,
+        expert_action=None,
     ):
         """添加一步数据"""
         self.states[self.step] = state
@@ -212,6 +231,8 @@ class RolloutBuffer:
         
         if teacher_action is not None:
             self.teacher_actions[self.step] = teacher_action
+        if expert_action is not None:
+            self.expert_actions[self.step] = expert_action
         
         self.step += 1
 
@@ -248,6 +269,7 @@ class RolloutBuffer:
         self.rewards.zero_()
         self.dones.zero_()
         self.teacher_actions.zero_()
+        self.expert_actions.zero_()
 
 
 # V5 核心环境包装器 (The Hierarchical Environment Wrapper)
@@ -390,6 +412,20 @@ class HierarchicalHexapodEnv:
          self.affordance_y_map,
          self.affordance_bearing_map,
          self.affordance_visible_mask) = self._build_affordance_geometry()
+        terrain_type = str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower()
+        self.is_s0_follow_task = (str(getattr(args, "task", "")).lower() == "hex_s0_follow") or (terrain_type in ("s0_follow_plane", "s0"))
+        self.scene_difficulty_pending = 0.0
+        self.scene_difficulty_override = torch.zeros(self.num_envs, device=device)
+        if hasattr(self.env, "scene_difficulty_override"):
+            self.env.scene_difficulty_override = self.scene_difficulty_override
+        self.s0_follow_d_des = 1.0
+        self.s0_follow_d_tol = 0.25
+        self.s0_follow_ahead_margin = 0.2
+        self.s0_follow_success_bonus = 10.0
+        self.s0_follow_dir_v_eps = 0.05
+        self.s0_follow_success_time_s = 3.0
+        self.s0_follow_dt_high = float(getattr(getattr(env_cfg, "terrain", None), "scene_high_dt", 0.1))
+        self.s0_follow_steps_success = max(1, int(self.s0_follow_success_time_s / max(1e-6, self.s0_follow_dt_high)))
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -443,6 +479,7 @@ class HierarchicalHexapodEnv:
         self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.stable_follow_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
@@ -542,6 +579,8 @@ class HierarchicalHexapodEnv:
         self.reach_given.zero_()
         self.goal_change_count.zero_()
         self.target_lost_steps.zero_()
+        self.stable_follow_steps.zero_()
+        self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
 
@@ -553,6 +592,23 @@ class HierarchicalHexapodEnv:
         
         self.last_obs = obs_dict
         return obs_dict
+
+    def set_scene_difficulty_target(self, difficulty: float) -> None:
+        """Set curriculum target; it becomes active only for envs after reset."""
+        self.scene_difficulty_pending = float(np.clip(float(difficulty), 0.0, 1.0))
+
+    def _apply_scene_difficulty_for_resets(self, reset_mask: Optional[torch.Tensor]) -> None:
+        if reset_mask is None:
+            self.scene_difficulty_override.fill_(self.scene_difficulty_pending)
+        else:
+            if reset_mask.dtype != torch.bool:
+                raise ValueError("reset_mask must be bool tensor")
+            if reset_mask.shape[0] != self.num_envs:
+                raise ValueError(f"reset_mask shape mismatch: {tuple(reset_mask.shape)}")
+            if reset_mask.any():
+                self.scene_difficulty_override[reset_mask] = self.scene_difficulty_pending
+        if hasattr(self.env, "scene_difficulty_override"):
+            self.env.scene_difficulty_override = self.scene_difficulty_override
 
     def _refresh_depth_images(self, force: bool = False) -> None:
         if not hasattr(self.env, "camera_cfg"):
@@ -1376,16 +1432,46 @@ class HierarchicalHexapodEnv:
                 bearing_cam = bearing_body - float(self.camera_bearing_rad)
                 bearing_cam = torch.atan2(torch.sin(bearing_cam), torch.cos(bearing_cam))
                 fov = float(self.camera_fov_rad)
-                soft_half = max(1e-3, 0.5 * fov * float(self.target_fov_soft_scale))
-                hard_half = max(1e-3, 0.5 * fov * float(self.target_fov_hard_scale))
+                phys_half = 0.5 * fov
+                abs_bearing = torch.abs(bearing_cam)
+                phys_visible = abs_bearing <= phys_half
+
+                if self.is_s0_follow_task:
+                    difficulty_override = getattr(self.env, "scene_difficulty_override", self.scene_difficulty_override)
+                    if torch.is_tensor(difficulty_override):
+                        difficulty_tensor = difficulty_override.to(device=self.device, dtype=abs_bearing.dtype)
+                        if difficulty_tensor.ndim == 0:
+                            difficulty_vec = torch.full_like(abs_bearing, float(difficulty_tensor.item()))
+                        elif difficulty_tensor.numel() == self.num_envs:
+                            difficulty_vec = difficulty_tensor.reshape(-1)
+                        else:
+                            raise ValueError(
+                                f"scene_difficulty_override shape mismatch: {tuple(difficulty_tensor.shape)}"
+                            )
+                    else:
+                        difficulty_vec = torch.full_like(abs_bearing, float(difficulty_override))
+                    difficulty_vec = torch.clamp(difficulty_vec, 0.0, 1.0)
+                    hard_scale = 1.2 + difficulty_vec * (0.6 - 1.2)
+                    soft_scale = 0.5 * hard_scale
+                    hard_half_train = torch.clamp(0.5 * fov * hard_scale, min=1e-3)
+                    soft_half_train = torch.clamp(0.5 * fov * soft_scale, min=1e-3)
+                else:
+                    soft_half_train = torch.full_like(
+                        abs_bearing,
+                        max(1e-3, 0.5 * fov * float(self.target_fov_soft_scale)),
+                    )
+                    hard_half_train = torch.full_like(
+                        abs_bearing,
+                        max(1e-3, 0.5 * fov * float(self.target_fov_hard_scale)),
+                    )
 
                 # Centering penalty: normalized by the soft window.
-                center_margin = torch.abs(bearing_cam) / soft_half
+                center_margin = abs_bearing / soft_half_train
                 # Prevent reward explosion (squared penalty can dominate PPO and blow up KL).
                 center_margin = torch.clamp(center_margin, max=3.0)
                 r_center = -(center_margin ** 2)
                 # Visibility penalty: only active outside hard window.
-                visible_excess = torch.clamp(torch.abs(bearing_cam) - hard_half, min=0.0) / soft_half
+                visible_excess = torch.clamp(abs_bearing - hard_half_train, min=0.0) / soft_half_train
                 visible_excess = torch.clamp(visible_excess, max=3.0)
                 r_visible = -(visible_excess ** 2)
 
@@ -1401,7 +1487,7 @@ class HierarchicalHexapodEnv:
                     reward_terms["total"] = total_reward
 
                 if self.target_lost_k > 0:
-                    out_hard = torch.abs(bearing_cam) > hard_half
+                    out_hard = ~phys_visible
                     # Ignore envs already terminated by physics this high-level step.
                     if done_during.any():
                         out_hard = out_hard & (~done_during)
@@ -1418,6 +1504,43 @@ class HierarchicalHexapodEnv:
                         # Extra penalty on loss event to discourage drifting out of view.
                         total_reward = torch.where(lost, total_reward - 2.0, total_reward)
                         reward_terms["target_lost"] = lost.float() * (-2.0)
+                        reward_terms["total"] = total_reward
+
+                if self.is_s0_follow_task and hasattr(self.env, "target_world"):
+                    target_world_xy = self.env.target_world
+                    robot_world_xy = self.env.root_states[:, :2]
+                    target_vel_world_xy = getattr(self.env, "target_vel_world", None)
+                    target_heading = getattr(self.env, "target_heading", None)
+                    if target_vel_world_xy is None:
+                        target_vel_world_xy = torch.zeros_like(target_world_xy)
+                    if target_heading is None:
+                        target_heading = torch.zeros(self.num_envs, device=self.device)
+
+                    target_speed = torch.norm(target_vel_world_xy, dim=1)
+                    vel_dir_world = target_vel_world_xy / target_speed.unsqueeze(1).clamp_min(1e-6)
+                    heading_dir_world = torch.stack([torch.sin(target_heading), torch.cos(target_heading)], dim=1)
+                    use_vel = target_speed > self.s0_follow_dir_v_eps
+                    dir_world = torch.where(use_vel.unsqueeze(1), vel_dir_world, heading_dir_world)
+                    dir_world = dir_world / torch.norm(dir_world, dim=1, keepdim=True).clamp_min(1e-6)
+
+                    robot_minus_target = robot_world_xy - target_world_xy
+                    ahead = torch.sum(robot_minus_target * dir_world, dim=1)
+                    behind = ahead < (-self.s0_follow_ahead_margin)
+                    dist_to_target = torch.norm(target_world_xy - robot_world_xy, dim=1)
+                    dist_in_band = torch.abs(dist_to_target - self.s0_follow_d_des) < self.s0_follow_d_tol
+                    stable_ok = behind & dist_in_band & phys_visible & (~done_during)
+                    self.stable_follow_steps = torch.where(
+                        stable_ok,
+                        self.stable_follow_steps + 1,
+                        torch.zeros_like(self.stable_follow_steps),
+                    )
+                    success = self.stable_follow_steps >= self.s0_follow_steps_success
+                    if success.any():
+                        done_any |= success
+                        manual_reset_mask |= success
+                        success_bonus = success.float() * self.s0_follow_success_bonus
+                        total_reward = total_reward + success_bonus
+                        reward_terms["success_bonus"] = success_bonus
                         reward_terms["total"] = total_reward
         
         # 4. 更新缓冲区
@@ -1440,6 +1563,10 @@ class HierarchicalHexapodEnv:
         done_any |= timeout
         manual_reset_mask |= timeout
 
+        # Scene difficulty switches only when an env starts a new episode.
+        if done_any.any():
+            self._apply_scene_difficulty_for_resets(done_any)
+
         # 低层已 auto-reset 的 env 不再重复 reset；高层触发的 done 在这里统一 reset。
         manual_reset_mask = manual_reset_mask & (~done_during)
         if manual_reset_mask.any():
@@ -1461,6 +1588,7 @@ class HierarchicalHexapodEnv:
             self.reach_given[done_any] = False
             self.goal_change_count[done_any] = 0
             self.target_lost_steps[done_any] = 0
+            self.stable_follow_steps[done_any] = 0
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
@@ -1668,6 +1796,17 @@ def train(args):
     action_dim = 1 if is_gate else 3
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
+    use_egpo = bool(getattr(args, "egpo", False)) and (not is_gate) and (skill == "follow") and (args.task == "hex_s0_follow")
+    compute_s0_follow_expert_cmd = None
+    if bool(getattr(args, "egpo", False)) and not use_egpo:
+        print("[Warn] --egpo 仅在 --skill follow --task hex_s0_follow 且 non-gate 路径生效；当前配置下将忽略。")
+    if use_egpo:
+        from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
+        compute_s0_follow_expert_cmd = s0_follow_expert_fn
+        dprint(
+            f"[EGPO] enabled: interface_iter={EXPERT_INTERFACE_ITER}, alpha_min={EXPERT_ALPHA_MIN}, "
+            f"schedule={EXPERT_ALPHA_SCHEDULE}, bc_coef={EXPERT_BC_COEF}"
+        )
 
     if is_gate:
         policy = GatePolicy(
@@ -1852,6 +1991,8 @@ def train(args):
     aff_stack_fill = None
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
+        d_scene = float(np.clip(float(iteration) / float(SCENE_CURRIC_ITERS), 0.0, 1.0))
+        env.set_scene_difficulty_target(d_scene)
         
         # ============ Rollout Phase ============
         buffer.reset()
@@ -1868,6 +2009,7 @@ def train(args):
             'target_center',
             'target_visible',
             'target_lost',
+            'success_bonus',
             'risk_barrier',
             'gate_smooth',
             'collision',
@@ -1899,6 +2041,8 @@ def train(args):
         aff_stack_filled_sum = torch.zeros((), device=device)
         prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
+        expert_action_diff_sum = torch.zeros((), device=device)
+        expert_alpha_rollout = _get_expert_alpha(iteration) if use_egpo else 0.0
         
         for step in range(args.num_steps):
             # 准备输入
@@ -1997,6 +2141,7 @@ def train(args):
 
             # Policy 决策
             teacher_action = None
+            expert_action = None
             gate_y = None
             cmd_used = None
             if is_gate:
@@ -2074,6 +2219,26 @@ def train(args):
                 cmd, _ = policy.get_action(
                     aff_stack_buf, state, goal, difficulty, deterministic=False
                 )
+                if use_egpo and compute_s0_follow_expert_cmd is not None:
+                    target_world_xy = getattr(env.env, "target_world", None)
+                    target_vel_world_xy = getattr(env.env, "target_vel_world", None)
+                    target_heading = getattr(env.env, "target_heading", None)
+                    if target_world_xy is None:
+                        target_world_xy = torch.zeros(env.num_envs, 2, device=device)
+                    if target_vel_world_xy is None:
+                        target_vel_world_xy = torch.zeros(env.num_envs, 2, device=device)
+                    if target_heading is None:
+                        target_heading = torch.zeros(env.num_envs, device=device)
+                    expert_action = compute_s0_follow_expert_cmd(
+                        robot_pos_world_xy=env.env.root_states[:, :2],
+                        robot_heading=state[:, 2],
+                        target_world_xy=target_world_xy,
+                        target_vel_world_xy=target_vel_world_xy,
+                        target_heading=target_heading,
+                        cmd_scale=cmd_scale,
+                    )
+                    expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
+                    cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
                 log_prob, value, _, _ = policy.evaluate_actions(
                     aff_stack_buf, state, goal, difficulty, cmd
                 )
@@ -2112,6 +2277,7 @@ def train(args):
                 rewards.detach(),
                 dones.detach(),
                 teacher_action.detach() if teacher_action is not None else None,
+                expert_action.detach() if expert_action is not None else None,
             )
 
             # 统计分量与行为
@@ -2272,9 +2438,11 @@ def train(args):
         value_loss_sum = 0
         entropy_sum = 0
         distill_loss_sum = 0
+        bc_loss_sum = 0
         approx_kl_sum = 0
         clip_frac_sum = 0
         num_updates = 0
+        expert_alpha_update = _get_expert_alpha(iteration) if use_egpo else 0.0
         
         batch_size = env.num_envs * args.num_steps
         
@@ -2285,8 +2453,8 @@ def train(args):
                 end = min(start + args.mini_batch_size, batch_size)
                 mb_indices = indices[start:end]
                 
-                step_idx = mb_indices // env.num_envs
-                env_idx = mb_indices % env.num_envs
+                step_idx = torch.div(mb_indices, env.num_envs, rounding_mode='floor')
+                env_idx = torch.remainder(mb_indices, env.num_envs)
                 
                 # 获取 mini-batch 数据
                 mb_actions = buffer.actions[step_idx, env_idx]
@@ -2335,13 +2503,22 @@ def train(args):
                 if args.mode == 'student' and teacher_model is not None and not is_gate:
                     mb_teacher_actions = buffer.teacher_actions[step_idx, env_idx]
                     distill_loss = nn.functional.mse_loss(mb_actions, mb_teacher_actions)
+
+                bc_loss = torch.tensor(0.0, device=device)
+                if use_egpo:
+                    mb_expert_actions = buffer.expert_actions[step_idx, env_idx]
+                    expert_log_prob, _, _, _ = policy.evaluate_actions(
+                        mb_aff_maps, mb_states, mb_goals, mb_difficulties, mb_expert_actions
+                    )
+                    bc_loss = -expert_log_prob.mean() * expert_alpha_update * EXPERT_BC_COEF
                 
                 # 总 Loss
                 loss = (
                     policy_loss + 
                     args.value_loss_coef * value_loss + 
                     args.entropy_coef * entropy_loss +
-                    args.distill_coef * distill_loss
+                    args.distill_coef * distill_loss +
+                    bc_loss
                 )
                 
                 # 优化
@@ -2355,6 +2532,7 @@ def train(args):
                 value_loss_sum += value_loss.item()
                 entropy_sum += entropy.mean().item()
                 distill_loss_sum += distill_loss.item()
+                bc_loss_sum += bc_loss.item()
                 num_updates += 1
         
         update_time = time.time() - start_time - rollout_time
@@ -2386,6 +2564,7 @@ def train(args):
         cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
         gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
+        expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
@@ -2418,6 +2597,10 @@ def train(args):
         writer.add_scalar('Loss/Entropy', entropy_sum / max(num_updates, 1), iteration)
         if args.mode == 'student':
             writer.add_scalar('Loss/Distill', distill_loss_sum / max(num_updates, 1), iteration)
+        if use_egpo:
+            writer.add_scalar('Train/ExpertAlpha', expert_alpha_update, iteration)
+            writer.add_scalar('Train/BCLoss', bc_loss_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Train/ExpertActionDiff', expert_action_diff_mean, iteration)
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
@@ -2453,6 +2636,7 @@ def train(args):
         writer.add_scalar('Stats/CmdJerkAng', cmd_jerk_ang_mean, iteration)
         writer.add_scalar('Stats/NearMissExcess', near_miss_excess_mean, iteration)
         writer.add_scalar('Stats/GateSwitchRate', gate_switch_rate_mean, iteration)
+        writer.add_scalar('Stats/SceneDifficulty', d_scene, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
@@ -2481,6 +2665,12 @@ def train(args):
             gate_line = ""
             if is_gate:
                 gate_line = f"""{'Gate y / Δy:':>{pad}} {gate_y_mean:.3f} / {gate_y_change_mean:.3f}\n"""
+            egpo_line = ""
+            if use_egpo:
+                egpo_line = (
+                    f"""{'EGPO alpha/bc/diff:':>{pad}} {expert_alpha_update:.3f} / """
+                    f"""{bc_loss_sum / max(num_updates, 1):.4f} / {expert_action_diff_mean:.3f}\n"""
+                )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -2498,6 +2688,7 @@ def train(args):
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
                           f"""{gate_line}"""
+                          f"""{egpo_line}"""
                           f"""{'Passable gate/align:':>{pad}} {reward_term_means.get('passable_gate', 0.0):.3f} / {reward_term_means.get('passable_align', 0.0):.3f} (occ {passable_occ_ratio_mean:.3f})\n"""
                           f"""{'Crossable gate/align:':>{pad}} {reward_term_means.get('crossable_gate', 0.0):.3f} / {reward_term_means.get('crossable_align', 0.0):.3f} (width {crossable_width_mean:.3f})\n"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
@@ -2645,6 +2836,8 @@ if __name__ == "__main__":
                         help='T1 弱遮挡触发概率')
     parser.add_argument('--t1_goal_occlusion_len', type=int, default=10,
                         help='T1 弱遮挡持续步数')
+    parser.add_argument('--egpo', action='store_true',
+                        help='仅在 hex_s0_follow + follow 下启用 EGPO（专家动作混合 + BC）')
     
     # 输出
     parser.add_argument('--output_dir', type=str, default='outputs/planner',

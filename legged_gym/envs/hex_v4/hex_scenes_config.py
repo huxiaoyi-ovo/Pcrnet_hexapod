@@ -120,7 +120,7 @@ class HexS0FollowCfg(HexGroundCfg):
         moving_target_v_max = 1.2
         # Make early training learnable: slow + gentle, then scale up with difficulty.
         moving_target_v_min = 0.05
-        moving_target_v_typical = 0.05
+        moving_target_v_typical = 0.1
         moving_target_turn_rate_max = 0.35
         moving_target_accel_max = 1.0
         moving_target_cmd_period_slow = 3.0
@@ -128,7 +128,7 @@ class HexS0FollowCfg(HexGroundCfg):
         moving_target_freeze_s = 1.5
 
         # High-level command bounds (must cover the target speed envelope).
-        max_lin_vel_command = 1.2
+        max_lin_vel_command = 1.4
         max_ang_vel_command = 1.5
         # Following distance contract (paper + code unified).
         follow_distance_desired = 1.0

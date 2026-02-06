@@ -119,7 +119,9 @@ class HexGround(LeggedRobot):
         if not hasattr(self, "_viz_traj_time_accum"):
             self._viz_traj_time_accum = 0.0
             self._viz_traj_tick = 0
-            self._viz_traj_clear_every = 300  # ~30s window at 10Hz
+            # Default off: keep line clearing aligned with reset_idx.
+            # Set cfg.terrain.debug_viz_clear_every > 0 only when periodic clear is desired.
+            self._viz_traj_clear_every = int(getattr(self.cfg.terrain, "debug_viz_clear_every", 0))
             self._viz_prev_robot = np.zeros((self.num_envs, 3), dtype=np.float32)
             self._viz_prev_target = np.zeros((self.num_envs, 3), dtype=np.float32)
             self._viz_prev_valid = np.zeros((self.num_envs,), dtype=np.bool_)
@@ -136,7 +138,7 @@ class HexGround(LeggedRobot):
         self._viz_traj_time_accum = 0.0
         self._viz_traj_tick += 1
 
-        if self._viz_traj_tick % int(self._viz_traj_clear_every) == 0:
+        if self._viz_traj_clear_every > 0 and self._viz_traj_tick % self._viz_traj_clear_every == 0:
             self.gym.clear_lines(self.viewer)
             self._viz_prev_valid[:] = False
 
@@ -928,17 +930,42 @@ class HexGround(LeggedRobot):
         dt = float(self._moving_target_time_accum)
         self._moving_target_time_accum = 0.0
 
-        # Difficulty in [0,1] from curriculum (per-env).
-        if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
+        moving_mode = self._moving_target_mode()
+        if moving_mode == "s1_gate_script":
+            if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
+                denom = max(1, int(self.max_terrain_level))
+                d = self.terrain_levels.float() / float(denom)
+            else:
+                d = torch.zeros(self.num_envs, device=device)
+            d = torch.clamp(d, 0.0, 1.0)
+            self._update_moving_target_s1(dt=dt, d=d)
+            return
+
+        difficulty_override = getattr(self, "scene_difficulty_override", None)
+        terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
+        if difficulty_override is not None and terrain_type in ("s0_follow_plane", "s0"):
+            if torch.is_tensor(difficulty_override):
+                difficulty_tensor = difficulty_override.to(device=device, dtype=torch.float32)
+                if difficulty_tensor.ndim == 0:
+                    difficulty_value = float(difficulty_tensor.item())
+                    difficulty_value = float(np.clip(difficulty_value, 0.0, 1.0))
+                    d = torch.full((self.num_envs,), difficulty_value, device=device)
+                elif difficulty_tensor.numel() == self.num_envs:
+                    d = torch.clamp(difficulty_tensor.reshape(-1), 0.0, 1.0)
+                else:
+                    raise ValueError(
+                        f"scene_difficulty_override shape mismatch: {tuple(difficulty_tensor.shape)}"
+                    )
+            else:
+                difficulty_value = float(difficulty_override)
+                difficulty_value = float(np.clip(difficulty_value, 0.0, 1.0))
+                d = torch.full((self.num_envs,), difficulty_value, device=device)
+        elif hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
             denom = max(1, int(self.max_terrain_level))
             d = self.terrain_levels.float() / float(denom)
         else:
             d = torch.zeros(self.num_envs, device=device)
         d = torch.clamp(d, 0.0, 1.0)
-
-        if self._moving_target_mode() == "s1_gate_script":
-            self._update_moving_target_s1(dt=dt, d=d)
-            return
 
         # Freeze after reset for early-stage learnability.
         if hasattr(self, "target_freeze_timer"):
