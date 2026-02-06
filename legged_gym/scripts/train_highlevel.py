@@ -54,10 +54,10 @@ AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
 GOAL_TH_DEFAULT = 0.1
 GATE_SWITCH_DY_DEFAULT = 0.2
 SCENE_CURRIC_ITERS = 1000
-EXPERT_INTERFACE_ITER = 200
+EXPERT_INTERFACE_ITER = 100
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
-EXPERT_BC_COEF = 0.5
+EXPERT_BC_COEF = 0.2
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -2074,6 +2074,8 @@ def train(args):
         cmd_jerk_ang_sum = torch.zeros((), device=device)
         near_miss_excess_sum = torch.zeros((), device=device)
         gate_switch_count = torch.zeros((), device=device)
+        goal_world_delta_sum = torch.zeros((), device=device)
+        target_speed_sum = torch.zeros((), device=device)
         aff_stack_delta_sum = torch.zeros((), device=device)
         aff_stack_std_sum = torch.zeros((), device=device)
         aff_stack_filled_sum = torch.zeros((), device=device)
@@ -2081,6 +2083,9 @@ def train(args):
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
         expert_action_diff_sum = torch.zeros((), device=device)
         expert_alpha_rollout = _get_expert_alpha(iteration) if use_egpo else 0.0
+        prev_goal_world_rollout = None
+        if hasattr(env.env, "goal_world"):
+            prev_goal_world_rollout = env.env.goal_world.clone()
         
         for step in range(args.num_steps):
             # 准备输入
@@ -2339,6 +2344,17 @@ def train(args):
                 cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
             else:
                 cmd_speed_sum += torch.norm(cmd_used[:, :2], dim=1).sum()
+            if hasattr(env.env, "target_speed"):
+                target_speed = torch.nan_to_num(env.env.target_speed, nan=0.0, posinf=0.0, neginf=0.0)
+                target_speed_sum += target_speed.sum()
+            elif hasattr(env.env, "target_vel_world"):
+                target_vel = torch.nan_to_num(env.env.target_vel_world, nan=0.0, posinf=0.0, neginf=0.0)
+                target_speed_sum += torch.norm(target_vel, dim=1).sum()
+            if hasattr(env.env, "goal_world"):
+                goal_world_now = torch.nan_to_num(env.env.goal_world, nan=0.0, posinf=0.0, neginf=0.0)
+                if prev_goal_world_rollout is not None and prev_goal_world_rollout.shape == goal_world_now.shape:
+                    goal_world_delta_sum += torch.norm(goal_world_now - prev_goal_world_rollout, dim=1).sum()
+                prev_goal_world_rollout = goal_world_now.clone()
             reward_terms = env_info.get('reward_terms', None)
             if reward_terms is not None:
                 for key in reward_term_keys:
@@ -2612,7 +2628,7 @@ def train(args):
                         optimizer.zero_grad(set_to_none=True)
                         continue
                     expert_log_prob = torch.nan_to_num(expert_log_prob, nan=-20.0, posinf=20.0, neginf=-20.0)
-                    expert_log_prob_mean = expert_log_prob.mean()
+                    expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
                     bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
                 # 总 Loss
@@ -2696,6 +2712,8 @@ def train(args):
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
         gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
+        target_speed_mean = (target_speed_sum / total_samples).item()
+        goal_world_delta_mean = (goal_world_delta_sum / total_samples).item()
         egpo_expert_log_prob_mean = (expert_log_prob_mean_sum / max(num_updates, 1)) if use_egpo else 0.0
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
@@ -2776,7 +2794,9 @@ def train(args):
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
+        writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
         writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
+        writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
         for key, value in reward_term_means.items():
             writer.add_scalar(f'Reward/{key}', value, iteration)
         
@@ -2822,7 +2842,8 @@ def train(args):
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
-                          f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
+                          f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
+                          f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
                           f"""{gate_line}"""
                           f"""{egpo_line}"""
@@ -2921,17 +2942,17 @@ if __name__ == "__main__":
                         help='训练迭代次数')
     parser.add_argument('--num_steps', type=int, default=24,
                         help='每次迭代的步数')
-    parser.add_argument('--num_epochs', type=int, default=5,
+    parser.add_argument('--num_epochs', type=int, default=2,
                         help='PPO epoch 数')
     parser.add_argument('--mini_batch_size', type=int, default=4096,
                         help='Mini-batch 大小')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=3e-5,
                         help='学习率')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='折扣因子')
     parser.add_argument('--gae_lambda', type=float, default=0.95,
                         help='GAE lambda')
-    parser.add_argument('--clip_range', type=float, default=0.1,
+    parser.add_argument('--clip_range', type=float, default=0.05,
                         help='PPO clip range')
     parser.add_argument('--value_loss_coef', type=float, default=0.5,
                         help='Value loss 系数')
