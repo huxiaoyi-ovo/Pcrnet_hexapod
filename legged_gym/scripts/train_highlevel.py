@@ -57,7 +57,7 @@ SCENE_CURRIC_ITERS = 1000
 EXPERT_INTERFACE_ITER = 200
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
-EXPERT_BC_COEF = 2.0
+EXPERT_BC_COEF = 0.5
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -76,7 +76,7 @@ ActorCritic: Any = None
 def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
     if aff_map.ndim != 4 or aff_map.size(1) < 2:
         return torch.zeros(aff_map.shape[0], device=aff_map.device)
-    gap = aff_map[:, 1]
+    gap = torch.nan_to_num(aff_map[:, 1], nan=0.0, posinf=0.0, neginf=0.0)
     difficulty = 1.0 - gap.mean(dim=(1, 2))
     return torch.clamp(difficulty, 0.0, 1.0)
 
@@ -102,6 +102,44 @@ def _get_expert_alpha(iteration: int) -> float:
     else:
         alpha = 1.0 - progress
     return max(alpha, EXPERT_ALPHA_MIN)
+
+
+def _module_has_non_finite(module: nn.Module) -> bool:
+    for param in module.parameters():
+        if not torch.isfinite(param).all():
+            return True
+    return False
+
+
+def _sanitize_module_params(module: nn.Module) -> None:
+    with torch.no_grad():
+        for param in module.parameters():
+            if not torch.isfinite(param).all():
+                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=1.0, neginf=-1.0)
+
+
+def _tensor_min_max_text(t: torch.Tensor) -> str:
+    finite = t[torch.isfinite(t)]
+    if finite.numel() == 0:
+        return "all_non_finite"
+    return f"min={finite.min().item():.6g}, max={finite.max().item():.6g}"
+
+
+def _assert_finite_tensor(name: str, t: torch.Tensor) -> None:
+    if torch.isfinite(t).all():
+        return
+    raise RuntimeError(f"[NonFinite] {name} has non-finite values ({_tensor_min_max_text(t)})")
+
+
+def _actor_grad_has_non_finite(module: nn.Module) -> bool:
+    for name, param in module.named_parameters():
+        if "value_head" in name:
+            continue
+        if param.grad is None:
+            continue
+        if not torch.isfinite(param.grad).all():
+            return True
+    return False
 
 
 def import_modules():
@@ -2139,6 +2177,12 @@ def train(args):
                 goal = goal_raw
                 last_goal_obs = goal_raw.detach()
 
+            # Runtime finite-guards for policy inputs.
+            state = torch.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
+            goal = torch.nan_to_num(goal, nan=0.0, posinf=0.0, neginf=0.0)
+            aff_stack_buf = torch.nan_to_num(aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
+            difficulty = torch.nan_to_num(difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+
             # Policy 决策
             teacher_action = None
             expert_action = None
@@ -2431,6 +2475,14 @@ def train(args):
         
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        _assert_finite_tensor("buffer.actions", buffer.actions)
+        _assert_finite_tensor("buffer.log_probs", buffer.log_probs)
+        _assert_finite_tensor("buffer.states", buffer.states)
+        _assert_finite_tensor("buffer.goals", buffer.goals)
+        _assert_finite_tensor("buffer.aff_maps", buffer.aff_maps)
+        _assert_finite_tensor("buffer.difficulties", buffer.difficulties)
+        _assert_finite_tensor("returns", returns)
+        _assert_finite_tensor("advantages", advantages)
         
         # PPO Update
         total_loss = 0
@@ -2439,10 +2491,13 @@ def train(args):
         entropy_sum = 0
         distill_loss_sum = 0
         bc_loss_sum = 0
+        expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
         clip_frac_sum = 0
         num_updates = 0
         expert_alpha_update = _get_expert_alpha(iteration) if use_egpo else 0.0
+        skipped_nonfinite_updates = 0
+        sanitized_param_count = 0
         
         batch_size = env.num_envs * args.num_steps
         
@@ -2467,28 +2522,63 @@ def train(args):
                 mb_goals = buffer.goals[step_idx, env_idx]
                 mb_aff_maps = buffer.aff_maps[step_idx, env_idx]
                 mb_difficulties = buffer.difficulties[step_idx, env_idx]
+                mb_actions = torch.nan_to_num(mb_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_old_log_probs = torch.nan_to_num(mb_old_log_probs, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_advantages = torch.nan_to_num(mb_advantages, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_returns = torch.nan_to_num(mb_returns, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_states = torch.nan_to_num(mb_states, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_goals = torch.nan_to_num(mb_goals, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_aff_maps = torch.nan_to_num(mb_aff_maps, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_difficulties = torch.nan_to_num(mb_difficulties, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # 评估当前策略
-                if is_gate:
-                    gate_difficulty = mb_difficulties if gate_use_difficulty else torch.zeros_like(mb_difficulties)
-                    new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
-                        mb_aff_maps, mb_states, mb_goals, gate_difficulty,
-                        mb_actions
-                    )
-                else:
-                    new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
-                        mb_aff_maps, mb_states, mb_goals, mb_difficulties,
-                        mb_actions
-                    )
+                try:
+                    if is_gate:
+                        gate_difficulty = mb_difficulties if gate_use_difficulty else torch.zeros_like(mb_difficulties)
+                        new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                            mb_aff_maps, mb_states, mb_goals, gate_difficulty,
+                            mb_actions
+                        )
+                    else:
+                        new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                            mb_aff_maps, mb_states, mb_goals, mb_difficulties,
+                            mb_actions
+                        )
+                except ValueError as exc:
+                    skipped_nonfinite_updates += 1
+                    if _module_has_non_finite(policy):
+                        _sanitize_module_params(policy)
+                        sanitized_param_count += 1
+                    print(f"[Warn] Skip non-finite minibatch at iter={iteration}, epoch={epoch}: {exc}")
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                if (
+                    (not torch.isfinite(new_log_probs).all())
+                    or (not torch.isfinite(new_values).all())
+                    or (not torch.isfinite(entropy).all())
+                ):
+                    skipped_nonfinite_updates += 1
+                    if _module_has_non_finite(policy):
+                        _sanitize_module_params(policy)
+                        sanitized_param_count += 1
+                    print(f"[Warn] Skip non-finite policy outputs at iter={iteration}, epoch={epoch}")
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 
                 # PPO Clipped Loss
-                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                log_ratio_raw = new_log_probs - mb_old_log_probs
+                if not torch.isfinite(log_ratio_raw).all():
+                    skipped_nonfinite_updates += 1
+                    print(f"[Warn] Skip non-finite log-ratio at iter={iteration}, epoch={epoch}")
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                log_ratio = torch.clamp(log_ratio_raw, min=-20.0, max=20.0)
+                ratio = torch.exp(log_ratio)
                 surr1 = ratio * mb_advantages
                 surr2 = torch.clamp(ratio, 1 - args.clip_range, 1 + args.clip_range) * mb_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 # Diagnostics
-                log_ratio = new_log_probs - mb_old_log_probs
                 approx_kl_sum += (0.5 * (log_ratio ** 2).mean()).item()
                 clip_frac_sum += (torch.abs(ratio - 1.0) > args.clip_range).float().mean().item()
                 
@@ -2505,27 +2595,67 @@ def train(args):
                     distill_loss = nn.functional.mse_loss(mb_actions, mb_teacher_actions)
 
                 bc_loss = torch.tensor(0.0, device=device)
+                expert_log_prob_mean = torch.tensor(0.0, device=device)
                 if use_egpo:
                     mb_expert_actions = buffer.expert_actions[step_idx, env_idx]
-                    expert_log_prob, _, _, _ = policy.evaluate_actions(
-                        mb_aff_maps, mb_states, mb_goals, mb_difficulties, mb_expert_actions
-                    )
-                    bc_loss = -expert_log_prob.mean() * expert_alpha_update * EXPERT_BC_COEF
+                    mb_expert_actions = torch.nan_to_num(mb_expert_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                    try:
+                        expert_log_prob, _, _, _ = policy.evaluate_actions(
+                            mb_aff_maps, mb_states, mb_goals, mb_difficulties, mb_expert_actions
+                        )
+                    except ValueError as exc:
+                        skipped_nonfinite_updates += 1
+                        if _module_has_non_finite(policy):
+                            _sanitize_module_params(policy)
+                            sanitized_param_count += 1
+                        print(f"[Warn] Skip non-finite EGPO minibatch at iter={iteration}, epoch={epoch}: {exc}")
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+                    expert_log_prob = torch.nan_to_num(expert_log_prob, nan=-20.0, posinf=20.0, neginf=-20.0)
+                    expert_log_prob_mean = expert_log_prob.mean()
+                    bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
                 # 总 Loss
-                loss = (
+                loss_ppo = (
                     policy_loss + 
                     args.value_loss_coef * value_loss + 
                     args.entropy_coef * entropy_loss +
-                    args.distill_coef * distill_loss +
-                    bc_loss
+                    args.distill_coef * distill_loss
                 )
+                loss = loss_ppo + bc_loss
+                if not torch.isfinite(loss):
+                    skipped_nonfinite_updates += 1
+                    print(f"[Warn] Skip non-finite loss at iter={iteration}, epoch={epoch}")
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 
                 # 优化
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                if _actor_grad_has_non_finite(policy):
+                    skipped_nonfinite_updates += 1
+                    print(f"[Warn] Skip optimizer.step due to non-finite actor grads at iter={iteration}, epoch={epoch}")
+                    optimizer.zero_grad(set_to_none=True)
+                    if _module_has_non_finite(policy):
+                        _sanitize_module_params(policy)
+                        sanitized_param_count += 1
+                    continue
+                grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                if not torch.isfinite(grad_norm):
+                    skipped_nonfinite_updates += 1
+                    print(f"[Warn] Skip non-finite grad-norm at iter={iteration}, epoch={epoch}")
+                    optimizer.zero_grad(set_to_none=True)
+                    if _module_has_non_finite(policy):
+                        _sanitize_module_params(policy)
+                        sanitized_param_count += 1
+                    continue
                 optimizer.step()
+                if _module_has_non_finite(policy):
+                    _sanitize_module_params(policy)
+                    sanitized_param_count += 1
+                    skipped_nonfinite_updates += 1
+                    print(f"[Warn] Sanitized non-finite policy params at iter={iteration}, epoch={epoch}")
+                    continue
                 
                 total_loss += loss.item()
                 policy_loss_sum += policy_loss.item()
@@ -2533,6 +2663,7 @@ def train(args):
                 entropy_sum += entropy.mean().item()
                 distill_loss_sum += distill_loss.item()
                 bc_loss_sum += bc_loss.item()
+                expert_log_prob_mean_sum += expert_log_prob_mean.item()
                 num_updates += 1
         
         update_time = time.time() - start_time - rollout_time
@@ -2565,6 +2696,7 @@ def train(args):
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
         gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
+        egpo_expert_log_prob_mean = (expert_log_prob_mean_sum / max(num_updates, 1)) if use_egpo else 0.0
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
@@ -2599,7 +2731,8 @@ def train(args):
             writer.add_scalar('Loss/Distill', distill_loss_sum / max(num_updates, 1), iteration)
         if use_egpo:
             writer.add_scalar('Train/ExpertAlpha', expert_alpha_update, iteration)
-            writer.add_scalar('Train/BCLoss', bc_loss_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Train/EGPO_ExpertLogProbMean', expert_log_prob_mean_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Train/EGPO_BCLoss', bc_loss_sum / max(num_updates, 1), iteration)
             writer.add_scalar('Train/ExpertActionDiff', expert_action_diff_mean, iteration)
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
@@ -2623,6 +2756,8 @@ def train(args):
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
+        writer.add_scalar('Diag/SkippedNonFiniteUpdates', skipped_nonfinite_updates, iteration)
+        writer.add_scalar('Diag/SanitizedParamCount', sanitized_param_count, iteration)
         writer.add_scalar('Diag/AffStackDelta', aff_stack_delta_mean, iteration)
         writer.add_scalar('Diag/AffStackStd', aff_stack_std_mean, iteration)
         writer.add_scalar('Diag/AffStackFilled', aff_stack_filled_mean, iteration)
@@ -2668,8 +2803,9 @@ def train(args):
             egpo_line = ""
             if use_egpo:
                 egpo_line = (
-                    f"""{'EGPO alpha/bc/diff:':>{pad}} {expert_alpha_update:.3f} / """
-                    f"""{bc_loss_sum / max(num_updates, 1):.4f} / {expert_action_diff_mean:.3f}\n"""
+                    f"""{'EGPO alpha/logp/bc/diff:':>{pad}} {expert_alpha_update:.3f} / """
+                    f"""{egpo_expert_log_prob_mean:.4f} / {bc_loss_sum / max(num_updates, 1):.4f} / """
+                    f"""{expert_action_diff_mean:.3f}\n"""
                 )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
@@ -2684,6 +2820,7 @@ def train(args):
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
+                          f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f}\n"""
                           f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
