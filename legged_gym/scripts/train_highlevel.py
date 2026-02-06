@@ -423,7 +423,7 @@ class HierarchicalHexapodEnv:
         self.s0_follow_ahead_margin = 0.2
         self.s0_follow_success_bonus = 10.0
         self.s0_follow_dir_v_eps = 0.05
-        self.s0_follow_success_time_s = 3.0
+        self.s0_follow_success_time_s = 10.0
         self.s0_follow_dt_high = float(getattr(getattr(env_cfg, "terrain", None), "scene_high_dt", 0.1))
         self.s0_follow_steps_success = max(1, int(self.s0_follow_success_time_s / max(1e-6, self.s0_follow_dt_high)))
 
