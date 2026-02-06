@@ -54,7 +54,7 @@ AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
 GOAL_TH_DEFAULT = 0.1
 GATE_SWITCH_DY_DEFAULT = 0.2
 SCENE_CURRIC_ITERS = 1000
-EXPERT_INTERFACE_ITER = 100
+EXPERT_INTERFACE_RATIO = 0.2
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
 EXPERT_BC_COEF = 0.2
@@ -93,10 +93,10 @@ def apply_goal_occlusion(
     return masked_goal, masked_goal.detach()
 
 
-def _get_expert_alpha(iteration: int) -> float:
-    if EXPERT_INTERFACE_ITER <= 0:
+def _get_expert_alpha(local_iteration: int, interface_iters: int) -> float:
+    if interface_iters <= 0:
         return 0.0
-    progress = min(float(iteration) / float(EXPERT_INTERFACE_ITER), 1.0)
+    progress = min(float(max(local_iteration, 0)) / float(interface_iters), 1.0)
     if EXPERT_ALPHA_SCHEDULE == "cosine":
         alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
     else:
@@ -1842,7 +1842,7 @@ def train(args):
         from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
         compute_s0_follow_expert_cmd = s0_follow_expert_fn
         dprint(
-            f"[EGPO] enabled: interface_iter={EXPERT_INTERFACE_ITER}, alpha_min={EXPERT_ALPHA_MIN}, "
+            f"[EGPO] enabled: interface_ratio={EXPERT_INTERFACE_RATIO:.2f}, alpha_min={EXPERT_ALPHA_MIN}, "
             f"schedule={EXPERT_ALPHA_SCHEDULE}, bc_coef={EXPERT_BC_COEF}"
         )
 
@@ -2016,10 +2016,13 @@ def train(args):
     running_returns = torch.zeros(env.num_envs, device=device)
     
     total_iterations = start_iteration + args.num_iterations
+    expert_interface_iters = max(1, int(math.ceil(float(args.num_iterations) * float(EXPERT_INTERFACE_RATIO))))
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
     dprint(f"  - Steps per iteration: {args.num_steps}")
     dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
     dprint(f"  - Learning rate: {args.lr}")
+    if use_egpo:
+        dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
     
     aff_stack_buf = None
     last_goal_obs = None
@@ -2082,7 +2085,8 @@ def train(args):
         prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
         expert_action_diff_sum = torch.zeros((), device=device)
-        expert_alpha_rollout = _get_expert_alpha(iteration) if use_egpo else 0.0
+        local_iteration = iteration - start_iteration
+        expert_alpha_rollout = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
         prev_goal_world_rollout = None
         if hasattr(env.env, "goal_world"):
             prev_goal_world_rollout = env.env.goal_world.clone()
@@ -2511,7 +2515,7 @@ def train(args):
         approx_kl_sum = 0
         clip_frac_sum = 0
         num_updates = 0
-        expert_alpha_update = _get_expert_alpha(iteration) if use_egpo else 0.0
+        expert_alpha_update = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         
