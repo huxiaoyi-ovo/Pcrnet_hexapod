@@ -385,7 +385,8 @@ class HierarchicalHexapodEnv:
         
         self.env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
         self.num_envs = self.env.num_envs
-        self.max_episode_length = self.env.max_episode_length
+        self.max_episode_length_low = int(self.env.max_episode_length)
+        self.max_episode_length = self.max_episode_length_low
         if hasattr(self.env, "debug_viz"):
             self.env.debug_viz = bool(getattr(args, "debug", False))
 
@@ -526,9 +527,15 @@ class HierarchicalHexapodEnv:
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
+        self.high_level_dt = float(self.env.dt) * float(self.decimation)
+        self.max_episode_length = max(1, int(np.ceil(self.max_episode_length_low / float(self.decimation))))
+        self.max_episode_length_s = float(self.max_episode_length * self.high_level_dt)
         
         if self.debug:
-            print(f"[Env] 初始化完成: {self.num_envs} envs, decimation={self.decimation}")
+            print(
+                f"[Env] 初始化完成: {self.num_envs} envs, decimation={self.decimation}, "
+                f"episode_steps(HL)={self.max_episode_length}, episode_s={self.max_episode_length_s:.2f}"
+            )
 
     def _load_low_level_policy(self, ckpt_path: str):
         """加载并冻结底层控制器"""
@@ -1615,6 +1622,7 @@ class HierarchicalHexapodEnv:
                 self.env.compute_observations()
             self._refresh_depth_images(force=True)
         
+        goal_change_count_snapshot = self.goal_change_count.clone()
         episode_info = None
         if done_any.any():
             episode_info = {
@@ -1642,7 +1650,7 @@ class HierarchicalHexapodEnv:
             'episode_length': length_snapshot,
             'reward_terms': reward_terms,
             'gate_y': gate_y,
-            'goal_change_count': self.goal_change_count.clone(),
+            'goal_change_count': goal_change_count_snapshot,
             'episode': episode_info,
             'collision_mask': collision_mask,
             'collision_force_max': collision_force_max,
@@ -1652,6 +1660,14 @@ class HierarchicalHexapodEnv:
             'clearance': clearance,
             'done_during': done_during,
             'manual_reset_mask': manual_reset_mask,
+            'target_turn_events': getattr(self.env, "target_turn_events", None),
+            'target_preturn_events': getattr(self.env, "target_preturn_events", None),
+            'target_reflect_events': getattr(self.env, "target_reflect_events", None),
+            'target_turn_count': getattr(self.env, "target_turn_count", None),
+            'target_preturn_count': getattr(self.env, "target_preturn_count", None),
+            'target_reflect_count': getattr(self.env, "target_reflect_count", None),
+            'target_reset_dist_error': getattr(self.env, "target_reset_dist_error", None),
+            'target_reset_bearing_error': getattr(self.env, "target_reset_bearing_error", None),
         }
 
         return next_obs, total_reward, done_any, info
@@ -2021,6 +2037,16 @@ def train(args):
     dprint(f"  - Steps per iteration: {args.num_steps}")
     dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
     dprint(f"  - Learning rate: {args.lr}")
+    if hasattr(env, "max_episode_length") and hasattr(env, "high_level_dt"):
+        dprint(
+            f"  - Episode budget (HL): {int(env.max_episode_length)} steps "
+            f"(~{float(env.max_episode_length) * float(env.high_level_dt):.2f}s)"
+        )
+        if hasattr(env, "max_episode_length_low"):
+            dprint(
+                f"  - Episode budget (LL): {int(env.max_episode_length_low)} steps "
+                f"(env.dt={float(getattr(env.env, 'dt', 0.0)):.3f}s, wrapper_decimation={int(env.decimation)})"
+            )
     if use_egpo:
         dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
     
@@ -2079,6 +2105,14 @@ def train(args):
         gate_switch_count = torch.zeros((), device=device)
         goal_world_delta_sum = torch.zeros((), device=device)
         target_speed_sum = torch.zeros((), device=device)
+        target_turn_event_sum = torch.zeros((), device=device)
+        target_preturn_event_sum = torch.zeros((), device=device)
+        target_reflect_event_sum = torch.zeros((), device=device)
+        target_turn_count_sum = torch.zeros((), device=device)
+        target_preturn_count_sum = torch.zeros((), device=device)
+        target_reflect_count_sum = torch.zeros((), device=device)
+        target_reset_dist_error_sum = torch.zeros((), device=device)
+        target_reset_bearing_error_sum = torch.zeros((), device=device)
         aff_stack_delta_sum = torch.zeros((), device=device)
         aff_stack_std_sum = torch.zeros((), device=device)
         aff_stack_filled_sum = torch.zeros((), device=device)
@@ -2359,6 +2393,34 @@ def train(args):
                 if prev_goal_world_rollout is not None and prev_goal_world_rollout.shape == goal_world_now.shape:
                     goal_world_delta_sum += torch.norm(goal_world_now - prev_goal_world_rollout, dim=1).sum()
                 prev_goal_world_rollout = goal_world_now.clone()
+            target_turn_events = env_info.get('target_turn_events', None) if env_info is not None else None
+            if target_turn_events is not None:
+                target_turn_event_sum += torch.nan_to_num(target_turn_events, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_preturn_events = env_info.get('target_preturn_events', None) if env_info is not None else None
+            if target_preturn_events is not None:
+                target_preturn_event_sum += torch.nan_to_num(target_preturn_events, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_reflect_events = env_info.get('target_reflect_events', None) if env_info is not None else None
+            if target_reflect_events is not None:
+                target_reflect_event_sum += torch.nan_to_num(target_reflect_events, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_turn_count = env_info.get('target_turn_count', None) if env_info is not None else None
+            if target_turn_count is not None:
+                target_turn_count_sum += torch.nan_to_num(target_turn_count, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_preturn_count = env_info.get('target_preturn_count', None) if env_info is not None else None
+            if target_preturn_count is not None:
+                target_preturn_count_sum += torch.nan_to_num(target_preturn_count, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_reflect_count = env_info.get('target_reflect_count', None) if env_info is not None else None
+            if target_reflect_count is not None:
+                target_reflect_count_sum += torch.nan_to_num(target_reflect_count, nan=0.0, posinf=0.0, neginf=0.0).sum()
+            target_reset_dist_error = env_info.get('target_reset_dist_error', None) if env_info is not None else None
+            if target_reset_dist_error is not None:
+                target_reset_dist_error_sum += torch.nan_to_num(
+                    target_reset_dist_error, nan=0.0, posinf=0.0, neginf=0.0
+                ).sum()
+            target_reset_bearing_error = env_info.get('target_reset_bearing_error', None) if env_info is not None else None
+            if target_reset_bearing_error is not None:
+                target_reset_bearing_error_sum += torch.nan_to_num(
+                    target_reset_bearing_error, nan=0.0, posinf=0.0, neginf=0.0
+                ).sum()
             reward_terms = env_info.get('reward_terms', None)
             if reward_terms is not None:
                 for key in reward_term_keys:
@@ -2718,6 +2780,16 @@ def train(args):
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
         target_speed_mean = (target_speed_sum / total_samples).item()
         goal_world_delta_mean = (goal_world_delta_sum / total_samples).item()
+        target_turn_event_rate = (target_turn_event_sum / total_samples).item()
+        target_preturn_event_rate = (target_preturn_event_sum / total_samples).item()
+        target_reflect_event_rate = (target_reflect_event_sum / total_samples).item()
+        target_turn_count_mean = (target_turn_count_sum / total_samples).item()
+        target_preturn_count_mean = (target_preturn_count_sum / total_samples).item()
+        target_reflect_count_mean = (target_reflect_count_sum / total_samples).item()
+        target_reset_dist_error_mean = (target_reset_dist_error_sum / total_samples).item()
+        target_reset_bearing_error_deg_mean = (
+            (target_reset_bearing_error_sum / total_samples).item() * 180.0 / math.pi
+        )
         egpo_expert_log_prob_mean = (expert_log_prob_mean_sum / max(num_updates, 1)) if use_egpo else 0.0
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
@@ -2801,6 +2873,14 @@ def train(args):
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
         writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
         writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
+        writer.add_scalar('Stats/TargetTurnEventRate', target_turn_event_rate, iteration)
+        writer.add_scalar('Stats/TargetPreTurnEventRate', target_preturn_event_rate, iteration)
+        writer.add_scalar('Stats/TargetReflectEventRate', target_reflect_event_rate, iteration)
+        writer.add_scalar('Stats/TargetTurnCountMean', target_turn_count_mean, iteration)
+        writer.add_scalar('Stats/TargetPreTurnCountMean', target_preturn_count_mean, iteration)
+        writer.add_scalar('Stats/TargetReflectCountMean', target_reflect_count_mean, iteration)
+        writer.add_scalar('Stats/TargetResetDistError', target_reset_dist_error_mean, iteration)
+        writer.add_scalar('Stats/TargetResetBearingErrorDeg', target_reset_bearing_error_deg_mean, iteration)
         for key, value in reward_term_means.items():
             writer.add_scalar(f'Reward/{key}', value, iteration)
         
@@ -2848,6 +2928,8 @@ def train(args):
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
+                          f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""
+                          f"""{'Target reset err(d/mdeg):':>{pad}} {target_reset_dist_error_mean:.3f} / {target_reset_bearing_error_deg_mean:.3f}\n"""
                           f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
                           f"""{gate_line}"""
                           f"""{egpo_line}"""

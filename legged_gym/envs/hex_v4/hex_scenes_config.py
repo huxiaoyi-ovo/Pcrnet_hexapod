@@ -85,7 +85,7 @@ class HexS0FollowCfg(HexGroundCfg):
     """S0: flat ground + moving target, train stable following before S1 resume."""
     class env(HexGroundCfg.env):
         env_spacing = 10.0
-        episode_length_s = 45
+        episode_length_s = 10
     class terrain(HexGroundCfg.terrain):
         # S0 is a flat, obstacle-free pretrain bed: use plane to ensure env origins are
         # separated by env_spacing (avoid overlapping origins and improve stability).
@@ -123,9 +123,23 @@ class HexS0FollowCfg(HexGroundCfg):
         moving_target_v_typical = 0.5
         moving_target_turn_rate_max = 0.35
         moving_target_accel_max = 1.0
-        moving_target_cmd_period_slow = 3.0
-        moving_target_cmd_period_fast = 0.8
+        moving_target_cmd_period_slow = 1.2
+        moving_target_cmd_period_fast = 0.5
         moving_target_freeze_s = 0.3
+        # Turn curriculum: max heading change ramps from small-angle to 90deg.
+        moving_target_turn_deg_easy = 10.0
+        moving_target_turn_deg_hard = 90.0
+        # Early-turn near boundary to avoid hard reflection flips.
+        moving_target_preturn_lookahead_s = 0.8
+        moving_target_preturn_deg_min = 25.0
+        moving_target_preturn_deg_max = 90.0
+        moving_target_preturn_center_bias = 0.6
+        # Speed variation (non-constant target speed).
+        moving_target_speed_span_easy = 0.06
+        moving_target_speed_span_hard = 0.35
+        moving_target_speed_wave_amp = 0.15
+        moving_target_speed_wave_rate_slow = 0.6
+        moving_target_speed_wave_rate_fast = 1.8
 
         # High-level command bounds (must cover the target speed envelope).
         max_lin_vel_command = 1.4

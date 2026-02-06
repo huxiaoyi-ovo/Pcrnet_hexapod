@@ -900,15 +900,19 @@ class HexGround(LeggedRobot):
         target_local[:, 0] = torch.clamp(target_local[:, 0], x_min, x_max)
         target_local[:, 1] = torch.clamp(target_local[:, 1], y_min, y_max)
 
-        # Initialize heading/speed.
-        self.target_heading[env_ids] = 0.0
-        self.target_heading_des[env_ids] = 0.0
+        # Initialize heading/speed. Keep target heading consistent with robot spawn yaw.
+        self.target_heading[env_ids] = heading
+        self.target_heading_des[env_ids] = heading
         v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
         self.target_speed[env_ids] = v_typ
         self.target_speed_des[env_ids] = v_typ
         self.target_cmd_timer[env_ids] = 0.0
+        self.target_speed_phase[env_ids] = torch.rand(len(env_ids), device=self.device) * (2.0 * math.pi)
         freeze_s = float(getattr(self.nav_cfg, "moving_target_freeze_s", 0.0))
         self.target_freeze_timer[env_ids] = freeze_s
+        self.target_turn_events[env_ids] = 0.0
+        self.target_preturn_events[env_ids] = 0.0
+        self.target_reflect_events[env_ids] = 0.0
 
         # Store world state and expose as goal_world for high-level.
         self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
@@ -981,84 +985,117 @@ class HexGround(LeggedRobot):
                     return
 
         v_max = float(getattr(self.nav_cfg, "moving_target_v_max", 1.2))
+        v_min = float(getattr(self.nav_cfg, "moving_target_v_min", 0.05))
         v_typ = float(getattr(self.nav_cfg, "moving_target_v_typical", 0.6))
         turn_rate_max = float(getattr(self.nav_cfg, "moving_target_turn_rate_max", 1.0))
         accel_max = float(getattr(self.nav_cfg, "moving_target_accel_max", 2.0))
-
-        # More frequent command changes at higher difficulty.
+        turn_deg_easy = float(getattr(self.nav_cfg, "moving_target_turn_deg_easy", 10.0))
+        turn_deg_hard = float(getattr(self.nav_cfg, "moving_target_turn_deg_hard", 90.0))
+        turn_deg_hard = float(np.clip(turn_deg_hard, 0.0, 90.0))
         period_fast = float(getattr(self.nav_cfg, "moving_target_cmd_period_fast", 0.6))
         period_slow = float(getattr(self.nav_cfg, "moving_target_cmd_period_slow", 2.0))
+        speed_span_easy = float(getattr(self.nav_cfg, "moving_target_speed_span_easy", 0.06))
+        speed_span_hard = float(getattr(self.nav_cfg, "moving_target_speed_span_hard", 0.35))
+        speed_wave_amp_cfg = float(getattr(self.nav_cfg, "moving_target_speed_wave_amp", 0.15))
+        speed_wave_rate_slow = float(getattr(self.nav_cfg, "moving_target_speed_wave_rate_slow", 0.6))
+        speed_wave_rate_fast = float(getattr(self.nav_cfg, "moving_target_speed_wave_rate_fast", 1.8))
+        preturn_lookahead_s = float(getattr(self.nav_cfg, "moving_target_preturn_lookahead_s", 0.8))
+        preturn_deg_min = float(getattr(self.nav_cfg, "moving_target_preturn_deg_min", 25.0))
+        preturn_deg_max = float(getattr(self.nav_cfg, "moving_target_preturn_deg_max", 90.0))
+        preturn_deg_max = float(np.clip(preturn_deg_max, 0.0, 90.0))
+        preturn_center_bias = float(getattr(self.nav_cfg, "moving_target_preturn_center_bias", 0.6))
+        preturn_center_bias = float(np.clip(preturn_center_bias, 0.0, 1.0))
+
+        self.target_turn_events.zero_()
+        self.target_preturn_events.zero_()
+        self.target_reflect_events.zero_()
+
+        # More frequent command changes at higher difficulty.
         period = period_slow + (period_fast - period_slow) * d
+        period = torch.clamp(period, min=0.05)
+
+        # Scene bounds.
+        half_len = 0.5 * float(self.cfg.terrain.terrain_length)
+        half_wid = 0.5 * float(self.cfg.terrain.terrain_width)
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.6))
+        x_min = -half_wid + margin
+        x_max = half_wid - margin
+        y_min = -half_len + margin
+        y_max = half_len - margin
+
+        pos_local_curr = self.target_world - self.env_origins[:, :2]
+        dir_x_curr = torch.sin(self.target_heading)
+        dir_y_curr = torch.cos(self.target_heading)
+        eps = 1e-6
+        dist_to_x = torch.where(
+            dir_x_curr >= 0.0,
+            (x_max - pos_local_curr[:, 0]) / (torch.abs(dir_x_curr) + eps),
+            (pos_local_curr[:, 0] - x_min) / (torch.abs(dir_x_curr) + eps),
+        )
+        dist_to_y = torch.where(
+            dir_y_curr >= 0.0,
+            (y_max - pos_local_curr[:, 1]) / (torch.abs(dir_y_curr) + eps),
+            (pos_local_curr[:, 1] - y_min) / (torch.abs(dir_y_curr) + eps),
+        )
+        dist_to_boundary_along_heading = torch.minimum(dist_to_x, dist_to_y)
+        lookahead_dist = torch.clamp(self.target_speed, min=v_min) * preturn_lookahead_s + margin * 0.25
+        preturn_needed = dist_to_boundary_along_heading <= lookahead_dist
 
         # Countdown.
         self.target_cmd_timer -= dt
-        need_cmd = self.target_cmd_timer <= 0.0
+        need_cmd = (self.target_cmd_timer <= 0.0) | preturn_needed
         if need_cmd.any():
-            # Choose motion primitive probabilities (difficulty-dependent).
-            # At difficulty=0, only forward motion (no lateral/back/diag).
-            p_lat = 0.50 * d
-            p_back = 0.20 * d
-            p_diag = 0.30 * d
-            p_sum = p_lat + p_back + p_diag
-            p_sum = torch.clamp(p_sum, 0.0, 0.9)
-            p_fwd = 1.0 - p_sum
+            turn_deg_max = turn_deg_easy + (turn_deg_hard - turn_deg_easy) * d
+            turn_deg_max = torch.clamp(turn_deg_max, min=0.0, max=90.0)
+            turn_rad_max = torch.deg2rad(turn_deg_max)
+            rand_delta = (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * turn_rad_max
 
-            u = torch.rand(self.num_envs, device=device)
-            # Forward/back/lat/diag selection.
-            theta = torch.zeros(self.num_envs, device=device)
-
-            # Forward (around 0 with jitter).
-            # Early-stage learnability: at difficulty=0, keep heading almost straight (+Y).
-            jitter = (0.02 + 0.70 * d)  # rad
-            theta_fwd = (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
-
-            # Backward (around pi).
-            theta_back = math.pi + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
-
-            # Lateral (left/right).
-            lr = torch.randint(0, 2, (self.num_envs,), device=device)
-            theta_lat = torch.where(lr == 0, 0.5 * math.pi, -0.5 * math.pi)
-            theta_lat = theta_lat + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
-
-            # Diagonal (4 choices).
-            diag_idx = torch.randint(0, 4, (self.num_envs,), device=device)
-            diag_angles = torch.tensor(
-                [0.25 * math.pi, -0.25 * math.pi, 0.75 * math.pi, -0.75 * math.pi],
-                device=device,
+            center_vec = -pos_local_curr
+            cross_z = dir_x_curr * center_vec[:, 1] - dir_y_curr * center_vec[:, 0]
+            sign_to_center = torch.sign(cross_z)
+            random_sign = torch.where(
+                torch.rand(self.num_envs, device=device) > 0.5,
+                torch.ones(self.num_envs, device=device),
+                -torch.ones(self.num_envs, device=device),
             )
-            theta_diag = diag_angles[diag_idx]
-            theta_diag = theta_diag + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * jitter
+            sign_to_center = torch.where(torch.abs(sign_to_center) < 1e-4, random_sign, sign_to_center)
 
-            # Map u into categories.
-            t0 = p_fwd
-            t1 = t0 + p_back
-            t2 = t1 + p_lat
-            fwd_mask = u < t0
-            back_mask = (u >= t0) & (u < t1)
-            lat_mask = (u >= t1) & (u < t2)
-            diag_mask = u >= t2
+            preturn_deg = preturn_deg_min + (preturn_deg_max - preturn_deg_min) * d
+            preturn_deg = torch.clamp(preturn_deg, min=0.0, max=90.0)
+            preturn_delta = sign_to_center * torch.deg2rad(preturn_deg)
+            preturn_delta = (
+                (1.0 - preturn_center_bias) * rand_delta + preturn_center_bias * preturn_delta
+            )
 
-            theta = torch.where(fwd_mask, theta_fwd, theta)
-            theta = torch.where(back_mask, theta_back, theta)
-            theta = torch.where(lat_mask, theta_lat, theta)
-            theta = torch.where(diag_mask, theta_diag, theta)
-            theta = torch.atan2(torch.sin(theta), torch.cos(theta))
+            preturn_mask = need_cmd & preturn_needed
+            delta_heading = torch.where(preturn_mask, preturn_delta, rand_delta)
+            theta_des = self.target_heading + delta_heading
+            theta_des = torch.atan2(torch.sin(theta_des), torch.cos(theta_des))
 
-            # Speed command: wider range + more variation at higher difficulty.
-            v_lo = float(getattr(self.nav_cfg, "moving_target_v_min", 0.05))
-            # At difficulty=0, keep v_cmd=v_typ; ramp up faster at higher difficulty (quadratic).
-            v_scale = d * d
-            v_hi = torch.clamp(v_typ + (v_max - v_typ) * v_scale, v_lo, v_max)
-            v_cmd = v_lo + (v_hi - v_lo) * torch.rand(self.num_envs, device=device)
+            speed_span = speed_span_easy + (speed_span_hard - speed_span_easy) * d
+            speed_span = torch.clamp(speed_span, min=0.0, max=max(0.0, v_max - v_min))
+            v_cmd = v_typ + (torch.rand(self.num_envs, device=device) * 2.0 - 1.0) * speed_span
+            # Large heading changes slow down target for smoother arcs.
+            turn_scale = 1.0 - 0.35 * (
+                torch.abs(delta_heading) / torch.clamp(turn_rad_max, min=1e-3)
+            )
+            turn_scale = torch.clamp(turn_scale, min=0.55, max=1.0)
+            v_cmd = torch.clamp(v_cmd * turn_scale, v_min, v_max)
 
-            self.target_heading_des = torch.where(need_cmd, theta, self.target_heading_des)
+            self.target_heading_des = torch.where(need_cmd, theta_des, self.target_heading_des)
             self.target_speed_des = torch.where(need_cmd, v_cmd, self.target_speed_des)
-            # Reset timer with some jitter.
-            self.target_cmd_timer = torch.where(
-                need_cmd,
-                period * (0.6 + 0.8 * torch.rand(self.num_envs, device=device)),
-                self.target_cmd_timer,
-            )
+
+            timer_default = period * (0.7 + 0.6 * torch.rand(self.num_envs, device=device))
+            timer_preturn = torch.clamp(0.35 + 0.35 * (1.0 - d), min=0.2)
+            next_timer = torch.where(preturn_mask, timer_preturn, timer_default)
+            self.target_cmd_timer = torch.where(need_cmd, next_timer, self.target_cmd_timer)
+
+            turn_events = need_cmd.float()
+            preturn_events = preturn_mask.float()
+            self.target_turn_events[:] = turn_events
+            self.target_preturn_events[:] = preturn_events
+            self.target_turn_count += turn_events
+            self.target_preturn_count += preturn_events
 
         # Smoothly turn toward desired heading.
         dtheta = torch.atan2(
@@ -1070,8 +1107,14 @@ class HexGround(LeggedRobot):
         self.target_heading = self.target_heading + dtheta
         self.target_heading = torch.atan2(torch.sin(self.target_heading), torch.cos(self.target_heading))
 
-        # Smoothly change speed.
-        dv = self.target_speed_des - self.target_speed
+        # Smoothly change speed with a bounded low-frequency wave (avoid long constant-speed segments).
+        wave_rate = speed_wave_rate_slow + (speed_wave_rate_fast - speed_wave_rate_slow) * d
+        self.target_speed_phase = self.target_speed_phase + wave_rate * dt
+        self.target_speed_phase = torch.atan2(torch.sin(self.target_speed_phase), torch.cos(self.target_speed_phase))
+        wave_amp = speed_wave_amp_cfg * (0.25 + 0.75 * d)
+        speed_des_wave = torch.clamp(self.target_speed_des + wave_amp * torch.sin(self.target_speed_phase), v_min, v_max)
+
+        dv = speed_des_wave - self.target_speed
         max_dv = (0.4 + 0.6 * d) * accel_max * dt
         dv = torch.clamp(dv, -max_dv, max_dv)
         self.target_speed = torch.clamp(self.target_speed + dv, 0.0, v_max)
@@ -1080,21 +1123,12 @@ class HexGround(LeggedRobot):
         dir_x = torch.sin(self.target_heading)
         dir_y = torch.cos(self.target_heading)
         vel_local = torch.stack([self.target_speed * dir_x, self.target_speed * dir_y], dim=-1)
+        pos_local = pos_local_curr + vel_local * dt
 
-        pos_local = self.target_world - self.env_origins[:, :2]
-        pos_local = pos_local + vel_local * dt
-
-        # Keep within bounds with reflection.
-        half_len = 0.5 * float(self.cfg.terrain.terrain_length)
-        half_wid = 0.5 * float(self.cfg.terrain.terrain_width)
-        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.6))
-        x_min = -half_wid + margin
-        x_max = half_wid - margin
-        y_min = -half_len + margin
-        y_max = half_len - margin
-
+        # Keep within bounds. Reflection remains as a fallback only.
         hit_x = (pos_local[:, 0] < x_min) | (pos_local[:, 0] > x_max)
         hit_y = (pos_local[:, 1] < y_min) | (pos_local[:, 1] > y_max)
+        reflect_mask = hit_x | hit_y
         if hit_x.any():
             pos_local[:, 0] = torch.clamp(pos_local[:, 0], x_min, x_max)
             self.target_heading = torch.where(hit_x, -self.target_heading, self.target_heading)
@@ -1105,6 +1139,15 @@ class HexGround(LeggedRobot):
             self.target_heading_des = torch.where(hit_y, math.pi - self.target_heading_des, self.target_heading_des)
         self.target_heading = torch.atan2(torch.sin(self.target_heading), torch.cos(self.target_heading))
         self.target_heading_des = torch.atan2(torch.sin(self.target_heading_des), torch.cos(self.target_heading_des))
+        if reflect_mask.any():
+            reflect_events = reflect_mask.float()
+            self.target_reflect_events[:] = reflect_events
+            self.target_reflect_count += reflect_events
+
+        # Rebuild velocity from (possibly reflected) heading.
+        dir_x = torch.sin(self.target_heading)
+        dir_y = torch.cos(self.target_heading)
+        vel_local = torch.stack([self.target_speed * dir_x, self.target_speed * dir_y], dim=-1)
 
         # Commit world state.
         self.target_world = self.env_origins[:, :2] + pos_local
@@ -1719,6 +1762,15 @@ class HexGround(LeggedRobot):
                 # For S0, we re-place the target after locking spawn yaw; avoid double-reset here.
                 if not is_s0_follow_plane:
                     self._reset_moving_target(env_ids)
+            if hasattr(self, "target_turn_count"):
+                self.target_turn_count[env_ids] = 0.0
+                self.target_preturn_count[env_ids] = 0.0
+                self.target_reflect_count[env_ids] = 0.0
+                self.target_turn_events[env_ids] = 0.0
+                self.target_preturn_events[env_ids] = 0.0
+                self.target_reflect_events[env_ids] = 0.0
+                self.target_reset_dist_error[env_ids] = 0.0
+                self.target_reset_bearing_error[env_ids] = 0.0
             if hasattr(self, "goal_world"):
                 yaw_offset = float(getattr(self.nav_cfg, "heading_offset_rad", 0.0)) if self.nav_cfg is not None else 0.0
                 jitter_deg = float(getattr(self.nav_cfg, "spawn_yaw_jitter_deg", 0.0)) if self.nav_cfg is not None else 0.0
@@ -1775,6 +1827,17 @@ class HexGround(LeggedRobot):
                     self._sync_robot_root_states(s0_tensor)
                     if self._moving_target_enabled():
                         self._reset_moving_target(s0_tensor)
+                    if hasattr(self, "target_world"):
+                        delta = self.target_world[s0_tensor] - self.root_states[s0_tensor, :2]
+                        cos_h = torch.cos(yaw)
+                        sin_h = torch.sin(yaw)
+                        x_r = cos_h * delta[:, 0] - sin_h * delta[:, 1]
+                        y_f = sin_h * delta[:, 0] + cos_h * delta[:, 1]
+                        bearing = torch.atan2(x_r, y_f)
+                        desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.0))
+                        dist_err = torch.abs(torch.norm(delta, dim=1) - desired)
+                        self.target_reset_dist_error[s0_tensor] = dist_err
+                        self.target_reset_bearing_error[s0_tensor] = torch.abs(bearing)
 
                     if getattr(self, "debug_viz", False) and hasattr(self, "target_world"):
                         if not getattr(self, "_s0_reset_align_warned", False):
@@ -1820,8 +1883,10 @@ class HexGround(LeggedRobot):
                     self.root_states[other_ids, 3:7] = quat
                     self._sync_robot_root_states(other_ids)
             self.get_expert_actions()
-            # Debug viz: clear viewer lines once per reset (avoid double clear_lines()).
-            if self.viewer is not None:
+            clear_on_reset = bool(getattr(self.cfg.terrain, "debug_viz_clear_on_reset", False))
+            # Default behavior: do NOT clear global viewer lines on each reset.
+            # Global clear can make trajectories disappear before the currently viewed env resets.
+            if self.viewer is not None and clear_on_reset:
                 need_clear = False
                 if bool(getattr(self, "foot_traj_viz", False)):
                     need_clear = True
@@ -1833,9 +1898,7 @@ class HexGround(LeggedRobot):
             if hasattr(self, "_viz_prev_valid"):
                 ids = env_ids.detach().cpu().numpy()
                 self._viz_prev_valid[ids] = False
-                # Clear all trajectory lines after a reset to keep the viewer readable.
-                # This is for debugging only; it is guarded by debug_viz.
-                if getattr(self, "debug_viz", False) and self.viewer is not None and self._moving_target_enabled():
+                if clear_on_reset and getattr(self, "debug_viz", False) and self.viewer is not None and self._moving_target_enabled():
                     self._viz_prev_valid[:] = False
                     if hasattr(self, "_viz_traj_tick"):
                         self._viz_traj_tick = 0
@@ -2338,6 +2401,35 @@ class HexGround(LeggedRobot):
         )
         # Freeze timer after reset to keep the target stationary (S0 learnability).
         self.target_freeze_timer = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_speed_phase = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        # Per-step diagnostics for moving-target behavior.
+        self.target_turn_events = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_preturn_events = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_reflect_events = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        # Per-episode counters (reset in reset_idx for corresponding envs).
+        self.target_turn_count = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_preturn_count = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_reflect_count = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_reset_dist_error = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_reset_bearing_error = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         # S1 moving target scripted gate traversal (always allocated; used only when enabled).
