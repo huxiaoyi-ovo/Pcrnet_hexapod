@@ -2122,6 +2122,8 @@ def train(args):
         expert_action_diff_sum = torch.zeros((), device=device)
         egpo_heading_align_cos_sum = torch.zeros((), device=device)
         egpo_heading_error_deg_samples = []
+        egpo_turn_sign_match_sum = torch.zeros((), device=device)
+        egpo_turn_sign_count = torch.zeros((), device=device)
         local_iteration = iteration - start_iteration
         expert_alpha_rollout = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
         prev_goal_world_rollout = None
@@ -2350,6 +2352,18 @@ def train(args):
                         egpo_heading_align_cos_sum += align_cos.sum()
                         heading_err_deg = torch.rad2deg(torch.acos(align_cos))
                         egpo_heading_error_deg_samples.append(heading_err_deg.detach())
+                        cos_h = torch.cos(robot_heading)
+                        sin_h = torch.sin(robot_heading)
+                        dir_body_x = cos_h * dir_world[:, 0] - sin_h * dir_world[:, 1]
+                        dir_body_y = sin_h * dir_world[:, 0] + cos_h * dir_world[:, 1]
+                        dir_body_angle = torch.atan2(dir_body_x, dir_body_y)
+                        turn_valid = torch.abs(dir_body_angle) > 1e-3
+                        if turn_valid.any():
+                            turn_sign_match = (
+                                expert_action[turn_valid, 2] * dir_body_angle[turn_valid]
+                            ) <= 0.0
+                            egpo_turn_sign_match_sum += turn_sign_match.float().sum()
+                            egpo_turn_sign_count += turn_valid.float().sum()
                     expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
                     cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
                 log_prob, value, _, _ = policy.evaluate_actions(
@@ -2806,10 +2820,15 @@ def train(args):
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
         egpo_heading_align_cos_mean = 0.0
         egpo_heading_err_p95_deg = 0.0
+        egpo_turn_sign_match_rate = 0.0
         if use_egpo and debug and egpo_heading_error_deg_samples:
             egpo_heading_align_cos_mean = (egpo_heading_align_cos_sum / total_samples).item()
             heading_err_all = torch.cat(egpo_heading_error_deg_samples, dim=0)
             egpo_heading_err_p95_deg = torch.quantile(heading_err_all, 0.95).item()
+            if float(egpo_turn_sign_count.item()) > 0.0:
+                egpo_turn_sign_match_rate = float(
+                    (egpo_turn_sign_match_sum / egpo_turn_sign_count).item()
+                )
         target_speed_mean = (target_speed_sum / total_samples).item()
         goal_world_delta_mean = (goal_world_delta_sum / total_samples).item()
         target_turn_event_rate = (target_turn_event_sum / total_samples).item()
@@ -2863,6 +2882,7 @@ def train(args):
             if debug:
                 writer.add_scalar('Diag/EGPOHeadingAlignCosMean', egpo_heading_align_cos_mean, iteration)
                 writer.add_scalar('Diag/EGPOHeadingErrP95Deg', egpo_heading_err_p95_deg, iteration)
+                writer.add_scalar('Diag/EGPOTurnSignMatchRate', egpo_turn_sign_match_rate, iteration)
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
@@ -2950,6 +2970,9 @@ def train(args):
                     egpo_line += (
                         f"""{'EGPO heading cos/p95deg:':>{pad}} """
                         f"""{egpo_heading_align_cos_mean:.3f} / {egpo_heading_err_p95_deg:.1f}\n"""
+                    )
+                    egpo_line += (
+                        f"""{'EGPO turn sign match:':>{pad}} {egpo_turn_sign_match_rate:.3f}\n"""
                     )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""

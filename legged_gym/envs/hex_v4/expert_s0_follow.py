@@ -93,7 +93,8 @@ def compute_s0_follow_expert_cmd(
     cmd_xy = v_along.unsqueeze(1) * dir_body + v_perp.unsqueeze(1) * perp_body
 
     dir_body_angle = torch.atan2(dir_body[:, 0], dir_body[:, 1])
-    omega = torch.clamp(float(k_yaw) * dir_body_angle, min=-float(w_max), max=float(w_max))
+    # yaw sign follows env command convention: positive omega turns opposite to +x_right.
+    omega = torch.clamp(-float(k_yaw) * dir_body_angle, min=-float(w_max), max=float(w_max))
 
     cmd = torch.stack([cmd_xy[:, 0], cmd_xy[:, 1], omega], dim=1)
     scale = _as_cmd_scale(cmd_scale, device=device, dtype=dtype)
