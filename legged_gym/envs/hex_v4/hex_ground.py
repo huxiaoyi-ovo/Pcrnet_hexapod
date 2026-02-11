@@ -59,6 +59,7 @@ class HexGround(LeggedRobot):
         self.scene_dyn_time = torch.zeros(self.num_envs, device=self.device)
         self.scene_spec_cache = [None] * self.num_envs
         self.scene_level_cache = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        self.scene_difficulty_override = None
         self.scene_margin = float(getattr(self.cfg.terrain, "scene_margin", 0.3))
         self.scene_clearance = float(getattr(self.cfg.terrain, "scene_clearance", 0.27))
         self._init_scene_runtime()
@@ -970,6 +971,7 @@ class HexGround(LeggedRobot):
         else:
             d = torch.zeros(self.num_envs, device=device)
         d = torch.clamp(d, 0.0, 1.0)
+        active_mask = torch.ones(self.num_envs, device=device, dtype=torch.bool)
 
         # Freeze after reset for early-stage learnability.
         if hasattr(self, "target_freeze_timer"):
@@ -978,7 +980,8 @@ class HexGround(LeggedRobot):
                 self.target_freeze_timer = torch.clamp(self.target_freeze_timer - dt, min=0.0)
                 self.target_vel_world[frozen].zero_()
                 self.goal_world[frozen] = self.target_world[frozen]
-                if (~frozen).any():
+                active_mask = ~frozen
+                if active_mask.any():
                     d = d.clone()
                     d[frozen] = 0.0
                 else:
@@ -1042,8 +1045,8 @@ class HexGround(LeggedRobot):
         preturn_needed = dist_to_boundary_along_heading <= lookahead_dist
 
         # Countdown.
-        self.target_cmd_timer -= dt
-        need_cmd = (self.target_cmd_timer <= 0.0) | preturn_needed
+        self.target_cmd_timer[active_mask] -= dt
+        need_cmd = active_mask & ((self.target_cmd_timer <= 0.0) | preturn_needed)
         if need_cmd.any():
             turn_deg_max = turn_deg_easy + (turn_deg_hard - turn_deg_easy) * d
             turn_deg_max = torch.clamp(turn_deg_max, min=0.0, max=90.0)
@@ -1104,30 +1107,34 @@ class HexGround(LeggedRobot):
         )
         max_turn = (0.3 + 0.7 * d) * turn_rate_max * dt
         dtheta = torch.clamp(dtheta, -max_turn, max_turn)
-        self.target_heading = self.target_heading + dtheta
-        self.target_heading = torch.atan2(torch.sin(self.target_heading), torch.cos(self.target_heading))
+        heading_next = self.target_heading + dtheta
+        heading_next = torch.atan2(torch.sin(heading_next), torch.cos(heading_next))
+        self.target_heading = torch.where(active_mask, heading_next, self.target_heading)
 
         # Smoothly change speed with a bounded low-frequency wave (avoid long constant-speed segments).
         wave_rate = speed_wave_rate_slow + (speed_wave_rate_fast - speed_wave_rate_slow) * d
-        self.target_speed_phase = self.target_speed_phase + wave_rate * dt
-        self.target_speed_phase = torch.atan2(torch.sin(self.target_speed_phase), torch.cos(self.target_speed_phase))
+        speed_phase_next = self.target_speed_phase + wave_rate * dt
+        speed_phase_next = torch.atan2(torch.sin(speed_phase_next), torch.cos(speed_phase_next))
+        self.target_speed_phase = torch.where(active_mask, speed_phase_next, self.target_speed_phase)
         wave_amp = speed_wave_amp_cfg * (0.25 + 0.75 * d)
         speed_des_wave = torch.clamp(self.target_speed_des + wave_amp * torch.sin(self.target_speed_phase), v_min, v_max)
 
         dv = speed_des_wave - self.target_speed
         max_dv = (0.4 + 0.6 * d) * accel_max * dt
         dv = torch.clamp(dv, -max_dv, max_dv)
-        self.target_speed = torch.clamp(self.target_speed + dv, 0.0, v_max)
+        speed_next = torch.clamp(self.target_speed + dv, 0.0, v_max)
+        self.target_speed = torch.where(active_mask, speed_next, self.target_speed)
 
         # Integrate position in local env frame.
         dir_x = torch.sin(self.target_heading)
         dir_y = torch.cos(self.target_heading)
         vel_local = torch.stack([self.target_speed * dir_x, self.target_speed * dir_y], dim=-1)
         pos_local = pos_local_curr + vel_local * dt
+        pos_local = torch.where(active_mask.unsqueeze(1), pos_local, pos_local_curr)
 
         # Keep within bounds. Reflection remains as a fallback only.
-        hit_x = (pos_local[:, 0] < x_min) | (pos_local[:, 0] > x_max)
-        hit_y = (pos_local[:, 1] < y_min) | (pos_local[:, 1] > y_max)
+        hit_x = active_mask & ((pos_local[:, 0] < x_min) | (pos_local[:, 0] > x_max))
+        hit_y = active_mask & ((pos_local[:, 1] < y_min) | (pos_local[:, 1] > y_max))
         reflect_mask = hit_x | hit_y
         if hit_x.any():
             pos_local[:, 0] = torch.clamp(pos_local[:, 0], x_min, x_max)
@@ -1148,6 +1155,7 @@ class HexGround(LeggedRobot):
         dir_x = torch.sin(self.target_heading)
         dir_y = torch.cos(self.target_heading)
         vel_local = torch.stack([self.target_speed * dir_x, self.target_speed * dir_y], dim=-1)
+        vel_local = torch.where(active_mask.unsqueeze(1), vel_local, torch.zeros_like(vel_local))
 
         # Commit world state.
         self.target_world = self.env_origins[:, :2] + pos_local
@@ -1884,13 +1892,20 @@ class HexGround(LeggedRobot):
                     self._sync_robot_root_states(other_ids)
             self.get_expert_actions()
             clear_on_reset = bool(getattr(self.cfg.terrain, "debug_viz_clear_on_reset", False))
+            clear_debug_target_traj = (
+                self.viewer is not None
+                and bool(getattr(self, "debug_viz", False))
+                and self._moving_target_enabled()
+            )
             # Default behavior: do NOT clear global viewer lines on each reset.
             # Global clear can make trajectories disappear before the currently viewed env resets.
-            if self.viewer is not None and clear_on_reset:
+            if self.viewer is not None:
                 need_clear = False
-                if bool(getattr(self, "foot_traj_viz", False)):
+                if clear_on_reset and bool(getattr(self, "foot_traj_viz", False)):
                     need_clear = True
-                if bool(getattr(self, "debug_viz", False)) and self._moving_target_enabled():
+                if clear_on_reset and bool(getattr(self, "debug_viz", False)) and self._moving_target_enabled():
+                    need_clear = True
+                if clear_debug_target_traj:
                     need_clear = True
                 if need_clear:
                     self.gym.clear_lines(self.viewer)
@@ -1898,7 +1913,7 @@ class HexGround(LeggedRobot):
             if hasattr(self, "_viz_prev_valid"):
                 ids = env_ids.detach().cpu().numpy()
                 self._viz_prev_valid[ids] = False
-                if clear_on_reset and getattr(self, "debug_viz", False) and self.viewer is not None and self._moving_target_enabled():
+                if clear_debug_target_traj:
                     self._viz_prev_valid[:] = False
                     if hasattr(self, "_viz_traj_tick"):
                         self._viz_traj_tick = 0

@@ -454,17 +454,16 @@ class HierarchicalHexapodEnv:
         terrain_type = str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower()
         self.is_s0_follow_task = (str(getattr(args, "task", "")).lower() == "hex_s0_follow") or (terrain_type in ("s0_follow_plane", "s0"))
         self.scene_difficulty_pending = 0.0
-        self.scene_difficulty_override = torch.zeros(self.num_envs, device=device)
-        if hasattr(self.env, "scene_difficulty_override"):
-            self.env.scene_difficulty_override = self.scene_difficulty_override
+        self.scene_difficulty_override = torch.zeros(
+            self.num_envs, device=self.env.device, dtype=torch.float32
+        )
+        self.env.scene_difficulty_override = self.scene_difficulty_override
         self.s0_follow_d_des = 1.0
         self.s0_follow_d_tol = 0.25
         self.s0_follow_ahead_margin = 0.2
         self.s0_follow_success_bonus = 10.0
         self.s0_follow_dir_v_eps = 0.05
         self.s0_follow_success_time_s = 10.0
-        self.s0_follow_dt_high = float(getattr(getattr(env_cfg, "terrain", None), "scene_high_dt", 0.1))
-        self.s0_follow_steps_success = max(1, int(self.s0_follow_success_time_s / max(1e-6, self.s0_follow_dt_high)))
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -530,6 +529,9 @@ class HierarchicalHexapodEnv:
         self.high_level_dt = float(self.env.dt) * float(self.decimation)
         self.max_episode_length = max(1, int(np.ceil(self.max_episode_length_low / float(self.decimation))))
         self.max_episode_length_s = float(self.max_episode_length * self.high_level_dt)
+        self.s0_follow_steps_success = max(
+            1, int(self.s0_follow_success_time_s / max(1e-6, self.high_level_dt))
+        )
         
         if self.debug:
             print(
@@ -652,8 +654,7 @@ class HierarchicalHexapodEnv:
                 raise ValueError(f"reset_mask shape mismatch: {tuple(reset_mask.shape)}")
             if reset_mask.any():
                 self.scene_difficulty_override[reset_mask] = self.scene_difficulty_pending
-        if hasattr(self.env, "scene_difficulty_override"):
-            self.env.scene_difficulty_override = self.scene_difficulty_override
+        self.env.scene_difficulty_override = self.scene_difficulty_override
 
     def _refresh_depth_images(self, force: bool = False) -> None:
         if not hasattr(self.env, "camera_cfg"):
@@ -2119,6 +2120,8 @@ def train(args):
         prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
         expert_action_diff_sum = torch.zeros((), device=device)
+        egpo_heading_align_cos_sum = torch.zeros((), device=device)
+        egpo_heading_error_deg_samples = []
         local_iteration = iteration - start_iteration
         expert_alpha_rollout = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
         prev_goal_world_rollout = None
@@ -2310,6 +2313,12 @@ def train(args):
                     target_world_xy = getattr(env.env, "target_world", None)
                     target_vel_world_xy = getattr(env.env, "target_vel_world", None)
                     target_heading = getattr(env.env, "target_heading", None)
+                    quat = env.env.root_states[:, 3:7]
+                    x_q, y_q, z_q, w_q = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+                    robot_heading = torch.atan2(
+                        2.0 * (w_q * z_q + x_q * y_q),
+                        1.0 - 2.0 * (y_q * y_q + z_q * z_q),
+                    )
                     if target_world_xy is None:
                         target_world_xy = torch.zeros(env.num_envs, 2, device=device)
                     if target_vel_world_xy is None:
@@ -2318,12 +2327,29 @@ def train(args):
                         target_heading = torch.zeros(env.num_envs, device=device)
                     expert_action = compute_s0_follow_expert_cmd(
                         robot_pos_world_xy=env.env.root_states[:, :2],
-                        robot_heading=state[:, 2],
+                        robot_heading=robot_heading,
                         target_world_xy=target_world_xy,
                         target_vel_world_xy=target_vel_world_xy,
                         target_heading=target_heading,
                         cmd_scale=cmd_scale,
                     )
+                    if debug:
+                        target_speed = torch.norm(target_vel_world_xy, dim=1)
+                        vel_dir_world = target_vel_world_xy / target_speed.unsqueeze(1).clamp_min(1e-6)
+                        heading_dir_world = torch.stack(
+                            [torch.sin(target_heading), torch.cos(target_heading)], dim=1
+                        )
+                        v_eps = float(getattr(env, "s0_follow_dir_v_eps", 0.05))
+                        use_vel = target_speed > v_eps
+                        dir_world = torch.where(use_vel.unsqueeze(1), vel_dir_world, heading_dir_world)
+                        dir_world = dir_world / torch.norm(dir_world, dim=1, keepdim=True).clamp_min(1e-6)
+                        robot_fwd_world = torch.stack(
+                            [torch.sin(robot_heading), torch.cos(robot_heading)], dim=1
+                        )
+                        align_cos = torch.sum(robot_fwd_world * dir_world, dim=1).clamp(-1.0, 1.0)
+                        egpo_heading_align_cos_sum += align_cos.sum()
+                        heading_err_deg = torch.rad2deg(torch.acos(align_cos))
+                        egpo_heading_error_deg_samples.append(heading_err_deg.detach())
                     expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
                     cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
                 log_prob, value, _, _ = policy.evaluate_actions(
@@ -2778,6 +2804,12 @@ def train(args):
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
         gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
+        egpo_heading_align_cos_mean = 0.0
+        egpo_heading_err_p95_deg = 0.0
+        if use_egpo and debug and egpo_heading_error_deg_samples:
+            egpo_heading_align_cos_mean = (egpo_heading_align_cos_sum / total_samples).item()
+            heading_err_all = torch.cat(egpo_heading_error_deg_samples, dim=0)
+            egpo_heading_err_p95_deg = torch.quantile(heading_err_all, 0.95).item()
         target_speed_mean = (target_speed_sum / total_samples).item()
         goal_world_delta_mean = (goal_world_delta_sum / total_samples).item()
         target_turn_event_rate = (target_turn_event_sum / total_samples).item()
@@ -2828,6 +2860,9 @@ def train(args):
             writer.add_scalar('Train/EGPO_ExpertLogProbMean', expert_log_prob_mean_sum / max(num_updates, 1), iteration)
             writer.add_scalar('Train/EGPO_BCLoss', bc_loss_sum / max(num_updates, 1), iteration)
             writer.add_scalar('Train/ExpertActionDiff', expert_action_diff_mean, iteration)
+            if debug:
+                writer.add_scalar('Diag/EGPOHeadingAlignCosMean', egpo_heading_align_cos_mean, iteration)
+                writer.add_scalar('Diag/EGPOHeadingErrP95Deg', egpo_heading_err_p95_deg, iteration)
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
@@ -2911,6 +2946,11 @@ def train(args):
                     f"""{egpo_expert_log_prob_mean:.4f} / {bc_loss_sum / max(num_updates, 1):.4f} / """
                     f"""{expert_action_diff_mean:.3f}\n"""
                 )
+                if debug:
+                    egpo_line += (
+                        f"""{'EGPO heading cos/p95deg:':>{pad}} """
+                        f"""{egpo_heading_align_cos_mean:.3f} / {egpo_heading_err_p95_deg:.1f}\n"""
+                    )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""

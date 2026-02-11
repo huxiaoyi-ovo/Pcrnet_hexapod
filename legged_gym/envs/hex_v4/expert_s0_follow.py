@@ -86,7 +86,8 @@ def compute_s0_follow_expert_cmd(
     err_perp = torch.sum(err_body * perp_body, dim=1)
 
     v_along = float(kp_along) * err_along + float(kff) * target_speed
-    v_along = torch.clamp(v_along, min=0.0, max=float(v_along_max))
+    # Allow mild reverse correction when the robot overshoots the desired trailing point.
+    v_along = torch.clamp(v_along, min=-0.2, max=float(v_along_max))
     v_perp = torch.clamp(float(kp_perp) * err_perp, min=-float(v_perp_max), max=float(v_perp_max))
 
     cmd_xy = v_along.unsqueeze(1) * dir_body + v_perp.unsqueeze(1) * perp_body
