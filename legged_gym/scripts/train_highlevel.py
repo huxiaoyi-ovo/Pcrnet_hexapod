@@ -93,10 +93,15 @@ def apply_goal_occlusion(
     return masked_goal, masked_goal.detach()
 
 
-def _get_expert_alpha(local_iteration: int, interface_iters: int) -> float:
+def _get_expert_alpha(local_iteration: int, interface_iters: int, hold_iters: int = 0) -> float:
     if interface_iters <= 0:
         return 0.0
-    progress = min(float(max(local_iteration, 0)) / float(interface_iters), 1.0)
+    it = max(local_iteration, 0)
+    hold = max(int(hold_iters), 0)
+    if it < hold:
+        return 1.0
+    decay_denom = max(interface_iters - hold, 1)
+    progress = min(float(it - hold) / float(decay_denom), 1.0)
     if EXPERT_ALPHA_SCHEDULE == "cosine":
         alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
     else:
@@ -2034,6 +2039,8 @@ def train(args):
     
     total_iterations = start_iteration + args.num_iterations
     expert_interface_iters = max(1, int(math.ceil(float(args.num_iterations) * float(EXPERT_INTERFACE_RATIO))))
+    expert_alpha_hold_iters = max(0, int(math.ceil(float(args.num_iterations) * 0.10)))
+    expert_alpha_hold_iters = min(expert_alpha_hold_iters, expert_interface_iters)
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
     dprint(f"  - Steps per iteration: {args.num_steps}")
     dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
@@ -2050,6 +2057,7 @@ def train(args):
             )
     if use_egpo:
         dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
+        dprint(f"  - Expert alpha hold: {expert_alpha_hold_iters} iters (10% of run, alpha=1.0)")
     
     aff_stack_buf = None
     last_goal_obs = None
@@ -2059,8 +2067,15 @@ def train(args):
     aff_stack_fill = None
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
-        d_scene = float(np.clip(float(iteration) / float(SCENE_CURRIC_ITERS), 0.0, 1.0))
+        if env.is_s0_follow_task:
+            local_iter = iteration - start_iteration
+            denom = max(1, int(args.num_iterations) - 1)
+            d_scene = float(np.clip(float(local_iter) / float(denom), 0.0, 1.0))
+        else:
+            d_scene = float(np.clip(float(iteration) / float(SCENE_CURRIC_ITERS), 0.0, 1.0))
         env.set_scene_difficulty_target(d_scene)
+        if env.is_s0_follow_task:
+            env._apply_scene_difficulty_for_resets(None)
         
         # ============ Rollout Phase ============
         buffer.reset()
@@ -2122,10 +2137,13 @@ def train(args):
         expert_action_diff_sum = torch.zeros((), device=device)
         egpo_heading_align_cos_sum = torch.zeros((), device=device)
         egpo_heading_error_deg_samples = []
-        egpo_turn_sign_match_sum = torch.zeros((), device=device)
-        egpo_turn_sign_count = torch.zeros((), device=device)
+        egpo_yaw_resp_sign_match_sum = torch.zeros((), device=device)
+        egpo_yaw_resp_sign_count = torch.zeros((), device=device)
         local_iteration = iteration - start_iteration
-        expert_alpha_rollout = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
+        expert_alpha_rollout = (
+            _get_expert_alpha(local_iteration, expert_interface_iters, expert_alpha_hold_iters)
+            if use_egpo else 0.0
+        )
         prev_goal_world_rollout = None
         if hasattr(env.env, "goal_world"):
             prev_goal_world_rollout = env.env.goal_world.clone()
@@ -2134,6 +2152,8 @@ def train(args):
             # 准备输入
             state = obs_dict['state']
             goal_raw = obs_dict['goal']
+            egpo_diag_yaw_before = None
+            egpo_diag_cmd_omega = None
             
             use_student_aff = args.mode != 'teacher'
             if is_gate and moe_use_student_aff:
@@ -2352,20 +2372,11 @@ def train(args):
                         egpo_heading_align_cos_sum += align_cos.sum()
                         heading_err_deg = torch.rad2deg(torch.acos(align_cos))
                         egpo_heading_error_deg_samples.append(heading_err_deg.detach())
-                        cos_h = torch.cos(robot_heading)
-                        sin_h = torch.sin(robot_heading)
-                        dir_body_x = cos_h * dir_world[:, 0] - sin_h * dir_world[:, 1]
-                        dir_body_y = sin_h * dir_world[:, 0] + cos_h * dir_world[:, 1]
-                        dir_body_angle = torch.atan2(dir_body_x, dir_body_y)
-                        turn_valid = torch.abs(dir_body_angle) > 1e-3
-                        if turn_valid.any():
-                            turn_sign_match = (
-                                expert_action[turn_valid, 2] * dir_body_angle[turn_valid]
-                            ) <= 0.0
-                            egpo_turn_sign_match_sum += turn_sign_match.float().sum()
-                            egpo_turn_sign_count += turn_valid.float().sum()
                     expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
                     cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
+                    if debug:
+                        egpo_diag_yaw_before = robot_heading.detach()
+                        egpo_diag_cmd_omega = cmd[:, 2].detach()
                 log_prob, value, _, _ = policy.evaluate_actions(
                     aff_stack_buf, state, goal, difficulty, cmd
                 )
@@ -2387,6 +2398,34 @@ def train(args):
                         teacher_action = t_cmd
 
                 next_obs, rewards, dones, env_info = env.step(cmd)
+                if debug and use_egpo and egpo_diag_yaw_before is not None and egpo_diag_cmd_omega is not None:
+                    cmd_omega_eval = egpo_diag_cmd_omega
+                    if env_info is not None and isinstance(env_info, dict):
+                        post_info = env_info.get("post_info", None)
+                        if post_info is not None and isinstance(post_info, dict):
+                            cmd_slew = post_info.get("cmd_slew", None)
+                            if cmd_slew is not None:
+                                if not torch.is_tensor(cmd_slew):
+                                    cmd_slew = torch.as_tensor(cmd_slew, device=device)
+                                if cmd_slew.dim() == 1:
+                                    cmd_slew = cmd_slew.unsqueeze(0)
+                                if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 3:
+                                    cmd_omega_eval = cmd_slew[:, 2].detach()
+                    quat_after = env.env.root_states[:, 3:7]
+                    x_a, y_a, z_a, w_a = quat_after[:, 0], quat_after[:, 1], quat_after[:, 2], quat_after[:, 3]
+                    yaw_after = torch.atan2(
+                        2.0 * (w_a * z_a + x_a * y_a),
+                        1.0 - 2.0 * (y_a * y_a + z_a * z_a),
+                    )
+                    dyaw = torch.atan2(
+                        torch.sin(yaw_after - egpo_diag_yaw_before),
+                        torch.cos(yaw_after - egpo_diag_yaw_before),
+                    )
+                    valid = torch.abs(cmd_omega_eval) > 0.05
+                    if valid.any():
+                        sign_match = (cmd_omega_eval[valid] * dyaw[valid]) > 0.0
+                        egpo_yaw_resp_sign_match_sum += sign_match.float().sum()
+                        egpo_yaw_resp_sign_count += valid.float().sum()
                 action = cmd
                 gate_y_prev = None
                 cmd_used = cmd
@@ -2617,7 +2656,10 @@ def train(args):
         approx_kl_sum = 0
         clip_frac_sum = 0
         num_updates = 0
-        expert_alpha_update = _get_expert_alpha(local_iteration, expert_interface_iters) if use_egpo else 0.0
+        expert_alpha_update = (
+            _get_expert_alpha(local_iteration, expert_interface_iters, expert_alpha_hold_iters)
+            if use_egpo else 0.0
+        )
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         
@@ -2820,14 +2862,14 @@ def train(args):
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
         egpo_heading_align_cos_mean = 0.0
         egpo_heading_err_p95_deg = 0.0
-        egpo_turn_sign_match_rate = 0.0
+        egpo_yaw_resp_sign_match_rate = 0.0
         if use_egpo and debug and egpo_heading_error_deg_samples:
             egpo_heading_align_cos_mean = (egpo_heading_align_cos_sum / total_samples).item()
             heading_err_all = torch.cat(egpo_heading_error_deg_samples, dim=0)
             egpo_heading_err_p95_deg = torch.quantile(heading_err_all, 0.95).item()
-            if float(egpo_turn_sign_count.item()) > 0.0:
-                egpo_turn_sign_match_rate = float(
-                    (egpo_turn_sign_match_sum / egpo_turn_sign_count).item()
+            if float(egpo_yaw_resp_sign_count.item()) > 0.0:
+                egpo_yaw_resp_sign_match_rate = float(
+                    (egpo_yaw_resp_sign_match_sum / egpo_yaw_resp_sign_count).item()
                 )
         target_speed_mean = (target_speed_sum / total_samples).item()
         goal_world_delta_mean = (goal_world_delta_sum / total_samples).item()
@@ -2882,7 +2924,7 @@ def train(args):
             if debug:
                 writer.add_scalar('Diag/EGPOHeadingAlignCosMean', egpo_heading_align_cos_mean, iteration)
                 writer.add_scalar('Diag/EGPOHeadingErrP95Deg', egpo_heading_err_p95_deg, iteration)
-                writer.add_scalar('Diag/EGPOTurnSignMatchRate', egpo_turn_sign_match_rate, iteration)
+                writer.add_scalar('Diag/EGPOYawRespSignMatchRate', egpo_yaw_resp_sign_match_rate, iteration)
         
         writer.add_scalar('Perf/MeanReward', mean_reward, iteration)
         writer.add_scalar('Perf/MeanLength', mean_length, iteration)
@@ -2972,7 +3014,7 @@ def train(args):
                         f"""{egpo_heading_align_cos_mean:.3f} / {egpo_heading_err_p95_deg:.1f}\n"""
                     )
                     egpo_line += (
-                        f"""{'EGPO turn sign match:':>{pad}} {egpo_turn_sign_match_rate:.3f}\n"""
+                        f"""{'EGPO yaw response match:':>{pad}} {egpo_yaw_resp_sign_match_rate:.3f}\n"""
                     )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""

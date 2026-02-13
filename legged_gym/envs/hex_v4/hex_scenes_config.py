@@ -170,8 +170,8 @@ class HexS0FollowCfg(HexGroundCfg):
         # Disable reach logic in S0 (we don't want to "reach target point").
         reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["goal_reach_bonus"] = 0.0
-        # Use view-centering instead of heading-to-goal for orientation.
-        reward_cfg["heading_scale"] = 0.0
+        # Keep both view-centering and a light heading-to-goal term for orientation.
+        reward_cfg["heading_scale"] = 0.08
         # S0 is a clean following pretrain bed: disable navigation/obstacle terms to avoid noisy gradients.
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["crossable_align_scale"] = 0.0
