@@ -31,7 +31,6 @@ build/
 # 4. 个人配置 (VS Code / PyCharm)
 .vscode/
 .idea/
-*.md 
 *.pdf
 
 # 单次执行缓存（自动清空，不进入版本控制）

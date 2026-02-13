@@ -1,0 +1,937 @@
+# TODO Log
+
+完成后请改为 `[x] ~~条目内容~~`。
+后续“计划好的代码改动方案”请先在此处写入精简版，便于新开终端直接接手。
+
+规则：
+
+- 仅记录“重大改变/思路调整”：架构变更、训练主线调整、评测协议变化、跨模块关键改动。
+- 小修小补默认不记录：局部 bugfix、轻微参数微调、文案/注释修改、格式整理。
+- 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
+- 中长期 TODO 只能在你明确同意后才能新增条目。
+
+## 中长期 TODO（置顶：V7 训练与论文主线）
+
+> 这部分保持长期不变：只追加，不随短期进展频繁挪动；完成项同样用 `[x] ~~...~~` 标记。
+
+### Stage 0.5：训练架构定稿（先于所有训练）
+
+- [ ] [P0] 固化语义契约：`y/y_eff` 为 Follow 权重；`w` 为冲突强度；`y_eff_raw=(1-λ)*y+λ*(1-w)`；`cmd_base=y_eff*cmd_F+(1-y_eff)*cmd_A`
+- [ ] [P0] 固化 gate 链路 ABI：gate 训练/推理统一产出并记录 `cmd_F/cmd_A` 候选与 `risk_F/risk_A`（命令条件化 w 的输入来源）
+- [ ] [P0] 固化后处理 ABI：`CommandPostProcessor(cmd_raw, beta, clearance)`；统一 `post_info` 透出字段用于日志与论文图
+- [ ] [P0] 固化评测协议：固定 seeds/episodes/β sweep 点位/记录 jerk/near-miss/switch-rate（不再只看 success）
+
+### Stage S：训练场景设计优化（为证据链服务）
+
+- [ ] [P0] S0 平地移动目标跟随（预训练底座）：1m 跟随 + 视野中心窗口约束 + 丢失 K 步 reset
+- [ ] [P0] S1 门洞走廊强化为“窄缝主演示”：门洞宽度 curriculum、门洞位置/出生/目标段互斥契约、关键冲突片段可复现
+- [ ] [P0] S1-moving 强制冲突版：目标必须穿门洞（gate-by-gate 阶段机），确保稳定产生 Follow vs Avoid 冲突段
+- [ ] [P0] S2 柱阵森林分布与 curriculum：Poisson/聚类/通道型 2–3 模式 + 密度课程 + 可复现统计
+- [ ] [P0] 结构化 hold-out：在 S1/S2 内留出“组合 OOD”（参数组合训练不出现，评测专测）
+- [ ] [P0] 新增路线/时机类指标口径（服务 w/β 贡献）：门洞前“提前决策时机”、事件对齐曲线等
+
+### Stage A'（过渡）：β 仅作为评测/部署旋钮（先产出 Pareto）
+
+- [ ] [P0] β→约束族参数映射落地（safe_dist/free_dist/max_cmd/max_delta/risk_gain），支持 `--beta_sweep` 固定权重扫 Pareto
+- [ ] [P0] Pareto 单调性与“β=1 不停住”验收
+
+### Stage A：专家（Follow/Avoid）训练（冻结底层）
+
+- [ ] [P0] Follow expert：目标效率/跟随稳定；Avoid expert：安全/风险；两者共享统一奖励骨架（仅权重不同）
+- [ ] [P0] 专家验收：S1/S2 固定种子评测 + β sweep（在 A’ 的后处理联动下）
+- [ ] [P1] （可选）专家内风格条件：将 β 作为 expert 观测输入，验证“同权重随 β 连续变化”优于仅靠后处理联动
+
+### Stage B：PCR-Net++ gate（y + w + β + y_eff + 条件融合）
+
+- [ ] [P0] gate 基线：y-only（复现 late switch / chattering）
+- [ ] [P0] y+β(link) 与 β(no-link) 对照（证明“机制化接口”）
+- [ ] [P0] 加 w（命令条件化）：输入包含 `cmd_F/cmd_A` 与 `risk_F/risk_A`；做 w 退化检测（w≠clearance）
+- [ ] [P0] w 预测性训练：实现 `simulate_command_trajectory`/RiskAlong-lite（向量化、GPU 友好、horizon=0.8s）生成伪标签并加入 w_aux loss
+- [ ] [P0] 条件融合 + 平滑/滞回（推理启用为主）：稳定性指标必须改善（jerk/near-miss/switch）
+- [ ] [P0] 主证据评测：IID(S1/S2) + OOD(S6) + β sweep Pareto + 事件对齐图（y/w/β）
+- [ ] [P1] （可选）多维 w：spatial/proximity/severity + fusion（单帧输入），提供可解释性图与消融
+
+### Stage C：Student 蒸馏（视觉部署）
+
+- [ ] [P0] Teacher/Student 边界与蒸馏目标定稿（cmd + 可选 y_eff/β），并做视觉退化矩阵 + OOD
+- [ ] [P1] 消融：只蒸馏 cmd vs cmd+β（证明 β 对部署一致性与可控性的贡献）
+
+---
+
+## 短期 TODO（动态滚动：下面按日期维护）
+
+## 2026-02-13 项目架构优化（文档与结构，不改核心代码）
+
+- [x] ~~[P0] 冻结架构边界：`legged_gym/`、`rsl_rl/`、`resources/`、`tools/` 不改~~
+- [x] ~~[P0] 建立 `docs/` 骨架与文档职责索引（specs/operations/reference/archive）~~
+- [x] ~~[P0] 更新顶层文档（`README.md`、`AGENTS.md`）以统一“单一事实源”口径~~
+- [x] ~~[P1] 全局引用自检：修正失效文档路径，避免后续维护歧义~~
+
+## 2026-02-13 项目架构优化（第二阶段：文档归位）
+
+- [x] ~~[P0] 文档迁移到 `docs/`：`PHASE_SWITCHING_GUIDE.md`、`训练指令.txt`、`参数一览表.md`、`思路设计.md`~~
+- [x] ~~[P0] 为迁移文档补充状态标记（当前规范/当前参考/历史参考）~~
+- [x] ~~[P1] 更新 `README.md` 与 `docs/README.md` 索引路径并完成引用自检~~
+
+## 2026-02-13 项目架构优化（第三阶段：导航与职责收口）
+
+- [x] ~~[P0] 根目录收口：`ROBOT_SPECS.md` 迁移到 `docs/reference/ROBOT_SPECS.md`~~
+- [x] ~~[P0] 新增 `docs/NAVIGATION.md`，统一“当前规范/当前参考/历史参考”导航~~
+- [x] ~~[P0] 对齐 `AGENTS.md`、`CLAUDE.md`、`PROJECT_OVERVIEW_CN.md` 的文档职责口径~~
+- [x] ~~[P1] 活跃文档路径自检：确认迁移后入口文档无残留旧路径~~
+
+## 2026-02-13 TODO_LOG 记录机制优化（仅重大变更记录）
+
+- [x] ~~[P0] 新增规则：TODO_LOG 仅记录重大改变/思路调整（架构、主线、评测协议、跨模块关键改动）~~
+- [x] ~~[P0] 新增规则：小修小补默认不记录（局部 bugfix、轻微调参、文案/注释、格式整理）~~
+- [x] ~~[P1] 与 AGENTS.md / CHANGELOG_CN 机制对齐并完成自检~~
+
+## 2026-02-13 角色机制改造（自动路由 + 项目主理人）
+
+- [x] ~~[P0] 将“新对话必问角色”改为“默认自动路由 + 用户可随时强制切换”~~
+- [x] ~~[P0] 重写角色(1)为“项目主理人（RAL共同作者）”提示词（高效、行动导向）~~
+- [x] ~~[P0] 保留并对齐角色(2)“编程主力”表述，确保与新切换机制兼容~~
+- [x] ~~[P0] 参考方案基准从 V4 切换为两个 V7 文档（`hexapod_RAL_complete_technical_spec_v7.md` + `hexapod_RAL_integrated_final_v7.md`）~~
+- [x] ~~[P1] 完成文档自检：语义一致、无互相冲突规则~~
+
+## 2026-02-13 会话级 TODO 规则
+
+- [x] ~~[P0] 在 `AGENTS.md` 新增“每次先输出会话级 TODO（3-7条动作要点），用户回复‘执行’后再动手”的强制规则~~
+- [x] ~~[P1] 规则口径与“只记录动作要点，不写过程细节”保持一致~~
+
+## 2026-02-13 Updated Plan 清单规则
+
+- [x] ~~[P0] 将“会话级 TODO”升级为“Updated Plan（带勾选框清单）”规则~~
+- [x] ~~[P0] 明确“未收到用户回复‘执行’前，不动手修改文件或运行命令”~~
+- [x] ~~[P1] 明确执行中持续更新勾选状态（□/✓）~~
+
+## 2026-02-11 S0 课程生效修复（仅S0）
+
+- [x] ~~[P0] S0 课程调度改为按本次训练迭代归一化（不再依赖固定 1000）~~
+- [x] ~~[P0] S0 难度每轮即时下发到全体 env，消除 reset 才生效的延迟~~
+- [x] ~~[P0] 按用户要求保持最小改动：不新增 S0 课程日志项~~
+- [x] ~~[P1] 语法检查：`train_highlevel.py` 编译通过~~
+
+## 2026-02-11 清理无关diff + 专家朝向/质心跟随增强
+
+- [x] ~~[P0] 清理无关 diff：回退 `__pycache__/*.pyc` 与训练产物未跟踪目录~~
+- [x] ~~[P0] 专家控制增强：保持朝向优先，同时提升转弯段质心贴合~~
+- [x] ~~[P1] 语法检查：`expert_s0_follow.py` 编译通过~~
+- [ ] [P1] 短跑验证：观察转弯段机头一致性与质心贴合
+
+## 2026-02-11 Expert 改为朝向优先控制（Heading-first）
+
+- [x] ~~[P0] 专家控制增加朝向优先门控：大角误差时强抑制平移（先转向再推进）~~
+- [x] ~~[P0] 同步增强角速度权重：角误差越大，`omega` 放大越明显~~
+- [x] ~~[P1] 语法检查：`expert_s0_follow.py` 编译通过~~
+- [ ] [P1] 短跑验证：观察机头朝向一致性与转弯段质心贴合
+
+## 2026-02-11 EGPO 参与率固定平台期（前10%）
+
+- [ ] [P0] `alpha` 调度加入固定平台期：前 `10%` 总迭代 `alpha=1.0`
+- [ ] [P0] 平台期后在接口窗口内按既有 schedule 衰减，不新增参数
+- [ ] [P1] 日志打印补充平台期长度，便于核对
+- [ ] [P1] 语法检查并等待短跑验证
+
+## 2026-02-11 Expert 精度跟随增强（转弯偏差修复）
+
+- [x] ~~[P0] 专家控制从纯位置反馈升级为“前馈+反馈”：引入目标速度在机体系的 along/perp 前馈~~
+- [x] ~~[P0] 提升跟随带宽：`kff=1.0`、`v_along_max=1.0`、`v_perp_max=0.12`、`k_yaw=1.2`~~
+- [x] ~~[P0] 增加转弯状态补偿：大转角时降前向、增横向与角速度，降低弯道切角误差~~
+- [x] ~~[P1] 语法检查完成~~
+- [ ] [P1] 短跑复测：检查转弯段质心贴合误差与机头朝向一致性
+
+## 2026-02-11 朝向一致性二轮修复（诊断口径 + 去侧移）
+
+- [x] ~~[P0] 修正 `EGPO yaw response match` 统计口径：使用 `post_info.cmd_slew[:,2]`（实际下发角速度），并提高有效阈值以抑制噪声~~
+- [x] ~~[P0] 专家去侧移最小调参：`kp_perp 0.6->0.35`，`v_perp_max 0.15->0.08`（保持 `omega` 正号方案）~~
+- [x] ~~[P1] 语法检查完成~~
+- [ ] [P1] 短跑复测：对比朝向一致性与 `EGPO yaw response match`
+
+## 2026-02-11 专家朝向稳定化回退（原地绕圈回归）
+
+- [x] ~~[P0] 回退 `expert_s0_follow.py` 的“目标点朝向融合 + 状态权重”改动，恢复到单一 `dir_body_angle` 角速度控制~~
+- [ ] [P1] 根因排查：区分“专家角速度映射问题”与“低层执行/观测口径问题”
+
+## 2026-02-11 专家朝向稳定化（符号约定 + 距离带降权）
+
+- [x] ~~[P0] 专家 `omega` 恢复到已采用的转向符号约定（避免左右反向回归）~~
+- [x] ~~[P0] 目标点朝向项改为状态相关权重：跟随距离带内降权，低速时降权，降低近目标抖动~~
+- [x] ~~[P1] 修正 S0 注释与当前 `heading_scale=0.08` 一致~~
+- [ ] [P1] 短跑验证：确认机头反向减轻且无原地绕圈回归
+
+## 2026-02-11 专家朝向融合（目标运动方向 + 目标点）
+
+- [x] ~~[P0] 仅修改 `expert_s0_follow.py` 的 `omega` 计算：加入目标点朝向角并与运动方向角固定加权融合~~
+- [x] ~~[P0] 不新增参数，不修改任何 offset，不改线速度控制链~~
+- [x] ~~[P1] 语法检查：`expert_s0_follow.py` 编译通过~~
+- [ ] [P1] 短跑验证：观察“机头反向”是否减轻且无原地绕圈回归
+
+## 2026-02-11 硬性指标（S0 offset 冻结）
+
+- [x] ~~[P0] `hex_s0_follow` 的 `navigation.heading_offset_rad` 必须恒等于 `0.0`~~
+- [x] ~~[P0] `hex_s0_follow` 的 `reward_cfg.heading_offset_rad` 必须恒等于 `0.0`~~
+- [x] ~~[P0] 未经用户明确批准，禁止修改上述两个 offset 字段（以本条为后续执行基线）~~
+
+## 2026-02-11 S0 朝向修正（offset固定0，仅调scale）
+
+- [x] ~~[P0] 固定约束：S0 `navigation.heading_offset_rad=0.0` 与 `reward_cfg.heading_offset_rad=0.0`，后续不再修改~~
+- [x] ~~[P0] 仅调整 S0 `reward_cfg["heading_scale"]`：`0.0 -> 0.04`~~
+- [x] ~~[P1] 语法检查：`hex_scenes_config.py` 编译通过~~
+- [ ] [P1] 训练短跑验证：观察机头朝向是否改善且无原地绕圈
+
+## 2026-02-11 S0 朝向对齐修复（机头朝向与目标运动方向一致）
+
+- [x] ~~[P0] 统一 S0 heading 参考：`navigation.heading_offset_rad` 恢复到 `+pi/2`（与项目默认 +Y 前向契约一致）~~
+- [x] ~~[P0] 同步 S0 奖励朝向参考：`reward_cfg.heading_offset_rad` 恢复到 `+pi/2`~~
+- [x] ~~[P1] 启用小权重朝向约束：S0 `reward_cfg.heading_scale` 从 `0.0` 调整到保守正值（先用 `0.08`）~~
+- [ ] [P1] 完成后进行短跑验证：重点检查“机头朝向 vs 目标运动方向”是否仍反向
+
+## 2026-02-11 S0 风险修复（课程覆盖/冻结语义/成功时长/EGPO 专家）
+
+- [x] ~~[P0] 修复 `scene_difficulty_override` 注入链路：高层 wrapper 无条件写入 env，环境侧提供显式属性，保证 S0 难度课程实际生效~~
+- [x] ~~[P0] 修复 moving target 冻结语义：部分 env reset 时冻结窗口内目标保持静止（不漂移）~~
+- [x] ~~[P0] 修复 S0 success 时长口径：成功步数按高层 `high_level_dt` 计算，避免 decimation 改动导致判定秒数偏移~~
+- [x] ~~[P1] 调整 S0 EGPO 专家沿轨控制：允许固定小幅负向速度，支持超前时回退纠偏（不新增可选参数）~~
+- [x] ~~[P1] debug 可视化：reset 后清空目标/机器人轨迹绘制，避免跨 episode 轨迹残留~~
+
+## 2026-02-11 EGPO 朝向口径修复（S0 follow 专家）
+
+- [x] ~~[P0] 修复 EGPO 专家 `robot_heading` 来源：不再使用 `state[:,2]`，改为由 `env.env.root_states` 四元数现算（与环境坐标契约一致）~~
+- [x] ~~[P1] 增加 debug 方向诊断：统计“机器人前向 vs 目标运动方向”对齐度（mean cos / p95角度）用于排查反向跟随~~
+
+## 2026-02-11 EGPO 转向符号修复（S0 follow 专家）
+
+- [x] ~~[P0] 修复 S0 expert `omega` 符号：目标右转时机器人同向转（消除左右转反向）~~
+- [x] ~~[P1] 增加 debug 转向一致性诊断：统计 expert `omega` 与目标方向夹角符号的一致率~~
+
+## 2026-02-11 EGPO 转向回归修正（基于实机观测）
+
+- [x] ~~[P0] 回滚 S0 expert `omega` 符号到原实现（修复“开局原地绕圈”回归问题）~~
+- [x] ~~[P1] 将诊断改为“命令角速度 vs 实际 yaw 响应”符号一致率（替代自洽但不可靠的几何符号诊断）~~
+
+## 2026-02-06 新会话交接摘要
+
+- [x] ~~生成 `CONTEXT_HANDOFF_SUMMARY.md`（可直接用于新对话接手继续推进）~~
+
+## 2026-02-06 代码执行缓存区（规则与模板）
+
+- [ ] 新增 `代码执行缓存区.md`：作为“单次执行缓存”，执行完成后自动清空回模板（无需用户确认）
+
+## 2026-02-06 S0 高层训练 reset 链路修复（语义统一 + 观测一致）
+
+- [x] ~~[P0] 高层 done 语义统一：汇总 reach/lost/timeout 的 reset 触发，避免分支漏 reset~~
+- [x] ~~[P0] 手动 reset 后观测刷新：保证 next_obs 与 reset 后 state 对齐（robot_state/goal/depth）~~
+- [x] ~~[P1] 回归检查：低层 auto-reset（done_during）与高层 manual reset 无重复/冲突~~
+
+## 2026-02-06 轨迹清空与 reset 时序对齐
+
+- [x] ~~[P0] 关闭默认周期清空轨迹线，仅保留 reset_idx 内清空（清空时机与 reset 对齐）~~
+- [x] ~~[P1] 保留可选周期清空开关（默认关闭），便于长时调试按需开启~~
+- [x] ~~[P1] 最小回归：确认语法通过且 reset 后仍会清轨迹~~
+
+## 2026-02-04 S0 可学性修复（出生朝向锁定 + 目标配套 + 距离奖励增强）
+
+- [x] ~~[P0] S0 reset 原子性：先锁定 robot yaw≈0（±2deg，小抖动）再重置 moving target（目标始终在视野中心附近并沿 +Y 运动）~~
+- [x] ~~[P0] 方向契约（以 S1 为准）校验：修正 goal_buf 计算为 (x_right, y_forward)=dot(delta, right/fwd)，排查“出生后全体后退”~~
+- [x] ~~[P0] Debug：训练脚本增加 `--force_cmd_y`（全程强制 cmd=[0,+v,0]）验证命令方向是否反了~~
+- [x] ~~[P0] S0 reset 强制同步 robot root_state：位置/速度/朝向写回 sim，避免“机器人沿用上回合末位置继续走”~~
+- [x] ~~[P1] reset 可视化清屏去重：同一 reset 内只 clear_lines 一次，避免干扰观察~~
+- [x] ~~[P1] S0 follow 奖励增强：加大“保持 1m 距离”的奖励（含 band reward 的权重），避免早期被惩罚项淹没~~
+
+## 2026-02-04 S0 Reward Cleanup（通用骨架继承 + S0 置零无关项）
+
+- [x] ~~[P0] S0: 显著降低 target_center_scale（避免前期绕圈/原地转）~~
+- [x] ~~[P0] S0: reward_cfg 覆盖并置 0：passable_align/crossable_align/gate_smooth/risk_barrier/time/collision~~
+
+## 2026-02-04 S0 Crash/Explode Hotfix（viewer项裁剪 + plane分离）
+
+- [x] ~~[P0] S0: 将 mesh_type 改为 plane（避免 env_origins 重叠带来的潜在 PhysX GPU 崩溃/异常）~~
+- [x] ~~[P0] S0: 显著降低 target_visible_scale（避免视野罚项主导训练）~~
+- [x] ~~[P0] train_highlevel: 对 target_center/visible 的 margin/excess 做 clamp（避免平方爆炸导致 KL 发散）~~
+- [x] ~~[P0] S0: 允许 plane 启动：HexS0FollowCfg.terrain.debug_allow_plane=True（通过 HexGround mesh_type 检查）~~
+
+## 2026-02-03 Hotfix（review 修复：S2 layout/公开接口/小优化）
+
+- [x] ~~[P0] 修复 S2 layout_modes/layout_mode_probs 选择逻辑：difficulty>0.5 时必须使用 hard 的概率分布~~
+- [x] ~~[P1] 去除对 CommandPostProcessor 私有字段 `_beta_safe_dist` 的访问：新增公开 getter 并在 gate_safe_clamp 使用~~
+- [x] ~~[P2] 清理 target_lost_steps 重复清零（仅保留 done_any 统一清零）~~
+
+## 2026-02-03 Stage S（S1-moving 强制冲突：目标过门洞脚本）
+
+- [x] ~~[P0] 新增任务 `hex_s1_follow_moving`：启用 moving_target_mode=`s1_gate_script`，follow 距离 1m + 视野窗口 + 丢失K步reset~~
+- [x] ~~[P0] HexGround 实现 s1_gate_script：gate-by-gate 阶段机（Approach/Align/Pass/Post），门洞处小偏置，出门洞后小横移~~
+- [x] ~~[P0] 性能：目标更新频率对齐 scene_high_dt=0.1（10Hz），避免 4096 并行吞吐掉下去~~
+
+## 2026-02-03 Hotfix（review：beta插值去重 + S1门宽边界 + 注释）
+
+- [x] ~~[P0] CommandPostProcessor：抽取 beta 插值为内部方法，消除 get_effective_params/process 重复代码~~
+- [x] ~~[P1] S1 门宽约束：默认仅考虑当前 gate_idx 的门；异常边界回退到“取最窄门宽”的保守策略，并加注释说明~~
+- [x] ~~[P2] RNG 注释：说明 RandomState(seed) 独立于全局 numpy state（不改 seed 乘子以保持复现）~~
+- [x] ~~[P3] scripted mode 参数注释：moving_target_turn_rate_max 等在 s1_gate_script 中不使用（保留无害）~~
+
+## 2026-02-03 Debug（viewer 可视化：目标/轨迹）
+
+- [x] ~~[P1] debug_viz：画出所有 env 的移动目标点+目标轨迹（绿色）与机器人轨迹（红色），10Hz 增量绘制并定期清屏~~
+
+## 2026-02-03 S0 训练可学性（目标课程 + 速度上限 + 方向契约）
+
+- [x] ~~[P0] S0 目标运动课程：difficulty=0 时 v_typical=0.2；降低早期转弯/加速度/切换频率；difficulty 提升时更快更复杂~~
+- [x] ~~[P0] S0 高层速度上限匹配目标：max_lin_vel_command=1.2（post_processor/cmd_scale 同步）~~
+- [x] ~~[P0] 方向契约统一（以 S1 为准）：goal_buf 统一为 (x_right, y_forward)，避免 view-centering/reward/policy 口径冲突~~
+- [x] ~~[P1] debug_viz：任意 reset 后清空所有轨迹线（避免越画越乱）~~
+
+## 2026-02-03 S0 Early-Stage Learnability（目标对齐 + 起步冻结 + 最低速度 + 回合长度）
+
+- [x] ~~[P0] S0 reset：目标点强制落在机器人正前方（视野中心附近），横向偏置=0~~
+- [x] ~~[P0] S0 reset：目标静止 freeze=1.5s 后再开始运动（避免出生即跑飞）~~
+- [x] ~~[P0] S0 最低课程：v_min=v_typical=0.05m/s，difficulty=0 只前进（不横移/不后退/不对角）~~
+- [x] ~~[P0] S0 增加回合长度：episode_length_s=45~~
+
+## 2026-02-02 Stage 0.5 训练架构收口（ABI/口径先行）
+
+- [x] ~~P0: Gate 链路 ABI 收口：训练时区分 y(raw) 与 y_eff（先令 y_eff=y），env.step 传 y_eff；记录 cmd_F/cmd_A 与 risk_F/risk_A（proxy）~~
+- [x] ~~P0: 增加“沿候选命令方向的最小 clearance”近似（cone-min over occupancy），作为 risk_F/risk_A 的统一 proxy~~
+- [x] ~~P0: post_info 补齐：cmd_F/cmd_A、y_raw、y_eff、clearance_F/A、risk_F/A（仅记录，不影响训练）~~
+
+## 2026-02-02 Stage S 训练场景设计优化（S1/S2）
+
+- [x] ~~P0: S1 门洞宽度分布对齐 V7：difficulty 插值范围改为 [1.0, 0.85]，删除不现实的 0.65~~
+- [x] ~~P0: S2 增加可复现分布模式：poisson / cluster / lane（三选一或按概率混合），并写入 terrain.meta~~
+- [x] ~~P0: S2 配置补齐 layout_modes/layout_probs 与 lane/cluster 参数（S2 与 S2Large 同口径）~~
+
+## 2026-02-02 Stage A' β评测旋钮（后处理约束族联动）
+
+- [x] ~~P0: CommandPostProcessor.process 支持 beta 输入并实现 safe/max_cmd/max_delta/risk_gain 插值（beta=None 时保持旧行为）~~
+- [x] ~~P0: train_highlevel/play_highlevel 增加 --beta，并在 env.step 内将 beta 传入 CommandPostProcessor.process（beta=None 不改变旧行为）~~
+- [x] ~~P0: post_info 统一透出 beta 生效后的 safe/free/max_cmd/max_delta/risk_gain（日志/论文图口径一致）~~
+
+## 2026-02-02 Hotfix（review 修复：pyc/dtype/beta一致性/S2小坑）
+
+- [x] ~~P0: 从 Git 停止跟踪 `legged_gym/utils/__pycache__/terrain.cpython-38.pyc`（不改 .gitignore）~~
+- [x] ~~P0: CommandPostProcessor 的 `max_cmd/max_delta` dtype 对齐为 float32，并在 process() 强制与 cmd.dtype 对齐（避免隐式 float64）~~
+- [x] ~~P1: gate_safe_clamp 阈值与 --beta 生效后的 safe_distance 对齐（clamp/后处理同口径）~~
+- [x] ~~P1: S2 cluster center：cx≈0 时随机左右偏移，避免 sign(0) 落入 clear band 导致重采样~~
+
+## 2026-02-02 Stage S0（平地移动目标跟随：先练稳定跟随+视野居中）
+
+- [x] ~~P0: 新增 `hex_s0_follow` 任务：flat heightfield（terrain_type=`s0_follow_plane`）+ 关闭 spawn_edge~~
+- [x] ~~P0: HexGround 增加移动目标生成器（difficulty 越高：切换更频繁、速度/方向更复杂；v_max=1.2）~~
+- [x] ~~P0: 目标输入与奖励口径：follow_distance_desired=1.0m；reach 逻辑禁用（不以“接触目标点”为结束）~~
+- [x] ~~P0: 视野居中口径：soft=0.35*fov、hard=0.70*fov；S0 连续 K=5 超出 hard 判丢失并 reset~~
+- [x] ~~P0: S0 训练稳定性：暂时关闭 target_lost 硬重置（target_lost_k=0），仅保留 target_center/visible shaping（S1 再启用硬重置）~~
+- [ ] P0: S0 完成后：S1 resume（Follow expert 继承稳定跟随能力，再引入门洞冲突）
+
+## 2026-01-30 机器人参数盘点（URDF + expert/ground 约束）
+
+- [x] ~~P0: 统一文档口径：y/y_eff 为 Follow 权重，w 为冲突强度（需取 1-w 融入 y_eff），修复 v6/v7 公式自相矛盾~~
+- [x] ~~P1: 基于训练用 URDF 与 legged_gym/envs/hex_v4/expert.py 汇总机器人物理参数（质量/惯量/几何包络/关节限位/最大速度角速度等）~~
+- [x] ~~P1: 精简 ROBOT_SPECS.md：仅保留 URDF/expert/训练配置的硬指标，删除推算与口径混用项~~
+
+## 2026-01-28 Stage 0 协议收口（seed / goal_th=0.1 / 指标口径）
+
+- [x] ~~P0: train_highlevel + play_highlevel 增加 --seed，并确保传入 env 创建流程~~
+- [x] ~~P0: goal threshold 兜底统一为 0.1（navigation_env / hex_terrain_config / hex_ground / hex_terrain + train_highlevel 同步常量）~~
+- [x] ~~P0: 训练链路新增 post_info 透出 + CmdJerk / NearMiss / GateSwitchRate 指标（TensorBoard）~~
+- [x] ~~P0: 修复 jerk 统计跨 episode 差分 + near-miss 指标命名为 excess~~
+- [x] ~~P0: seed 覆盖写死在 train_highlevel/play_highlevel（get_cfgs 后、make_env 前，env_cfg.seed=argseed）~~
+- [x] ~~P0: GateSwitchRate/GateYChange 统计屏蔽跨 episode Δy~~
+
+## 2026-01-27 S3–S6 classic heightfield 入口打通（无动态 actor）
+
+- [x] ~~Must: S3–S6（含 Large）配置补齐 terrain_type~~
+- [x] ~~Must: terrain.py 追加 S3–S6 classic heightfield 生成分支（走契约视图）~~
+- [x] ~~Must: Terrain.make_terrain 支持 s3/s4/s5/s6 terrain_type 别名映射~~
+- [ ] Must: hex_s3/hex_s4/hex_s5/hex_s6 最小启动验证（num_envs 小）
+
+## 2026-01-27 S1 出生段/门洞段/目标段契约（避免重叠）
+
+- [x] ~~P0: S1 明确走廊局部坐标契约（+Y 走廊轴，y∈[-L/2,+L/2]，spawn 在起点段，gate/goal 在中后段）~~
+- [x] ~~P0: s1_corridor_gate_terrain 加入 gate 排除区间与硬报错（含 spawn/goal 段保护）~~
+- [x] ~~P0: corridor_gates 写入 meta 前按 y0 升序排序~~
+- [ ] P0: 最小验证（hex_s1 固定 seed）：spawn 段、gate 段、goal 段互斥且无 reset-loop
+
+## 2026-01-27 S2 出生点安全通道修复（clear_band）
+
+- [x] ~~P0: _apply_scene_spawn 对 s2_forest 强制出生在 clear_band 安全通道内，避免出生即碰撞~~
+- [ ] P0: 最小验证（hex_s2 固定 seed）：出生 x 均落在 clear_band 且不再崩溃
+
+## 2026-01-27 导航训练链路修复（S3-6 解锁 / num_envs / depth / goal 阈值）
+
+- [x] ~~P0: train_highlevel 放开 hex_s3/4/5/6/hex_mix_gate 的硬拦截（改为 warning）~~
+- [x] ~~P0: train_highlevel 的 --num_envs 默认改为 None，仅显式传参才覆盖 cfg~~
+- [x] ~~P0: Teacher 不创建 depth buffer（仅 Student/camera_enable 才创建）~~
+- [x] ~~P0: goal_reached_threshold 与 reward_cfg.goal_reach_threshold 统一为 0.1（含一致性断言）~~
+
+## 2026-01-27 相机关闭时 step_separate 修复 + .pyc 清理
+
+- [x] ~~P0: step_separate 相机关闭不触碰 depth buffer；相机开启时惰性创建~~
+- [x] ~~P0: .gitignore 确认/添加 __pycache__/ 与 *.pyc，清理已跟踪 .pyc~~
+
+## 2026-01-27 separated 观测噪声维度修复（headless 检查）
+
+- [x] ~~P0: compute_observations_separated 噪声 slice 按实际 buffer 维度切片，并加长度校验~~
+
+## 2026-01-27 S1 spawn 放置优化（避免 reset-loop）
+
+- [x] ~~P0: S1 spawn x 采样扣除 clearance，y 采样避开 gate 段，失败走 deterministic fallback（一次性 warn）~~
+
+## 2026-01-27 调试经验更新（S1 2048 并行稳定）
+
+- [ ] P0: 将 S1 2048 并行稳定经验写入 AGENTS.md“调试总结”
+
+## 2026-01-27 调试总结拆分为独立文件
+
+- [x] ~~P0: 将 AGENTS.md 的“调试总结”剪切到 DEBUG_SUMMARY_CN.md，并在 AGENTS.md 留引用~~
+
+## 2026-01-27 调试总结追加（S1 2048 并行经验）
+
+- [x] ~~P0: 向 DEBUG_SUMMARY_CN.md 追加 S1 2048 并行稳定经验（详细版）~~
+
+## 2026-01-27 调试总结追加（简版 checklist）
+
+- [x] ~~P0: 向 DEBUG_SUMMARY_CN.md 追加简版 checklist~~
+
+## 2026-01-26 训练链路收口 - debug/plane + 可复现 + grid 透明
+
+- [x] ~~Must: 新增 hex_debug_plane 任务配置，工具脚本统一改用~~
+- [x] ~~Must: hex_ground debug_allow_plane 放行 plane；训练主线仍严格 terrain_v2~~
+- [x] ~~Must: train_highlevel 默认任务改为 hex_s1~~
+- [x] ~~Must: terrain_v2 shuffle 可复现（显式 seed）~~
+- [x] ~~Must: terrain_v2 auto grid 支持部分指定 + 启动日志打印关键参数~~
+- [x] ~~Must: SceneSpec helper 生成 rect_hf（debug/s2 接入）~~
+- [x] ~~Must: terrain_v2 SubTerrain 轴序显式映射 + 日志/可审计~~
+- [ ] Must: A/B 测 GPU vs CPU pipeline（同一地形/num_envs）
+- [x] ~~Must: _create_heightfield 恢复 swap 口径（与 hex 语义一致）~~
+- [x] ~~Must: heightfield 传入 PhysX 前强制 C-contiguous~~
+- [x] ~~Must: CPU 模式下 actuator_net 允许 map_location=cpu（用于 A/B 证伪）~~
+- [x] ~~Must: terrain_v2_max_rows 仅限 hex_calib + auto_grid 优先级日志~~
+- [x] ~~Must: terrain_v2_max_tot_rows/cols（仅 hex_calib）+ auto_grid 像素预算约束（deterministic）~~
+
+## 2026-01-26 经典 legged_gym 回退（hexpod 口径）
+
+- [x] ~~Must: 删除 terrain_v2 全链路与配置字段（仅保留 classic）~~
+- [x] ~~Must: Terrain 经典 TileGrid + 固定 5x10 网格，num_envs 复用 tile~~
+- [x] ~~Must: _create_heightfield / _get_env_origins 复刻 hexpod 口径~~
+- [x] ~~Must: S1/S2 classic builder（seed 可复现 + tile_meta）~~
+- [x] ~~Must: hex_s1/hex_s2 配置收口（terrain_type + 固定网格）~~
+- [x] ~~Must: tools/scene_audit 改为 classic 口径~~
+
+## 2026-01-26 classic 主线稳定性修复（spawn/工具/S2审计）
+
+- [x] ~~P0: _apply_scene_spawn 不再依赖 scene_generator（S1 出生必须在走廊内）~~
+- [x] ~~P0: 删除 legged_gym/envs/hex_v4/terrain_v2/ 并迁移 tools/debug_s2_scene.py 到 classic builder~~
+- [x] ~~P1: S2 meta 记录实际放置数量（避免审计误导）~~
+- [x] ~~P1: S1 wall_thickness_m 实现有限厚度（不再无限填满）~~
+
+## 2026-01-26 classic 拼图轴序适配（SubTerrain shape）
+
+- [x] ~~P0: add_terrain_to_map 形状判定后必要时转置；env_origin_z 同口径采样；首次触发仅日志一次~~
+
+## 2026-01-26 S1 出生与朝向收口（classic）
+
+- [x] ~~P0: S1 创建时禁用 jitter（避免初始 pose 偏移出走廊）~~
+- [x] ~~P0: _apply_scene_spawn 强制 margin clamp + 非法范围硬报错~~
+- [x] ~~P0: S1 出生朝向强制沿 +Y（保留 yaw 抖动）~~
+- [x] ~~P0: 修正 S1 出生朝向公式（heading_offset 采用加法，避免垂直墙）~~
+- [x] ~~P0: S1 spawn 依赖 scene_spec_cache；缺失时硬报错并提示 mesh_type/terrain_type/tile_meta~~
+
+## 2026-01-26 轴向契约与校准验收（classic）
+
+- [x] ~~P0: 写死轴向契约（World/Tile/Heightfield），作为单一真源~~
+- [x] ~~P0: 统一唯一映射层到 add_terrain_to_map（含 env_origin_z 同口径）~~
+- [x] ~~P0: debug_axis 自动验收（+Y 单调、+X 恒定，失败即报错）~~
+- [x] ~~P0: 启动日志一次性打印 tile/subterrain 轴映射（none/transpose）~~
+
+## 2026-01-26 S1 朝向/重生收口（classic）
+
+- [x] ~~P0: hex_s1 系列将 heading_offset 置 0（机体 +Y forward，避免再偏转）~~
+- [x] ~~P0: hex_s1 reward_cfg 同步 heading_offset 置 0（避免奖励方向矛盾）~~
+
+## 2026-01-26 文档补充 - 调试总结
+
+- [x] ~~P0: AGENTS.md 新增“调试总结”章节（轴向契约 + 唯一映射层 + 校准验收 + heading_offset 经验）~~
+
+## 2026-01-26 工具链收口 - debug 入口与误用提示
+
+- [x] ~~Must: hex_ground.py __main__ 改为 hex_debug_plane~~
+- [x] ~~Must: hex_ground 误用提示升级（明确容器任务 + 示例命令）~~
+- [x] ~~Must: 新增 hex_debug_heightfield 任务并接入 RGB/Depth 联合测试~~
+
+## 2026-01-26 文档更新 - 训练指令与场景说明
+
+- [x] ~~Must: 训练指令.txt 按现有代码更新命令与场景说明~~
+- [x] ~~Must: 训练指令.txt 补充 gate_width/door_width 映射与权威字段说明~~
+
+## 2026-01-23 18:07:54 - terrain_v2 重构（阶段 A）
+
+- [x] ~~Must: 新增 terrain_v2 + debug_axis_calib + S1/S2 + backend/contracts/audit~~
+- [x] ~~Must: terrain.py 接入 terrain_v2（hex 显式开关）+ unique tile + auto expand + 禁止 legacy fallback~~
+- [x] ~~Must: 更新 hex_ground/hex_s1/hex_s2 配置与训练入口日志~~
+- [x] ~~Must: 删除旧 scene_gen_v2/scene_manager/terrain_builder 与旧引用~~
+
+## 2026-01-23 20:35:10 - hex 场景配置合并
+
+- [x] ~~Must: 合并 hex_calib/hex_s1..s6/hex_mix_gate 配置到单文件 hex_scenes_config.py~~
+- [x] ~~Must: 更新所有 import 引用并删除旧配置文件~~
+- [x] ~~Must: 验证无残留引用（rg）并更新 CHANGELOG_CN.md~~
+
+## 2026-01-23 21:05:30 - terrain 变更复核与旧文件恢复
+
+- [x] ~~Must: 恢复被删除的 terrain 相关 legacy 文件（仅保留、不使用）~~
+- [x] ~~Must: 复核 terrain.py 与 terrain 入口改动，确保默认路径不受影响~~
+- [x] ~~Must: 重新梳理引用，保证 legacy 入口不再被调用~~
+
+## 2026-01-23 21:25:10 - hex_terrain 硬报错 + 删除旧配置文件
+
+- [x] ~~Must: 所有入口对 hex_terrain 硬报错并给出提示~~
+- [x] ~~Must: 删除旧 hex_s1..s6/hex_calib/hex_mix_gate 配置文件~~
+- [x] ~~Must: rg 全仓确认无残留引用并更新 CHANGELOG_CN.md~~
+
+## 2026-01-23 21:40:20 - 高层训练链路修复
+
+- [ ] Must: scene_type 概率全零兜底（terrain_v2）
+- [ ] Must: highlevel 入口拦截未实现任务并给出清晰提示
+- [ ] Must: train_highlevel task 提示优化（hex_s1/hex_s2 不误报）
+
+## 2026-01-20 18:12:10 - V5 场景定义对齐与 TODO 收尾
+
+- [x] ~~Must: 技术方案中 S6 定义改为“结构化 OOD hold-out”，同步训练/验证/测试划分口径~~
+- [x] ~~Must: 核对 S1–S6 代码变更已落地，更新 TODO_LOG 17:25 条目为完成~~
+
+## 2026-01-23 14:09:13 - 场景生成系统重构（阶段1：S1/S2 闭环）
+
+- [x] ~~Must: 新建 SceneSpec/ObstacleSpec + HeightfieldBackend，统一单一真源入口~~
+- [x] ~~Must: 实现 S1/S2 generator + contract，并提供 tools/scene_audit 体检入口~~
+- [x] ~~Must: 训练入口接入新链路（hex_s1/hex_s2），旧 SceneManager/scene_cfg 直连下线~~
+
+## 2026-01-23 14:34:48 - scene_gen_v2 强化（参考 parkour）
+
+- [x] ~~Must: 统一入口打印 “Using scene_gen_v2”，并保持 legacy guard~~
+- [x] ~~Must: 增加 quantizer（米→格）并在 backend 强制量化~~
+- [x] ~~Must: 增加 guards（spawn/goal 清空 + edge pad）~~
+- [x] ~~Must: 强化 S1/S2 contract 与 scene_audit（pass率/指标）~~
+
+## 2026-01-23 14:49:37 - 训练指令更新（scene_gen_v2）
+
+- [x] ~~Must: 更新 `训练指令.txt`，补充 scene_gen_v2 提示与 scene_audit 命令~~
+
+## 2026-01-23 14:51:45 - scene_audit golden seeds
+
+- [x] ~~Must: 写入 golden seeds 文件（tools/scene_golden.json）~~
+- [x] ~~Must: 更新 `训练指令.txt` 记录 golden seeds 与 S1 现状~~
+
+## 2026-01-23 15:22:00 - S1 outside_escape 修复与 golden seeds 重建
+
+- [x] ~~Must: 修复 S1 corridor 外绕连通泄露（outside_escape）~~
+- [x] ~~Must: 重新运行 scene_audit 生成 golden seeds 并更新训练指令~~
+
+## 2026-01-23 15:40:00 - scene_gen_v2 tile 轴与坐标系修复
+
+- [x] ~~Must: scene_gen_v2 输出轴语义与 tile 约定对齐（length/width）~~
+- [x] ~~Must: tile 局部坐标系改为中心原点（y∈[-L/2,+L/2]）并修正 guards/contract~~
+- [x] ~~Must: 复测 scene_audit 并更新 golden seeds/训练指令~~
+
+## 2026-01-23 16:30:00 - P0/P1 虚空修复与外围墙下线
+
+- [x] ~~Must: 对齐 HeightFieldParams 轴语义（nbRows/nbColumns 按 parkour），并以 env_origins 全落入 world 覆盖范围为通过标准（num_envs=128）~~
+- [x] ~~Must: 继续保证 tile 轴顺序一致（axis0=length, axis1=width）~~
+- [x] ~~Must: 关闭外围墙（edge_pad 默认 0），S1 通过“走廊墙覆盖 + 绕行外侧连通性检查”保障不可绕行~~
+- [x] ~~Must: 复测 scene_audit 并更新 golden seeds/训练指令~~
+
+## 2026-01-23 17:50:00 - _create_heightfield 轴语义与 view 对齐（parkour）
+
+- [x] ~~Must: 对齐 nbRows/nbColumns 与 height_samples 视图语义，保持与 parkour 口径一致~~
+- [x] ~~Must: height_samples 统一一维 flatten/order 与长度校验（base/hex_climb）~~
+
+## 2026-01-23 18:05:00 - S1 连续墙 + 门洞内凸（去离散块）
+
+- [x] ~~Must: S1 门洞改为贴合走廊墙的内凸块，移除浮空离散块效果~~
+
+## 2026-01-23 18:25:00 - S1 连续墙强化 + 训练网格扩列
+
+- [x] ~~Must: num_envs 超过 terrain grid 时自动扩列，避免 env 重叠导致 GPU 崩溃/虚空~~
+- [x] ~~Must: S1 门洞内凸与外墙重叠，确保视觉连续~~
+
+## 2026-01-23 19:00:00 - Heightfield 轴语义校准场景（calib_axis）
+
+- [x] ~~Must: 新增 calib_axis 场景与 task 注册，用于 30s 轴语义校准~~
+
+## 2026-01-23 19:20:00 - calib_axis 长宽区分（长方形）
+
+- [x] ~~Must: calib_axis 使用明显长宽比（length!=width）便于肉眼判轴~~
+
+## 2026-01-23 19:35:00 - scene_gen_v2 tile 维度对齐 SubTerrain
+
+- [x] ~~Must: scene_gen_v2 SubTerrain(width/length) 与 backend tile shape 对齐~~
+
+## 2026-01-23 13:41:24 - 高层训练崩溃与 heightfield 形状修复
+
+- [x] ~~Must: hex_ground._reset_scene 兼容 heightfield meta(dict)，避免 build_meta 访问 static_obstacles 报错~~
+- [x] ~~Must: 修复 heightfield height_samples 形状，满足 Isaac Gym nbRows*nbColumns 要求~~
+
+## 2026-01-23 14:30:00 - Agent 角色模式开关（新对话必问）
+
+- [x] ~~将“新对话先询问角色：1 决策辅助 / 2 编程主力”的规则写入 `AGENTS.md`~~
+
+## 2026-01-23 15:00:00 - Agent 写入项目核心诉求与约束
+
+- [x] ~~将“高效率训练（3090/2048/4096）+ 高仿真质量 + 泛化/Sim2Real + RAL 证据链要求”的背景与约束写入 `AGENTS.md`~~
+
+## 2026-01-23 09:10:00 - 地形生成精简（保留必要动态障碍）
+
+- [x] ~~Must: 移除静态 actor 生成与同步逻辑，仅保留 heightfield 静态障碍~~
+- [x] ~~Must: 仅保留 S4 动态障碍 actor 路径，其它场景禁用动态 actor~~
+- [x] ~~Must: 精简 SceneManager/HexGround 中 actor 相关分支与配置字段~~
+- [x] ~~Must: 对齐 S5/S6 scene_type 分支以保证 heightfield 生成~~
+
+## 2026-01-20 19:20:04 - 训练指令清单更新（V5 全链路）
+
+- [x] ~~Must: 更新 `训练指令.txt`，补齐 Follow/Avoid/Gate 训练与微调、Test-ID/Test-OOD/Hold-out、play/eval 相关命令~~
+
+## 2026-01-20 19:34:20 - 修复机器人 root_states 索引（多 actor 场景）
+
+- [x] ~~Must: 记录 robot actor indices，root_states 只指向机器人，障碍写回 all_root_states~~
+
+## 2026-01-20 19:42:30 - 修复场景 affordance NaN（GT rasterize）
+
+- [x] ~~Must: _compute_gt_affordance_from_scene 对 NaN/无效 cell 做防护，避免 rasterize 崩溃~~
+
+## 2026-01-20 20:08:20 - 修复 actor 创建顺序（env 内一次性创建）
+
+- [x] ~~Must: 基类加入创建钩子，HexGround 在每个 env 内创建 robot+障碍 actor，消除 creation order warning 风险~~
+
+## 2026-01-20 20:18:30 - 修复 DOF reset 使用 actor indices
+
+- [x] ~~Must: LeggedRobot._reset_dofs 使用 robot_actor_indices，避免多 actor 场景非法访问~~
+
+## 2026-01-21 16:00:56 - 多 actor 收口修复与走廊墙体保障
+
+- [x] ~~Must: hex_ground._reset_dofs 改用 robot_actor_indices_int32（禁止 env_ids 直接传给 DOF indexed）~~
+- [x] ~~Must: 引入 scene_static_wall_max / scene_static_block_max，S1 wall 不截断~~
+- [x] ~~Must: 启动时断言 robot actor 顺序（env 内第一个）~~
+- [x] ~~Should: affordance 坐标系校验开关（用于 +Y forward 验证）~~
+
+## 2026-01-21 16:12:10 - S1 走廊障碍补齐与出生修复
+
+- [x] ~~Must: corridor 场景补充随机障碍（不改变墙体/门洞逻辑）~~
+- [x] ~~Must: corridor 场景出生点限制在通道内，避免出生卡墙~~
+
+## 2026-01-21 18:30:00 - 按最新描述重做 S1–S6 场景语义
+
+- [x] ~~Must: S1 走廊+门洞实现（门洞收缩段、位置/数量随机化、宽度随难度收缩），并保证 wall_truncate_rate=0~~
+- [x] ~~Must: S1 走廊内障碍与出生/目标采样约束在通道内（避免出生卡墙）~~
+- [x] ~~Must: S2 Forest 障碍密度/形状比例/尺寸随机化按难度生效，区间量化并保留覆盖~~
+- [x] ~~Must: S3 Doorway 房间-门洞拓扑生成（门洞位置/数量/宽度随机化，房间内少量障碍）~~
+- [x] ~~Must: S4 Crossing 动态横穿轨迹由反应窗口步数反推速度，记录可复现轨迹参数~~
+- [x] ~~Must: S5 Sparse→Dense 分段密度与分界随机化（分界位置/密度差随难度）~~
+- [x] ~~Must: S6 OOD 结构化模板（cluster/nonconvex/maze）混合采样，并支持模板固定开关~~
+
+## 2026-01-21 19:10:00 - 同步文档与训练指令（S1–S6 语义）
+
+- [x] ~~Must: 更新 `训练指令.txt` 的场景映射与任务说明（S1=Corridor, S2=Forest, S3=Doorway, S6=OOD mix）~~
+- [x] ~~Must: 更新 `技术方案/技术方案V4_完整统一版.md` 的 S1–S6 描述与 Train/Val/Test 口径~~
+- [x] ~~Should: 更新 `TRAINING_PIPELINE_V5_CHECKLIST.txt` 补充 S1–S6 映射说明与 S6 模板开关~~
+
+## 2026-01-21 19:24:00 - 训练指令更新与场景说明补充
+
+- [x] ~~Must: 更新 `训练指令.txt` 的最新训练指令（S2 Follow/Avoid 主训、S1 Avoid 微调、S4 Gate、Mix Gate）~~
+- [x] ~~Must: 在 `训练指令.txt` 中补充 S1–S6 场景细节说明与 S6 模板开关提示~~
+
+## 2026-01-21 19:46:00 - S2 场景排查脚本
+
+- [x] ~~Must: 新增 debug 脚本输出 hex_s2 的场景配置与障碍数量摘要（不触发 isaacgym）~~
+
+## 2026-01-21 20:05:00 - 训练输出精简与 debug 开关
+
+- [x] ~~Must: train_highlevel 非必要输出改为 --debug 控制，默认安静~~
+- [x] ~~Should: play_highlevel 同步 debug 开关控制诊断输出~~
+
+## 2026-01-22 09:10:00 - debug 模式打印障碍落地位置
+
+- [x] ~~Must: train_highlevel --debug 下打印前 N 个静态障碍位置/尺寸与 z 统计，便于排查“看不到障碍”~~
+
+## 2026-01-22 09:40:00 - reset 时全量写回障碍 root_states（仅重采样）
+
+- [x] ~~Must: _reset_scene 末尾全量 set_actor_root_state_tensor（只用于 reset/重采样）~~
+- [x] ~~Must: debug 抽查 1-3 个静态障碍 root_state 与 spec/world 偏差（wall 尺度为主，block/pole 用自身尺度）~~
+
+## 2026-01-22 10:05:00 - S1 spawn 采样 rng 初始化修复
+
+- [x] ~~Must: _apply_scene_spawn 在 S1 分支前初始化 rng（防止 UnboundLocalError）~~
+
+## 2026-01-22 10:15:00 - 障碍 collision filter 修复（防穿墙）
+
+- [x] ~~Must: 场景障碍 actor 使用 scene_collision_filter=0xFFFFFFFF 并写回 shape filter~~
+
+## 2026-01-22 10:25:00 - scene_collision_filter 兼容有符号 int
+
+- [x] ~~Must: 将 0xFFFFFFFF 归一为 -1，避免 create_actor 参数类型报错~~
+
+## 2026-01-22 10:40:00 - S1-S6 actor 场景改为 plane + env_spacing
+
+- [x] ~~Must: hex_s1..hex_s6 全部设 mesh_type="plane"，并设置 env.env_spacing=12.0~~
+
+## 2026-01-22 10:50:00 - mix gate 改为 plane + env_spacing
+
+- [x] ~~Must: hex_mix_gate_config 设 mesh_type="plane"，env.env_spacing=12.0~~
+- [x] ~~Should: train_highlevel --debug 打印 num_envs/env_spacing/env_origins[:3]~~
+
+## 2026-01-22 11:00:00 - plane 模式下 scene_manager 初始化修复
+
+- [x] ~~Must: HexGround._pre_create_envs 不依赖 self.terrain，必要时用 cfg.terrain 创建 SceneManager~~
+
+## 2026-01-22 11:05:00 - plane 模式下 scene_specs 访问修复
+
+- [x] ~~Must: HexGround.__init__ 访问 scene_specs 时不依赖 self.terrain~~
+
+## 2026-01-22 11:20:00 - 隐藏问题收口修复
+
+- [x] ~~Must: 障碍创建时 collision_filter=0，reset 同步时按 active 开/关碰撞（避免 hidden pool 崩溃）~~
+- [x] ~~Should: S3/S6 wall 截断报警（非 S1 硬断言）~~
+- [x] ~~Should: S1 goal 采样极端参数 fallback（避免 y_max<=y_min 卡死）~~
+
+## 2026-01-22 12:10:00 - 隐藏问题收口修复（续）
+
+- [x] ~~Must: 修复 S1 goal 采样 fallback（y_max<=y_min 时转入通用采样）~~
+- [x] ~~Must: 确认 hidden pool 碰撞过滤策略（创建 filter=0，reset 时按 active/hidden 切换）~~
+- [x] ~~Should: 校验 S3/S6 wall 截断仅告警，S1 仍硬断言~~
+
+## 2026-01-22 12:30:00 - 墙体碰撞修复（机器人穿墙）
+
+- [x] ~~Must: 机器人 actor shape filter 设为 scene_collision_filter（避免与障碍不碰撞）~~
+- [x] ~~Should: debug 下打印一次 robot/wall 的 shape filter 值，便于确认~~
+
+## 2026-01-22 12:40:00 - plane 模式 debug_viz 守护
+
+- [x] ~~Must: HexGround 覆盖 _draw_debug_vis，缺少 terrain 时直接 return~~
+
+## 2026-01-22 13:00:00 - 2048 env train_large 配置与 actor budget
+
+- [x] ~~Must: 新增 train_large 配置（S1-S6 + mix），按配额限制 wall/block/dyn 上限~~
+- [x] ~~Must: 启动时打印 actors/env 与 total_actors，并按 budget 断言~~
+
+## 2026-01-22 13:20:00 - train_large 量化误差与 mix 统计
+
+- [x] ~~Must: S1 门洞量化误差写入 meta 并按阈值告警（含 n_tiles==0 兜底）~~
+- [x] ~~Must: mix 场景占比与 spawned 统计写入 extras，debug 下打印~~
+
+## 2026-01-22 13:35:00 - S3 Doorway train_large 截断修复
+
+- [x] ~~Must: Doorway 门框改走 wall pool（避免 block_max 截断）~~
+- [x] ~~Should: train_large room_width 拉大（减少 outer wall tiles）~~
+
+## 2026-01-22 13:45:00 - S6 OOD train_large 截断修复
+
+- [x] ~~Must: OOD 迷宫/非凸墙体改走 wall pool~~
+- [x] ~~Should: 确认 S6 wall_truncate_rate 仍为 warn（非 S1 不 raise）~~
+
+## 2026-01-22 14:00:00 - S6_large 模板固定与 mix 滑动统计
+
+- [ ] Must: S6_large 固定 ood_template=cluster（避免迷宫墙体截断）
+- [ ] Must: mix 场景统计增加最近 200 reset 滑动窗口
+
+## 2026-01-22 15:10:00 - 训练指令更新与潜在问题审计
+
+- [x] ~~Must: 更新 `训练指令.txt` 为最新任务/large 指令，并补充场景说明~~
+- [x] ~~Must: 审计潜在问题并输出清单（不改代码）~~
+
+## 2026-01-22 15:25:00 - S6 模板口径与 mix 统计触发修复
+
+- [x] ~~Must: 基础版 S6 使用 mix，large 固定 cluster~~
+- [x] ~~Must: mix 统计窗口按 reset 计数触发（每 200 次）~~
+
+## 2026-01-22 15:40:00 - mix 统计阈值与 large 结构截断硬断言
+
+- [x] ~~Must: mix 统计改为按 env-reset 大阈值触发（训练 50k，debug 200）~~
+- [x] ~~Must: train_large 对 S1/S3/S6 wall 截断升级为 hard assert~~
+
+## 2026-01-22 16:10:00 - 碰撞 group=0 诊断确认
+
+- [x] ~~Must: debug 模式打印 robot/wall 的 collision group/filter，确认 env0 group=0 问题~~
+
+## 2026-01-22 16:20:00 - 碰撞 group=0 修复
+
+- [x] ~~Must: robot/obstacle create_actor 使用 env_id+1 作为 collision group，避免 group=0 失效~~
+
+## 2026-01-22 16:35:00 - group_id 未定义修复与潜在错误复检
+
+- [x] ~~Must: _create_env_actors 内补充 group_id 定义，排除 NameError~~
+- [x] ~~Must: 复检近期改动中的潜在未定义变量/口径问题~~
+
+## 2026-01-22 17:00:00 - actor 场景 collision_filter 统一
+
+- [x] ~~Must: robot create_actor filter 在 actor 场景下改用 scene_collision_filter~~
+- [x] ~~Must: obstacle create_actor filter 改为 scene_collision_filter，保留 inactive filter=0~~
+
+## 2026-01-22 17:55:00 - 走廊穿墙修复（group bitmask + filter 统一）
+
+- [x] ~~Must: actor 场景下 group_id 改为固定 bitmask=1（机器人+障碍统一）~~
+- [x] ~~Must: 新增统一 helper 写入 shape filter（robot/obstacle 都走同一逻辑）~~
+- [x] ~~Must: debug 下 reset 后打印一次 robot/wall 的 shape filter 与 group（确认生效）~~
+
+## 2026-01-22 22:05:00 - TerrainBuilder 重构（heightfield 主线）
+
+- [x] ~~Must: 新增 TerrainBuilder（S1/S2/S3/S5/S6 heightfield）~~
+- [x] ~~Must: Terrain 入口接入 scene_type -> TerrainBuilder（legacy 保留）~~
+- [x] ~~Must: hex_s1..hex_s6 configs 切换 mesh_type=heightfield + scene_type/scene_cfg~~
+- [x] ~~Must: TRAINING_COMMANDS.md 写最小验证命令~~
+
+## 2026-01-20 11:39:46 - MoE cmd-space 重构与 V5 方案更新
+
+- [x] ~~Must: 训练顺序调整为 Avoid → Follow → Gate（Gate 前 Avoid 碰撞率需很低）~~
+- [x] ~~Must: CommandPostProcessor 放到可复用位置（不只放在 train_highlevel.py）~~
+- [x] ~~Must: `rsl_rl/algorithms/high_level_planner.py` 新增 CmdVelExpert/GatePolicy，y 仅门控~~
+- [x] ~~Must: `legged_gym/scripts/train_highlevel.py` 支持 follow/avoid/moe，cmd-space 融合~~
+- [x] ~~Must: `legged_gym/envs/hex_v4/navigation_env.py` 增加连续风险成本（risk barrier）~~
+- [x] ~~Must: 技术方案升级到 V5，写明 y 语义、MoE 结构、S1-S6/T1-T2 划分、OOD hold-out~~
+- [x] ~~Must: 收尾 `legged_gym/scripts/train_highlevel.py`（清理残留字段、日志与 buffer 对齐）~~
+- [x] ~~Must: 对齐 `compute_reward` 调用签名与 reward 统计键~~
+- [x] ~~Must: 完成后更新 `CHANGELOG_CN.md` 记录大改动~~
+- [x] ~~Should: Gate 加 y-rate penalty，训练早期可启用安全 clamp（d_min < d_safe）~~
+- [x] ~~Should: CmdVelExpert 使用 tanh + 物理尺度映射，避免极值~~
+
+## 2026-01-20 16:12:58 - S1-S6 场景落地（每场景一个 task config）
+
+- [x] ~~Must: 新增 `legged_gym/envs/hex_v4/scene_manager.py`，提供 SceneSpec/SceneManager 与重采样机制（create/reset/level_change）~~
+- [x] ~~Must: 新增 `hex_s1_config.py`…`hex_s6_config.py`（继承 HexGroundCfg），绑定 scene_type 与课程 easy/hard 区间~~
+- [x] ~~Must: 接入 SceneManager 到 hex_ground/terrain 生成流程，替代 fixed_layout 的场景生成入口~~
+- [x] ~~Must: S4 动态障碍 kinematic 轨迹可复现（SceneSpec 显式 path/速度），碰撞强惩罚/终止~~
+- [x] ~~Must: 反应窗口步数 → 横穿速度映射（10Hz 下训练 8–20 步，OOD 4–10 步）~~
+- [x] ~~Must: 任务注册 hex_s1…hex_s6 到 `legged_gym/envs/__init__.py` 并输出 SceneSpec meta 日志~~
+- [x] ~~Should: 保持不新建目录，仅新增文件与接入逻辑~~
+
+## 2026-01-20 17:03:38 - S1-S6 场景问题修复
+
+- [x] ~~Must: S1–S6 禁用 slalom 出生逻辑（避免 terrain_proportions=[1.0] 触发）~~
+- [x] ~~Must: 场景静态重采样改为“列切换”方式（scene_resample_on_reset + num_cols>1）~~
+
+## 2026-01-20 17:25:08 - 场景与高层训练最终方案（V5）
+
+- [x] ~~Must: SceneManager 补齐 meta（layout_id/hash/密度代理/动态体参数），并支持 mix gate 的 scene_types 采样~~
+- [x] ~~Must: hex_ground 支持 on_reset/on_level_change 重采样与 actor pool 复用，动态障碍轨迹可复现~~
+- [x] ~~Must: 新增 `hex_mix_gate_config.py` 并注册任务，保持 S1-S6 配置一致性~~
+- [x] ~~Must: train_highlevel 接入 PPO runner，支持 --resume/--finetune_from 语义~~
+- [x] ~~Must: task_registry 修复 hex_s* runner 选择（仅 PPO，不引入 EGPO）~~
+- [ ] Must: 验证 scene meta、layout 变更、resume/finetune 行为，并记录最小可运行指令
+
+## 2026-01-20 18:18:40 - 训练指令补充（V5 最小可运行）
+
+- [x] ~~Must: 训练指令.txt 追加 S1/S2/S4/mix gate 与 resume/finetune 示例~~
+
+## 2026-01-20 19:05:40 - V5 场景修复补全
+
+## 2026-01-22 23:10:00 - TerrainBuilder 场景重写（heightfield 科研规范）
+
+- [x] ~~Must: terrain_builder.py 按科研规范重写 S1/S2/S3/S5/S6（+Y 坐标、clear_rect、zig-zag 门洞、分段密度）~~
+- [x] ~~Must: build_heightfield 接收 horizontal/vertical_scale，返回 (hf, meta) 并在 terrain.py 传参对齐~~
+- [x] ~~Must: hex_s1..hex_s6 scene_cfg 字段名对齐新规范（clearance/length_mul/half_width_mul 等）~~
+- [x] ~~Must: V5 奖励口径下沉到 hex_* config，train_highlevel 不再按 task 特判~~
+- [x] ~~Must: actor 场景目标采样改为 scene_spec 线段阻挡判定，并增加可控开关~~
+- [x] ~~Must: S3/S5/S6 障碍尺寸参数生效（radius/height/cluster_radius）~~
+- [x] ~~Should: play_highlevel help 文案更新支持 hex_s1…hex_s6/mix gate~~
+
+## 2026-01-20 19:34:02 - Actor pool 动态分配与 Follow 一致性
+
+- [x] ~~Must: 静态障碍 actor pool 改为总池动态分配，记录 truncate_rate~~
+- [x] ~~Must: Follow config 关闭 blocking-line；play_highlevel 保底同步~~
+
+## 2026-01-20 12:08:32 - 修复 V5 语法与 play_highlevel 适配
+
+- [x] ~~Must: 修复 NavigationRewardFunction.compute_reward 参数顺序（默认参数在末尾）~~
+- [x] ~~Must: play_highlevel 适配 CmdVelExpert 输出与 env.step(cmd_vel)~~
+- [x] ~~Must: 清理 play_highlevel 的 intensity/subgoal 旧日志字段~~
+- [ ] Should: T1 弱遮挡训练仅作用于 policy 输入（不改 env 目标/奖励）
+
+## 2026-01-20 12:18:35 - Pylance 报错清理
+
+- [x] ~~Must: train_highlevel 增加延迟导入占位，消除未定义/可调用检查~~
+- [x] ~~Must: play_highlevel 对 vision_model/obs 增加显式保护~~
+
+## 2026-01-20 12:28:03 - T1 弱遮挡训练与 play_highlevel MoE
+
+- [x] ~~Must: train_highlevel 增加 T1 弱遮挡（仅影响 policy 输入）~~
+- [x] ~~Must: play_highlevel 支持 follow/avoid/moe 与 gate 混合演示~~
+- [x] ~~Must: play_highlevel 增加 gate_y 日志~~
+
+## 2026-01-20 12:34:41 - CommandPostProcessor 训练/演示一致性
+
+- [x] ~~Must: play_highlevel 补齐 cmd post-processor 参数并对齐训练默认值~~
+- [x] ~~Must: 训练与演示统一使用 env.post_processor 结果~~
+
+## 2026-01-20 12:39:12 - Gate 训练梯度隔离
+
+- [x] ~~Must: Gate 训练 expert 前向必须 no_grad + requires_grad=False~~
+- [x] ~~Must: Gate 训练仅记录 gate 的 logprob/value/adv~~
+
+## 2026-01-20 12:44:10 - Reward 语义断言（可检查）
+
+- [ ] Must: gate_smooth 仅依赖 y_t - y_{t-1}，不得读取 intensity/subgoal（检查 `NavigationRewardFunction.compute_reward`）
+- [ ] Must: risk_barrier 连续可导（至少 piecewise 连续）；collision 仍为强惩罚/终止（检查 `NavigationRewardFunction.compute_reward` 与 env 终止条件）
+- [ ] Must: intensity 仅作兼容 fallback，主线训练/演示不再依赖它（日志不输出 intensity）
+
+## 2026-01-20 12:52:20 - V5 风险点 Must-check
+
+- [x] ~~Must: 默认 task 与论文一致（V5 默认 hex_ground；hex_terrain 标注 legacy/非主线）~~
+- [x] ~~Must: Gate 输入特权信息审计（difficulty 是否进入 gate；如进入需说明来源，或移除/固定）~~
+- [x] ~~Must: 风险后处理消融开关（可单独关闭 risk_scale/钳制做归因）~~
+- [x] ~~Must: moe 模式 affordance 来源固定（teacher/student 在 train/test 一致并记录）~~
+- [x] ~~Must: rollout horizon 合理性验证（gate 至少对比 num_steps=48）~~
+
+## 2026-01-20 13:04:52 - 默认 aff_stack 改为 1
+
+- [x] ~~Must: train_highlevel 默认 aff_stack=1~~
+- [x] ~~Must: play_highlevel 默认 aff_stack=1~~
+- [x] ~~Must: 更新 V5 训练清单默认值~~
+
+## 2026-01-19 10:19:12 - play_highlevel 手动课程修复
+
+- [x] ~~play_highlevel: 禁用自动课程，仅响应 A/D 手动升降级~~
+- [x] ~~play_highlevel: 启动时固定 terrain_levels=0 并同步 env_origins~~
+- [x] ~~play_highlevel: 修正 max_level 计算与降级逻辑，避免直接跳最高级~~
+
+## 2026-01-19 10:33:37 - play_highlevel 门缝诊断输出
+
+- [x] ~~play_highlevel: 输出可通行/低障方向与门控、扇区可见率等排查指标~~
+- [x] ~~play_highlevel: 输出门缝偏离目标方向的夹角与判定~~
+
+## 2026-01-19 10:43:27 - play_highlevel 诊断输出格式化修复
+
+- [x] ~~play_highlevel: 诊断输出中 Tensor 格式化为 float，避免 format 报错~~
+
+## 2026-01-19 10:56:05 - play_highlevel heading_offset 覆盖验证
+
+- [x] ~~play_highlevel: 增加 heading_offset override/flip 以验证朝向口径~~
+
+## 2026-01-19 10:58:18 - play_highlevel goal 旋转诊断输出
+
+- [x] ~~play_highlevel: 输出 goal_raw/goal_rot 与多口径 bearing 以定位旋转符号~~
+
+## 2026-01-19 17:30:00 - 高层 goal 旋转修正（+Y 前进）
+
+- [x] ~~train_highlevel: 修正 goal 旋转公式并移除 guidance_goal_fix 兼容逻辑~~
+- [x] ~~play_highlevel: 清理 guidance_goal_fix 相关选项与诊断输出~~
+
+## 2026-01-19 16:13:57 - play_highlevel 引导目标修正（仅诊断）
+
+- [x] ~~train_highlevel: passable 引导使用 +Y 前进目标（可开关）~~
+- [x] ~~play_highlevel: 默认开启 guidance_goal_fix 并输出 fix 相关诊断~~
+
+## 2026-01-26 训练链路收口 - terrain_v2 规则与语义
+
+- [x] Must: hex_ground 强制 terrain_v2 + heightfield + 明确 scene_type(s) 提示
+- [x] Must: terrain_v2 自动 grid 可复现（rows/cols 规则固定）
+- [x] Must: door_width 语义钉死（生成/使用/审计一致）
+- [x] Must: spawn/goal rect_hf 强制存在且清空只用量化 rect_hf
+
+## 2026-01-27 方案文档 - PCR-Net++ (w+beta 联动后处理)
+
+- [ ] 在 docs/archive/思路设计.md 增补第二章：PCR-Net++（替代 Delta 残差为主线）
+- [ ] 明确 (y, w, beta) 分工：结构选择 / 预测式 prior / 风险预算(联动 Post-Processor)
+- [ ] 写清训练策略：专家预训练 -> 冻结专家训练 PCR-Net++ -> 可选端到端微调
+- [ ] 写清指标/消融：y-only vs y+w vs y+beta vs y+w+beta；beta 联动/不联动后处理
+
+## 2026-01-27 技术方案 - V6（实验总指导大纲落盘）
+
+- [ ] 新建 `技术方案/技术方案V6.md`：整理“最新实验设计总指导大纲”（y/w/beta 语义、训练/评测/消融矩阵、风险与失败判据）
+- [ ] 扩写 `技术方案/技术方案V6.md`：补齐可执行实验指导（语义验收 checklist、beta->后处理映射规范、场景分布参数表、训练三阶段预算建议、指标口径与消融矩阵模板）

@@ -26,6 +26,18 @@
 - **高效训练**：利用 GPU 并行加速，训练时间缩短至小时级
 - **鲁棒控制**：通过专家引导和课程学习提升稳定性
 
+### 🗂️ 文档结构（2026 架构优化）
+
+- 技术方案唯一基准：`技术方案/hexapod_RAL_complete_technical_spec_v7.md`、`技术方案/hexapod_RAL_integrated_final_v7.md`
+- 执行与里程碑记录：`TODO_LOG.md`（仅重大改变/思路调整）
+- 调试知识：`DEBUG_SUMMARY_CN.md`
+- 会话交接：`CONTEXT_HANDOFF_SUMMARY.md`
+- 长期项目总览：`PROJECT_OVERVIEW_CN.md`
+- 文档分层索引：`docs/README.md`
+- 文档快速导航：`docs/NAVIGATION.md`
+- 训练与阶段操作手册：`docs/operations/训练指令.txt`、`docs/operations/PHASE_SWITCHING_GUIDE.md`
+- 参数参考：`docs/reference/参数一览表.md`、`docs/reference/ROBOT_SPECS.md`
+
 ---
 
 ## ✨ 核心特性

@@ -1,5 +1,7 @@
 # 训练指令（classic legged_gym heightfield）
 
+> 文档状态：当前规范（Operations）。用于训练/评测命令速查；最终语义以 V7 技术方案与当前代码为准。
+
 ## 说明（以当前代码为准）
 
 - 训练主线任务：`hex_s0_follow` / `hex_s1` / `hex_s1_follow_moving` / `hex_s2` / `hex_calib`（classic heightfield）。
