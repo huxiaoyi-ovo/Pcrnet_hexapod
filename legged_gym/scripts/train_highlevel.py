@@ -3216,7 +3216,7 @@ if __name__ == "__main__":
                         help='PPO epoch 数')
     parser.add_argument('--mini_batch_size', type=int, default=4096,
                         help='Mini-batch 大小')
-    parser.add_argument('--lr', type=float, default=3e-5,
+    parser.add_argument('--lr', type=float, default=1.5e-5,
                         help='学习率')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='折扣因子')
