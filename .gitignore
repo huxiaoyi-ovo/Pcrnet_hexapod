@@ -35,6 +35,8 @@ build/
 
 # 单次执行缓存（自动清空，不进入版本控制）
 代码执行缓存区.md
+.cache/
+outputs/eval/
 
 # 5. 系统垃圾
 .DS_Store
