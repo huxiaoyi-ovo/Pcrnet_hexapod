@@ -58,7 +58,7 @@ SCENE_CURRIC_ITERS = 1000
 EXPERT_INTERFACE_RATIO = 0.2
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
-EXPERT_BC_COEF = 0.05
+EXPERT_BC_COEF = 0.5
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -2861,12 +2861,12 @@ def train(args):
                     expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
                     bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
-                # 总 Loss
-                # Hold phase: expert dominates behavior, so update only value head.
+                # Total loss.
+                # Hold phase: keep value + BC updates, block PPO policy/entropy terms.
                 policy_loss_weight = 0.0 if hold_expert else 1.0
                 value_loss_weight = args.value_loss_coef
                 entropy_loss_weight = args.entropy_coef * policy_loss_weight
-                bc_loss_weight = 0.0 if hold_expert else 1.0
+                bc_loss_weight = 1.0
                 effective_policy_loss = policy_loss_weight * policy_loss
                 effective_entropy_loss = entropy_loss_weight * entropy_loss
                 effective_bc_loss = bc_loss_weight * bc_loss
@@ -2889,14 +2889,6 @@ def train(args):
                 # 优化
                 optimizer.zero_grad()
                 loss.backward()
-                if hold_expert:
-                    # During expert-hold, keep only value_head gradients to avoid
-                    # actor/drift updates from shared trunk when policy actions are not executed.
-                    for name, param in policy.named_parameters():
-                        if param.grad is None:
-                            continue
-                        if "value_head" not in name:
-                            param.grad = None
                 if _actor_grad_has_non_finite(policy):
                     _handle_nonfinite_event(
                         "non-finite actor gradients before optimizer.step",
