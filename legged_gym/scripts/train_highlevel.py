@@ -2703,10 +2703,13 @@ def train(args):
         # PPO Update
         total_loss = 0
         policy_loss_sum = 0
+        effective_policy_loss_sum = 0
         value_loss_sum = 0
         entropy_sum = 0
+        effective_entropy_loss_sum = 0
         distill_loss_sum = 0
         bc_loss_sum = 0
+        effective_bc_loss_sum = 0
         expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
         clip_frac_sum = 0
@@ -2715,6 +2718,7 @@ def train(args):
             _get_expert_alpha(local_iteration, expert_interface_iters, expert_alpha_hold_iters)
             if use_egpo else 0.0
         )
+        hold_expert = bool(use_egpo and expert_alpha_update >= 0.95)
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         fail_fast_nonfinite = not bool(getattr(args, "allow_nonfinite_recovery", False))
@@ -2858,18 +2862,22 @@ def train(args):
                     bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
                 # 总 Loss
-                # Block policy gradient/entropy update when expert remains dominant.
-                policy_loss_weight = 0.0 if (use_egpo and expert_alpha_update >= 0.95) else 1.0
+                # Hold phase: expert dominates behavior, so update only value head.
+                policy_loss_weight = 0.0 if hold_expert else 1.0
                 value_loss_weight = args.value_loss_coef
                 entropy_loss_weight = args.entropy_coef * policy_loss_weight
-                total_loss = (
+                bc_loss_weight = 0.0 if hold_expert else 1.0
+                effective_policy_loss = policy_loss_weight * policy_loss
+                effective_entropy_loss = entropy_loss_weight * entropy_loss
+                effective_bc_loss = bc_loss_weight * bc_loss
+                loss_terms = (
                     policy_loss_weight * policy_loss
                     + value_loss_weight * value_loss
                     + entropy_loss_weight * entropy_loss
                     + args.distill_coef * distill_loss
-                    + bc_loss
+                    + effective_bc_loss
                 )
-                loss = total_loss
+                loss = loss_terms
                 if not torch.isfinite(loss):
                     _handle_nonfinite_event(
                         "non-finite loss",
@@ -2881,6 +2889,14 @@ def train(args):
                 # 优化
                 optimizer.zero_grad()
                 loss.backward()
+                if hold_expert:
+                    # During expert-hold, keep only value_head gradients to avoid
+                    # actor/drift updates from shared trunk when policy actions are not executed.
+                    for name, param in policy.named_parameters():
+                        if param.grad is None:
+                            continue
+                        if "value_head" not in name:
+                            param.grad = None
                 if _actor_grad_has_non_finite(policy):
                     _handle_nonfinite_event(
                         "non-finite actor gradients before optimizer.step",
@@ -2907,10 +2923,13 @@ def train(args):
                 
                 total_loss += loss.item()
                 policy_loss_sum += policy_loss.item()
+                effective_policy_loss_sum += effective_policy_loss.item()
                 value_loss_sum += value_loss.item()
                 entropy_sum += entropy.mean().item()
+                effective_entropy_loss_sum += effective_entropy_loss.item()
                 distill_loss_sum += distill_loss.item()
                 bc_loss_sum += bc_loss.item()
+                effective_bc_loss_sum += effective_bc_loss.item()
                 expert_log_prob_mean_sum += expert_log_prob_mean.item()
                 num_updates += 1
         
@@ -2996,14 +3015,17 @@ def train(args):
         # TensorBoard
         writer.add_scalar('Loss/Total', total_loss / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/Policy', policy_loss_sum / max(num_updates, 1), iteration)
+        writer.add_scalar('Loss/PolicyEffective', effective_policy_loss_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/Value', value_loss_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/Entropy', entropy_sum / max(num_updates, 1), iteration)
+        writer.add_scalar('Loss/EntropyEffective', effective_entropy_loss_sum / max(num_updates, 1), iteration)
         if args.mode == 'student':
             writer.add_scalar('Loss/Distill', distill_loss_sum / max(num_updates, 1), iteration)
         if use_egpo:
             writer.add_scalar('Train/ExpertAlpha', expert_alpha_update, iteration)
             writer.add_scalar('Train/EGPO_ExpertLogProbMean', expert_log_prob_mean_sum / max(num_updates, 1), iteration)
             writer.add_scalar('Train/EGPO_BCLoss', bc_loss_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Train/EGPO_BCLossEffective', effective_bc_loss_sum / max(num_updates, 1), iteration)
             writer.add_scalar('Train/ExpertActionDiff', expert_action_diff_mean, iteration)
             if debug:
                 writer.add_scalar('Diag/EGPOHeadingAlignCosMean', egpo_heading_align_cos_mean, iteration)
@@ -3088,9 +3110,9 @@ def train(args):
             egpo_line = ""
             if use_egpo:
                 egpo_line = (
-                    f"""{'EGPO alpha/logp/bc/diff:':>{pad}} {expert_alpha_update:.3f} / """
+                    f"""{'EGPO alpha/logp/bc(raw/eff)/diff:':>{pad}} {expert_alpha_update:.3f} / """
                     f"""{egpo_expert_log_prob_mean:.4f} / {bc_loss_sum / max(num_updates, 1):.4f} / """
-                    f"""{expert_action_diff_mean:.3f}\n"""
+                    f"""{effective_bc_loss_sum / max(num_updates, 1):.4f} / {expert_action_diff_mean:.3f}\n"""
                 )
                 if debug:
                     egpo_line += (
@@ -3105,7 +3127,9 @@ def train(args):
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
                           f"""{'Value function loss:':>{pad}} {value_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Policy loss:':>{pad}} {policy_loss_sum / max(num_updates, 1):.4f}\n"""
+                          f"""{'Policy loss (effective):':>{pad}} {effective_policy_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Entropy loss:':>{pad}} {entropy_sum / max(num_updates, 1):.4f}\n"""
+                          f"""{'Entropy loss (effective):':>{pad}} {effective_entropy_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
                           f"""{'Mean step reward:':>{pad}} {mean_step_reward:.3f} (resid {reward_residual:.3f})\n"""
                           f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
