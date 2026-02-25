@@ -2858,13 +2858,18 @@ def train(args):
                     bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
                 # 总 Loss
-                loss_ppo = (
-                    policy_loss + 
-                    args.value_loss_coef * value_loss + 
-                    args.entropy_coef * entropy_loss +
-                    args.distill_coef * distill_loss
+                # Block policy gradient/entropy update when expert remains dominant.
+                policy_loss_weight = 0.0 if (use_egpo and expert_alpha_update >= 0.95) else 1.0
+                value_loss_weight = args.value_loss_coef
+                entropy_loss_weight = args.entropy_coef * policy_loss_weight
+                total_loss = (
+                    policy_loss_weight * policy_loss
+                    + value_loss_weight * value_loss
+                    + entropy_loss_weight * entropy_loss
+                    + args.distill_coef * distill_loss
+                    + bc_loss
                 )
-                loss = loss_ppo + bc_loss
+                loss = total_loss
                 if not torch.isfinite(loss):
                     _handle_nonfinite_event(
                         "non-finite loss",
