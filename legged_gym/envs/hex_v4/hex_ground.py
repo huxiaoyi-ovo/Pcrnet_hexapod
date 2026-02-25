@@ -571,11 +571,71 @@ class HexGround(LeggedRobot):
             layout_seed=layout_seed,
         )
 
-    def _get_scene_difficulty(self, env_id: int) -> float:
+    @staticmethod
+    def _normalize_difficulty_override_tensor(
+        difficulty_override,
+        *,
+        expected_num: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if torch.is_tensor(difficulty_override):
+            d_tensor = difficulty_override.to(device=device, dtype=dtype)
+        else:
+            d_tensor = torch.as_tensor(difficulty_override, device=device, dtype=dtype)
+        if d_tensor.ndim == 0:
+            d_vec = torch.full((expected_num,), float(d_tensor.item()), device=device, dtype=dtype)
+        elif d_tensor.numel() == expected_num:
+            d_vec = d_tensor.reshape(-1)
+        else:
+            raise ValueError(
+                f"scene_difficulty_override shape mismatch: {tuple(d_tensor.shape)} "
+                f"(expected {expected_num})"
+            )
+        d_vec = torch.nan_to_num(d_vec, nan=0.0, posinf=1.0, neginf=0.0)
+        return torch.clamp(d_vec, 0.0, 1.0)
+
+    def _current_scene_difficulty(
+        self,
+        *,
+        expected_num: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        if device is None:
+            device = self.device
+        num = int(self.num_envs if expected_num is None else expected_num)
+
+        terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
+        difficulty_override = getattr(self, "scene_difficulty_override", None)
+        if difficulty_override is not None and terrain_type in ("s0_follow_plane", "s0"):
+            return self._normalize_difficulty_override_tensor(
+                difficulty_override,
+                expected_num=num,
+                device=device,
+                dtype=dtype,
+            )
+
         if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
             denom = max(1, int(self.max_terrain_level))
-            return float(self.terrain_levels[env_id].item()) / denom
-        return 0.0
+            d = self.terrain_levels[:num].to(device=device, dtype=dtype) / float(denom)
+            d = torch.nan_to_num(d, nan=0.0, posinf=1.0, neginf=0.0)
+            return torch.clamp(d, 0.0, 1.0)
+
+        return torch.zeros(num, device=device, dtype=dtype)
+
+    def _get_scene_difficulty(self, env_id: int) -> float:
+        if not hasattr(self, "terrain_levels") or self.terrain_levels.numel() == 0:
+            return 0.0
+        env_id = int(max(0, min(int(env_id), self.terrain_levels.numel() - 1)))
+        if hasattr(self, "max_terrain_level"):
+            denom = max(1, int(self.max_terrain_level))
+            d = float(self.terrain_levels[env_id].item()) / float(denom)
+        else:
+            d = 0.0
+        if not np.isfinite(d):
+            d = 0.0
+        return float(np.clip(d, 0.0, 1.0))
 
     def _fill_dynamic_buffers(self, env_id: int, dynamic_specs):
         if self.dynamic_actor_indices is None:
@@ -937,40 +997,11 @@ class HexGround(LeggedRobot):
 
         moving_mode = self._moving_target_mode()
         if moving_mode == "s1_gate_script":
-            if hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
-                denom = max(1, int(self.max_terrain_level))
-                d = self.terrain_levels.float() / float(denom)
-            else:
-                d = torch.zeros(self.num_envs, device=device)
-            d = torch.clamp(d, 0.0, 1.0)
+            d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
             self._update_moving_target_s1(dt=dt, d=d)
             return
 
-        difficulty_override = getattr(self, "scene_difficulty_override", None)
-        terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
-        if difficulty_override is not None and terrain_type in ("s0_follow_plane", "s0"):
-            if torch.is_tensor(difficulty_override):
-                difficulty_tensor = difficulty_override.to(device=device, dtype=torch.float32)
-                if difficulty_tensor.ndim == 0:
-                    difficulty_value = float(difficulty_tensor.item())
-                    difficulty_value = float(np.clip(difficulty_value, 0.0, 1.0))
-                    d = torch.full((self.num_envs,), difficulty_value, device=device)
-                elif difficulty_tensor.numel() == self.num_envs:
-                    d = torch.clamp(difficulty_tensor.reshape(-1), 0.0, 1.0)
-                else:
-                    raise ValueError(
-                        f"scene_difficulty_override shape mismatch: {tuple(difficulty_tensor.shape)}"
-                    )
-            else:
-                difficulty_value = float(difficulty_override)
-                difficulty_value = float(np.clip(difficulty_value, 0.0, 1.0))
-                d = torch.full((self.num_envs,), difficulty_value, device=device)
-        elif hasattr(self, "terrain_levels") and hasattr(self, "max_terrain_level"):
-            denom = max(1, int(self.max_terrain_level))
-            d = self.terrain_levels.float() / float(denom)
-        else:
-            d = torch.zeros(self.num_envs, device=device)
-        d = torch.clamp(d, 0.0, 1.0)
+        d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
         active_mask = torch.ones(self.num_envs, device=device, dtype=torch.bool)
 
         # Freeze after reset for early-stage learnability.

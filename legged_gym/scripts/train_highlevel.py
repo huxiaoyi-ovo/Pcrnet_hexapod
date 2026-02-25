@@ -23,6 +23,7 @@ import sys
 import time
 import argparse
 import math
+import copy
 import types
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 import torch
@@ -353,6 +354,9 @@ class HierarchicalHexapodEnv:
             print(f"[Env] 创建 Isaac Gym 环境: {args.task}")
         if env_cfg is None:
             env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+        # Isolate mutable runtime overrides to avoid cross-task config contamination.
+        env_cfg = copy.deepcopy(env_cfg)
+        train_cfg = copy.deepcopy(train_cfg) if train_cfg is not None else None
         if getattr(args, "seed", None) is not None:
             env_cfg.seed = int(args.seed)
         if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
@@ -457,18 +461,35 @@ class HierarchicalHexapodEnv:
          self.affordance_bearing_map,
          self.affordance_visible_mask) = self._build_affordance_geometry()
         terrain_type = str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower()
+        if str(getattr(args, "task", "")).lower() == "hex_s0_follow":
+            if terrain_type not in ("s0_follow_plane", "s0"):
+                raise RuntimeError(
+                    "hex_s0_follow requires terrain_type to be 's0_follow_plane' (or alias 's0'). "
+                    f"got terrain_type='{terrain_type or 'unset'}'"
+                )
         self.is_s0_follow_task = (str(getattr(args, "task", "")).lower() == "hex_s0_follow") or (terrain_type in ("s0_follow_plane", "s0"))
         self.scene_difficulty_pending = 0.0
         self.scene_difficulty_override = torch.zeros(
             self.num_envs, device=self.env.device, dtype=torch.float32
         )
         self.env.scene_difficulty_override = self.scene_difficulty_override
-        self.s0_follow_d_des = 1.0
-        self.s0_follow_d_tol = 0.25
+        self.s0_follow_d_des = float(getattr(nav_cfg, "follow_distance_desired", 1.0)) if nav_cfg is not None else 1.0
+        follow_min = getattr(nav_cfg, "follow_distance_min", None) if nav_cfg is not None else None
+        follow_max = getattr(nav_cfg, "follow_distance_max", None) if nav_cfg is not None else None
+        if follow_min is None or follow_max is None:
+            sigma = float(getattr(nav_cfg, "follow_distance_sigma", 0.25)) if nav_cfg is not None else 0.25
+            self.s0_follow_d_min = self.s0_follow_d_des - sigma
+            self.s0_follow_d_max = self.s0_follow_d_des + sigma
+        else:
+            self.s0_follow_d_min = float(min(follow_min, follow_max))
+            self.s0_follow_d_max = float(max(follow_min, follow_max))
         self.s0_follow_ahead_margin = 0.2
         self.s0_follow_success_bonus = 10.0
         self.s0_follow_dir_v_eps = 0.05
-        self.s0_follow_success_time_s = 10.0
+        success_time_default = float(getattr(env_cfg.env, "episode_length_s", 10.0))
+        self.s0_follow_success_time_s = float(
+            getattr(nav_cfg, "follow_success_time_s", success_time_default)
+        ) if nav_cfg is not None else success_time_default
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -649,16 +670,53 @@ class HierarchicalHexapodEnv:
         """Set curriculum target; it becomes active only for envs after reset."""
         self.scene_difficulty_pending = float(np.clip(float(difficulty), 0.0, 1.0))
 
+    def _normalize_scene_difficulty_override(
+        self,
+        difficulty_override,
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        if difficulty_override is None:
+            return torch.full(
+                (self.num_envs,),
+                float(self.scene_difficulty_pending),
+                device=self.device,
+                dtype=dtype,
+            )
+        if torch.is_tensor(difficulty_override):
+            d_tensor = difficulty_override.to(device=self.device, dtype=dtype)
+        else:
+            d_tensor = torch.as_tensor(difficulty_override, device=self.device, dtype=dtype)
+        if d_tensor.ndim == 0:
+            d_vec = torch.full((self.num_envs,), float(d_tensor.item()), device=self.device, dtype=dtype)
+        elif d_tensor.numel() == self.num_envs:
+            d_vec = d_tensor.reshape(-1)
+        else:
+            raise ValueError(
+                f"scene_difficulty_override shape mismatch: {tuple(d_tensor.shape)} (num_envs={self.num_envs})"
+            )
+        d_vec = torch.nan_to_num(d_vec, nan=0.0, posinf=1.0, neginf=0.0)
+        return torch.clamp(d_vec, 0.0, 1.0)
+
+    def _current_scene_difficulty(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        difficulty_override = getattr(self.env, "scene_difficulty_override", self.scene_difficulty_override)
+        return self._normalize_scene_difficulty_override(difficulty_override, dtype=dtype)
+
     def _apply_scene_difficulty_for_resets(self, reset_mask: Optional[torch.Tensor]) -> None:
+        pending = float(np.clip(float(self.scene_difficulty_pending), 0.0, 1.0))
         if reset_mask is None:
-            self.scene_difficulty_override.fill_(self.scene_difficulty_pending)
+            self.scene_difficulty_override.fill_(pending)
         else:
             if reset_mask.dtype != torch.bool:
                 raise ValueError("reset_mask must be bool tensor")
             if reset_mask.shape[0] != self.num_envs:
                 raise ValueError(f"reset_mask shape mismatch: {tuple(reset_mask.shape)}")
             if reset_mask.any():
-                self.scene_difficulty_override[reset_mask] = self.scene_difficulty_pending
+                self.scene_difficulty_override[reset_mask] = pending
+        self.scene_difficulty_override = self._normalize_scene_difficulty_override(
+            self.scene_difficulty_override,
+            dtype=self.scene_difficulty_override.dtype,
+        )
         self.env.scene_difficulty_override = self.scene_difficulty_override
 
     def _refresh_depth_images(self, force: bool = False) -> None:
@@ -1488,20 +1546,7 @@ class HierarchicalHexapodEnv:
                 phys_visible = abs_bearing <= phys_half
 
                 if self.is_s0_follow_task:
-                    difficulty_override = getattr(self.env, "scene_difficulty_override", self.scene_difficulty_override)
-                    if torch.is_tensor(difficulty_override):
-                        difficulty_tensor = difficulty_override.to(device=self.device, dtype=abs_bearing.dtype)
-                        if difficulty_tensor.ndim == 0:
-                            difficulty_vec = torch.full_like(abs_bearing, float(difficulty_tensor.item()))
-                        elif difficulty_tensor.numel() == self.num_envs:
-                            difficulty_vec = difficulty_tensor.reshape(-1)
-                        else:
-                            raise ValueError(
-                                f"scene_difficulty_override shape mismatch: {tuple(difficulty_tensor.shape)}"
-                            )
-                    else:
-                        difficulty_vec = torch.full_like(abs_bearing, float(difficulty_override))
-                    difficulty_vec = torch.clamp(difficulty_vec, 0.0, 1.0)
+                    difficulty_vec = self._current_scene_difficulty(dtype=abs_bearing.dtype)
                     hard_scale = 1.2 + difficulty_vec * (0.6 - 1.2)
                     soft_scale = 0.5 * hard_scale
                     hard_half_train = torch.clamp(0.5 * fov * hard_scale, min=1e-3)
@@ -1578,8 +1623,13 @@ class HierarchicalHexapodEnv:
                     ahead = torch.sum(robot_minus_target * dir_world, dim=1)
                     behind = ahead < (-self.s0_follow_ahead_margin)
                     dist_to_target = torch.norm(target_world_xy - robot_world_xy, dim=1)
-                    dist_in_band = torch.abs(dist_to_target - self.s0_follow_d_des) < self.s0_follow_d_tol
-                    stable_ok = behind & dist_in_band & phys_visible & (~done_during)
+                    dist_in_band = (dist_to_target >= self.s0_follow_d_min) & (dist_to_target <= self.s0_follow_d_max)
+                    target_freeze_timer = getattr(self.env, "target_freeze_timer", None)
+                    if target_freeze_timer is None:
+                        not_frozen = torch.ones_like(behind, dtype=torch.bool)
+                    else:
+                        not_frozen = target_freeze_timer <= 1e-6
+                    stable_ok = behind & dist_in_band & phys_visible & not_frozen & (~done_during)
                     self.stable_follow_steps = torch.where(
                         stable_ok,
                         self.stable_follow_steps + 1,
@@ -1700,6 +1750,7 @@ def train(args):
     print(f"V5 Command-Space MoE Training")
     print(f"Mode: {args.mode.upper()} | Skill: {getattr(args, 'skill', 'follow')}")
     print(f"Device: {device}")
+    print("[Note] Online training stats are for monitoring only; use eval_highlevel.py for paper-report metrics.")
     print(f"{'='*60}\n")
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
@@ -2058,6 +2109,10 @@ def train(args):
     if use_egpo:
         dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
         dprint(f"  - Expert alpha hold: {expert_alpha_hold_iters} iters (10% of run, alpha=1.0)")
+    dprint(
+        f"  - Non-finite handling: "
+        f"{'recovery(skip+sanitize)' if bool(getattr(args, 'allow_nonfinite_recovery', False)) else 'fail-fast'}"
+    )
     
     aff_stack_buf = None
     last_goal_obs = None
@@ -2662,8 +2717,30 @@ def train(args):
         )
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
+        fail_fast_nonfinite = not bool(getattr(args, "allow_nonfinite_recovery", False))
         
         batch_size = env.num_envs * args.num_steps
+
+        def _handle_nonfinite_event(
+            reason: str,
+            *,
+            epoch: int,
+            exc: Optional[Exception] = None,
+            try_sanitize: bool = False,
+        ) -> None:
+            nonlocal skipped_nonfinite_updates, sanitized_param_count
+            detail = reason if exc is None else f"{reason}: {exc}"
+            if fail_fast_nonfinite:
+                raise RuntimeError(
+                    f"[NonFinite-FailFast] iter={iteration}, epoch={epoch} {detail}. "
+                    "Use --allow_nonfinite_recovery to fallback to skip+sanitize mode."
+                )
+            skipped_nonfinite_updates += 1
+            if try_sanitize and _module_has_non_finite(policy):
+                _sanitize_module_params(policy)
+                sanitized_param_count += 1
+            print(f"[Warn] Skip {detail} at iter={iteration}, epoch={epoch}")
+            optimizer.zero_grad(set_to_none=True)
         
         for epoch in range(args.num_epochs):
             indices = torch.randperm(batch_size, device=device)
@@ -2709,32 +2786,33 @@ def train(args):
                             mb_actions
                         )
                 except ValueError as exc:
-                    skipped_nonfinite_updates += 1
-                    if _module_has_non_finite(policy):
-                        _sanitize_module_params(policy)
-                        sanitized_param_count += 1
-                    print(f"[Warn] Skip non-finite minibatch at iter={iteration}, epoch={epoch}: {exc}")
-                    optimizer.zero_grad(set_to_none=True)
+                    _handle_nonfinite_event(
+                        "policy.evaluate_actions non-finite minibatch",
+                        epoch=epoch,
+                        exc=exc,
+                        try_sanitize=True,
+                    )
                     continue
                 if (
                     (not torch.isfinite(new_log_probs).all())
                     or (not torch.isfinite(new_values).all())
                     or (not torch.isfinite(entropy).all())
                 ):
-                    skipped_nonfinite_updates += 1
-                    if _module_has_non_finite(policy):
-                        _sanitize_module_params(policy)
-                        sanitized_param_count += 1
-                    print(f"[Warn] Skip non-finite policy outputs at iter={iteration}, epoch={epoch}")
-                    optimizer.zero_grad(set_to_none=True)
+                    _handle_nonfinite_event(
+                        "non-finite policy outputs",
+                        epoch=epoch,
+                        try_sanitize=True,
+                    )
                     continue
                 
                 # PPO Clipped Loss
                 log_ratio_raw = new_log_probs - mb_old_log_probs
                 if not torch.isfinite(log_ratio_raw).all():
-                    skipped_nonfinite_updates += 1
-                    print(f"[Warn] Skip non-finite log-ratio at iter={iteration}, epoch={epoch}")
-                    optimizer.zero_grad(set_to_none=True)
+                    _handle_nonfinite_event(
+                        "non-finite log-ratio",
+                        epoch=epoch,
+                        try_sanitize=False,
+                    )
                     continue
                 log_ratio = torch.clamp(log_ratio_raw, min=-20.0, max=20.0)
                 ratio = torch.exp(log_ratio)
@@ -2768,12 +2846,12 @@ def train(args):
                             mb_aff_maps, mb_states, mb_goals, mb_difficulties, mb_expert_actions
                         )
                     except ValueError as exc:
-                        skipped_nonfinite_updates += 1
-                        if _module_has_non_finite(policy):
-                            _sanitize_module_params(policy)
-                            sanitized_param_count += 1
-                        print(f"[Warn] Skip non-finite EGPO minibatch at iter={iteration}, epoch={epoch}: {exc}")
-                        optimizer.zero_grad(set_to_none=True)
+                        _handle_nonfinite_event(
+                            "EGPO evaluate_actions non-finite minibatch",
+                            epoch=epoch,
+                            exc=exc,
+                            try_sanitize=True,
+                        )
                         continue
                     expert_log_prob = torch.nan_to_num(expert_log_prob, nan=-20.0, posinf=20.0, neginf=-20.0)
                     expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
@@ -2788,37 +2866,38 @@ def train(args):
                 )
                 loss = loss_ppo + bc_loss
                 if not torch.isfinite(loss):
-                    skipped_nonfinite_updates += 1
-                    print(f"[Warn] Skip non-finite loss at iter={iteration}, epoch={epoch}")
-                    optimizer.zero_grad(set_to_none=True)
+                    _handle_nonfinite_event(
+                        "non-finite loss",
+                        epoch=epoch,
+                        try_sanitize=False,
+                    )
                     continue
                 
                 # 优化
                 optimizer.zero_grad()
                 loss.backward()
                 if _actor_grad_has_non_finite(policy):
-                    skipped_nonfinite_updates += 1
-                    print(f"[Warn] Skip optimizer.step due to non-finite actor grads at iter={iteration}, epoch={epoch}")
-                    optimizer.zero_grad(set_to_none=True)
-                    if _module_has_non_finite(policy):
-                        _sanitize_module_params(policy)
-                        sanitized_param_count += 1
+                    _handle_nonfinite_event(
+                        "non-finite actor gradients before optimizer.step",
+                        epoch=epoch,
+                        try_sanitize=True,
+                    )
                     continue
                 grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
                 if not torch.isfinite(grad_norm):
-                    skipped_nonfinite_updates += 1
-                    print(f"[Warn] Skip non-finite grad-norm at iter={iteration}, epoch={epoch}")
-                    optimizer.zero_grad(set_to_none=True)
-                    if _module_has_non_finite(policy):
-                        _sanitize_module_params(policy)
-                        sanitized_param_count += 1
+                    _handle_nonfinite_event(
+                        "non-finite grad_norm",
+                        epoch=epoch,
+                        try_sanitize=True,
+                    )
                     continue
                 optimizer.step()
                 if _module_has_non_finite(policy):
-                    _sanitize_module_params(policy)
-                    sanitized_param_count += 1
-                    skipped_nonfinite_updates += 1
-                    print(f"[Warn] Sanitized non-finite policy params at iter={iteration}, epoch={epoch}")
+                    _handle_nonfinite_event(
+                        "non-finite policy params after optimizer.step",
+                        epoch=epoch,
+                        try_sanitize=True,
+                    )
                     continue
                 
                 total_loss += loss.item()
@@ -3187,6 +3266,11 @@ if __name__ == "__main__":
                         help='T1 弱遮挡持续步数')
     parser.add_argument('--egpo', action='store_true',
                         help='仅在 hex_s0_follow + follow 下启用 EGPO（专家动作混合 + BC）')
+    parser.add_argument(
+        '--allow_nonfinite_recovery',
+        action='store_true',
+        help='允许旧行为：遇到非有限值时跳过并尝试sanitize后继续（默认关闭，默认fail-fast）',
+    )
     
     # 输出
     parser.add_argument('--output_dir', type=str, default='outputs/planner',

@@ -94,6 +94,22 @@
 - [x] ~~[P0] 参考方案基准从 V4 切换为两个 V7 文档（`hexapod_RAL_complete_technical_spec_v7.md` + `hexapod_RAL_integrated_final_v7.md`）~~
 - [x] ~~[P1] 完成文档自检：语义一致、无互相冲突规则~~
 
+## 2026-02-13 S0 训练链路 P0 稳定性修复（训练主线）
+
+- [x] ~~[P0] `train_highlevel.py` 引入配置隔离（cfg 深拷贝）与 S0 任务-地形类型强校验，避免跨任务污染与错误场景开训~~
+- [x] ~~[P0] 统一 `scene_difficulty_override` 归一化入口（wrapper/env 双端）并消除重复实现~~
+- [x] ~~[P0] S0 跟随成功判定改为单一事实源：使用 `follow_distance_desired/min/max` 与高层步长推导窗口~~
+- [x] ~~[P0] 冻结窗口语义修复：目标冻结期间不累计 S0 stable-follow 成功步数~~
+- [x] ~~[P0] EGPO 非有限值策略改造：默认 fail-fast（可配置），避免 silent sanitize 掩盖训练崩坏~~
+
+## 2026-02-13 论文级评测管线（训练监控与独立评测解耦）
+
+- [x] ~~[P0] 新建独立 eval 入口（frozen policy + 固定评测集），禁止直接使用训练在线统计写论文结果~~
+- [x] ~~[P0] 落地论文必须指标：Follow MAE/RMSE、Success Rate、Time-to-Success(mean/median/p95 + fail ratio)~~
+- [x] ~~[P1] 落地论文应补指标：CoT、Inference Latency(p50/p95)、Params(total/trainable)~~
+- [x] ~~[P0] 输出标准结果文件：`metrics.json` + `metrics.csv`，支持多难度分组统计~~
+- [x] ~~[P1] 训练侧标量与论文口径分离：保留在线监控用途，不作为论文主表直接数据源~~
+
 ## 2026-02-13 会话级 TODO 规则
 
 - [x] ~~[P0] 在 `AGENTS.md` 新增“每次先输出会话级 TODO（3-7条动作要点），用户回复‘执行’后再动手”的强制规则~~
