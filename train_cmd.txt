@@ -1,0 +1,1 @@
+cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task hex_s0_follow --mode teacher --skill follow --num_envs 2048 --max_iterations 1000 --seed 42 --headless

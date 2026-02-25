@@ -32,7 +32,7 @@ def compute_s0_follow_expert_cmd(
     kp_along: float = 0.8,
     kp_perp: float = 0.35,
     kff: float = 1.0,
-    v_along_max: float = 1.0,
+    v_along_max: float = 1.5,
     v_perp_max: float = 0.12,
     k_yaw: float = 1.2,
     w_max: float = 0.8,
@@ -100,7 +100,7 @@ def compute_s0_follow_expert_cmd(
     turn_gain = torch.clamp((torch.abs(yaw_ref_angle) - 0.12) / 0.48, min=0.0, max=1.0)
     track_err = torch.norm(err_world, dim=1)
     catchup_gain = torch.clamp((track_err - 0.25) / 0.75, min=0.0, max=1.0)
-    along_floor = 0.12 + 0.45 * catchup_gain
+    along_floor = 0.25 + 0.45 * catchup_gain
     perp_floor = 0.08 + 0.55 * catchup_gain
     along_scale = torch.maximum(1.0 - 0.85 * turn_gain, along_floor)
     perp_scale = torch.maximum(1.0 - 0.75 * turn_gain, perp_floor)
