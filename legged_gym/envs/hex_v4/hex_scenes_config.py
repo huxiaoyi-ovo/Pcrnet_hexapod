@@ -148,6 +148,7 @@ class HexS0FollowCfg(HexGroundCfg):
         follow_distance_desired = 1.0
         follow_distance_min = 0.7
         follow_distance_max = 1.4
+        follow_success_time_s = 2.0  # require 2s stable follow to count success
         # Target-in-view contract: use camera FOV but enforce a tighter center window.
         target_fov_soft_scale = 0.35
         target_fov_hard_scale = 0.70
@@ -171,7 +172,8 @@ class HexS0FollowCfg(HexGroundCfg):
         reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["goal_reach_bonus"] = 0.0
         # Keep both view-centering and a light heading-to-goal term for orientation.
-        reward_cfg["heading_scale"] = 0.08
+        reward_cfg["heading_scale"] = 0.50
+        reward_cfg["velocity_scale"] = 1.50
         # S0 is a clean following pretrain bed: disable navigation/obstacle terms to avoid noisy gradients.
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["crossable_align_scale"] = 0.0
