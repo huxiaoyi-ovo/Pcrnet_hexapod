@@ -95,6 +95,14 @@ def parse_args():
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     parser.add_argument("--debug", action="store_true", help="debug 输出（诊断信息）")
     parser.add_argument(
+        "--force_cmd",
+        type=float,
+        nargs=3,
+        metavar=("VX", "VY", "WZ"),
+        default=None,
+        help="Debug: 强制覆盖高层命令为固定 [vx, vy, wz]（用于轴向验收）",
+    )
+    parser.add_argument(
         "--heading_offset_override",
         type=float,
         default=None,
@@ -241,6 +249,18 @@ def main():
     if hasattr(env, "env") and hasattr(env.env, "nav_cfg") and env.env.nav_cfg is not None:
         env.env.nav_cfg.heading_offset_rad = heading_offset
     dprint(f"[PlayHigh] heading_offset_rad={heading_offset:.3f} (effective)")
+    force_cmd_tensor = None
+    if args.force_cmd is not None:
+        force_cmd_tensor = torch.tensor(
+            [float(args.force_cmd[0]), float(args.force_cmd[1]), float(args.force_cmd[2])],
+            device=device,
+            dtype=torch.float32,
+        ).view(1, 3)
+        print(
+            "[PlayHigh] force_cmd enabled: "
+            f"[{force_cmd_tensor[0,0].item():.3f}, {force_cmd_tensor[0,1].item():.3f}, {force_cmd_tensor[0,2].item():.3f}]"
+        )
+
     def _get_max_level():
         if not hasattr(env.env, "terrain_levels"):
             return 0
@@ -321,6 +341,12 @@ def main():
     step_idx = 0
     deterministic = not args.stochastic
     camera_frame_idx = 0
+    track_env_idx = min(max(int(args.camera_env), 0), env.num_envs - 1)
+    prev_track_pos_world = None
+    prev_track_yaw = None
+    axis_disp_world_sum = np.zeros(2, dtype=np.float64)
+    axis_disp_body_sum = np.zeros(2, dtype=np.float64)
+    axis_disp_count = 0
 
     prev_dist = None
     aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
@@ -423,12 +449,39 @@ def main():
                     difficulty,
                     deterministic=deterministic,
                 )
+        if force_cmd_tensor is not None:
+            cmd = force_cmd_tensor.expand(env.num_envs, -1)
         if args.mode == "student":
             env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             env.reward_affordance_override = aff_map
         obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
         if dones.any():
             stack_reset_mask = dones.clone()
+
+        step_dx = 0.0
+        step_dy = 0.0
+        step_body_x = 0.0
+        step_body_y = 0.0
+        if hasattr(env.env, "root_states"):
+            root = env.env.root_states[track_env_idx]
+            pos_xy = root[:2].detach().cpu().numpy()
+            quat = root[3:7].detach().cpu().numpy()
+            x_q, y_q, z_q, w_q = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+            yaw_now = math.atan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q))
+            if prev_track_pos_world is not None and prev_track_yaw is not None:
+                step_dx = float(pos_xy[0] - prev_track_pos_world[0])
+                step_dy = float(pos_xy[1] - prev_track_pos_world[1])
+                cos_h = math.cos(prev_track_yaw)
+                sin_h = math.sin(prev_track_yaw)
+                step_body_x = cos_h * step_dx - sin_h * step_dy
+                step_body_y = sin_h * step_dx + cos_h * step_dy
+                axis_disp_world_sum[0] += step_dx
+                axis_disp_world_sum[1] += step_dy
+                axis_disp_body_sum[0] += step_body_x
+                axis_disp_body_sum[1] += step_body_y
+                axis_disp_count += 1
+            prev_track_pos_world = pos_xy
+            prev_track_yaw = yaw_now
 
         env_idx = 0
         goal = obs["goal"][env_idx].detach().cpu().numpy()
@@ -685,6 +738,25 @@ def main():
                     goal_world_bear_y,
                     bearing_y,
                     heading_offset,
+                )
+            )
+            mean_dx = axis_disp_world_sum[0] / max(axis_disp_count, 1)
+            mean_dy = axis_disp_world_sum[1] / max(axis_disp_count, 1)
+            mean_bx = axis_disp_body_sum[0] / max(axis_disp_count, 1)
+            mean_by = axis_disp_body_sum[1] / max(axis_disp_count, 1)
+            print(
+                "[PlayHigh][axis] force_cmd={} step_world=({:.4f},{:.4f}) step_body(x_right,y_forward)=({:.4f},{:.4f}) "
+                "mean_world=({:.4f},{:.4f}) mean_body=({:.4f},{:.4f}) samples={}".format(
+                    "None" if force_cmd_tensor is None else np.array2string(force_cmd_tensor[0].detach().cpu().numpy(), precision=3, floatmode="fixed"),
+                    step_dx,
+                    step_dy,
+                    step_body_x,
+                    step_body_y,
+                    mean_dx,
+                    mean_dy,
+                    mean_bx,
+                    mean_by,
+                    axis_disp_count,
                 )
             )
 

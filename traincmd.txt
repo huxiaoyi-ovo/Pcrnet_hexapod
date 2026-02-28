@@ -1,0 +1,2 @@
+python legged_gym/scripts/play_highlevel.py --task hex_s0_follow --mode teacher --skill follow --teacher_ckpt <YOUR_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --debug_cmd --debug_interval 1 --max_steps 400 --force_cmd 0 0.5 0
+python legged_gym/scripts/play_highlevel.py --task hex_s0_follow --mode teacher --skill follow --teacher_ckpt <YOUR_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --debug_cmd --debug_interval 1 --max_steps 400 --force_cmd 0.5 0 0
