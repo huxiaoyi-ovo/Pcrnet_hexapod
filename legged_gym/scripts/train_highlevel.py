@@ -2712,6 +2712,12 @@ def train(args):
             _get_expert_alpha(local_iteration, expert_interface_iters)
             if use_egpo else 0.0
         )
+        if use_egpo:
+            current_lr = 1.5e-4 if expert_alpha_update <= 0.0 else 1.5e-5
+        else:
+            current_lr = args.lr
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         fail_fast_nonfinite = not bool(getattr(args, "allow_nonfinite_recovery", False))

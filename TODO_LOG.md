@@ -60,6 +60,18 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 接管期动态学习率（alpha=0 后放大学习步长）
+
+- [x] ~~[P0] 接管期动态 `lr`：`expert_alpha_update<=0` 时 `1.5e-4`，否则 `1.5e-5`~~
+- [x] ~~[P0] 回退动态 clip 试验，避免与动态学习率实验互相干扰~~
+- [ ] [P1] 1000 轮跑到 iter250 验证：alpha=0 后 KL/clip_frac 是否非零且 Goal dist 改善
+
+## 2026-02-28 S0 接管期动态 clip 调整（alpha=0 后放宽 PPO 裁剪）
+
+- [x] ~~[P0] 接管期动态 `clip_range`：`expert_alpha_update<=0` 时用 0.20，否则保持 0.05~~
+- [x] ~~[P0] 固定评测口径：回归 1000 轮训练预算，观察 iter250 接管段 KL/clip_frac 非零性~~
+- [ ] [P1] 验证目标：alpha=0 后 `KL` 与 `clip_frac` 从近零变为可学习区间（非零）并改善 Goal dist
+
 ## 2026-02-25 S0 回归原始 EGPO 衰减机制（移除 hold）
 
 - [x] ~~[P0] 删除 S0 特有 hold 平台：`alpha` 从迭代 0 开始连续衰减（与原始 EGPO 一致）~~
