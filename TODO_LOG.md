@@ -60,6 +60,22 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 朝向奖励全程生效（关闭 heading gate）
+
+- [x] ~~[P0] S0 显式设置 `heading_gate_use=False`，避免低速/低进度时朝向奖励被清零~~
+- [x] ~~[P0] S0 显式设置 `heading_use_difficulty_gate=False`，避免高难度阶段朝向奖励被缩弱~~
+- [ ] [P1] 复跑到 iter100 验收：heading>0.1、backward>-0.05、Goal dist<=1.8
+
+## 2026-02-28 S0 Expert/Reward 朝向口径对齐（BC 标签一致化）
+
+- [x] ~~[P0] 传入 expert 的 `robot_heading` 增加 `heading_offset_rad`，与奖励函数朝向口径一致~~
+- [ ] [P1] 复跑到 iter100 验收：heading>0.1、backward>-0.05、Goal dist<=1.8
+
+## 2026-02-28 S0 朝向基准修正（+Y 前向口径）
+
+- [x] ~~[P0] S0 `heading_offset_rad` 从 `0.0` 调整到 `1.5708`，对齐机体 +Y 前向约定~~
+- [ ] [P1] 复跑到 iter100 验收：heading>0.1、backward>-0.05、Goal dist<=1.8
+
 ## 2026-02-28 S0 诊断口径一致性修复（EGPO heading debug 对齐 expert）
 
 - [x] ~~[P0] 修复训练 debug 中 `dir_world` 计算：与 expert 保持一致（`target_vel/heading` 缺失时走几何方向）~~

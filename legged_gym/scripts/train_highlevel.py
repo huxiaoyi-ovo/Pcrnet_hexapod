@@ -2392,6 +2392,12 @@ def train(args):
                         2.0 * (w_q * z_q + x_q * y_q),
                         1.0 - 2.0 * (y_q * y_q + z_q * z_q),
                     )
+                    heading_offset = float(getattr(getattr(env, "reward_cfg", None), "heading_offset_rad", 0.0))
+                    robot_heading_for_expert = robot_heading + heading_offset
+                    robot_heading_for_expert = torch.atan2(
+                        torch.sin(robot_heading_for_expert),
+                        torch.cos(robot_heading_for_expert),
+                    )
                     if target_world_xy is None:
                         target_world_xy = torch.zeros(env.num_envs, 2, device=device)
                     if target_vel_world_xy is None:
@@ -2400,7 +2406,7 @@ def train(args):
                         target_heading = torch.zeros(env.num_envs, device=device)
                     expert_action = compute_s0_follow_expert_cmd(
                         robot_pos_world_xy=env.env.root_states[:, :2],
-                        robot_heading=robot_heading,
+                        robot_heading=robot_heading_for_expert,
                         target_world_xy=target_world_xy,
                         # Keep BC labels consistent with policy-observable inputs only.
                         target_vel_world_xy=None,
@@ -2422,7 +2428,7 @@ def train(args):
                             default_dir,
                         )
                         robot_fwd_world = torch.stack(
-                            [torch.sin(robot_heading), torch.cos(robot_heading)], dim=1
+                            [torch.sin(robot_heading_for_expert), torch.cos(robot_heading_for_expert)], dim=1
                         )
                         align_cos = torch.sum(robot_fwd_world * dir_world, dim=1).clamp(-1.0, 1.0)
                         egpo_heading_align_cos_sum += align_cos.sum()
