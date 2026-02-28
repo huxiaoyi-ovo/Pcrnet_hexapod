@@ -172,7 +172,7 @@ class NavigationRewardFunction:
                 min=self.cfg.heading_min_weight,
                 max=1.0,
             )
-        heading_reward = torch.cos(heading_error) * self.cfg.heading_scale * heading_weight
+        heading_reward = (torch.cos(heading_error) - 0.15) * self.cfg.heading_scale * heading_weight
         if self.cfg.heading_gate_use:
             progress = prev_dist - dist_to_goal
             gate = progress > self.cfg.heading_gate_min_approach

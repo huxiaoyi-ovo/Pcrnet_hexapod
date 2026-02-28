@@ -48,19 +48,33 @@ def compute_s0_follow_expert_cmd(
     device = robot_pos_world_xy.device
     dtype = robot_pos_world_xy.dtype
 
-    if target_vel_world_xy is None:
-        target_vel_world_xy = torch.zeros(num_envs, 2, device=device, dtype=dtype)
-    if target_heading is None:
-        target_heading = torch.zeros(num_envs, device=device, dtype=dtype)
+    if target_vel_world_xy is not None:
+        if target_vel_world_xy.ndim != 2 or target_vel_world_xy.shape != (num_envs, 2):
+            raise ValueError("target_vel_world_xy must have shape (N, 2)")
+        target_vel_world = target_vel_world_xy.to(device=device, dtype=dtype)
+    else:
+        target_vel_world = torch.zeros(num_envs, 2, device=device, dtype=dtype)
 
-    if target_vel_world_xy.ndim != 2 or target_vel_world_xy.shape != (num_envs, 2):
-        raise ValueError("target_vel_world_xy must have shape (N, 2)")
-    if target_heading.ndim != 1 or target_heading.shape[0] != num_envs:
-        raise ValueError("target_heading must have shape (N,)")
+    if target_heading is not None:
+        if target_heading.ndim != 1 or target_heading.shape[0] != num_envs:
+            raise ValueError("target_heading must have shape (N,)")
+        target_heading_world = target_heading.to(device=device, dtype=dtype)
+        heading_dir_world = torch.stack([torch.sin(target_heading_world), torch.cos(target_heading_world)], dim=1)
+    else:
+        # Fallback for observation-only labels: use geometric target direction in world frame.
+        to_target_world = target_world_xy - robot_pos_world_xy
+        heading_dir_world = to_target_world / torch.norm(to_target_world, dim=1, keepdim=True).clamp_min(1e-6)
+        # Degenerate case: robot and target overlap.
+        default_dir = torch.zeros_like(heading_dir_world)
+        default_dir[:, 1] = 1.0
+        heading_dir_world = torch.where(
+            torch.norm(to_target_world, dim=1, keepdim=True) > 1e-6,
+            heading_dir_world,
+            default_dir,
+        )
 
-    target_speed = torch.norm(target_vel_world_xy, dim=1)
-    vel_dir_world = target_vel_world_xy / target_speed.unsqueeze(1).clamp_min(1e-6)
-    heading_dir_world = torch.stack([torch.sin(target_heading), torch.cos(target_heading)], dim=1)
+    target_speed = torch.norm(target_vel_world, dim=1)
+    vel_dir_world = target_vel_world / target_speed.unsqueeze(1).clamp_min(1e-6)
     use_vel = target_speed > float(v_eps)
     dir_world = torch.where(use_vel.unsqueeze(1), vel_dir_world, heading_dir_world)
     dir_world = dir_world / torch.norm(dir_world, dim=1, keepdim=True).clamp_min(1e-6)
@@ -81,8 +95,8 @@ def compute_s0_follow_expert_cmd(
     dir_body = dir_body / torch.norm(dir_body, dim=1, keepdim=True).clamp_min(1e-6)
 
     perp_body = torch.stack([-dir_body[:, 1], dir_body[:, 0]], dim=1)
-    target_vel_body_x = cos_heading * target_vel_world_xy[:, 0] - sin_heading * target_vel_world_xy[:, 1]
-    target_vel_body_y = sin_heading * target_vel_world_xy[:, 0] + cos_heading * target_vel_world_xy[:, 1]
+    target_vel_body_x = cos_heading * target_vel_world[:, 0] - sin_heading * target_vel_world[:, 1]
+    target_vel_body_y = sin_heading * target_vel_world[:, 0] + cos_heading * target_vel_world[:, 1]
     target_vel_body = torch.stack([target_vel_body_x, target_vel_body_y], dim=1)
 
     err_along = torch.sum(err_body * dir_body, dim=1)

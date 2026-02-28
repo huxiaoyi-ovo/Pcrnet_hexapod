@@ -2408,15 +2408,19 @@ def train(args):
                         cmd_scale=cmd_scale,
                     )
                     if debug:
-                        target_speed = torch.norm(target_vel_world_xy, dim=1)
-                        vel_dir_world = target_vel_world_xy / target_speed.unsqueeze(1).clamp_min(1e-6)
-                        heading_dir_world = torch.stack(
-                            [torch.sin(target_heading), torch.cos(target_heading)], dim=1
+                        # Keep debug heading diagnostics on the same branch used by expert labels
+                        # in S0: no target vel/heading, geometric fallback direction only.
+                        to_target_world = target_world_xy - env.env.root_states[:, :2]
+                        dir_world = to_target_world / torch.norm(
+                            to_target_world, dim=1, keepdim=True
+                        ).clamp_min(1e-6)
+                        default_dir = torch.zeros_like(dir_world)
+                        default_dir[:, 1] = 1.0
+                        dir_world = torch.where(
+                            torch.norm(to_target_world, dim=1, keepdim=True) > 1e-6,
+                            dir_world,
+                            default_dir,
                         )
-                        v_eps = float(getattr(env, "s0_follow_dir_v_eps", 0.05))
-                        use_vel = target_speed > v_eps
-                        dir_world = torch.where(use_vel.unsqueeze(1), vel_dir_world, heading_dir_world)
-                        dir_world = dir_world / torch.norm(dir_world, dim=1, keepdim=True).clamp_min(1e-6)
                         robot_fwd_world = torch.stack(
                             [torch.sin(robot_heading), torch.cos(robot_heading)], dim=1
                         )

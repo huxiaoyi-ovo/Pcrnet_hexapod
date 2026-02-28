@@ -60,6 +60,21 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 诊断口径一致性修复（EGPO heading debug 对齐 expert）
+
+- [x] ~~[P0] 修复训练 debug 中 `dir_world` 计算：与 expert 保持一致（`target_vel/heading` 缺失时走几何方向）~~
+- [ ] [P1] 复跑观察：`EGPO heading` 诊断与 play 行为是否一致
+
+## 2026-02-28 Heading 侧身惩罚口径调整（cos 偏移）
+
+- [x] ~~[P0] `heading_reward` 从 `cos(err)` 改为 `cos(err)-0.15`，让侧身状态变为负分~~
+- [ ] [P1] 复跑对比：heading reward 均值、backward、Goal dist 与 play 绕圈比例
+
+## 2026-02-28 S0 Expert 方向回退修复（避免 `target_vel=None` 退化到固定 +Y）
+
+- [x] ~~[P0] 修复 expert 方向生成：缺失 `target_vel/target_heading` 时改为几何方向回退（`target - robot`）~~
+- [ ] [P1] 复跑观察：alpha=0 后 backward 是否回落、Goal dist 是否不再飙升
+
 ## 2026-02-28 S0 奖励再平衡（target_lost 降权 + sigma 回调）
 
 - [x] ~~[P0] `target_lost` 持续惩罚从 `-2.0` 下调到 `-0.3`（避免总奖励长期为负）~~
