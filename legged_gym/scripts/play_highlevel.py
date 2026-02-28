@@ -95,6 +95,12 @@ def parse_args():
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     parser.add_argument("--debug", action="store_true", help="debug 输出（诊断信息）")
     parser.add_argument(
+        "--show_expert_cmd",
+        action="store_true",
+        default=False,
+        help="Debug: 打印 S0 expert 命令（与训练 EGPO 同口径）",
+    )
+    parser.add_argument(
         "--force_cmd",
         type=float,
         nargs=3,
@@ -211,6 +217,15 @@ def main():
             env.env.env_origins[:] = env.env.terrain_origins[env.env.terrain_levels, env.env.terrain_types]
         dprint("[PlayHigh] curriculum disabled; start at level 0")
     vision_model = None
+    s0_expert_fn = None
+    if bool(getattr(args, "show_expert_cmd", False)):
+        try:
+            from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as _s0_expert_fn
+            s0_expert_fn = _s0_expert_fn
+            dprint("[PlayHigh] expert cmd debug enabled")
+        except Exception as exc:
+            print(f"[PlayHigh] ⚠ failed to import S0 expert function: {exc}; disabling --show_expert_cmd.")
+            args.show_expert_cmd = False
     if args.mode == "student":
         vision_model = th.AffordanceEstimator(
             depth_channels=1,
@@ -449,6 +464,31 @@ def main():
                     difficulty,
                     deterministic=deterministic,
                 )
+        expert_cmd = None
+        if bool(getattr(args, "show_expert_cmd", False)) and s0_expert_fn is not None and args.task == "hex_s0_follow":
+            quat_e = env.env.root_states[:, 3:7]
+            x_q, y_q, z_q, w_q = quat_e[:, 0], quat_e[:, 1], quat_e[:, 2], quat_e[:, 3]
+            robot_heading = torch.atan2(
+                2.0 * (w_q * z_q + x_q * y_q),
+                1.0 - 2.0 * (y_q * y_q + z_q * z_q),
+            )
+            heading_offset_dbg = float(getattr(getattr(env, "reward_cfg", None), "heading_offset_rad", 0.0))
+            robot_heading_for_expert = robot_heading + heading_offset_dbg
+            robot_heading_for_expert = torch.atan2(
+                torch.sin(robot_heading_for_expert),
+                torch.cos(robot_heading_for_expert),
+            )
+            target_world_xy = getattr(env.env, "target_world", None)
+            if target_world_xy is None:
+                target_world_xy = torch.zeros(env.num_envs, 2, device=device)
+            expert_cmd = s0_expert_fn(
+                robot_pos_world_xy=env.env.root_states[:, :2],
+                robot_heading=robot_heading_for_expert,
+                target_world_xy=target_world_xy,
+                target_vel_world_xy=None,
+                target_heading=None,
+                cmd_scale=cmd_scale,
+            )
         if force_cmd_tensor is not None:
             cmd = force_cmd_tensor.expand(env.num_envs, -1)
         if args.mode == "student":
@@ -740,6 +780,15 @@ def main():
                     heading_offset,
                 )
             )
+            if expert_cmd is not None:
+                expert_cmd_np = expert_cmd[env_idx].detach().cpu().numpy()
+                print(
+                    "[PlayHigh][expert] cmd_expert={} cmd_pred={} cmd_exec={}".format(
+                        np.array2string(expert_cmd_np, precision=3, floatmode="fixed"),
+                        np.array2string(cmd_pred, precision=3, floatmode="fixed"),
+                        cmd_str,
+                    )
+                )
             mean_dx = axis_disp_world_sum[0] / max(axis_disp_count, 1)
             mean_dy = axis_disp_world_sum[1] / max(axis_disp_count, 1)
             mean_bx = axis_disp_body_sum[0] / max(axis_disp_count, 1)
