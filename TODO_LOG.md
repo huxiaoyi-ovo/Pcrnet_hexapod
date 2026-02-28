@@ -60,6 +60,14 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-25 S0 回归原始 EGPO 衰减机制（移除 hold）
+
+- [x] ~~[P0] 删除 S0 特有 hold 平台：`alpha` 从迭代 0 开始连续衰减（与原始 EGPO 一致）~~
+- [x] ~~[P0] 删除 hold 相关 loss 屏蔽链路，恢复完整 EGPO loss 更新路径~~
+- [x] ~~[P0] `EXPERT_BC_COEF` 恢复至 2.0，默认学习率保持 1.5e-5~~
+- [x] ~~[P1] 日志频率改为自动 `num_iterations/20`（至少每 1 轮）~~
+- [ ] [P1] 跑到 iter230 验证接管稳定性（重点看 Goal dist / KL / rollout reward）
+
 ## 2026-02-25 EGPO 接管机制修正（hold阶段保留BC预热）
 
 - [x] ~~[P0] 修正 hold 阶段损失组合：屏蔽 PPO policy/entropy，仅保留 value + BC~~

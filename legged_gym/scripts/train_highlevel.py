@@ -58,7 +58,7 @@ SCENE_CURRIC_ITERS = 1000
 EXPERT_INTERFACE_RATIO = 0.2
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
-EXPERT_BC_COEF = 0.5
+EXPERT_BC_COEF = 2.0
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -94,19 +94,14 @@ def apply_goal_occlusion(
     return masked_goal, masked_goal.detach()
 
 
-def _get_expert_alpha(local_iteration: int, interface_iters: int, hold_iters: int = 0) -> float:
+def _get_expert_alpha(local_iteration: int, interface_iters: int) -> float:
     if interface_iters <= 0:
         return 0.0
-    it = max(local_iteration, 0)
-    hold = max(int(hold_iters), 0)
-    if it < hold:
-        return 1.0
-    decay_denom = max(interface_iters - hold, 1)
-    progress = min(float(it - hold) / float(decay_denom), 1.0)
+    progress = min(float(max(local_iteration, 0)) / float(max(interface_iters, 1)), 1.0)
     if EXPERT_ALPHA_SCHEDULE == "cosine":
-        alpha = 0.5 * (1.0 + math.cos(math.pi * progress))
+        alpha = EXPERT_ALPHA_MIN + 0.5 * (1.0 - EXPERT_ALPHA_MIN) * (1.0 + math.cos(math.pi * progress))
     else:
-        alpha = 1.0 - progress
+        alpha = EXPERT_ALPHA_MIN + (1.0 - EXPERT_ALPHA_MIN) * (1.0 - progress)
     return max(alpha, EXPERT_ALPHA_MIN)
 
 
@@ -2089,13 +2084,13 @@ def train(args):
     running_returns = torch.zeros(env.num_envs, device=device)
     
     total_iterations = start_iteration + args.num_iterations
+    args.log_interval = max(1, int(args.num_iterations) // 20)
     expert_interface_iters = max(1, int(math.ceil(float(args.num_iterations) * float(EXPERT_INTERFACE_RATIO))))
-    expert_alpha_hold_iters = max(0, int(math.ceil(float(args.num_iterations) * 0.10)))
-    expert_alpha_hold_iters = min(expert_alpha_hold_iters, expert_interface_iters)
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
     dprint(f"  - Steps per iteration: {args.num_steps}")
     dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
     dprint(f"  - Learning rate: {args.lr}")
+    dprint(f"  - Console log interval: {args.log_interval} iters (auto: num_iterations/20)")
     if hasattr(env, "max_episode_length") and hasattr(env, "high_level_dt"):
         dprint(
             f"  - Episode budget (HL): {int(env.max_episode_length)} steps "
@@ -2108,7 +2103,6 @@ def train(args):
             )
     if use_egpo:
         dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
-        dprint(f"  - Expert alpha hold: {expert_alpha_hold_iters} iters (10% of run, alpha=1.0)")
     dprint(
         f"  - Non-finite handling: "
         f"{'recovery(skip+sanitize)' if bool(getattr(args, 'allow_nonfinite_recovery', False)) else 'fail-fast'}"
@@ -2196,7 +2190,7 @@ def train(args):
         egpo_yaw_resp_sign_count = torch.zeros((), device=device)
         local_iteration = iteration - start_iteration
         expert_alpha_rollout = (
-            _get_expert_alpha(local_iteration, expert_interface_iters, expert_alpha_hold_iters)
+            _get_expert_alpha(local_iteration, expert_interface_iters)
             if use_egpo else 0.0
         )
         prev_goal_world_rollout = None
@@ -2715,10 +2709,9 @@ def train(args):
         clip_frac_sum = 0
         num_updates = 0
         expert_alpha_update = (
-            _get_expert_alpha(local_iteration, expert_interface_iters, expert_alpha_hold_iters)
+            _get_expert_alpha(local_iteration, expert_interface_iters)
             if use_egpo else 0.0
         )
-        hold_expert = bool(use_egpo and expert_alpha_update >= 0.95)
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         fail_fast_nonfinite = not bool(getattr(args, "allow_nonfinite_recovery", False))
@@ -2861,11 +2854,10 @@ def train(args):
                     expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
                     bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
                 
-                # Total loss.
-                # Hold phase: keep value + BC updates, block PPO policy/entropy terms.
-                policy_loss_weight = 0.0 if hold_expert else 1.0
+                # Total loss (full EGPO update path, no hold-phase masking).
+                policy_loss_weight = 1.0
                 value_loss_weight = args.value_loss_coef
-                entropy_loss_weight = args.entropy_coef * policy_loss_weight
+                entropy_loss_weight = args.entropy_coef
                 bc_loss_weight = 1.0
                 effective_policy_loss = policy_loss_weight * policy_loss
                 effective_entropy_loss = entropy_loss_weight * entropy_loss
@@ -3297,7 +3289,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, default='outputs/planner',
                         help='输出目录')
     parser.add_argument('--log_interval', type=int, default=10,
-                        help='日志间隔')
+                        help='日志间隔（运行时自动覆盖为 num_iterations/20）')
     parser.add_argument('--save_interval', type=int, default=200,
                         help='保存间隔')
     parser.add_argument('--debug', action='store_true',
