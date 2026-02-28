@@ -152,8 +152,8 @@ class HexS0FollowCfg(HexGroundCfg):
         # Target-in-view contract: use camera FOV but enforce a tighter center window.
         target_fov_soft_scale = 0.35
         target_fov_hard_scale = 0.70
-        # S0 pretraining should not be dominated by early "lost" resets; keep it as shaping only.
-        target_lost_k = 0
+        # Target lost for consecutive high-level steps triggers a sustained penalty.
+        target_lost_k = 5
         # Reward weights for view centering (penalties are negative values).
         # Keep this small: too strong encourages early-stage "spin in place" solutions.
         target_center_scale = 0.2
@@ -165,15 +165,17 @@ class HexS0FollowCfg(HexGroundCfg):
         # Follow-mode reward: track a desired distance instead of "reach goal".
         reward_cfg["follow_enable"] = True
         reward_cfg["follow_distance_desired"] = 1.0
-        reward_cfg["follow_distance_sigma"] = 0.20
+        reward_cfg["follow_distance_sigma"] = 0.15
         reward_cfg["follow_distance_scale"] = 12.0
         reward_cfg["follow_band_scale"] = 4.0
         # Disable reach logic in S0 (we don't want to "reach target point").
         reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["goal_reach_bonus"] = 0.0
         # Keep both view-centering and a light heading-to-goal term for orientation.
-        reward_cfg["heading_scale"] = 0.50
+        reward_cfg["heading_scale"] = 2.50
         reward_cfg["velocity_scale"] = 0.50
+        reward_cfg["backward_scale"] = 1.0
+        reward_cfg["turn_penalty_scale"] = 0.20
         # S0 is a clean following pretrain bed: disable navigation/obstacle terms to avoid noisy gradients.
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["crossable_align_scale"] = 0.0

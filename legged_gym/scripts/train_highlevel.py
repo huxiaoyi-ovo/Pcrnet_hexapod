@@ -1468,7 +1468,8 @@ class HierarchicalHexapodEnv:
             gate_y = torch.zeros(self.num_envs, device=self.device)
         gate_y = gate_y.to(self.device)
         if self.reward_func is not None:
-            robot_vel = self.env.base_lin_vel
+            # Use world-frame linear velocity to match world-frame goal direction in reward terms.
+            robot_vel = self.env.root_states[:, 7:10]
             robot_quat = self.env.root_states[:, 3:7]
             if hasattr(self.env, "goal_world"):
                 goal_pos = self.env.goal_world.clone()
@@ -1496,6 +1497,7 @@ class HierarchicalHexapodEnv:
                 collision_mask=collision_mask,
                 clearance=clearance,
                 cmd_xy=velocity_cmd[:, :2],
+                cmd_omega=velocity_cmd[:, 2],
                 passable_dir=passable_dir,
                 passable_gate=passable_gate,
                 crossable_dir=crossable_dir,
@@ -1590,9 +1592,7 @@ class HierarchicalHexapodEnv:
                     )
                     lost = self.target_lost_steps >= int(self.target_lost_k)
                     if lost.any():
-                        done_any |= lost
-                        manual_reset_mask |= lost
-                        # Extra penalty on loss event to discourage drifting out of view.
+                        # Continuous penalty while target stays lost; do not force reset in S0.
                         total_reward = torch.where(lost, total_reward - 2.0, total_reward)
                         reward_terms["target_lost"] = lost.float() * (-2.0)
                         reward_terms["total"] = total_reward
@@ -2147,6 +2147,8 @@ def train(args):
             'collision',
             'stability',
             'velocity',
+            'backward',
+            'turn_penalty',
             'time',
             'total',
         ]
@@ -2400,8 +2402,9 @@ def train(args):
                         robot_pos_world_xy=env.env.root_states[:, :2],
                         robot_heading=robot_heading,
                         target_world_xy=target_world_xy,
-                        target_vel_world_xy=target_vel_world_xy,
-                        target_heading=target_heading,
+                        # Keep BC labels consistent with policy-observable inputs only.
+                        target_vel_world_xy=None,
+                        target_heading=None,
                         cmd_scale=cmd_scale,
                     )
                     if debug:

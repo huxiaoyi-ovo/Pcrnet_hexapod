@@ -60,6 +60,25 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 奖励修正（坐标系一致 + 丢失持续惩罚 + 转向惩罚降权）
+
+- [x] ~~[P0] `vel_towards_goal` 对齐到世界系：奖励输入速度改为 `root_states[:,7:10]`~~
+- [x] ~~[P0] `target_lost` 改为持续惩罚，不再触发 reset~~
+- [x] ~~[P0] `turn_penalty_scale` 从 `0.50` 下调到 `0.20`~~
+- [ ] [P1] 复跑并对比：反向走比例、Goal dist、target_lost 触发率、heading 误差
+
+## 2026-02-28 S0 奖励塑形强化（朝向/视野/后退/无效转向）
+
+- [x] ~~[P0] S0 奖励权重调整：`heading_scale=2.5`、`follow_distance_sigma=0.15`~~
+- [x] ~~[P0] S0 目标丢失约束收紧：`target_lost_k=5`~~
+- [x] ~~[P0] 新增 S0 奖励项：后退惩罚（`backward_scale`）与小角误差下无效转向惩罚（`turn_penalty_scale`）~~
+- [ ] [P1] 复跑训练并对比：Goal dist、heading error、target_lost 触发率与 play 反向走比例
+
+## 2026-02-28 S0 Expert 标签观测对齐（修正学反方向主线）
+
+- [x] ~~[P0] 训练阶段 expert 标签改为仅使用策略可观测信息（去除 `target_vel_world/target_heading` 依赖）~~
+- [ ] [P1] 复跑训练并复核：`alpha=0` 后 Goal dist 是否收敛、play 中是否仍出现反向远离
+
 ## 2026-02-28 S0 接管期动态学习率（alpha=0 后放大学习步长）
 
 - [x] ~~[P0] 接管期动态 `lr`：`expert_alpha_update<=0` 时 `1.5e-4`，否则 `1.5e-5`~~

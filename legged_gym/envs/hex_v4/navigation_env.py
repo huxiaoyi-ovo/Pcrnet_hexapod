@@ -69,6 +69,8 @@ class NavigationRewardConfig:
 
     # 速度奖励
     velocity_scale: float = 0.1
+    backward_scale: float = 0.0
+    turn_penalty_scale: float = 0.0
 
 
 class NavigationRewardFunction:
@@ -109,6 +111,7 @@ class NavigationRewardFunction:
         passable_gate: Optional[torch.Tensor] = None,  # (N,) 可通行门控
         crossable_dir: Optional[torch.Tensor] = None,  # (N, 2) 低障中心方向
         crossable_gate: Optional[torch.Tensor] = None,  # (N,) 低障门控
+        cmd_omega: Optional[torch.Tensor] = None,  # (N,) 实际执行角速度命令
         gate_y: Optional[torch.Tensor] = None,  # (N,) 门控权重
         prev_gate_y: Optional[torch.Tensor] = None,  # (N,) 上一门控
         intensity: Optional[torch.Tensor] = None,       # (N,) 兼容字段（将被 gate_y 替代）
@@ -249,6 +252,25 @@ class NavigationRewardFunction:
         velocity_reward = vel_towards_goal * self.cfg.velocity_scale
         rewards['velocity'] = velocity_reward
 
+        # 6.5 后退惩罚（朝目标方向速度为负时惩罚）
+        backward_penalty = torch.zeros(num_envs, device=device)
+        if self.cfg.backward_scale != 0.0:
+            backward_speed = torch.clamp(-vel_towards_goal, min=0.0)
+            backward_penalty = -backward_speed * self.cfg.backward_scale
+        rewards['backward'] = backward_penalty
+
+        # 6.6 无意义转向惩罚（已基本对准目标时，仍给大角速度命令）
+        turn_penalty = torch.zeros(num_envs, device=device)
+        if self.cfg.turn_penalty_scale != 0.0:
+            if cmd_omega is None:
+                omega_cmd = torch.zeros(num_envs, device=device)
+            else:
+                omega_cmd = cmd_omega.view(-1)
+            aligned = torch.abs(heading_error) < 0.2  # about 11.5 deg
+            omega_excess = torch.clamp(torch.abs(omega_cmd) - 0.2, min=0.0)
+            turn_penalty = -omega_excess * aligned.float() * self.cfg.turn_penalty_scale
+        rewards['turn_penalty'] = turn_penalty
+
         # 7. 时间惩罚
         time_reward = torch.ones(num_envs, device=device) * self.cfg.time_penalty
         rewards['time'] = time_reward
@@ -265,6 +287,8 @@ class NavigationRewardFunction:
             rewards['collision'] +
             rewards['stability'] +
             rewards['velocity'] +
+            rewards['backward'] +
+            rewards['turn_penalty'] +
             rewards['time']
         )
         rewards['total'] = total_reward
