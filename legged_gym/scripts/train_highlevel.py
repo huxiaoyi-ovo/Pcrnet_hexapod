@@ -1593,8 +1593,8 @@ class HierarchicalHexapodEnv:
                     lost = self.target_lost_steps >= int(self.target_lost_k)
                     if lost.any():
                         # Continuous penalty while target stays lost; do not force reset in S0.
-                        total_reward = torch.where(lost, total_reward - 2.0, total_reward)
-                        reward_terms["target_lost"] = lost.float() * (-2.0)
+                        total_reward = torch.where(lost, total_reward - 0.3, total_reward)
+                        reward_terms["target_lost"] = lost.float() * (-0.3)
                         reward_terms["total"] = total_reward
 
                 if self.is_s0_follow_task and hasattr(self.env, "target_world"):
@@ -3146,7 +3146,8 @@ def train(args):
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(gate/risk/col):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f}\n"""
-                          f"""{'Reward(velocity/time/total):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
+                          f"""{'Reward(velocity/backward/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
+                          f"""{'Reward(turn_pen/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
             print(log_string)
         

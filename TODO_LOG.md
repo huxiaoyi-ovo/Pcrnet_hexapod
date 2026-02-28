@@ -60,6 +60,12 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 奖励再平衡（target_lost 降权 + sigma 回调）
+
+- [x] ~~[P0] `target_lost` 持续惩罚从 `-2.0` 下调到 `-0.3`（避免总奖励长期为负）~~
+- [x] ~~[P0] `follow_distance_sigma` 从 `0.15` 回调到 `0.20`（先恢复可学区间）~~
+- [ ] [P1] 复跑到 iter150 复核：`Rollout step reward` 转正且 `Goal dist` 开始回落
+
 ## 2026-02-28 S0 奖励修正（坐标系一致 + 丢失持续惩罚 + 转向惩罚降权）
 
 - [x] ~~[P0] `vel_towards_goal` 对齐到世界系：奖励输入速度改为 `root_states[:,7:10]`~~

@@ -165,7 +165,7 @@ class HexS0FollowCfg(HexGroundCfg):
         # Follow-mode reward: track a desired distance instead of "reach goal".
         reward_cfg["follow_enable"] = True
         reward_cfg["follow_distance_desired"] = 1.0
-        reward_cfg["follow_distance_sigma"] = 0.15
+        reward_cfg["follow_distance_sigma"] = 0.20
         reward_cfg["follow_distance_scale"] = 12.0
         reward_cfg["follow_band_scale"] = 4.0
         # Disable reach logic in S0 (we don't want to "reach target point").
