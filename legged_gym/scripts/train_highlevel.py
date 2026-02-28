@@ -2114,6 +2114,7 @@ def train(args):
     stack_reset_mask = None
     last_dones = None
     aff_stack_fill = None
+    egpo_alpha_half_logged = False
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
         if env.is_s0_follow_task:
@@ -2190,6 +2191,9 @@ def train(args):
         egpo_heading_error_deg_samples = []
         egpo_yaw_resp_sign_match_sum = torch.zeros((), device=device)
         egpo_yaw_resp_sign_count = torch.zeros((), device=device)
+        egpo_policy_cmd_sum = torch.zeros(3, device=device)
+        egpo_expert_cmd_sum = torch.zeros(3, device=device)
+        egpo_cmd_count = torch.zeros((), device=device)
         local_iteration = iteration - start_iteration
         expert_alpha_rollout = (
             _get_expert_alpha(local_iteration, expert_interface_iters)
@@ -2383,6 +2387,7 @@ def train(args):
                     aff_stack_buf, state, goal, difficulty, deterministic=False
                 )
                 if use_egpo and compute_s0_follow_expert_cmd is not None:
+                    policy_cmd_raw = cmd
                     target_world_xy = getattr(env.env, "target_world", None)
                     target_vel_world_xy = getattr(env.env, "target_vel_world", None)
                     target_heading = getattr(env.env, "target_heading", None)
@@ -2413,6 +2418,9 @@ def train(args):
                         target_heading=None,
                         cmd_scale=cmd_scale,
                     )
+                    egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
+                    egpo_expert_cmd_sum += expert_action.sum(dim=0)
+                    egpo_cmd_count += float(policy_cmd_raw.shape[0])
                     if debug:
                         # Keep debug heading diagnostics on the same branch used by expert labels
                         # in S0: no target vel/heading, geometric fallback direction only.
@@ -2990,6 +2998,12 @@ def train(args):
             (target_reset_bearing_error_sum / total_samples).item() * 180.0 / math.pi
         )
         egpo_expert_log_prob_mean = (expert_log_prob_mean_sum / max(num_updates, 1)) if use_egpo else 0.0
+        egpo_policy_cmd_mean = torch.zeros(3, device=device)
+        egpo_expert_cmd_mean = torch.zeros(3, device=device)
+        if use_egpo and float(egpo_cmd_count.item()) > 0.0:
+            denom_cmd = egpo_cmd_count.clamp_min(1.0)
+            egpo_policy_cmd_mean = egpo_policy_cmd_sum / denom_cmd
+            egpo_expert_cmd_mean = egpo_expert_cmd_sum / denom_cmd
         mean_step_reward = (sum_reward / sum_length) if sum_length > 0 else 0.0
         rollout_mean_step_reward = buffer.rewards.mean().item()
         breakdown_total_mean = reward_term_means.get('total', 0.0)
@@ -3091,6 +3105,17 @@ def train(args):
             writer.add_scalar(f'Reward/{key}', value, iteration)
         
         # Console
+        if (
+            use_egpo
+            and (not egpo_alpha_half_logged)
+            and abs(float(expert_alpha_update) - 0.5) < 0.01
+            and float(egpo_cmd_count.item()) > 0.0
+        ):
+            p = egpo_policy_cmd_mean.detach().cpu().tolist()
+            e = egpo_expert_cmd_mean.detach().cpu().tolist()
+            print(f"[EGPO][alpha~0.5] Policy cmd mean: [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]")
+            print(f"[EGPO][alpha~0.5] Expert cmd mean: [{e[0]:.4f}, {e[1]:.4f}, {e[2]:.4f}]")
+            egpo_alpha_half_logged = True
         if iteration % args.log_interval == 0:
             width = 80
             pad = 32

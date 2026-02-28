@@ -44,7 +44,7 @@ def parse_args():
         default="logs/hex_s1/Dec31_16-52-59_/model_6000.pt",
         help="Low-level policy checkpoint path",
     )
-    parser.add_argument("--teacher_ckpt", type=str, required=True, help="Expert checkpoint path")
+    parser.add_argument("--teacher_ckpt", type=str, default=None, help="Expert checkpoint path")
     parser.add_argument(
         "--skill",
         type=str,
@@ -99,6 +99,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Debug: 打印 S0 expert 命令（与训练 EGPO 同口径）",
+    )
+    parser.add_argument(
+        "--use_expert_cmd",
+        action="store_true",
+        default=False,
+        help="Debug: 用 S0 expert 命令直接接管执行（仅 hex_s0_follow）",
     )
     parser.add_argument(
         "--force_cmd",
@@ -163,6 +169,11 @@ def main():
         raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
     if args.task not in ("hex_s0_follow", "hex_s1", "hex_s1_follow_moving", "hex_s2", "hex_calib"):
         raise ValueError("play_highlevel.py supports only --task hex_s0_follow/hex_s1/hex_s1_follow_moving/hex_s2/hex_calib")
+    if bool(getattr(args, "use_expert_cmd", False)) and args.task != "hex_s0_follow":
+        raise ValueError("--use_expert_cmd 仅支持 --task hex_s0_follow")
+    if bool(getattr(args, "use_expert_cmd", False)) and not bool(getattr(args, "show_expert_cmd", False)):
+        # In expert takeover mode, always compute and print expert commands.
+        args.show_expert_cmd = True
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
         if debug:
@@ -313,46 +324,55 @@ def main():
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     skill = getattr(args, "skill", "follow")
     is_gate = skill == "moe"
-    if is_gate:
-        if not args.follow_ckpt or not args.avoid_ckpt:
-            raise ValueError("moe 需要 --follow_ckpt 和 --avoid_ckpt")
-        policy = th.GatePolicy(
-            affordance_channels=aff_channels,
-            state_dim=obs["state"].shape[1],
-            goal_dim=obs["goal"].shape[1],
-        ).to(device)
-        follow_policy = th.CmdVelExpert(
-            affordance_channels=aff_channels,
-            state_dim=obs["state"].shape[1],
-            goal_dim=obs["goal"].shape[1],
-            cmd_scale=cmd_scale,
-        ).to(device)
-        avoid_policy = th.CmdVelExpert(
-            affordance_channels=aff_channels,
-            state_dim=obs["state"].shape[1],
-            goal_dim=obs["goal"].shape[1],
-            cmd_scale=cmd_scale,
-        ).to(device)
-        gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
-        gate_state = gate_ckpt["model_state_dict"] if isinstance(gate_ckpt, dict) and "model_state_dict" in gate_ckpt else gate_ckpt
-        policy.load_state_dict(gate_state)
-        for model, ckpt_path in [(follow_policy, args.follow_ckpt), (avoid_policy, args.avoid_ckpt)]:
-            ckpt = torch.load(ckpt_path, map_location=device)
+    expert_only_mode = bool(getattr(args, "use_expert_cmd", False)) and args.task == "hex_s0_follow"
+    policy = None
+    follow_policy = None
+    avoid_policy = None
+    if not expert_only_mode:
+        if not args.teacher_ckpt:
+            raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
+        if is_gate:
+            if not args.follow_ckpt or not args.avoid_ckpt:
+                raise ValueError("moe 需要 --follow_ckpt 和 --avoid_ckpt")
+            policy = th.GatePolicy(
+                affordance_channels=aff_channels,
+                state_dim=obs["state"].shape[1],
+                goal_dim=obs["goal"].shape[1],
+            ).to(device)
+            follow_policy = th.CmdVelExpert(
+                affordance_channels=aff_channels,
+                state_dim=obs["state"].shape[1],
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            avoid_policy = th.CmdVelExpert(
+                affordance_channels=aff_channels,
+                state_dim=obs["state"].shape[1],
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            gate_state = gate_ckpt["model_state_dict"] if isinstance(gate_ckpt, dict) and "model_state_dict" in gate_ckpt else gate_ckpt
+            policy.load_state_dict(gate_state)
+            for model, ckpt_path in [(follow_policy, args.follow_ckpt), (avoid_policy, args.avoid_ckpt)]:
+                ckpt = torch.load(ckpt_path, map_location=device)
+                state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+                model.load_state_dict(state_dict)
+                model.eval()
+            policy.eval()
+        else:
+            policy = th.CmdVelExpert(
+                affordance_channels=aff_channels,
+                state_dim=obs["state"].shape[1],
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            ckpt = torch.load(args.teacher_ckpt, map_location=device)
             state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-            model.load_state_dict(state_dict)
-            model.eval()
-        policy.eval()
+            policy.load_state_dict(state_dict)
+            policy.eval()
     else:
-        policy = th.CmdVelExpert(
-            affordance_channels=aff_channels,
-            state_dim=obs["state"].shape[1],
-            goal_dim=obs["goal"].shape[1],
-            cmd_scale=cmd_scale,
-        ).to(device)
-        ckpt = torch.load(args.teacher_ckpt, map_location=device)
-        state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-        policy.load_state_dict(state_dict)
-        policy.eval()
+        dprint("[PlayHigh] expert-only takeover enabled; skip policy checkpoint loading.")
     step_idx = 0
     deterministic = not args.stochastic
     camera_frame_idx = 0
@@ -431,39 +451,41 @@ def main():
             aff_stack_fill.fill_(1)
         difficulty = _get_difficulty(obs, aff_map)
         gate_y = None
-        with torch.no_grad():
-            if is_gate:
-                gate_difficulty = difficulty if args.gate_use_difficulty else torch.zeros_like(difficulty)
-                cmd_f, _ = follow_policy.get_action(
-                    aff_stack_buf,
-                    obs["state"],
-                    obs["goal"],
-                    difficulty,
-                    deterministic=True,
-                )
-                cmd_a, _ = avoid_policy.get_action(
-                    aff_stack_buf,
-                    obs["state"],
-                    obs["goal"],
-                    difficulty,
-                    deterministic=True,
-                )
-                gate_y, _ = policy.get_action(
-                    aff_stack_buf,
-                    obs["state"],
-                    obs["goal"],
-                    gate_difficulty,
-                    deterministic=deterministic,
-                )
-                cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
-            else:
-                cmd, _ = policy.get_action(
-                    aff_stack_buf,
-                    obs["state"],
-                    obs["goal"],
-                    difficulty,
-                    deterministic=deterministic,
-                )
+        cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
+        if not expert_only_mode:
+            with torch.no_grad():
+                if is_gate:
+                    gate_difficulty = difficulty if args.gate_use_difficulty else torch.zeros_like(difficulty)
+                    cmd_f, _ = follow_policy.get_action(
+                        aff_stack_buf,
+                        obs["state"],
+                        obs["goal"],
+                        difficulty,
+                        deterministic=True,
+                    )
+                    cmd_a, _ = avoid_policy.get_action(
+                        aff_stack_buf,
+                        obs["state"],
+                        obs["goal"],
+                        difficulty,
+                        deterministic=True,
+                    )
+                    gate_y, _ = policy.get_action(
+                        aff_stack_buf,
+                        obs["state"],
+                        obs["goal"],
+                        gate_difficulty,
+                        deterministic=deterministic,
+                    )
+                    cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
+                else:
+                    cmd, _ = policy.get_action(
+                        aff_stack_buf,
+                        obs["state"],
+                        obs["goal"],
+                        difficulty,
+                        deterministic=deterministic,
+                    )
         expert_cmd = None
         if bool(getattr(args, "show_expert_cmd", False)) and s0_expert_fn is not None and args.task == "hex_s0_follow":
             quat_e = env.env.root_states[:, 3:7]
@@ -489,6 +511,10 @@ def main():
                 target_heading=None,
                 cmd_scale=cmd_scale,
             )
+        if bool(getattr(args, "use_expert_cmd", False)):
+            if expert_cmd is None:
+                raise RuntimeError("--use_expert_cmd requires --show_expert_cmd and task=hex_s0_follow")
+            cmd = expert_cmd
         if force_cmd_tensor is not None:
             cmd = force_cmd_tensor.expand(env.num_envs, -1)
         if args.mode == "student":

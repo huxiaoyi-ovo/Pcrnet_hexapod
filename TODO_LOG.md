@@ -60,6 +60,12 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 Expert 重写（去影子点，三路解耦控制）
+
+- [x] ~~[P0] 重写 `expert_s0_follow.py`：完全移除 shadow point 逻辑，仅用 `robot_pos/robot_heading/target_pos`~~
+- [x] ~~[P0] expert 改为三路控制：纵向距离控制 + 横向偏差控制 + 偏航对准控制（输出 `cmd[x_right, y_forward, yaw]`）~~
+- [ ] [P1] play 下 expert 接管验证：目标前方时 `cmd_y>0`、侧偏时 `cmd_x`修正方向正确、整体能稳定回到目标后方
+
 ## 2026-02-28 S0 朝向奖励全程生效（关闭 heading gate）
 
 - [x] ~~[P0] S0 显式设置 `heading_gate_use=False`，避免低速/低进度时朝向奖励被清零~~
