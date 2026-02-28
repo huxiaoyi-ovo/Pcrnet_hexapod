@@ -161,7 +161,7 @@ class HexS0FollowCfg(HexGroundCfg):
         # (tight) soft/hard window; keep it small for S0 and rely on shaping/curriculum.
         target_visible_scale = 0.2
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
-        reward_cfg["heading_offset_rad"] = 1.5708
+        reward_cfg["heading_offset_rad"] = 0.0
         # Follow-mode reward: track a desired distance instead of "reach goal".
         reward_cfg["follow_enable"] = True
         reward_cfg["follow_distance_desired"] = 1.0
