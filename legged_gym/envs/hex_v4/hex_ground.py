@@ -932,12 +932,103 @@ class HexGround(LeggedRobot):
         self.target_vel_world = vel_local
         self.goal_world[:] = self.target_world
 
+    def _reset_moving_target_s0_circle(self, env_ids: torch.Tensor):
+        """Reset scripted S0 right-turn circular target trajectory."""
+        if env_ids.numel() == 0:
+            return
+        radius = float(getattr(self.nav_cfg, "moving_target_circle_radius", 1.2))
+        speed = float(getattr(self.nav_cfg, "moving_target_circle_speed", 0.28))
+        center_x = float(getattr(self.nav_cfg, "moving_target_circle_center_x", radius))
+        center_y = float(getattr(self.nav_cfg, "moving_target_circle_center_y", 1.0))
+        phase_deg = float(getattr(self.nav_cfg, "moving_target_circle_start_phase_deg", 180.0))
+        clockwise = bool(getattr(self.nav_cfg, "moving_target_circle_clockwise", True))
+        phase0 = math.radians(phase_deg)
+        theta_dot = (-1.0 if clockwise else 1.0) * (speed / max(radius, 1e-6))
+
+        theta = torch.full((len(env_ids),), phase0, device=self.device, dtype=torch.float32)
+        x_local = center_x + radius * torch.cos(theta)
+        y_local = center_y + radius * torch.sin(theta)
+        target_local = torch.stack([x_local, y_local], dim=1)
+
+        vel_x = theta_dot * (-radius * torch.sin(theta))
+        vel_y = theta_dot * (radius * torch.cos(theta))
+        vel_local = torch.stack([vel_x, vel_y], dim=1)
+        heading = torch.atan2(vel_x, vel_y)
+
+        self.target_speed_phase[env_ids] = theta
+        self.target_heading[env_ids] = heading
+        self.target_heading_des[env_ids] = heading
+        self.target_speed[env_ids] = float(speed)
+        self.target_speed_des[env_ids] = float(speed)
+        self.target_cmd_timer[env_ids] = 0.0
+        freeze_s = float(getattr(self.nav_cfg, "moving_target_freeze_s", 0.0))
+        self.target_freeze_timer[env_ids] = freeze_s
+        self.target_turn_events[env_ids] = 0.0
+        self.target_preturn_events[env_ids] = 0.0
+        self.target_reflect_events[env_ids] = 0.0
+
+        self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        self.target_vel_world[env_ids] = vel_local
+        self.goal_world[env_ids] = self.target_world[env_ids]
+
+    def _update_moving_target_s0_circle(self, dt: float):
+        """Update scripted S0 right-turn circular target trajectory."""
+        radius = float(getattr(self.nav_cfg, "moving_target_circle_radius", 1.2))
+        speed = float(getattr(self.nav_cfg, "moving_target_circle_speed", 0.28))
+        center_x = float(getattr(self.nav_cfg, "moving_target_circle_center_x", radius))
+        center_y = float(getattr(self.nav_cfg, "moving_target_circle_center_y", 1.0))
+        clockwise = bool(getattr(self.nav_cfg, "moving_target_circle_clockwise", True))
+        theta_dot = (-1.0 if clockwise else 1.0) * (speed / max(radius, 1e-6))
+
+        self.target_turn_events.zero_()
+        self.target_preturn_events.zero_()
+        self.target_reflect_events.zero_()
+
+        active_mask = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+        if hasattr(self, "target_freeze_timer"):
+            frozen = self.target_freeze_timer > 0.0
+            if frozen.any():
+                self.target_freeze_timer = torch.clamp(self.target_freeze_timer - dt, min=0.0)
+                self.target_vel_world[frozen].zero_()
+                self.goal_world[frozen] = self.target_world[frozen]
+                active_mask = ~frozen
+                if not active_mask.any():
+                    return
+
+        theta = self.target_speed_phase
+        theta_next = torch.atan2(torch.sin(theta + theta_dot * dt), torch.cos(theta + theta_dot * dt))
+        theta = torch.where(active_mask, theta_next, theta)
+        self.target_speed_phase = theta
+
+        x_local = center_x + radius * torch.cos(theta)
+        y_local = center_y + radius * torch.sin(theta)
+        target_local = torch.stack([x_local, y_local], dim=1)
+
+        vel_x = theta_dot * (-radius * torch.sin(theta))
+        vel_y = theta_dot * (radius * torch.cos(theta))
+        vel_local = torch.stack([vel_x, vel_y], dim=1)
+        vel_local = torch.where(active_mask.unsqueeze(1), vel_local, torch.zeros_like(vel_local))
+        heading = torch.atan2(vel_x, vel_y)
+        heading = torch.where(active_mask, heading, self.target_heading)
+
+        self.target_heading = heading
+        self.target_heading_des = heading
+        self.target_speed = torch.where(active_mask, torch.full_like(self.target_speed, float(speed)), self.target_speed)
+        self.target_speed_des = self.target_speed.clone()
+        self.target_world = self.env_origins[:, :2] + target_local
+        self.target_vel_world = vel_local
+        self.goal_world[:] = self.target_world
+
     def _reset_moving_target(self, env_ids: torch.Tensor):
         """Reset moving target state for selected envs."""
         if env_ids.numel() == 0 or not self._moving_target_enabled():
             return
-        if self._moving_target_mode() == "s1_gate_script":
+        moving_mode = self._moving_target_mode()
+        if moving_mode == "s1_gate_script":
             self._reset_moving_target_s1(env_ids)
+            return
+        if moving_mode == "s0_circle_right":
+            self._reset_moving_target_s0_circle(env_ids)
             return
         # Place target straight ahead of the robot (camera center) at reset.
         robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
@@ -999,6 +1090,9 @@ class HexGround(LeggedRobot):
         if moving_mode == "s1_gate_script":
             d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
             self._update_moving_target_s1(dt=dt, d=d)
+            return
+        if moving_mode == "s0_circle_right":
+            self._update_moving_target_s0_circle(dt=dt)
             return
 
         d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
@@ -1772,8 +1866,12 @@ class HexGround(LeggedRobot):
             cos_max_tilt = math.cos(math.radians(max_tilt_deg))
             self.reset_buf |= self.projected_gravity[:, 2] > -cos_max_tilt
 
-        self.time_out_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf |= self.time_out_buf
+        no_episode_timeout = bool(getattr(self.cfg.env, "no_episode_timeout", False))
+        if no_episode_timeout:
+            self.time_out_buf = torch.zeros_like(self.reset_buf, dtype=torch.bool)
+        else:
+            self.time_out_buf = self.episode_length_buf > self.max_episode_length
+            self.reset_buf |= self.time_out_buf
         
       
 

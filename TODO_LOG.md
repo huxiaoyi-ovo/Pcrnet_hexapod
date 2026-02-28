@@ -60,6 +60,12 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-02-28 S0 目标轨迹改为“慢速右转整圆”并关闭超时终止
+
+- [x] ~~[P0] S0 moving target 新增脚本模式 `s0_circle_right`：固定半径、顺时针、整圈回到起点~~
+- [x] ~~[P0] S0 play/train 关闭 episode timeout 终止（保留其他终止条件）~~
+- [ ] [P1] play 验收：目标轨迹完成整圈且机器人可持续跟随，不因时长被 reset
+
 ## 2026-02-28 S0 Expert 重写（去影子点，三路解耦控制）
 
 - [x] ~~[P0] 重写 `expert_s0_follow.py`：完全移除 shadow point 逻辑，仅用 `robot_pos/robot_heading/target_pos`~~

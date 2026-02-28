@@ -550,6 +550,7 @@ class HierarchicalHexapodEnv:
         self.high_level_dt = float(self.env.dt) * float(self.decimation)
         self.max_episode_length = max(1, int(np.ceil(self.max_episode_length_low / float(self.decimation))))
         self.max_episode_length_s = float(self.max_episode_length * self.high_level_dt)
+        self.no_episode_timeout = bool(getattr(env_cfg.env, "no_episode_timeout", False))
         self.s0_follow_steps_success = max(
             1, int(self.s0_follow_success_time_s / max(1e-6, self.high_level_dt))
         )
@@ -1655,7 +1656,9 @@ class HierarchicalHexapodEnv:
         self.episode_len_buf += 1
 
         # 5. 处理超时
-        timeout = self.episode_length_buf >= self.max_episode_length
+        timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if not self.no_episode_timeout:
+            timeout = self.episode_length_buf >= self.max_episode_length
         done_any |= timeout
         manual_reset_mask |= timeout
 

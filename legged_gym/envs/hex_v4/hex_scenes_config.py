@@ -86,6 +86,8 @@ class HexS0FollowCfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 10.0
         episode_length_s = 10
+        # S0 circle-track debug: do not terminate by episode timeout.
+        no_episode_timeout = True
     class terrain(HexGroundCfg.terrain):
         # S0 is a flat, obstacle-free pretrain bed: use plane to ensure env origins are
         # separated by env_spacing (avoid overlapping origins and improve stability).
@@ -115,8 +117,16 @@ class HexS0FollowCfg(HexGroundCfg):
         goal_mode = "fixed"
         fixed_goal = [0.0, 0.0]
         resample_on_reach = False
-        # Moving target curriculum (difficulty controls switching frequency/complexity).
+        # Moving target: scripted large right-turn circle for stable behavior verification.
         moving_target_enable = True
+        moving_target_mode = "s0_circle_right"
+        # Circle in local env frame: slow clockwise full loop and return to start.
+        moving_target_circle_radius = 1.2
+        moving_target_circle_speed = 0.28
+        moving_target_circle_center_x = 1.2
+        moving_target_circle_center_y = 1.0
+        moving_target_circle_start_phase_deg = 180.0
+        moving_target_circle_clockwise = True
         moving_target_v_max = 1.2
         # Make early training learnable: slow + gentle, then scale up with difficulty.
         moving_target_v_min = 0.05
