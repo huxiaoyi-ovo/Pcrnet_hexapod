@@ -95,6 +95,12 @@ def parse_args():
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     parser.add_argument("--debug", action="store_true", help="debug 输出（诊断信息）")
     parser.add_argument(
+        "--show_reset_reason",
+        action="store_true",
+        default=False,
+        help="打印每次 done 的重置原因归类（success/done_during/timeout/other）",
+    )
+    parser.add_argument(
         "--show_expert_cmd",
         action="store_true",
         default=False,
@@ -521,19 +527,77 @@ def main():
             env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             env.reward_affordance_override = aff_map
         obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
+        done_during = None
+        if info is not None and isinstance(info, dict):
+            done_during = info.get("done_during", None)
+        if done_during is None:
+            done_during = torch.zeros_like(dones, dtype=torch.bool)
+        else:
+            done_during = done_during.to(device=dones.device, dtype=torch.bool)
+
+        reward_terms = info.get("reward_terms") if isinstance(info, dict) else None
+        success_mask = torch.zeros_like(dones, dtype=torch.bool)
+        if isinstance(reward_terms, dict) and ("success_bonus" in reward_terms):
+            success_bonus = reward_terms["success_bonus"]
+            if torch.is_tensor(success_bonus):
+                success_mask = success_bonus.to(device=dones.device) > 0.0
+
+        timeout_mask = torch.zeros_like(dones, dtype=torch.bool)
+        if hasattr(env, "no_episode_timeout") and (not bool(getattr(env, "no_episode_timeout", False))):
+            ep_len_snapshot = info.get("episode_length", None) if isinstance(info, dict) else None
+            if torch.is_tensor(ep_len_snapshot):
+                timeout_mask = ep_len_snapshot.to(device=dones.device) >= int(getattr(env, "max_episode_length", 0))
+                timeout_mask &= dones
+
+        other_done_mask = dones & (~done_during) & (~success_mask) & (~timeout_mask)
         if dones.any():
             stack_reset_mask = dones.clone()
+            track_done = bool(dones[track_env_idx].item())
+            if track_done:
+                # Avoid post-reset displacement spikes in diagnostics.
+                prev_track_pos_world = None
+                prev_track_yaw = None
+                axis_disp_world_sum[:] = 0.0
+                axis_disp_body_sum[:] = 0.0
+                axis_disp_count = 0
+            if args.show_reset_reason or args.debug_cmd or debug:
+                done_n = int(dones.sum().item())
+                phys_n = int(done_during.sum().item())
+                succ_n = int(success_mask.sum().item())
+                tout_n = int(timeout_mask.sum().item())
+                other_n = int(other_done_mask.sum().item())
+                track_reason = "none"
+                if track_done:
+                    if bool(done_during[track_env_idx].item()):
+                        track_reason = "done_during(physics)"
+                    elif bool(success_mask[track_env_idx].item()):
+                        track_reason = "success"
+                    elif bool(timeout_mask[track_env_idx].item()):
+                        track_reason = "timeout"
+                    else:
+                        track_reason = "other"
+                print(
+                    "[PlayHigh][reset] step={} done={} reason(physics/success/timeout/other)={}/{}/{}/{} track_env_reason={}".format(
+                        step_idx, done_n, phys_n, succ_n, tout_n, other_n, track_reason
+                    )
+                )
 
         step_dx = 0.0
         step_dy = 0.0
         step_body_x = 0.0
         step_body_y = 0.0
+        step_yaw = 0.0
+        cmd_omega_track = 0.0
         if hasattr(env.env, "root_states"):
             root = env.env.root_states[track_env_idx]
             pos_xy = root[:2].detach().cpu().numpy()
             quat = root[3:7].detach().cpu().numpy()
             x_q, y_q, z_q, w_q = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
             yaw_now = math.atan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q))
+            if hasattr(env.env, "commands"):
+                cmd_omega_track = float(env.env.commands[track_env_idx, 2].detach().cpu().item())
+            else:
+                cmd_omega_track = float(cmd[track_env_idx, 2].detach().cpu().item())
             if prev_track_pos_world is not None and prev_track_yaw is not None:
                 step_dx = float(pos_xy[0] - prev_track_pos_world[0])
                 step_dy = float(pos_xy[1] - prev_track_pos_world[1])
@@ -541,6 +605,7 @@ def main():
                 sin_h = math.sin(prev_track_yaw)
                 step_body_x = cos_h * step_dx - sin_h * step_dy
                 step_body_y = sin_h * step_dx + cos_h * step_dy
+                step_yaw = math.atan2(math.sin(yaw_now - prev_track_yaw), math.cos(yaw_now - prev_track_yaw))
                 axis_disp_world_sum[0] += step_dx
                 axis_disp_world_sum[1] += step_dy
                 axis_disp_body_sum[0] += step_body_x
@@ -821,12 +886,14 @@ def main():
             mean_by = axis_disp_body_sum[1] / max(axis_disp_count, 1)
             print(
                 "[PlayHigh][axis] force_cmd={} step_world=({:.4f},{:.4f}) step_body(x_right,y_forward)=({:.4f},{:.4f}) "
-                "mean_world=({:.4f},{:.4f}) mean_body=({:.4f},{:.4f}) samples={}".format(
+                "step_yaw={:.4f} cmd_omega={:.4f} mean_world=({:.4f},{:.4f}) mean_body=({:.4f},{:.4f}) samples={}".format(
                     "None" if force_cmd_tensor is None else np.array2string(force_cmd_tensor[0].detach().cpu().numpy(), precision=3, floatmode="fixed"),
                     step_dx,
                     step_dy,
                     step_body_x,
                     step_body_y,
+                    step_yaw,
+                    cmd_omega_track,
                     mean_dx,
                     mean_dy,
                     mean_bx,
