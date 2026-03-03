@@ -26,8 +26,11 @@ def _world_to_body_xy(
     cos_heading: torch.Tensor,
     sin_heading: torch.Tensor,
 ) -> torch.Tensor:
-    body_x = cos_heading * vec_world_xy[:, 0] - sin_heading * vec_world_xy[:, 1]
-    body_y = sin_heading * vec_world_xy[:, 0] + cos_heading * vec_world_xy[:, 1]
+    # Keep exact project contract used by goal_buf in hex_ground:
+    # heading=0 => world +Y is forward, +X is right.
+    # world -> body must use R(-heading) under this contract.
+    body_x = cos_heading * vec_world_xy[:, 0] + sin_heading * vec_world_xy[:, 1]
+    body_y = -sin_heading * vec_world_xy[:, 0] + cos_heading * vec_world_xy[:, 1]
     return torch.stack([body_x, body_y], dim=1)
 
 
@@ -55,20 +58,21 @@ def compute_s0_follow_expert_cmd(
     target_vel_world_xy: Optional[torch.Tensor],
     target_heading: Optional[torch.Tensor],
     cmd_scale: Union[Sequence[float], torch.Tensor],
+    reset_mask: Optional[torch.Tensor] = None,
     *,
     d_des: float = 1.0,
     v_eps: float = 0.05,
     kp_along: float = 0.8,
     kp_perp: float = 0.5,
     kff: float = 1.0,
-    v_along_max: float = 1.5,
+    v_along_max: float = 1.1,
     v_perp_max: float = 0.12,
-    k_yaw: float = 1.0,
-    w_max: float = 0.8,
-    heading_lock_rad: float = 0.85,
-    heading_release_rad: float = 0.35,
-    allow_backward_bearing_rad: float = 0.45,
-    omega_deadzone_rad: float = 0.05,
+    k_yaw: float = 1.4,
+    w_max: float = 1.2,
+    heading_lock_rad: float = 0.35,
+    heading_release_rad: float = 0.18,
+    allow_backward_bearing_rad: float = 0.30,
+    omega_deadzone_rad: float = 0.0,
 ) -> torch.Tensor:
     if robot_pos_world_xy.ndim != 2 or robot_pos_world_xy.shape[1] != 2:
         raise ValueError("robot_pos_world_xy must have shape (N, 2)")
@@ -98,13 +102,18 @@ def compute_s0_follow_expert_cmd(
     to_target_world = target_world_xy - robot_pos_world_xy
     to_target_body = _world_to_body_xy(to_target_world, cos_heading=cos_heading, sin_heading=sin_heading)
 
-    # Distance control: regulate Euclidean range to the target.
-    dist = torch.norm(to_target_world, dim=1).clamp_min(1e-6)
+    # Unicycle-style control with turn-first hysteresis:
+    # - alpha: bearing in body frame (x_right, y_forward)
+    # - omega: always active for heading alignment
+    # - v_forward: distance tracking with cos(alpha), but forced to zero while turning lock is on
+    dist = torch.norm(to_target_body, dim=1).clamp_min(1e-6)
     dist_error = dist - float(d_des)
-    v_forward_raw = float(kp_along) * dist_error
-
-    # Yaw control: align heading to current target direction.
     heading_error = torch.atan2(to_target_body[:, 0], to_target_body[:, 1])
+    cos_alpha = torch.cos(heading_error)
+    abs_bearing = torch.abs(heading_error)
+
+    # Project runtime validation: +omega is CCW(left turn).
+    # With alpha=atan2(x_right, y_forward), turn-toward-target requires omega = -k*alpha.
     omega = -float(k_yaw) * heading_error
     omega = torch.where(
         torch.abs(heading_error) < float(max(0.0, omega_deadzone_rad)),
@@ -113,27 +122,29 @@ def compute_s0_follow_expert_cmd(
     )
     omega = torch.clamp(omega, min=-float(w_max), max=float(w_max))
 
-    # Turn-first gating with hysteresis:
-    # - Enter lock when |bearing| > lock threshold.
-    # - Exit lock only when |bearing| < release threshold.
-    # - While locked, force zero forward speed and rotate first.
-    lock = float(max(1e-3, heading_lock_rad))
-    release = float(max(1e-3, min(heading_release_rad, lock - 1e-3)))
-    abs_bearing = torch.abs(heading_error)
+    lock_th = float(max(1e-3, heading_lock_rad))
+    release_th = float(max(1e-3, min(heading_release_rad, lock_th - 1e-3)))
     lock_state = _get_heading_lock_state(device=device, num_envs=num_envs)
-    enter_lock = abs_bearing > lock
-    exit_lock = abs_bearing < release
+    if reset_mask is not None:
+        if reset_mask.ndim == 1 and reset_mask.dtype == torch.bool and reset_mask.shape[0] == num_envs:
+            lock_state[reset_mask.to(device=device)] = False
+        elif reset_mask.ndim == 1 and reset_mask.dtype in (torch.int32, torch.int64):
+            lock_state[reset_mask.to(device=device, dtype=torch.long)] = False
+        else:
+            raise ValueError("reset_mask must be bool mask (N,) or index tensor (K,)")
+    enter_lock = abs_bearing > lock_th
+    exit_lock = abs_bearing < release_th
     lock_state = torch.where(
         enter_lock,
         torch.ones_like(lock_state, dtype=torch.bool),
         torch.where(exit_lock, torch.zeros_like(lock_state, dtype=torch.bool), lock_state),
     )
     _HEADING_LOCK_STATE[_heading_lock_key(device, num_envs)] = lock_state
-    v_forward = torch.where(lock_state, torch.zeros_like(v_forward_raw), v_forward_raw)
 
-    # Do not back up when target is largely off-axis; rotate first and then approach.
+    v_forward = float(kp_along) * dist_error * cos_alpha
     allow_backward = abs_bearing < float(max(0.0, allow_backward_bearing_rad))
     v_forward = torch.where((v_forward < 0.0) & (~allow_backward), torch.zeros_like(v_forward), v_forward)
+    v_forward = torch.where(lock_state, torch.zeros_like(v_forward), v_forward)
     v_forward = torch.clamp(v_forward, min=-float(v_along_max), max=float(v_along_max))
 
     # Expert output contract for this debug phase: no lateral command.

@@ -1968,8 +1968,8 @@ class HexGround(LeggedRobot):
                         delta = self.target_world[s0_tensor] - self.root_states[s0_tensor, :2]
                         cos_h = torch.cos(yaw)
                         sin_h = torch.sin(yaw)
-                        x_r = cos_h * delta[:, 0] - sin_h * delta[:, 1]
-                        y_f = sin_h * delta[:, 0] + cos_h * delta[:, 1]
+                        x_r = cos_h * delta[:, 0] + sin_h * delta[:, 1]
+                        y_f = -sin_h * delta[:, 0] + cos_h * delta[:, 1]
                         bearing = torch.atan2(x_r, y_f)
                         desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.0))
                         dist_err = torch.abs(torch.norm(delta, dim=1) - desired)
@@ -1981,8 +1981,8 @@ class HexGround(LeggedRobot):
                             delta = self.target_world[s0_tensor] - self.root_states[s0_tensor, :2]
                             cos_h = torch.cos(yaw)
                             sin_h = torch.sin(yaw)
-                            x_r = cos_h * delta[:, 0] - sin_h * delta[:, 1]
-                            y_f = sin_h * delta[:, 0] + cos_h * delta[:, 1]
+                            x_r = cos_h * delta[:, 0] + sin_h * delta[:, 1]
+                            y_f = -sin_h * delta[:, 0] + cos_h * delta[:, 1]
                             bearing = torch.atan2(x_r, y_f)
                             too_far = torch.abs(bearing) > 0.35  # ~20deg
                             behind = y_f < 0.0
@@ -2259,10 +2259,10 @@ class HexGround(LeggedRobot):
         # - heading=0 means world +Y is forward
         # - goal_buf is (x_right, y_forward) so bearing = atan2(x_right, y_forward)
         #
-        # Build world-frame right/forward unit vectors from heading and project delta.
+        # Project world delta to body (x_right, y_forward) using R(-heading).
         # heading=0 => forward=(0,+1), right=(+1,0).
-        x_right = cos_h * delta_world[:, 0] - sin_h * delta_world[:, 1]
-        y_forward = sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
+        x_right = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]
+        y_forward = -sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
         self.goal_buf[:] = torch.stack([x_right, y_forward], dim=1)
 
         if getattr(self.nav_cfg, "resample_on_reach", False):

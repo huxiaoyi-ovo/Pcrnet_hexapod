@@ -95,6 +95,36 @@ def parse_args():
     parser.add_argument("--debug_interval", type=int, default=10, help="Debug print interval (steps)")
     parser.add_argument("--debug", action="store_true", help="debug 输出（诊断信息）")
     parser.add_argument(
+        "--expert_k_yaw",
+        type=float,
+        default=None,
+        help="S0 expert override: yaw gain k_yaw (None keeps default)",
+    )
+    parser.add_argument(
+        "--expert_heading_lock",
+        type=float,
+        default=None,
+        help="S0 expert override: lock threshold in radians (None keeps default)",
+    )
+    parser.add_argument(
+        "--expert_heading_release",
+        type=float,
+        default=None,
+        help="S0 expert override: release threshold in radians (None keeps default)",
+    )
+    parser.add_argument(
+        "--disable_success_reset",
+        action="store_true",
+        default=False,
+        help="临时关闭 S0 成功即重置（用于长时间跟随观察）",
+    )
+    parser.add_argument(
+        "--keep_success_reset",
+        action="store_true",
+        default=False,
+        help="即使在 S0 + expert-only 模式也保留成功即重置",
+    )
+    parser.add_argument(
         "--show_reset_reason",
         action="store_true",
         default=False,
@@ -180,6 +210,9 @@ def main():
     if bool(getattr(args, "use_expert_cmd", False)) and not bool(getattr(args, "show_expert_cmd", False)):
         # In expert takeover mode, always compute and print expert commands.
         args.show_expert_cmd = True
+    if (args.expert_heading_lock is not None) and (args.expert_heading_release is not None):
+        if not (float(args.expert_heading_release) < float(args.expert_heading_lock)):
+            raise ValueError("--expert_heading_release must be < --expert_heading_lock")
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
         if debug:
@@ -222,6 +255,19 @@ def main():
         if args.seed is not None:
             env_cfg.seed = int(args.seed)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
+    # In S0 expert takeover debugging, default to long-horizon observation:
+    # disable success-triggered resets unless explicitly kept.
+    auto_disable_success_reset = (
+        args.task == "hex_s0_follow" and bool(getattr(args, "use_expert_cmd", False))
+    )
+    disable_success_reset = bool(getattr(args, "disable_success_reset", False)) or (
+        auto_disable_success_reset and (not bool(getattr(args, "keep_success_reset", False)))
+    )
+    if disable_success_reset and hasattr(env, "s0_follow_steps_success"):
+        env.s0_follow_steps_success = int(10 ** 9)
+        if hasattr(env, "s0_follow_success_bonus"):
+            env.s0_follow_success_bonus = 0.0
+        print("[PlayHigh] success-reset disabled for S0 follow (long-horizon debug mode).")
     if hasattr(env, "env") and hasattr(env.env, "cfg") and hasattr(env.env.cfg, "terrain"):
         env.env.cfg.terrain.curriculum = False
     if hasattr(env.env, "_update_terrain_curriculum"):
@@ -379,6 +425,16 @@ def main():
             policy.eval()
     else:
         dprint("[PlayHigh] expert-only takeover enabled; skip policy checkpoint loading.")
+    if expert_only_mode and (
+        (args.expert_k_yaw is not None)
+        or (args.expert_heading_lock is not None)
+        or (args.expert_heading_release is not None)
+    ):
+        print(
+            "[PlayHigh] expert overrides: k_yaw={} lock={} release={}".format(
+                args.expert_k_yaw, args.expert_heading_lock, args.expert_heading_release
+            )
+        )
     step_idx = 0
     deterministic = not args.stochastic
     camera_frame_idx = 0
@@ -493,6 +549,13 @@ def main():
                         deterministic=deterministic,
                     )
         expert_cmd = None
+        dircheck_alpha_pre = None
+        dircheck_x_pre = None
+        dircheck_y_pre = None
+        dircheck_omega_pre = None
+        dircheck_goal_x_pre = None
+        dircheck_goal_y_pre = None
+        dircheck_goal_err_pre = None
         if bool(getattr(args, "show_expert_cmd", False)) and s0_expert_fn is not None and args.task == "hex_s0_follow":
             quat_e = env.env.root_states[:, 3:7]
             x_q, y_q, z_q, w_q = quat_e[:, 0], quat_e[:, 1], quat_e[:, 2], quat_e[:, 3]
@@ -509,6 +572,13 @@ def main():
             target_world_xy = getattr(env.env, "target_world", None)
             if target_world_xy is None:
                 target_world_xy = torch.zeros(env.num_envs, 2, device=device)
+            expert_kwargs = {}
+            if args.expert_k_yaw is not None:
+                expert_kwargs["k_yaw"] = float(args.expert_k_yaw)
+            if args.expert_heading_lock is not None:
+                expert_kwargs["heading_lock_rad"] = float(args.expert_heading_lock)
+            if args.expert_heading_release is not None:
+                expert_kwargs["heading_release_rad"] = float(args.expert_heading_release)
             expert_cmd = s0_expert_fn(
                 robot_pos_world_xy=env.env.root_states[:, :2],
                 robot_heading=robot_heading_for_expert,
@@ -516,7 +586,28 @@ def main():
                 target_vel_world_xy=None,
                 target_heading=None,
                 cmd_scale=cmd_scale,
+                reset_mask=reset_mask,
+                **expert_kwargs,
             )
+            # Direction-check diagnostic uses the exact pre-step geometry fed to expert.
+            delta_w = target_world_xy - env.env.root_states[:, :2]
+            cos_h = torch.cos(robot_heading_for_expert)
+            sin_h = torch.sin(robot_heading_for_expert)
+            x_right = cos_h * delta_w[:, 0] + sin_h * delta_w[:, 1]
+            y_forward = -sin_h * delta_w[:, 0] + cos_h * delta_w[:, 1]
+            alpha_pre = torch.atan2(x_right, y_forward)
+            dircheck_alpha_pre = alpha_pre
+            dircheck_x_pre = x_right
+            dircheck_y_pre = y_forward
+            dircheck_omega_pre = expert_cmd[:, 2]
+            if hasattr(env.env, "goal_buf") and torch.is_tensor(env.env.goal_buf):
+                goal_buf_pre = env.env.goal_buf.detach().clone()
+                if goal_buf_pre.ndim == 2 and goal_buf_pre.shape[1] >= 2:
+                    dircheck_goal_x_pre = goal_buf_pre[:, 0]
+                    dircheck_goal_y_pre = goal_buf_pre[:, 1]
+                    dircheck_goal_err_pre = torch.sqrt(
+                        (dircheck_goal_x_pre - x_right) ** 2 + (dircheck_goal_y_pre - y_forward) ** 2
+                    )
         if bool(getattr(args, "use_expert_cmd", False)):
             if expert_cmd is None:
                 raise RuntimeError("--use_expert_cmd requires --show_expert_cmd and task=hex_s0_follow")
@@ -603,8 +694,8 @@ def main():
                 step_dy = float(pos_xy[1] - prev_track_pos_world[1])
                 cos_h = math.cos(prev_track_yaw)
                 sin_h = math.sin(prev_track_yaw)
-                step_body_x = cos_h * step_dx - sin_h * step_dy
-                step_body_y = sin_h * step_dx + cos_h * step_dy
+                step_body_x = cos_h * step_dx + sin_h * step_dy
+                step_body_y = -sin_h * step_dx + cos_h * step_dy
                 step_yaw = math.atan2(math.sin(yaw_now - prev_track_yaw), math.cos(yaw_now - prev_track_yaw))
                 axis_disp_world_sum[0] += step_dx
                 axis_disp_world_sum[1] += step_dy
@@ -880,6 +971,45 @@ def main():
                         cmd_str,
                     )
                 )
+                if (
+                    dircheck_alpha_pre is not None
+                    and dircheck_x_pre is not None
+                    and dircheck_y_pre is not None
+                    and dircheck_omega_pre is not None
+                ):
+                    a_pre = float(dircheck_alpha_pre[env_idx].detach().cpu().item())
+                    x_pre = float(dircheck_x_pre[env_idx].detach().cpu().item())
+                    y_pre = float(dircheck_y_pre[env_idx].detach().cpu().item())
+                    w_pre = float(dircheck_omega_pre[env_idx].detach().cpu().item())
+                    eps = 1e-6
+                    sign_match = int(
+                        (abs(a_pre) <= eps and abs(w_pre) <= eps)
+                        or (a_pre * w_pre < 0.0)
+                    )
+                    print(
+                        "[PlayHigh][dircheck] pre_body(x_right,y_forward)=({:.3f},{:.3f}) pre_alpha={:.3f} pre_omega={:.3f} sign_match={}".format(
+                            x_pre,
+                            y_pre,
+                            a_pre,
+                            w_pre,
+                            sign_match,
+                        )
+                    )
+                    if (
+                        dircheck_goal_x_pre is not None
+                        and dircheck_goal_y_pre is not None
+                        and dircheck_goal_err_pre is not None
+                    ):
+                        gx_pre = float(dircheck_goal_x_pre[env_idx].detach().cpu().item())
+                        gy_pre = float(dircheck_goal_y_pre[env_idx].detach().cpu().item())
+                        ge_pre = float(dircheck_goal_err_pre[env_idx].detach().cpu().item())
+                        print(
+                            "[PlayHigh][dircheck] pre_goal_buf(x_right,y_forward)=({:.3f},{:.3f}) pre_goal_err={:.6f}".format(
+                                gx_pre,
+                                gy_pre,
+                                ge_pre,
+                            )
+                        )
             mean_dx = axis_disp_world_sum[0] / max(axis_disp_count, 1)
             mean_dy = axis_disp_world_sum[1] / max(axis_disp_count, 1)
             mean_bx = axis_disp_body_sum[0] / max(axis_disp_count, 1)

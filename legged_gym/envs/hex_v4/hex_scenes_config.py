@@ -117,9 +117,9 @@ class HexS0FollowCfg(HexGroundCfg):
         goal_mode = "fixed"
         fixed_goal = [0.0, 0.0]
         resample_on_reach = False
-        # Moving target: scripted large right-turn circle for stable behavior verification.
+        # Moving target: training default random trajectory (speed/turn vary over time).
         moving_target_enable = True
-        moving_target_mode = "s0_circle_right"
+        moving_target_mode = "random_plane"
         # Circle in local env frame: slow clockwise full loop and return to start.
         moving_target_circle_radius = 1.2
         moving_target_circle_speed = 0.28
@@ -127,32 +127,33 @@ class HexS0FollowCfg(HexGroundCfg):
         moving_target_circle_center_y = 1.0
         moving_target_circle_start_phase_deg = 180.0
         moving_target_circle_clockwise = True
-        moving_target_v_max = 1.2
-        # Make early training learnable: slow + gentle, then scale up with difficulty.
-        moving_target_v_min = 0.05
+        moving_target_v_max = 1.6
+        # Keep stop-and-go behavior available for stronger speed contrast.
+        moving_target_v_min = 0.0
         moving_target_v_typical = 0.5
-        moving_target_turn_rate_max = 0.35
-        moving_target_accel_max = 1.0
-        moving_target_cmd_period_slow = 1.2
-        moving_target_cmd_period_fast = 0.5
+        moving_target_turn_rate_max = 0.22
+        moving_target_accel_max = 3.0
+        moving_target_cmd_period_slow = 2.4
+        moving_target_cmd_period_fast = 1.2
         moving_target_freeze_s = 0.3
-        # Turn curriculum: max heading change ramps from small-angle to 90deg.
-        moving_target_turn_deg_easy = 10.0
-        moving_target_turn_deg_hard = 90.0
+        # Turn curriculum: long smooth arcs (avoid abrupt large heading jumps).
+        moving_target_turn_deg_easy = 6.0
+        moving_target_turn_deg_hard = 28.0
+        moving_target_margin = 1.0
         # Early-turn near boundary to avoid hard reflection flips.
-        moving_target_preturn_lookahead_s = 0.8
+        moving_target_preturn_lookahead_s = 1.6
         moving_target_preturn_deg_min = 25.0
         moving_target_preturn_deg_max = 90.0
-        moving_target_preturn_center_bias = 0.6
+        moving_target_preturn_center_bias = 0.35
         # Speed variation (non-constant target speed).
-        moving_target_speed_span_easy = 0.06
-        moving_target_speed_span_hard = 0.35
-        moving_target_speed_wave_amp = 0.15
+        moving_target_speed_span_easy = 0.15
+        moving_target_speed_span_hard = 0.90
+        moving_target_speed_wave_amp = 0.45
         moving_target_speed_wave_rate_slow = 0.6
         moving_target_speed_wave_rate_fast = 1.8
 
         # High-level command bounds (must cover the target speed envelope).
-        max_lin_vel_command = 1.4
+        max_lin_vel_command = 1.8
         max_ang_vel_command = 1.5
         # Following distance contract (paper + code unified).
         follow_distance_desired = 1.0

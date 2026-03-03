@@ -46,6 +46,37 @@
 5. 用户问“为什么”时，只从实验逻辑回答（奖励信号、训练动力学、观测/动作影响），不从软件实现风格回答。
 6. 不确定时必须明确说：`我不确定，建议你跑一个对照实验验证`。
 
+### S0方向口径固定规则（硬约束）
+
+- 统一坐标约定：
+  - `heading=0` 表示机身前向对齐 world `+Y`，机身右向对齐 world `+X`。
+  - `goal_buf` 固定为 `(x_right, y_forward)`。
+  - `bearing` 固定为 `atan2(x_right, y_forward)`。
+- 世界坐标到机身坐标的投影必须使用 `R(-heading)`：
+  - `x_right = cos(h)*dx + sin(h)*dy`
+  - `y_forward = -sin(h)*dx + cos(h)*dy`
+- 转向符号固定：
+  - `+omega = 左转(CCW)`。
+  - 在上述 `bearing` 定义下，朝目标转向必须满足 `omega = -k_yaw * bearing`。
+- S0 expert 输出固定：
+  - 仅允许 `cmd=[0, cmd_y, omega]`，禁止侧向平移指令。
+
+### S0转向问题最小验收标准（固定）
+
+- 先看方向一致性，不先看总 reward：
+  - `pre_alpha * pre_omega < 0`（朝目标收敛）。
+  - `step_yaw` 与 `cmd_omega` 同号（执行方向一致）。
+  - `pre_goal_err` 约等于 0（expert 输入与 `goal_buf` 一致）。
+- 起步段固定验收窗口：
+  - 仅看 `step 0~80`，避免长时行为把根因混在一起。
+
+### S0反向问题排查顺序（固定）
+
+1. 用 `--force_cmd` 验证底层执行符号（先确定 `+omega` 实际方向）。
+2. 验证 `goal_buf` 与实时几何投影是否一致（`pre_goal_err`）。
+3. 验证 expert 的 `pre_alpha` 与 `pre_omega` 收敛关系。
+4. 最后再看整段轨迹与 `dist` 变化，避免先入为主误判。
+
 ## 角色模式开关（自动路由 + 双阶段执行 + 可强制切换，最高优先级）
 
 - 新对话默认自动路由，不再强制先询问角色。
