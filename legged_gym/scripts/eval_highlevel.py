@@ -578,7 +578,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description="Independent high-level evaluation")
 
-    parser.add_argument("--task", type=str, default="hex_s0_follow")
+    parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--skill", type=str, default="follow", choices=["follow", "avoid", "moe"])
 
@@ -609,6 +609,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if hasattr(th, "normalize_task_name"):
+        args.task = th.normalize_task_name(getattr(args, "task", ""))
     sys.argv = [sys.argv[0]] + unknown
     return args
 

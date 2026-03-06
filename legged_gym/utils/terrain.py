@@ -248,6 +248,65 @@ def s0_follow_plane_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg
     return terrain
 
 
+def e_l_conflict_turn_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """e_L_conflict: flat tile + one inner-corner cylinder tangent to L-turn legs."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    v_scale = terrain.vertical_scale
+    length_m = length_px * h_scale
+    width_m = width_px * h_scale
+
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    obs_r = float(getattr(cfg, "e_l_conflict_obstacle_radius", 0.15))
+    obs_h = float(getattr(cfg, "e_l_conflict_obstacle_height", 0.45))
+    use_inner_tangent = bool(getattr(cfg, "e_l_conflict_obstacle_inner_tangent", True))
+    if use_inner_tangent:
+        corner_x = float(getattr(cfg, "e_l_conflict_corner_x", 0.0))
+        corner_y = float(getattr(cfg, "e_l_conflict_corner_y", 4.0))
+        # For a right turn (+Y then +X), inner-side tangent center is:
+        # x = corner_x + r, y = corner_y - r
+        obs_x = corner_x + obs_r
+        obs_y = corner_y - obs_r
+    else:
+        obs_x = float(getattr(cfg, "e_l_conflict_obstacle_x", 0.15))
+        obs_y = float(getattr(cfg, "e_l_conflict_obstacle_y", 3.85))
+    # Keep obstacle center inside the local tile footprint.
+    margin = 0.05
+    obs_x = float(np.clip(obs_x, -0.5 * width_m + obs_r + margin, 0.5 * width_m - obs_r - margin))
+    obs_y = float(np.clip(obs_y, -0.5 * length_m + obs_r + margin, 0.5 * length_m - obs_r - margin))
+    static_obstacles = [
+        {
+            # Canonical scene obstacle description for runtime spawning.
+            "type": "cylinder",
+            "kind": "cylinder",
+            "position": [float(obs_x), float(obs_y), float(0.5 * obs_h)],
+            "size": [float(2.0 * obs_r), float(2.0 * obs_r), float(obs_h)],
+            "radius": float(obs_r),
+            "height": float(obs_h),
+            "yaw": 0.0,
+        }
+    ]
+
+    terrain.meta = {
+        "scene_type": "e_l_conflict_turn",
+        "params": {
+            "terrain_length": float(length_m),
+            "terrain_width": float(width_m),
+            "lturn_obstacle_x": float(obs_x),
+            "lturn_obstacle_y": float(obs_y),
+            "lturn_obstacle_radius": float(obs_r),
+            "lturn_obstacle_height": float(obs_h),
+            "lturn_obstacle_inner_tangent": bool(use_inner_tangent),
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": static_obstacles,
+    }
+    return terrain
+
+
 def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
     """S2 forest: poles + blocks with a clear band around x=0."""
     length_px = terrain.length
@@ -1138,6 +1197,8 @@ class Terrain:
                 return debug_axis_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s0", "s0_follow_plane"):
                 return s0_follow_plane_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
+                return e_l_conflict_turn_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s1", "s1_corridor_gate"):
                 return s1_corridor_gate_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s2", "s2_forest"):
@@ -1152,8 +1213,9 @@ class Terrain:
                 return s6_ood_cluster_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             raise RuntimeError(
                 f"unsupported terrain_type={terrain_type}. "
-                "supported: debug_axis, s0_follow_plane, s1_corridor_gate, s2_forest, "
-                "s3_doorway_rooms, s4_crossing, s5_sparse_dense, s6_ood_cluster"
+                "supported: debug_axis, s0_follow_plane, e_l_conflict_turn, "
+                "s1_corridor_gate, s2_forest, s3_doorway_rooms, s4_crossing, "
+                "s5_sparse_dense, s6_ood_cluster"
             )
         if getattr(self.cfg, "fixed_layout_enable", False):
             return fixed_layout_terrain(terrain, difficulty, self.cfg)

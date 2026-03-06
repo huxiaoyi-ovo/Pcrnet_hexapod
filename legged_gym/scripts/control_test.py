@@ -383,7 +383,7 @@ if __name__ == '__main__':
             sys.argv.pop(i)
             break
     if mode in ("hex_terrain", "expert_terrain"):
-        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic..s_ood_holdout / s_calib")
     
 
     if 'terrain' in mode:

@@ -1,0 +1,24 @@
+Importing module 'gym_38' (/home/hxy/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/hxy/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+
+============================================================
+V5 Command-Space MoE Training
+Mode: TEACHER | Skill: avoid
+Device: cuda
+[Note] Online training stats are for monitoring only; use eval_highlevel.py for paper-report metrics.
+============================================================
+
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/hxy/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/hxy/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/hxy/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+timeout: 监视的命令已核心转储

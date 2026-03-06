@@ -50,6 +50,10 @@ from .hex_v4.hex_scenes_config import (
     HexCalibCfgPPO,
     HexS0FollowCfg,
     HexS0FollowCfgPPO,
+    HexELConflictCfg,
+    HexELConflictCfgPPO,
+    HexAvoidBasicCfg,
+    HexAvoidBasicCfgPPO,
     HexS1Cfg,
     HexS1CfgPPO,
     HexS1FollowCfg,
@@ -104,9 +108,6 @@ task_registry.register("hex_debug_plane", HexGround, HexDebugPlaneCfg(), HexDebu
 task_registry.register("hex_debug_heightfield", HexGround, HexDebugHeightfieldCfg(), HexDebugHeightfieldCfgPPO())
 
 task_registry.register("hex_s0_follow", HexGround, HexS0FollowCfg(), HexS0FollowCfgPPO())
-task_registry.register("hex_s1", HexGround, HexS1Cfg(), HexS1CfgPPO())
-task_registry.register("hex_s1_follow", HexGround, HexS1FollowCfg(), HexS1FollowCfgPPO())
-task_registry.register("hex_s1_follow_moving", HexGround, HexS1FollowMovingCfg(), HexS1FollowMovingCfgPPO())
 task_registry.register("hex_s1_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())
 task_registry.register("hex_s2", HexGround, HexS2Cfg(), HexS2CfgPPO())
 task_registry.register("hex_s2_large", HexGround, HexS2LargeCfg(), HexS2LargeCfgPPO())
@@ -121,4 +122,29 @@ task_registry.register("hex_s6_large", HexGround, HexS6LargeCfg(), HexS6LargeCfg
 task_registry.register("hex_mix_gate", HexGround, HexMixGateCfg(), HexMixGateCfgPPO())
 task_registry.register("hex_mix_gate_large", HexGround, HexMixGateLargeCfg(), HexMixGateLargeCfgPPO())
 task_registry.register("hex_calib", HexGround, HexCalibCfg(), HexCalibCfgPPO())
+
+# Canonical scene names (s_*) for daily use; keep legacy hex_* names for compatibility.
+task_registry.register("s_follow_basic", HexGround, HexS0FollowCfg(), HexS0FollowCfgPPO())
+task_registry.register("s_avoid_basic", HexGround, HexAvoidBasicCfg(), HexAvoidBasicCfgPPO())
+task_registry.register("s_avoid_basic_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())
+task_registry.register("s_cylinder", HexGround, HexS2Cfg(), HexS2CfgPPO())
+task_registry.register("s_cylinder_large", HexGround, HexS2LargeCfg(), HexS2LargeCfgPPO())
+task_registry.register("s_narrow_passage", HexGround, HexS3Cfg(), HexS3CfgPPO())
+task_registry.register("s_narrow_passage_large", HexGround, HexS3LargeCfg(), HexS3LargeCfgPPO())
+task_registry.register("s_step_field", HexGround, HexS4Cfg(), HexS4CfgPPO())
+task_registry.register("s_step_field_large", HexGround, HexS4LargeCfg(), HexS4LargeCfgPPO())
+task_registry.register("s_dense_obstacles", HexGround, HexS5Cfg(), HexS5CfgPPO())
+task_registry.register("s_dense_obstacles_large", HexGround, HexS5LargeCfg(), HexS5LargeCfgPPO())
+task_registry.register("s_ood_holdout", HexGround, HexS6Cfg(), HexS6CfgPPO())
+task_registry.register("s_ood_holdout_large", HexGround, HexS6LargeCfg(), HexS6LargeCfgPPO())
+task_registry.register("s_mixed_gate", HexGround, HexMixGateCfg(), HexMixGateCfgPPO())
+task_registry.register("s_mixed_gate_large", HexGround, HexMixGateLargeCfg(), HexMixGateLargeCfgPPO())
+task_registry.register("s_calib", HexGround, HexCalibCfg(), HexCalibCfgPPO())
+task_registry.register("s_debug_plane", HexGround, HexDebugPlaneCfg(), HexDebugPlaneCfgPPO())
+task_registry.register("s_debug_heightfield", HexGround, HexDebugHeightfieldCfg(), HexDebugHeightfieldCfgPPO())
+
+# Paper scene series (e_*): keep explicit names for experiment reproducibility.
+task_registry.register("e_L_conflict", HexGround, HexELConflictCfg(), HexELConflictCfgPPO())
+# Backward-compatible alias (legacy typo).
+task_registry.register("e_L_confilct", HexGround, HexELConflictCfg(), HexELConflictCfgPPO())
 # print("Registered HexGround environment")

@@ -27,8 +27,8 @@ def parse_args():
     parser.add_argument(
         "--task",
         type=str,
-        default="hex_s1",
-        help="Task name (hex_s0_follow / hex_s1 / hex_s1_follow_moving / hex_s2 / hex_calib)",
+        required=True,
+        help="Task name (required): s_follow_basic / s_avoid_basic / s_cylinder / s_calib / e_L_conflict ...",
     )
     parser.add_argument("--seed", type=int, default=None, help="随机种子（None 使用默认）")
     parser.add_argument(
@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "--low_level_ckpt",
         type=str,
-        default="logs/hex_s1/Dec31_16-52-59_/model_6000.pt",
+        required=True,
         help="Low-level policy checkpoint path",
     )
     parser.add_argument("--teacher_ckpt", type=str, default=None, help="Expert checkpoint path")
@@ -140,7 +140,13 @@ def parse_args():
         "--use_expert_cmd",
         action="store_true",
         default=False,
-        help="Debug: 用 S0 expert 命令直接接管执行（仅 hex_s0_follow）",
+        help="兼容旧参数：等价于 --use_follow_expert",
+    )
+    parser.add_argument(
+        "--use_follow_expert",
+        action="store_true",
+        default=False,
+        help="Follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --teacher_ckpt）",
     )
     parser.add_argument(
         "--force_cmd",
@@ -195,6 +201,8 @@ def parse_args():
         args.debug_interval = 1
     if args.debug and "--no_debug_cmd" not in raw_argv:
         args.debug_cmd = True
+    if hasattr(th, "normalize_task_name"):
+        args.task = th.normalize_task_name(getattr(args, "task", ""))
 
     return args
 
@@ -202,14 +210,32 @@ def parse_args():
 def main():
     args = parse_args()
     if args.task == "hex_terrain":
-        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
-    if args.task not in ("hex_s0_follow", "hex_s1", "hex_s1_follow_moving", "hex_s2", "hex_calib"):
-        raise ValueError("play_highlevel.py supports only --task hex_s0_follow/hex_s1/hex_s1_follow_moving/hex_s2/hex_calib")
-    if bool(getattr(args, "use_expert_cmd", False)) and args.task != "hex_s0_follow":
-        raise ValueError("--use_expert_cmd 仅支持 --task hex_s0_follow")
-    if bool(getattr(args, "use_expert_cmd", False)) and not bool(getattr(args, "show_expert_cmd", False)):
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic..s_ood_holdout / s_calib")
+    supported_tasks = (
+        "s_follow_basic",
+        "s_avoid_basic",
+        "s_cylinder",
+        "s_narrow_passage",
+        "s_step_field",
+        "s_dense_obstacles",
+        "s_ood_holdout",
+        "s_calib",
+    )
+    if not (args.task in supported_tasks or args.task.startswith("e_")):
+        raise ValueError(
+            "play_highlevel.py supports only "
+            "--task s_follow_basic/s_avoid_basic/s_cylinder/"
+            "s_narrow_passage/s_step_field/s_dense_obstacles/s_ood_holdout/s_calib "
+            "or e_* paper scenes"
+        )
+    use_follow_expert = bool(getattr(args, "use_follow_expert", False)) or bool(getattr(args, "use_expert_cmd", False))
+    if use_follow_expert and getattr(args, "skill", "follow") != "follow":
+        raise ValueError("--use_follow_expert 仅支持 --skill follow")
+    if use_follow_expert and not bool(getattr(args, "show_expert_cmd", False)):
         # In expert takeover mode, always compute and print expert commands.
         args.show_expert_cmd = True
+    if bool(getattr(args, "use_expert_cmd", False)) and not bool(getattr(args, "use_follow_expert", False)):
+        print("[PlayHigh] ⚠ --use_expert_cmd 已兼容映射到 --use_follow_expert。")
     if (args.expert_heading_lock is not None) and (args.expert_heading_release is not None):
         if not (float(args.expert_heading_release) < float(args.expert_heading_lock)):
             raise ValueError("--expert_heading_release must be < --expert_heading_lock")
@@ -217,7 +243,7 @@ def main():
     def dprint(*vals, **kwargs):
         if debug:
             print(*vals, **kwargs)
-    dprint("[PlayHigh] V5 主线任务默认 hex_s1；hex_terrain 已移除。")
+    dprint("[PlayHigh] V5 任务需显式传入 --task；hex_terrain 已移除。")
     if getattr(args, "aff_stack", 1) > 1:
         print(f"[PlayHigh] aff_stack={args.aff_stack}: 输入通道数改变，需与 ckpt 训练时一致，否则无法加载。")
 
@@ -255,11 +281,16 @@ def main():
         if args.seed is not None:
             env_cfg.seed = int(args.seed)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
+    if str(getattr(args, "task", "")).startswith("e_"):
+        terrain_type_dbg = getattr(getattr(getattr(env, "env", None), "cfg", None), "terrain", None)
+        terrain_type_dbg = getattr(terrain_type_dbg, "terrain_type", "unknown")
+        moving_mode_dbg = getattr(getattr(getattr(env, "env", None), "nav_cfg", None), "moving_target_mode", "unknown")
+        print(
+            f"[PlayHigh] e-scene check: task={args.task}, terrain_type={terrain_type_dbg}, moving_target_mode={moving_mode_dbg}"
+        )
     # In S0 expert takeover debugging, default to long-horizon observation:
     # disable success-triggered resets unless explicitly kept.
-    auto_disable_success_reset = (
-        args.task == "hex_s0_follow" and bool(getattr(args, "use_expert_cmd", False))
-    )
+    auto_disable_success_reset = (args.task == "s_follow_basic" and use_follow_expert)
     disable_success_reset = bool(getattr(args, "disable_success_reset", False)) or (
         auto_disable_success_reset and (not bool(getattr(args, "keep_success_reset", False)))
     )
@@ -376,10 +407,12 @@ def main():
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     skill = getattr(args, "skill", "follow")
     is_gate = skill == "moe"
-    expert_only_mode = bool(getattr(args, "use_expert_cmd", False)) and args.task == "hex_s0_follow"
+    expert_only_mode = use_follow_expert
     policy = None
     follow_policy = None
     avoid_policy = None
+    if use_follow_expert:
+        print("[PlayHigh] cmd_source=follow_expert (--use_follow_expert)")
     if not expert_only_mode:
         if not args.teacher_ckpt:
             raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
@@ -556,7 +589,7 @@ def main():
         dircheck_goal_x_pre = None
         dircheck_goal_y_pre = None
         dircheck_goal_err_pre = None
-        if bool(getattr(args, "show_expert_cmd", False)) and s0_expert_fn is not None and args.task == "hex_s0_follow":
+        if bool(getattr(args, "show_expert_cmd", False)) and s0_expert_fn is not None and getattr(args, "skill", "follow") == "follow":
             quat_e = env.env.root_states[:, 3:7]
             x_q, y_q, z_q, w_q = quat_e[:, 0], quat_e[:, 1], quat_e[:, 2], quat_e[:, 3]
             robot_heading = torch.atan2(
@@ -608,9 +641,9 @@ def main():
                     dircheck_goal_err_pre = torch.sqrt(
                         (dircheck_goal_x_pre - x_right) ** 2 + (dircheck_goal_y_pre - y_forward) ** 2
                     )
-        if bool(getattr(args, "use_expert_cmd", False)):
+        if use_follow_expert:
             if expert_cmd is None:
-                raise RuntimeError("--use_expert_cmd requires --show_expert_cmd and task=hex_s0_follow")
+                raise RuntimeError("--use_follow_expert requires --show_expert_cmd and --skill follow")
             cmd = expert_cmd
         if force_cmd_tensor is not None:
             cmd = force_cmd_tensor.expand(env.num_envs, -1)

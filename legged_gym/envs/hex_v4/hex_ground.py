@@ -9,6 +9,7 @@ from legged_gym.envs.hex_v4.scene_spec import SceneSpec
 import torch
 import numpy as np
 from typing import Optional
+from collections import deque
 
 from isaacgym import gymtorch,gymapi,gymutil
 from legged_gym.utils import get_args,class_to_dict
@@ -40,14 +41,35 @@ class HexGround(LeggedRobot):
             if not terrain_type:
                 raise RuntimeError(
                     "hex_ground 是容器任务，必须显式设置 terrain_type。"
-                    "建议使用: --task hex_s1 或 --task hex_debug_plane。"
-                    "示例: python legged_gym/scripts/train.py --task hex_s1 --num_envs 2048; "
+                    "建议使用: --task s_avoid_basic 或 --task s_debug_plane。"
+                    "示例: python legged_gym/scripts/train.py --task s_avoid_basic --num_envs 2048; "
                     "或 python legged_gym/scripts/train_highlevel.py "
-                    "--mode teacher --skill follow --task hex_s1 --low_level_ckpt agents/fast_2000.pt"
+                    "--mode teacher --skill follow --task s_avoid_basic --low_level_ckpt agents/fast_2000.pt"
                 )
         super().__init__(cfg,sim_params,physics_engine,sim_device,headless)
         self.cfg:HexGroundCfg = cfg
         self.nav_cfg = getattr(cfg, "navigation", None)
+        if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn") and self.nav_cfg is not None:
+            moving_mode = str(getattr(self.nav_cfg, "moving_target_mode", "")).strip().lower()
+            if moving_mode in ("e_l_confilct_script",):
+                moving_mode = "e_l_conflict_script"
+            if moving_mode != "e_l_conflict_script":
+                raise RuntimeError(
+                    "e_L_conflict requires navigation.moving_target_mode='e_l_conflict_script', "
+                    f"got '{moving_mode or 'unset'}'"
+                )
+            geom = self._get_e_l_conflict_turn_path()
+            print(
+                "[Scene] e_L_conflict active: "
+                f"straight x={geom['x_line']:.3f}, y:{geom['start_y']:.3f}->{geom['turn_entry_y']:.3f}, "
+                f"arc_r={geom['turn_r']:.3f}, then y={geom['y_line']:.3f}, x:{geom['obs_x']:.3f}->{geom['end_x']:.3f}, "
+                f"speed={geom['speed']:.3f}, straight_len={geom['straight_len']:.3f}, spawn_gap={geom['spawn_gap']:.3f}"
+            )
+            print(
+                "[Scene] e_L_conflict obstacle spec: "
+                f"center_local=({geom['obs_x']:.3f},{geom['obs_y']:.3f}), radius={geom['obs_r']:.3f}, "
+                f"clearance={max(0.0, geom['turn_r'] - geom['obs_r']):.3f}"
+            )
         self.debug_viz = False
         self.foot_traj_viz=False
         terrain_obj = getattr(self, "terrain", None)
@@ -175,25 +197,126 @@ class HexGround(LeggedRobot):
     
     def _pre_create_envs(self):
         self.robot_actor_indices = np.zeros(self.num_envs, dtype=np.int32)
+        self.static_scene_actor_handles = None
+        self.static_scene_actor_indices = None
+        self.e_conflict_static_asset = None
+        self.e_conflict_static_shape = None
+        self.e_conflict_capsule_half_height = None
+        self.e_conflict_obstacle_pose_local = None
         self.dynamic_actor_handles = None
         self.dynamic_actor_indices = None
         self.dynamic_asset = None
+        self.s_avoid_enabled = False
+        self.s_avoid_actor_handles = None
+        self.s_avoid_actor_indices = None
+        self.s_avoid_capsule_asset = None
+        self.s_avoid_box_asset = None
+        self.s_avoid_wall_asset = None
+        self.s_avoid_capsule_slot_count = 0
+        self.s_avoid_box_slot_count = 0
+        self.s_avoid_wall_slot_count = 0
+        self.s_avoid_total_slots = 0
+        self.s_avoid_capsule_quat = None
+        self.s_avoid_identity_quat = None
+
+        terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
+        if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
+            obs_x, obs_y, obs_r, obs_h = self._get_e_l_conflict_obstacle_local()
+
+            asset_options = gymapi.AssetOptions()
+            asset_options.fix_base_link = True
+            asset_options.disable_gravity = True
+            asset_options.collapse_fixed_joints = True
+
+            # Prefer capsule (closest built-in primitive to a cylinder), fallback to box.
+            self.e_conflict_static_asset = None
+            if hasattr(self.gym, "create_capsule"):
+                try:
+                    half_height = max(1e-3, 0.5 * obs_h - obs_r)
+                    self.e_conflict_capsule_half_height = float(half_height)
+                    self.e_conflict_static_asset = self.gym.create_capsule(
+                        self.sim, obs_r, half_height, asset_options
+                    )
+                    self.e_conflict_static_shape = "capsule"
+                except Exception:
+                    self.e_conflict_static_asset = None
+                    self.e_conflict_capsule_half_height = None
+            if self.e_conflict_static_asset is None:
+                dia = max(1e-3, 2.0 * obs_r)
+                self.e_conflict_static_asset = self.gym.create_box(
+                    self.sim, dia, dia, max(1e-3, obs_h), asset_options
+                )
+                self.e_conflict_static_shape = "box"
+                self.e_conflict_capsule_half_height = None
+
+            self.e_conflict_obstacle_pose_local = (float(obs_x), float(obs_y), float(0.5 * obs_h))
+            self.static_scene_actor_handles = [None for _ in range(self.num_envs)]
+            self.static_scene_actor_indices = np.zeros((self.num_envs,), dtype=np.int32)
+            print(
+                "[Scene] e_L_conflict obstacle actor: "
+                f"shape={self.e_conflict_static_shape}, center_local=({obs_x:.3f},{obs_y:.3f}), "
+                f"radius={obs_r:.3f}, height={obs_h:.3f}"
+            )
+
+        if terrain_type == "s_avoid_basic":
+            asset_options = gymapi.AssetOptions()
+            asset_options.fix_base_link = True
+            asset_options.disable_gravity = True
+            asset_options.collapse_fixed_joints = True
+
+            cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+            cap_h = float(getattr(self.cfg.terrain, "avoid_capsule_height", 0.5))
+            cap_half_h = max(1e-3, 0.5 * cap_h - cap_r)
+            box_x = float(getattr(self.cfg.terrain, "avoid_box_size_x", 0.4))
+            box_y = float(getattr(self.cfg.terrain, "avoid_box_size_y", 0.4))
+            box_z = float(getattr(self.cfg.terrain, "avoid_box_size_z", 0.5))
+            wall_t = float(getattr(self.cfg.terrain, "avoid_wall_thickness", 0.12))
+            wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
+            wall_h = float(getattr(self.cfg.terrain, "avoid_wall_height", 0.5))
+
+            self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, asset_options)
+            self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, asset_options)
+            self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, asset_options)
+
+            self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
+            self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
+            self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
+            self.s_avoid_total_slots = (
+                self.s_avoid_capsule_slot_count
+                + self.s_avoid_box_slot_count
+                + self.s_avoid_wall_slot_count
+            )
+
+            self.s_avoid_actor_handles = [
+                [None for _ in range(self.s_avoid_total_slots)] for _ in range(self.num_envs)
+            ]
+            self.s_avoid_actor_indices = np.zeros((self.num_envs, self.s_avoid_total_slots), dtype=np.int32)
+            self.s_avoid_identity_quat = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+            self.s_avoid_capsule_quat = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
+            self.s_avoid_enabled = True
+            print(
+                "[Scene] s_avoid_basic obstacle pool: "
+                f"capsule_slots={self.s_avoid_capsule_slot_count}, "
+                f"box_slots={self.s_avoid_box_slot_count}, "
+                f"wall_slots={self.s_avoid_wall_slot_count}, "
+                f"capsule_d={2.0 * cap_r:.2f}, box=({box_x:.2f},{box_y:.2f},{box_z:.2f}), "
+                f"wall=({wall_t:.2f},{wall_l:.2f},{wall_h:.2f})"
+            )
+
         terrain_obj = getattr(self, "terrain", None)
         self.scene_generator = getattr(terrain_obj, "scene_generator", None)
-        if self.scene_generator is None or not self.scene_generator.has_dynamic:
-            return
-        max_dyn = int(getattr(self.cfg.terrain, "scene_dynamic_max", 0))
-        if max_dyn <= 0:
-            return
-        asset_options = gymapi.AssetOptions()
-        asset_options.fix_base_link = True
-        asset_options.disable_gravity = True
-        asset_options.collapse_fixed_joints = True
-        size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
-        height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
-        self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
-        self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
-        self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
+        if self.scene_generator is not None and self.scene_generator.has_dynamic:
+            max_dyn = int(getattr(self.cfg.terrain, "scene_dynamic_max", 0))
+            if max_dyn > 0:
+                asset_options = gymapi.AssetOptions()
+                asset_options.fix_base_link = True
+                asset_options.disable_gravity = True
+                asset_options.collapse_fixed_joints = True
+                size_xy = float(getattr(self.cfg.terrain, "scene_dynamic_size", 0.35))
+                height = float(getattr(self.cfg.terrain, "scene_dynamic_height", 0.5))
+                self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
+                self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
+                self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
 
     def _post_create_envs(self):
         if not hasattr(self, "robot_actor_indices"):
@@ -249,11 +372,70 @@ class HexGround(LeggedRobot):
         self._apply_actor_collision_filter(env_handle, actor_handle, scene_filter, env_id, debug_tag="robot")
 
     def _create_env_actors(self, env_id, env_handle):
-        if self.dynamic_asset is None or self.dynamic_actor_indices is None:
-            return
         group_id = self._scene_group_id(env_id)
         scene_filter = self._scene_collision_filter()
         create_filter = scene_filter
+
+        if self.e_conflict_static_asset is not None and self.e_conflict_obstacle_pose_local is not None:
+            ox, oy, oz = self.e_conflict_obstacle_pose_local
+            env_origin = self.env_origins[env_id]
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(
+                float(env_origin[0].item() + ox),
+                float(env_origin[1].item() + oy),
+                float(env_origin[2].item() + oz),
+            )
+            if self.e_conflict_static_shape == "capsule":
+                # Isaac Gym capsule major axis is not guaranteed to align with world +Z.
+                # Rotate to vertical so obstacle height matches the configured value.
+                pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
+            static_handle = self.gym.create_actor(
+                env_handle,
+                self.e_conflict_static_asset,
+                pose,
+                "static_obs_0",
+                group_id,
+                create_filter,
+                0,
+            )
+            self._apply_actor_collision_filter(env_handle, static_handle, create_filter, env_id, debug_tag="static")
+            if self.static_scene_actor_handles is not None:
+                self.static_scene_actor_handles[env_id] = static_handle
+            if self.static_scene_actor_indices is not None:
+                static_index = self.gym.get_actor_index(env_handle, static_handle, gymapi.DOMAIN_SIM)
+                self.static_scene_actor_indices[env_id] = static_index
+
+        if self.s_avoid_enabled and self.s_avoid_actor_handles is not None:
+            for slot in range(self.s_avoid_total_slots):
+                if slot < self.s_avoid_capsule_slot_count:
+                    asset = self.s_avoid_capsule_asset
+                    pose = gymapi.Transform()
+                    pose.r = self.s_avoid_capsule_quat
+                elif slot < self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count:
+                    asset = self.s_avoid_box_asset
+                    pose = gymapi.Transform()
+                    pose.r = self.s_avoid_identity_quat
+                else:
+                    asset = self.s_avoid_wall_asset
+                    pose = gymapi.Transform()
+                    pose.r = self.s_avoid_identity_quat
+                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                actor_handle = self.gym.create_actor(
+                    env_handle,
+                    asset,
+                    pose,
+                    f"s_avoid_obs_{slot}",
+                    group_id,
+                    0,
+                    0,
+                )
+                self._apply_actor_collision_filter(env_handle, actor_handle, 0, env_id, debug_tag="")
+                self.s_avoid_actor_handles[env_id][slot] = actor_handle
+                actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                self.s_avoid_actor_indices[env_id, slot] = actor_index
+
+        if self.dynamic_asset is None or self.dynamic_actor_indices is None:
+            return
         max_dyn = int(self.dynamic_actor_indices.shape[1])
         for obs_id in range(max_dyn):
             pose = gymapi.Transform()
@@ -488,6 +670,8 @@ class HexGround(LeggedRobot):
         return depth_normalized
 
     def _init_scene_runtime(self):
+        if self.s_avoid_enabled:
+            self._init_s_avoid_runtime()
         if self.scene_generator is None or not self.scene_generator.has_dynamic:
             return
         self._init_dynamic_runtime()
@@ -515,6 +699,38 @@ class HexGround(LeggedRobot):
         self.dynamic_height = torch.zeros(self.num_envs, max_dyn, device=self.device)
         self.dynamic_quat = torch.zeros(self.num_envs, max_dyn, 4, device=self.device)
         self.dynamic_quat[..., 3] = 1.0
+
+    def _init_s_avoid_runtime(self):
+        if self.s_avoid_actor_indices is None:
+            return
+        if isinstance(self.s_avoid_actor_indices, np.ndarray):
+            self.s_avoid_actor_indices = torch.tensor(
+                self.s_avoid_actor_indices, device=self.device, dtype=torch.int32
+            )
+        self.s_avoid_actor_indices_flat = self.s_avoid_actor_indices.reshape(-1).contiguous()
+        self.s_avoid_actor_indices_flat_long = self.s_avoid_actor_indices_flat.to(torch.long)
+        self.s_avoid_active = torch.zeros(
+            (self.num_envs, self.s_avoid_total_slots), device=self.device, dtype=torch.bool
+        )
+        self.s_avoid_pos_world = torch.zeros(
+            (self.num_envs, self.s_avoid_total_slots, 3), device=self.device, dtype=torch.float
+        )
+        self.s_avoid_quat_world = torch.zeros(
+            (self.num_envs, self.s_avoid_total_slots, 4), device=self.device, dtype=torch.float
+        )
+        self.s_avoid_quat_world[..., 3] = 1.0
+        self.s_avoid_episode_collision = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.s_avoid_stage = 1
+        self.s_avoid_total_completed_episodes = 0
+        self.s_avoid_collision_hist_100 = deque(
+            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
+        )
+        self.s_avoid_collision_hist_50 = deque(
+            maxlen=int(getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 50))
+        )
+        self.s_avoid_corridor_width = float(getattr(self.cfg.terrain, "avoid_stage3_width_start", 1.2))
+        self.s_avoid_last_shrink_episode = 0
 
 
     def _get_scene_spec(self, env_id: int):
@@ -665,6 +881,282 @@ class HexGround(LeggedRobot):
             self.dynamic_period[env_id, idx] = float(spec.period)
             self.dynamic_height[env_id, idx] = float(spec.size[2])
 
+    def _s_avoid_collision_rate(self, history: deque) -> float:
+        if history is None or len(history) == 0:
+            return 0.0
+        return float(sum(history) / len(history))
+
+    def _update_s_avoid_curriculum(self, episode_collision_flags: torch.Tensor):
+        if not self.s_avoid_enabled or episode_collision_flags.numel() == 0:
+            return
+        flags = episode_collision_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
+        for flag in flags:
+            val = 1.0 if bool(flag) else 0.0
+            self.s_avoid_collision_hist_100.append(val)
+            self.s_avoid_collision_hist_50.append(val)
+        self.s_avoid_total_completed_episodes += len(flags)
+
+        rate100 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_100)
+        rate50 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_50)
+        min_eps = int(getattr(self.cfg.terrain, "avoid_stage_switch_min_episodes", 200))
+        stage12_th = float(getattr(self.cfg.terrain, "avoid_stage12_collision_threshold", 0.05))
+        shrink_th = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_collision_threshold", 0.08))
+        shrink_step = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_step", 0.05))
+        width_min = float(getattr(self.cfg.terrain, "avoid_stage3_width_min", 0.85))
+        shrink_cooldown = int(getattr(self.cfg.terrain, "avoid_stage3_shrink_cooldown_episodes", 50))
+
+        switched = False
+        old_stage = int(self.s_avoid_stage)
+        if (
+            self.s_avoid_stage == 1
+            and self.s_avoid_total_completed_episodes >= min_eps
+            and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
+            and rate100 < stage12_th
+        ):
+            self.s_avoid_stage = 2
+            switched = True
+        elif (
+            self.s_avoid_stage == 2
+            and self.s_avoid_total_completed_episodes >= min_eps
+            and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
+            and rate100 < stage12_th
+        ):
+            self.s_avoid_stage = 3
+            switched = True
+
+        if switched:
+            print(
+                f"[s_avoid_basic] stage {old_stage}->{self.s_avoid_stage} | "
+                f"episodes={self.s_avoid_total_completed_episodes}, collision100={rate100:.3f}"
+            )
+
+        if self.s_avoid_stage == 3:
+            enough_window = len(self.s_avoid_collision_hist_50) >= self.s_avoid_collision_hist_50.maxlen
+            enough_cooldown = (
+                self.s_avoid_total_completed_episodes - self.s_avoid_last_shrink_episode
+            ) >= shrink_cooldown
+            if (
+                enough_window
+                and enough_cooldown
+                and rate50 < shrink_th
+                and self.s_avoid_corridor_width > width_min + 1e-6
+            ):
+                old_width = float(self.s_avoid_corridor_width)
+                self.s_avoid_corridor_width = max(width_min, old_width - shrink_step)
+                self.s_avoid_last_shrink_episode = self.s_avoid_total_completed_episodes
+                print(
+                    f"[s_avoid_basic] stage3 corridor width {old_width:.2f}->{self.s_avoid_corridor_width:.2f} "
+                    f"(collision50={rate50:.3f})"
+                )
+
+        self.extras["avoid_stage"] = int(self.s_avoid_stage)
+        self.extras["avoid_collision_rate_100"] = float(rate100)
+        self.extras["avoid_collision_rate_50"] = float(rate50)
+        self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
+        self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
+
+    def _sample_s_avoid_points(
+        self,
+        *,
+        rng: np.random.RandomState,
+        count: int,
+        half_extent: float,
+        min_spacing: float,
+        spawn_clearance: float,
+        max_tries: int = 600,
+    ):
+        if count <= 0:
+            return []
+        points = []
+        spacing = float(min_spacing)
+        for _ in range(4):
+            points = []
+            for _try in range(max_tries):
+                if len(points) >= count:
+                    break
+                x = rng.uniform(-half_extent, half_extent)
+                y = rng.uniform(-half_extent, half_extent)
+                if (x * x + y * y) ** 0.5 < spawn_clearance:
+                    continue
+                ok = True
+                for px, py in points:
+                    dx = x - px
+                    dy = y - py
+                    if (dx * dx + dy * dy) ** 0.5 < spacing:
+                        ok = False
+                        break
+                if ok:
+                    points.append((x, y))
+            if len(points) >= count:
+                return points[:count]
+            spacing = max(0.2, spacing * 0.85)
+
+        while len(points) < count:
+            x = rng.uniform(-half_extent, half_extent)
+            y = rng.uniform(-half_extent, half_extent)
+            if (x * x + y * y) ** 0.5 < spawn_clearance:
+                continue
+            points.append((x, y))
+        return points[:count]
+
+    def _reset_s_avoid_obstacles(self, env_ids: torch.Tensor):
+        if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
+            return
+
+        total_slots = int(self.s_avoid_total_slots)
+        cap_slots = int(self.s_avoid_capsule_slot_count)
+        box_slots = int(self.s_avoid_box_slot_count)
+        wall_slots = int(self.s_avoid_wall_slot_count)
+
+        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        cap_h = float(getattr(self.cfg.terrain, "avoid_capsule_height", 0.5))
+        box_h = float(getattr(self.cfg.terrain, "avoid_box_size_z", 0.5))
+        wall_h = float(getattr(self.cfg.terrain, "avoid_wall_height", 0.5))
+        wall_t = float(getattr(self.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
+
+        stage1_min = int(getattr(self.cfg.terrain, "avoid_stage1_count_min", 3))
+        stage1_max = int(getattr(self.cfg.terrain, "avoid_stage1_count_max", 5))
+        stage1_spacing = float(getattr(self.cfg.terrain, "avoid_stage1_min_spacing", 1.2))
+        stage2_min = int(getattr(self.cfg.terrain, "avoid_stage2_count_min", 6))
+        stage2_max = int(getattr(self.cfg.terrain, "avoid_stage2_count_max", 8))
+        stage2_spacing = float(getattr(self.cfg.terrain, "avoid_stage2_min_spacing", 0.7))
+        spawn_clear = float(getattr(self.cfg.terrain, "avoid_spawn_clearance", 0.5))
+        spawn_margin = float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.1))
+        seed0 = int(getattr(self.cfg.terrain, "avoid_seed", 7001))
+
+        cap_z = 0.5 * cap_h
+        box_z = 0.5 * box_h
+        wall_z = 0.5 * wall_h
+        half_extent = 0.5 * min(float(self.cfg.terrain.terrain_width), float(self.cfg.terrain.terrain_length))
+        half_extent = max(half_extent - spawn_margin, 0.6)
+
+        for env_id in env_ids.tolist():
+            episode_idx = int(self.s_avoid_env_episode_count[env_id].item())
+            self.s_avoid_env_episode_count[env_id] += 1
+            rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131)
+            preview_all = bool(getattr(self.cfg.terrain, "avoid_preview_all_stages", False))
+            if preview_all:
+                if self.num_envs >= 3:
+                    stage = int(env_id % 3) + 1
+                else:
+                    stage = int(episode_idx % 3) + 1
+            else:
+                stage = int(self.s_avoid_stage)
+
+            active = np.zeros((total_slots,), dtype=np.bool_)
+            pos = np.zeros((total_slots, 3), dtype=np.float32)
+            pos[:, 2] = -5.0
+            quat = np.zeros((total_slots, 4), dtype=np.float32)
+            quat[:, 3] = 1.0
+
+            # Capsule slots default to vertical orientation.
+            if cap_slots > 0:
+                quat[:cap_slots] = np.array(
+                    [self.s_avoid_capsule_quat.x, self.s_avoid_capsule_quat.y, self.s_avoid_capsule_quat.z, self.s_avoid_capsule_quat.w],
+                    dtype=np.float32,
+                )
+
+            if stage == 1:
+                n_caps = int(rng.randint(stage1_min, stage1_max + 1))
+                n_caps = max(0, min(n_caps, cap_slots))
+                points = self._sample_s_avoid_points(
+                    rng=rng,
+                    count=n_caps,
+                    half_extent=half_extent,
+                    min_spacing=stage1_spacing,
+                    spawn_clearance=spawn_clear + cap_r,
+                )
+                for i, (x, y) in enumerate(points):
+                    slot = i
+                    active[slot] = True
+                    pos[slot] = np.array([x, y, cap_z], dtype=np.float32)
+
+            elif stage == 2:
+                n_total = int(rng.randint(stage2_min, stage2_max + 1))
+                n_total = max(0, min(n_total, cap_slots + box_slots))
+                n_box = min(box_slots, max(2, n_total - cap_slots))
+                n_caps = max(0, min(cap_slots, n_total - n_box))
+                n_box = min(box_slots, max(0, n_total - n_caps))
+                points = self._sample_s_avoid_points(
+                    rng=rng,
+                    count=n_total,
+                    half_extent=half_extent,
+                    min_spacing=stage2_spacing,
+                    spawn_clearance=spawn_clear + cap_r,
+                )
+                for i in range(n_caps):
+                    x, y = points[i]
+                    slot = i
+                    active[slot] = True
+                    pos[slot] = np.array([x, y, cap_z], dtype=np.float32)
+                for j in range(n_box):
+                    x, y = points[n_caps + j]
+                    slot = cap_slots + j
+                    active[slot] = True
+                    pos[slot] = np.array([x, y, box_z], dtype=np.float32)
+                    yaw = float(rng.uniform(-math.pi, math.pi))
+                    quat[slot] = np.array(
+                        [0.0, 0.0, math.sin(0.5 * yaw), math.cos(0.5 * yaw)],
+                        dtype=np.float32,
+                    )
+
+            else:
+                width = float(self.s_avoid_corridor_width)
+                left_x = -0.5 * width - 0.5 * wall_t
+                right_x = 0.5 * width + 0.5 * wall_t
+                left_slot = cap_slots + box_slots
+                right_slot = left_slot + 1
+                if wall_slots >= 2:
+                    active[left_slot] = True
+                    active[right_slot] = True
+                    pos[left_slot] = np.array([left_x, 0.0, wall_z], dtype=np.float32)
+                    pos[right_slot] = np.array([right_x, 0.0, wall_z], dtype=np.float32)
+
+            env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
+            pos_world = pos.copy()
+            pos_world[:, 0] += env_origin[0]
+            pos_world[:, 1] += env_origin[1]
+            pos_world[:, 2] += env_origin[2]
+
+            self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
+            self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
+            self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+
+        self._sync_s_avoid_obstacles(env_ids)
+
+    def _sync_s_avoid_obstacles(self, env_ids: torch.Tensor):
+        if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
+            return
+        slot_n = int(self.s_avoid_total_slots)
+        flat_indices = self.s_avoid_actor_indices[env_ids].reshape(-1).contiguous()
+        flat_indices_long = flat_indices.to(torch.long)
+        pos_flat = self.s_avoid_pos_world[env_ids].reshape(-1, 3)
+        quat_flat = self.s_avoid_quat_world[env_ids].reshape(-1, 4)
+
+        root_states = getattr(self, "all_root_states", None)
+        if root_states is None:
+            return
+        root_states[flat_indices_long, :3] = pos_flat
+        root_states[flat_indices_long, 3:7] = quat_flat
+        root_states[flat_indices_long, 7:13] = 0.0
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(root_states),
+            gymtorch.unwrap_tensor(flat_indices),
+            int(flat_indices.numel()),
+        )
+
+        scene_filter = self._scene_collision_filter()
+        for env_id in env_ids.tolist():
+            env_active = self.s_avoid_active[env_id]
+            handles = self.s_avoid_actor_handles[env_id]
+            for slot in range(slot_n):
+                filter_v = scene_filter if bool(env_active[slot].item()) else 0
+                self._apply_actor_collision_filter(
+                    self.envs[env_id], handles[slot], filter_v, env_id, debug_tag=""
+                )
+
     def _sync_robot_root_states(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
             return
@@ -723,7 +1215,10 @@ class HexGround(LeggedRobot):
         mode = getattr(self.nav_cfg, "moving_target_mode", None)
         if mode is None:
             return "random_plane"
-        return str(mode)
+        mode = str(mode).strip().lower()
+        if mode in ("e_l_confilct_script",):
+            return "e_l_conflict_script"
+        return mode
 
     def _reset_moving_target_s1(self, env_ids: torch.Tensor):
         """Reset scripted gate-traversal moving target for S1 corridor."""
@@ -1019,6 +1514,230 @@ class HexGround(LeggedRobot):
         self.target_vel_world = vel_local
         self.goal_world[:] = self.target_world
 
+    def _ensure_e_l_conflict_buffers(self):
+        if hasattr(self, "target_lturn_stage"):
+            return
+        self.target_lturn_stage = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long, requires_grad=False
+        )
+        self.target_lturn_hold_timer = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.float, requires_grad=False
+        )
+        self.target_lturn_theta = torch.full(
+            (self.num_envs,), math.pi, device=self.device, dtype=torch.float, requires_grad=False
+        )
+
+    def _get_e_l_conflict_obstacle_local(self):
+        obs_r = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_radius", 0.15))
+        obs_h = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_height", 0.45))
+        use_inner_tangent = bool(getattr(self.cfg.terrain, "e_l_conflict_obstacle_inner_tangent", True))
+        if use_inner_tangent:
+            corner_x = float(getattr(self.cfg.terrain, "e_l_conflict_corner_x", 0.0))
+            corner_y = float(getattr(self.cfg.terrain, "e_l_conflict_corner_y", 4.0))
+            obs_x = corner_x + obs_r
+            obs_y = corner_y - obs_r
+        else:
+            obs_x = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_x", 0.15))
+            obs_y = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_y", 3.85))
+
+        # Keep obstacle inside local tile bounds.
+        half_len = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
+        half_wid = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
+        margin = 0.05
+        x_min = -half_wid + obs_r + margin
+        x_max = half_wid - obs_r - margin
+        y_min = -half_len + obs_r + margin
+        y_max = half_len - obs_r - margin
+        obs_x = float(np.clip(obs_x, x_min, x_max))
+        obs_y = float(np.clip(obs_y, y_min, y_max))
+        return obs_x, obs_y, obs_r, obs_h
+
+    def _get_e_l_conflict_turn_path(self):
+        obs_x, obs_y, obs_r, _ = self._get_e_l_conflict_obstacle_local()
+        start_y_base = float(getattr(self.nav_cfg, "moving_target_lturn_start_y", 1.0))
+        straight_extra = float(getattr(self.nav_cfg, "moving_target_lturn_straight_extra", 0.0))
+        start_y = start_y_base - max(0.0, straight_extra)
+        end_x = float(getattr(self.nav_cfg, "moving_target_lturn_end_x", 3.0))
+        speed = float(getattr(self.nav_cfg, "moving_target_lturn_speed", 0.85))
+        hold_s = float(getattr(self.nav_cfg, "moving_target_lturn_hold_s", 0.0))
+        loop = bool(getattr(self.nav_cfg, "moving_target_lturn_loop", True))
+        clear_m = float(getattr(self.nav_cfg, "moving_target_lturn_clearance", 0.05))
+        turn_after = float(getattr(self.nav_cfg, "moving_target_lturn_turn_after_obstacle", 0.10))
+        spawn_gap = float(getattr(self.nav_cfg, "moving_target_lturn_spawn_gap", 0.5))
+        turn_r = max(obs_r + clear_m, obs_r + 1e-3)
+        x_line = obs_x - turn_r
+        turn_entry_y = obs_y + obs_r + max(0.0, turn_after)
+
+        # Keep path inside tile bounds.
+        half_len = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
+        half_wid = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
+        margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.3))
+        x_line = float(np.clip(x_line, -half_wid + margin, half_wid - margin))
+        turn_center_y = float(
+            np.clip(turn_entry_y, -half_len + margin + turn_r, half_len - margin - turn_r)
+        )
+        y_line = turn_center_y + turn_r
+        end_x = float(np.clip(end_x, x_line + 0.2, half_wid - margin))
+        start_y = float(np.clip(start_y, -half_len + margin, turn_center_y - 0.2))
+
+        return {
+            "obs_x": obs_x,
+            "obs_y": obs_y,
+            "obs_r": obs_r,
+            "turn_r": turn_r,
+            "x_line": x_line,
+            "turn_center_y": turn_center_y,
+            "turn_entry_y": turn_center_y,
+            "y_line": y_line,
+            "start_y": start_y,
+            "end_x": end_x,
+            "speed": speed,
+            "hold_s": hold_s,
+            "loop": loop,
+            "spawn_gap": max(0.0, spawn_gap),
+            "straight_len": max(0.0, turn_center_y - start_y),
+        }
+
+    def _reset_moving_target_e_l_conflict(self, env_ids: torch.Tensor):
+        """Reset scripted L-turn moving target used by e_L_conflict scene."""
+        if env_ids.numel() == 0:
+            return
+        self._ensure_e_l_conflict_buffers()
+        geom = self._get_e_l_conflict_turn_path()
+        x0 = float(geom["x_line"])
+        y0 = float(geom["start_y"])
+        speed = float(geom["speed"])
+
+        target_local = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
+        target_local[:, 0] = x0
+        target_local[:, 1] = y0
+
+        vel_local = torch.zeros_like(target_local)
+        vel_local[:, 1] = speed  # +Y straight segment
+
+        heading = torch.zeros(len(env_ids), device=self.device, dtype=torch.float32)
+
+        self.target_lturn_stage[env_ids] = 0
+        self.target_lturn_hold_timer[env_ids] = 0.0
+        self.target_lturn_theta[env_ids] = math.pi
+
+        self.target_heading[env_ids] = heading
+        self.target_heading_des[env_ids] = heading
+        self.target_speed[env_ids] = speed
+        self.target_speed_des[env_ids] = speed
+        self.target_cmd_timer[env_ids] = 0.0
+        self.target_speed_phase[env_ids] = 0.0
+        self.target_freeze_timer[env_ids] = 0.0
+        self.target_turn_events[env_ids] = 0.0
+        self.target_preturn_events[env_ids] = 0.0
+        self.target_reflect_events[env_ids] = 0.0
+
+        self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        self.target_vel_world[env_ids] = vel_local
+        self.goal_world[env_ids] = self.target_world[env_ids]
+
+    def _update_moving_target_e_l_conflict(self, dt: float):
+        """Update scripted L-turn target: straight -> rounded right turn -> straight."""
+        self._ensure_e_l_conflict_buffers()
+        geom = self._get_e_l_conflict_turn_path()
+        x0 = float(geom["x_line"])
+        y0 = float(geom["start_y"])
+        end_x = float(geom["end_x"])
+        speed = float(geom["speed"])
+        hold_s = float(geom["hold_s"])
+        loop = bool(geom["loop"])
+        obs_x = float(geom["obs_x"])
+        turn_center_y = float(geom["turn_center_y"])
+        turn_entry_y = float(geom["turn_entry_y"])
+        turn_r = float(geom["turn_r"])
+        y_line = float(geom["y_line"])
+
+        self.target_turn_events.zero_()
+        self.target_preturn_events.zero_()
+        self.target_reflect_events.zero_()
+
+        pos_local = self.target_world - self.env_origins[:, :2]
+        vel_local = torch.zeros_like(pos_local)
+        heading = self.target_heading.clone()
+        stage = self.target_lturn_stage
+
+        # Stage 0: move straight along +Y to the arc entry.
+        m0 = stage == 0
+        if m0.any():
+            pos_local[m0, 0] = x0
+            pos_local[m0, 1] += speed * dt
+            vel_local[m0, 1] = speed
+            heading[m0] = 0.0
+            reached_entry = m0 & (pos_local[:, 1] >= turn_entry_y)
+            if reached_entry.any():
+                pos_local[reached_entry, 1] = turn_entry_y
+                stage[reached_entry] = 1
+                self.target_lturn_theta[reached_entry] = math.pi
+                self.target_turn_events[reached_entry] = 1.0
+
+        # Stage 1: quarter-circle right turn around obstacle center.
+        m1 = stage == 1
+        if m1.any():
+            w_arc = speed / max(turn_r, 1e-6)
+            theta_curr = self.target_lturn_theta[m1]
+            theta_next = torch.clamp(theta_curr - w_arc * dt, min=0.5 * math.pi, max=math.pi)
+            self.target_lturn_theta[m1] = theta_next
+
+            pos_local[m1, 0] = obs_x + turn_r * torch.cos(theta_next)
+            pos_local[m1, 1] = turn_center_y + turn_r * torch.sin(theta_next)
+            vel_local[m1, 0] = speed * torch.sin(theta_next)
+            vel_local[m1, 1] = -speed * torch.cos(theta_next)
+            heading[m1] = torch.atan2(vel_local[m1, 0], vel_local[m1, 1])
+
+            finished_arc_local = theta_next <= (0.5 * math.pi + 1e-4)
+            if finished_arc_local.any():
+                finished_idx = torch.nonzero(m1, as_tuple=False).flatten()[finished_arc_local]
+                pos_local[finished_idx, 0] = obs_x
+                pos_local[finished_idx, 1] = y_line
+                vel_local[finished_idx, 0] = speed
+                vel_local[finished_idx, 1] = 0.0
+                heading[finished_idx] = 0.5 * math.pi
+                stage[finished_idx] = 2
+
+        # Stage 2: move straight along +X.
+        m2 = stage == 2
+        if m2.any():
+            pos_local[m2, 1] = y_line
+            pos_local[m2, 0] += speed * dt
+            vel_local[m2, 0] = speed
+            heading[m2] = 0.5 * math.pi
+            reached_end = m2 & (pos_local[:, 0] >= end_x)
+            if reached_end.any():
+                pos_local[reached_end, 0] = end_x
+                vel_local[reached_end].zero_()
+                self.target_lturn_hold_timer[reached_end] = max(0.0, hold_s)
+                stage[reached_end] = 3
+
+        # Stage 3: optional hold and loop restart.
+        m3 = stage == 3
+        if m3.any():
+            heading[m3] = 0.5 * math.pi
+            vel_local[m3].zero_()
+            if loop:
+                self.target_lturn_hold_timer[m3] = torch.clamp(self.target_lturn_hold_timer[m3] - dt, min=0.0)
+                restart = m3 & (self.target_lturn_hold_timer <= 0.0)
+                if restart.any():
+                    pos_local[restart, 0] = x0
+                    pos_local[restart, 1] = y0
+                    vel_local[restart, 1] = speed
+                    heading[restart] = 0.0
+                    stage[restart] = 0
+                    self.target_lturn_theta[restart] = math.pi
+
+        self.target_lturn_stage = stage
+        self.target_heading = heading
+        self.target_heading_des = heading
+        self.target_speed[:] = speed
+        self.target_speed_des[:] = speed
+        self.target_world = self.env_origins[:, :2] + pos_local
+        self.target_vel_world = vel_local
+        self.goal_world[:] = self.target_world
+
     def _reset_moving_target(self, env_ids: torch.Tensor):
         """Reset moving target state for selected envs."""
         if env_ids.numel() == 0 or not self._moving_target_enabled():
@@ -1029,6 +1748,9 @@ class HexGround(LeggedRobot):
             return
         if moving_mode == "s0_circle_right":
             self._reset_moving_target_s0_circle(env_ids)
+            return
+        if moving_mode == "e_l_conflict_script":
+            self._reset_moving_target_e_l_conflict(env_ids)
             return
         # Place target straight ahead of the robot (camera center) at reset.
         robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
@@ -1093,6 +1815,9 @@ class HexGround(LeggedRobot):
             return
         if moving_mode == "s0_circle_right":
             self._update_moving_target_s0_circle(dt=dt)
+            return
+        if moving_mode == "e_l_conflict_script":
+            self._update_moving_target_e_l_conflict(dt=dt)
             return
 
         d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
@@ -1465,10 +2190,24 @@ class HexGround(LeggedRobot):
 
     def _is_scene_spawn_clear(self, scene_spec: SceneSpec, x_local: float, y_local: float, clearance: float) -> bool:
         for spec in scene_spec.static_obstacles:
-            dx = abs(x_local - float(spec.position[0]))
-            dy = abs(y_local - float(spec.position[1]))
-            limit_x = 0.5 * float(spec.size[0]) + clearance
-            limit_y = 0.5 * float(spec.size[1]) + clearance
+            if hasattr(spec, "position") and hasattr(spec, "size"):
+                pos = spec.position
+                size = spec.size
+            elif isinstance(spec, dict):
+                pos = spec.get("position", None)
+                size = spec.get("size", None)
+                if size is None and spec.get("type", "") == "cylinder":
+                    r = float(spec.get("radius", 0.0))
+                    h = float(spec.get("height", 0.0))
+                    size = (2.0 * r, 2.0 * r, h)
+                if pos is None or size is None:
+                    continue
+            else:
+                continue
+            dx = abs(x_local - float(pos[0]))
+            dy = abs(y_local - float(pos[1]))
+            limit_x = 0.5 * float(size[0]) + clearance
+            limit_y = 0.5 * float(size[1]) + clearance
             if dx < limit_x and dy < limit_y:
                 return False
         return True
@@ -1850,7 +2589,13 @@ class HexGround(LeggedRobot):
 
     def check_termination(self):
         contact_threshold = getattr(self.cfg.terrain, "collision_force_threshold", 1.0)
-        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > contact_threshold, dim=1)
+        collision_now = torch.any(
+            torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > contact_threshold,
+            dim=1,
+        )
+        self.reset_buf = collision_now.clone()
+        if self.s_avoid_enabled and hasattr(self, "s_avoid_episode_collision"):
+            self.s_avoid_episode_collision |= collision_now
 
         height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
         if height_threshold is not None:
@@ -1880,6 +2625,13 @@ class HexGround(LeggedRobot):
         prev_levels = None
         if hasattr(self, "terrain_levels") and len(env_ids) > 0:
             prev_levels = self.terrain_levels[env_ids].clone()
+        if self.s_avoid_enabled and len(env_ids) > 0 and hasattr(self, "s_avoid_episode_collision"):
+            completed_mask = self.episode_length_buf[env_ids] > 0
+            if bool(completed_mask.any().item()):
+                completed_env_ids = env_ids[completed_mask]
+                completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
+                self._update_s_avoid_curriculum(completed_flags)
+            self.s_avoid_episode_collision[env_ids] = False
         self._maybe_resample_scene_columns(env_ids)
         super().reset_idx(env_ids)
 
@@ -1894,6 +2646,8 @@ class HexGround(LeggedRobot):
             if prev_levels is not None:
                 self.scene_level_cache[env_ids] = self.terrain_levels[env_ids]
             self._apply_scene_spawn(env_ids)
+            if self.s_avoid_enabled:
+                self._reset_s_avoid_obstacles(env_ids)
             self._resample_nav_goals(env_ids)
             if self._moving_target_enabled():
                 # For S0, we re-place the target after locking spawn yaw; avoid double-reset here.
@@ -1914,6 +2668,7 @@ class HexGround(LeggedRobot):
 
                 s1_ids = []
                 s0_ids = []
+                e_ids = []
                 if is_s0_follow_plane:
                     # S0 may run without scene_spec_cache (e.g., mesh_type=plane), so treat all
                     # env_ids as S0 for spawn-yaw locking and moving-target placement.
@@ -1925,6 +2680,10 @@ class HexGround(LeggedRobot):
                             s1_ids.append(env_id)
                         elif scene_spec is not None and scene_spec.scene_type == "s0_follow_plane":
                             s0_ids.append(env_id)
+                        elif scene_spec is not None and scene_spec.scene_type == "e_l_conflict_turn":
+                            e_ids.append(env_id)
+                if (not e_ids) and self._moving_target_enabled() and self._moving_target_mode() == "e_l_conflict_script":
+                    e_ids = env_ids.tolist()
                 if s1_ids:
                     s1_tensor = torch.tensor(s1_ids, device=self.device, dtype=torch.long)
                     jitter = torch_rand_float(
@@ -1998,6 +2757,67 @@ class HexGround(LeggedRobot):
 
                 if s1_ids or s0_ids:
                     skip = set(s1_ids) | set(s0_ids)
+                    rest = [env_id for env_id in env_ids.tolist() if env_id not in skip]
+                    if rest:
+                        other_ids = torch.tensor(rest, device=self.device, dtype=torch.long)
+                    else:
+                        other_ids = None
+
+                if e_ids and hasattr(self, "target_world"):
+                    e_tensor = torch.tensor(e_ids, device=self.device, dtype=torch.long)
+                    # Rebuild robot spawn for e_L_conflict: face target with fixed start gap.
+                    self.root_states[e_tensor] = self.base_init_state
+                    self.root_states[e_tensor, :3] += self.env_origins[e_tensor]
+                    self.root_states[e_tensor, 7:13] = 0.0
+
+                    geom = self._get_e_l_conflict_turn_path()
+                    spawn_gap = float(geom.get("spawn_gap", 0.5))
+                    target_xy = self.target_world[e_tensor]
+                    target_vel = self.target_vel_world[e_tensor]
+                    vel_norm = torch.norm(target_vel, dim=1, keepdim=True)
+                    dir_world = torch.zeros_like(target_vel)
+                    dir_world[:, 1] = 1.0
+                    valid_vel = vel_norm > 1e-6
+                    dir_world = torch.where(valid_vel, target_vel / vel_norm.clamp_min(1e-6), dir_world)
+                    robot_xy = target_xy - spawn_gap * dir_world
+
+                    half_len = 0.5 * float(self.cfg.terrain.terrain_length)
+                    half_wid = 0.5 * float(self.cfg.terrain.terrain_width)
+                    margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.3))
+                    x_min = self.env_origins[e_tensor, 0] - half_wid + margin
+                    x_max = self.env_origins[e_tensor, 0] + half_wid - margin
+                    y_min = self.env_origins[e_tensor, 1] - half_len + margin
+                    y_max = self.env_origins[e_tensor, 1] + half_len - margin
+                    robot_xy[:, 0] = torch.clamp(robot_xy[:, 0], x_min, x_max)
+                    robot_xy[:, 1] = torch.clamp(robot_xy[:, 1], y_min, y_max)
+                    self.root_states[e_tensor, :2] = robot_xy
+
+                    delta = target_xy - robot_xy
+                    yaw = torch.atan2(delta[:, 0], delta[:, 1])
+                    qz = torch.sin(0.5 * yaw)
+                    qw = torch.cos(0.5 * yaw)
+                    quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
+                    self.root_states[e_tensor, 3:7] = quat
+                    self._sync_robot_root_states(e_tensor)
+
+                    cos_h = torch.cos(yaw)
+                    sin_h = torch.sin(yaw)
+                    x_r = cos_h * delta[:, 0] + sin_h * delta[:, 1]
+                    y_f = -sin_h * delta[:, 0] + cos_h * delta[:, 1]
+                    bearing = torch.atan2(x_r, y_f)
+                    self.target_reset_dist_error[e_tensor] = torch.abs(torch.norm(delta, dim=1) - spawn_gap)
+                    self.target_reset_bearing_error[e_tensor] = torch.abs(bearing)
+                    if not getattr(self, "_e_l_conflict_spawn_logged", False):
+                        d_mean = float(torch.norm(delta, dim=1).mean().item())
+                        b_mean = float(torch.abs(bearing).mean().item() * 180.0 / math.pi)
+                        print(
+                            f"[Scene] e_L_conflict spawn check: mean_dist={d_mean:.3f} (target {spawn_gap:.3f}), "
+                            f"mean_bearing_deg={b_mean:.2f}"
+                        )
+                        self._e_l_conflict_spawn_logged = True
+
+                if s1_ids or s0_ids or e_ids:
+                    skip = set(s1_ids) | set(s0_ids) | set(e_ids)
                     rest = [env_id for env_id in env_ids.tolist() if env_id not in skip]
                     if rest:
                         other_ids = torch.tensor(rest, device=self.device, dtype=torch.long)

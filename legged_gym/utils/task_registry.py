@@ -86,7 +86,7 @@ class TaskRegistry():
         if args is None:
             args = get_args()
         if name == "hex_terrain":
-            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
+            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic..s_ood_holdout / s_calib")
         # check if there is a registered env with that name
         if name in self.task_classes:
             task_class = self.get_task_class(name)
@@ -131,7 +131,7 @@ class TaskRegistry():
         if args is None:
             args = get_args()
         if name == "hex_terrain":
-            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
+            raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic..s_ood_holdout / s_calib")
         # if config files are passed use them, otherwise load from the name
         if train_cfg is None:
             if name is None:

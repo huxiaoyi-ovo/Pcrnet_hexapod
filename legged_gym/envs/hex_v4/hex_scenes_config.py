@@ -14,7 +14,7 @@ class HexDebugPlaneCfg(HexGroundCfg):
 
 class HexDebugPlaneCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_debug_plane"
+        experiment_name = "s_debug_plane"
 
 
 class HexDebugHeightfieldCfg(HexGroundCfg):
@@ -32,7 +32,7 @@ class HexDebugHeightfieldCfg(HexGroundCfg):
 
 class HexDebugHeightfieldCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_debug_heightfield"
+        experiment_name = "s_debug_heightfield"
 
 
 class HexCalibCfg(HexGroundCfg):
@@ -78,7 +78,7 @@ class HexCalibCfg(HexGroundCfg):
 
 class HexCalibCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_calib"
+        experiment_name = "s_calib"
 
 
 class HexS0FollowCfg(HexGroundCfg):
@@ -201,7 +201,142 @@ class HexS0FollowCfg(HexGroundCfg):
 
 class HexS0FollowCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s0_follow"
+        experiment_name = "s_follow_basic"
+
+
+class HexELConflictCfg(HexS0FollowCfg):
+    """
+    e_L_conflict:
+    Flat conflict setup for paper demos.
+    Target goes straight first, then makes a sudden 90-degree right turn.
+    One cylinder is placed at the inner corner and tangent to both legs of the L path.
+    """
+
+    class env(HexS0FollowCfg.env):
+        env_spacing = 12.0
+        no_episode_timeout = True
+
+    class terrain(HexS0FollowCfg.terrain):
+        mesh_type = "heightfield"
+        debug_allow_plane = False
+        terrain_type = "e_l_conflict_turn"
+        terrain_seed = 601
+        curriculum = False
+        num_rows = 1
+        num_cols = 1
+        max_init_terrain_level = 0
+        terrain_length = 12.0
+        terrain_width = 12.0
+
+        # L-corner geometry in local frame (x_right / y_forward):
+        # leg-1: x = corner_x, leg-2: y = corner_y.
+        e_l_conflict_corner_x = 0.0
+        e_l_conflict_corner_y = 4.0
+        # Single tangent cylinder: diameter = 0.30 m (radius = 0.15 m).
+        # Center is computed as (corner_x + r, corner_y - r) when inner_tangent=True.
+        e_l_conflict_obstacle_inner_tangent = True
+        e_l_conflict_obstacle_x = 0.15
+        e_l_conflict_obstacle_y = 3.85
+        e_l_conflict_obstacle_radius = 0.15
+        e_l_conflict_obstacle_height = 0.45
+
+    class navigation(HexS0FollowCfg.navigation):
+        # Scripted target trajectory: straight then sharp right turn.
+        moving_target_enable = True
+        moving_target_mode = "e_l_conflict_script"
+        moving_target_lturn_start_x = 0.0
+        moving_target_lturn_start_y = 1.0
+        # Extend the pre-turn straight segment by this extra length (meters).
+        moving_target_lturn_straight_extra = 1.5
+        moving_target_lturn_corner_y = 4.0
+        moving_target_lturn_end_x = 3.0
+        # Slow down by one-third from previous 0.85 m/s.
+        moving_target_lturn_speed = 0.567
+        # Keep going straight until 10 cm beyond obstacle outer edge, then turn.
+        moving_target_lturn_turn_after_obstacle = 0.10
+        # Extra radius over obstacle boundary for a visible绕障圆角（避免与圆柱边界重合）
+        moving_target_lturn_clearance = 0.05
+        # Spawn contract: robot starts behind target by fixed 0.5 m.
+        moving_target_lturn_spawn_gap = 0.5
+        moving_target_lturn_hold_s = 0.0
+        moving_target_lturn_loop = True
+
+
+class HexELConflictCfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "e_L_conflict"
+
+
+class HexAvoidBasicCfg(HexGroundCfg):
+    """
+    s_avoid_basic:
+    3-stage avoid curriculum on plane with PhysX primitive actors only.
+    """
+    class env(HexGroundCfg.env):
+        env_spacing = 12.0
+
+    class terrain(HexGroundCfg.terrain):
+        mesh_type = "plane"
+        debug_allow_plane = True
+        terrain_type = "s_avoid_basic"
+        curriculum = False
+        num_rows = 1
+        num_cols = 1
+        terrain_length = 6.0
+        terrain_width = 6.0
+
+        # Stage switch metrics.
+        avoid_stage_switch_window = 100
+        avoid_stage_switch_min_episodes = 200
+        avoid_stage12_collision_threshold = 0.05
+
+        # Stage-3 corridor shrink curriculum.
+        avoid_stage3_shrink_window = 50
+        avoid_stage3_shrink_collision_threshold = 0.08
+        avoid_stage3_shrink_step = 0.05
+        avoid_stage3_shrink_cooldown_episodes = 50
+        avoid_stage3_width_start = 1.20
+        avoid_stage3_width_min = 0.85
+
+        # Stage geometry (all units in meters).
+        avoid_stage1_count_min = 3
+        avoid_stage1_count_max = 5
+        avoid_stage1_min_spacing = 1.2
+        avoid_stage2_count_min = 6
+        avoid_stage2_count_max = 8
+        avoid_stage2_min_spacing = 0.7
+
+        avoid_spawn_clearance = 0.5
+        avoid_spawn_extra_margin = 0.1
+
+        # Primitive assets.
+        avoid_capsule_radius = 0.15
+        avoid_capsule_height = 0.50
+        avoid_box_size_x = 0.40
+        avoid_box_size_y = 0.40
+        avoid_box_size_z = 0.50
+        avoid_wall_thickness = 0.12
+        avoid_wall_height = 0.50
+        avoid_wall_length = 6.0
+
+        # Actor pool layout: [capsules][boxes][walls].
+        avoid_capsule_slots = 6
+        avoid_box_slots = 2
+        avoid_wall_slots = 2
+        avoid_seed = 7001
+
+    class navigation(HexGroundCfg.navigation):
+        # Avoid expert stage: no moving target actor (keep target non-collision by design).
+        moving_target_enable = False
+        spawn_edge_enable = False
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
+
+
+class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "s_avoid_basic"
 
 
 class HexS1Cfg(HexGroundCfg):
@@ -268,7 +403,7 @@ class HexS1Cfg(HexGroundCfg):
 
 class HexS1CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s1"
+        experiment_name = "s_archived_s1_base"
 
 
 class HexS1FollowCfg(HexGroundCfg):
@@ -338,7 +473,7 @@ class HexS1FollowCfg(HexGroundCfg):
 
 class HexS1FollowCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s1_follow"
+        experiment_name = "s_archived_s1_follow_static"
 
 
 class HexS1FollowMovingCfg(HexS1FollowCfg):
@@ -384,7 +519,7 @@ class HexS1FollowMovingCfg(HexS1FollowCfg):
 
 class HexS1FollowMovingCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s1_follow_moving"
+        experiment_name = "s_archived_s1_follow_moving"
 
 
 class HexS1LargeCfg(HexGroundCfg):
@@ -451,7 +586,7 @@ class HexS1LargeCfg(HexGroundCfg):
 
 class HexS1LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s1_large"
+        experiment_name = "s_avoid_basic_large"
 
 
 class HexS2Cfg(HexGroundCfg):
@@ -522,11 +657,15 @@ class HexS2Cfg(HexGroundCfg):
         num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS2CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s2"
+        experiment_name = "s_cylinder"
 
 
 class HexS2LargeCfg(HexGroundCfg):
@@ -597,11 +736,15 @@ class HexS2LargeCfg(HexGroundCfg):
         num_cols = 10
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS2LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s2_large"
+        experiment_name = "s_cylinder_large"
 
 
 class HexS3Cfg(HexGroundCfg):
@@ -675,11 +818,15 @@ class HexS3Cfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS3CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s3"
+        experiment_name = "s_narrow_passage"
 
 
 class HexS3LargeCfg(HexGroundCfg):
@@ -753,11 +900,15 @@ class HexS3LargeCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS3LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s3_large"
+        experiment_name = "s_narrow_passage_large"
 
 
 class HexS4Cfg(HexGroundCfg):
@@ -802,11 +953,15 @@ class HexS4Cfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS4CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s4"
+        experiment_name = "s_step_field"
 
 
 class HexS4LargeCfg(HexGroundCfg):
@@ -853,11 +1008,15 @@ class HexS4LargeCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS4LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s4_large"
+        experiment_name = "s_step_field_large"
 
 
 class HexS5Cfg(HexGroundCfg):
@@ -925,11 +1084,15 @@ class HexS5Cfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS5CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s5"
+        experiment_name = "s_dense_obstacles"
 
 
 class HexS5LargeCfg(HexGroundCfg):
@@ -997,11 +1160,15 @@ class HexS5LargeCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS5LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s5_large"
+        experiment_name = "s_dense_obstacles_large"
 
 
 class HexS6Cfg(HexGroundCfg):
@@ -1074,11 +1241,15 @@ class HexS6Cfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS6CfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s6"
+        experiment_name = "s_ood_holdout"
 
 
 class HexS6LargeCfg(HexGroundCfg):
@@ -1151,11 +1322,15 @@ class HexS6LargeCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexS6LargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_s6_large"
+        experiment_name = "s_ood_holdout_large"
 
 
 class HexMixGateCfg(HexGroundCfg):
@@ -1290,11 +1465,15 @@ class HexMixGateCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexMixGateCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_mix_gate"
+        experiment_name = "s_mixed_gate"
 
 
 class HexMixGateLargeCfg(HexGroundCfg):
@@ -1429,8 +1608,12 @@ class HexMixGateLargeCfg(HexGroundCfg):
         num_cols = 3
         terrain_proportions = [1.0]
         max_init_terrain_level = 4
+    class navigation(HexGroundCfg.navigation):
+        heading_offset_rad = 0.0
+        reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
+        reward_cfg["heading_offset_rad"] = 0.0
 
 
 class HexMixGateLargeCfgPPO(HexGroundCfgPPO):
     class runner(HexGroundCfgPPO.runner):
-        experiment_name = "hex_mix_gate_large"
+        experiment_name = "s_mixed_gate_large"

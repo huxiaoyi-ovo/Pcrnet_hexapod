@@ -29,7 +29,7 @@ from rsl_rl.modules import ActorCritic
 
 def play(args):
     if getattr(args, "task", None) == "hex_terrain":
-        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1..hex_s6 / hex_calib")
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic..s_ood_holdout / s_calib")
     # 1. 准备环境配置
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     

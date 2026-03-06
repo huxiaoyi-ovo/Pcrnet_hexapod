@@ -7,12 +7,16 @@ scripts/train_highlevel.py - V5 Command-Space MoE 训练脚本
 3) Teacher/Student 仅用于 affordance 蒸馏
 
 用法:
-    Follow / Avoid:
-        python scripts/train_highlevel.py --mode teacher --skill follow --task hex_s1 \\
+    Follow:
+        python scripts/train_highlevel.py --mode teacher --skill follow --task s_follow_basic \\
+            --low_level_ckpt agents/fast_2000.pt
+
+    Avoid:
+        python scripts/train_highlevel.py --mode teacher --skill avoid --task s_avoid_basic \\
             --low_level_ckpt agents/fast_2000.pt
 
     Gate:
-        python scripts/train_highlevel.py --mode teacher --skill moe --task hex_s1 \\
+        python scripts/train_highlevel.py --mode teacher --skill moe --task s_avoid_basic \\
             --low_level_ckpt agents/fast_2000.pt \\
             --follow_ckpt outputs/planner/follow/best_model.pt \\
             --avoid_ckpt outputs/planner/avoid/best_model.pt
@@ -59,6 +63,39 @@ EXPERT_INTERFACE_RATIO = 0.2
 EXPERT_ALPHA_MIN = 0.0
 EXPERT_ALPHA_SCHEDULE = "cosine"
 EXPERT_BC_COEF = 2.0
+
+# Task naming upgrade: canonical names use s_*; legacy hex_* stays compatible.
+LEGACY_TASK_ALIASES = {
+    "hex_s0_follow": "s_follow_basic",
+    "hex_s1_large": "s_avoid_basic_large",
+    "hex_s2": "s_cylinder",
+    "hex_s2_large": "s_cylinder_large",
+    "hex_s3": "s_narrow_passage",
+    "hex_s3_large": "s_narrow_passage_large",
+    "hex_s4": "s_step_field",
+    "hex_s4_large": "s_step_field_large",
+    "hex_s5": "s_dense_obstacles",
+    "hex_s5_large": "s_dense_obstacles_large",
+    "hex_s6": "s_ood_holdout",
+    "hex_s6_large": "s_ood_holdout_large",
+    "hex_mix_gate": "s_mixed_gate",
+    "hex_mix_gate_large": "s_mixed_gate_large",
+    "hex_calib": "s_calib",
+    "hex_debug_plane": "s_debug_plane",
+    "hex_debug_heightfield": "s_debug_heightfield",
+}
+S0_FOLLOW_TASK_NAME = "s_follow_basic"
+
+
+def normalize_task_name(task_name: str) -> str:
+    t = str(task_name).strip()
+    if not t:
+        return t
+    return LEGACY_TASK_ALIASES.get(t, t)
+
+
+def is_s0_follow_task_name(task_name: str) -> bool:
+    return normalize_task_name(task_name) == S0_FOLLOW_TASK_NAME
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -317,7 +354,7 @@ class HierarchicalHexapodEnv:
     V5 分层环境包装器
     
     职责:
-    1. 托管 Isaac Gym 底层环境 (hex_s1/hex_s2)
+    1. 托管 Isaac Gym 底层环境 (s_avoid_basic/s_cylinder)
     2. 托管 Low-Level Controller (冻结的底层策略)
     3. 托管 Command Post-Processor (限幅/滤波/风险钳制)
     4. 托管 Reward Function (V5 gate_smooth + risk_barrier)
@@ -456,13 +493,13 @@ class HierarchicalHexapodEnv:
          self.affordance_bearing_map,
          self.affordance_visible_mask) = self._build_affordance_geometry()
         terrain_type = str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower()
-        if str(getattr(args, "task", "")).lower() == "hex_s0_follow":
+        if is_s0_follow_task_name(str(getattr(args, "task", "")).lower()):
             if terrain_type not in ("s0_follow_plane", "s0"):
                 raise RuntimeError(
-                    "hex_s0_follow requires terrain_type to be 's0_follow_plane' (or alias 's0'). "
+                    "s_follow_basic requires terrain_type to be 's0_follow_plane' (or alias 's0'). "
                     f"got terrain_type='{terrain_type or 'unset'}'"
                 )
-        self.is_s0_follow_task = (str(getattr(args, "task", "")).lower() == "hex_s0_follow") or (terrain_type in ("s0_follow_plane", "s0"))
+        self.is_s0_follow_task = is_s0_follow_task_name(str(getattr(args, "task", "")).lower()) or (terrain_type in ("s0_follow_plane", "s0"))
         self.scene_difficulty_pending = 0.0
         self.scene_difficulty_override = torch.zeros(
             self.num_envs, device=self.env.device, dtype=torch.float32
@@ -1754,19 +1791,34 @@ def train(args):
     def dprint(*vals, **kwargs):
         if debug:
             print(*vals, **kwargs)
+    args.task = normalize_task_name(getattr(args, "task", ""))
+    skill_name = getattr(args, "skill", "follow")
     if args.task == "hex_terrain":
-        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / hex_s1 / hex_s2 / hex_calib")
-    if args.task in ("hex_s3", "hex_s4", "hex_s5", "hex_s6", "hex_mix_gate"):
-        print(
-            f"[Warn] {args.task} 尚未验证完成。如遇 terrain_type/场景错误，请先确认 classic terrain_type 已落地。"
-        )
+        raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic / s_cylinder / s_calib")
     if args.task == "hex_ground":
-        print("[Warn] hex_ground 仅作为容器任务，请显式配置 terrain_type 或改用 hex_s1/hex_s2/hex_calib。")
-    if args.task not in ("hex_s0_follow", "hex_s1", "hex_s1_follow_moving", "hex_s2", "hex_calib"):
-        print(f"[Warn] 当前 task={args.task} 不在主线推荐列表（hex_s0_follow/hex_s1/hex_s1_follow_moving/hex_s2/hex_calib）。")
+        print("[Warn] hex_ground 仅作为容器任务，请显式配置 terrain_type 或改用 s_avoid_basic/s_cylinder/s_calib。")
+    if args.task in ("s_mixed_gate", "s_mixed_gate_large"):
+        print(
+            f"[Warn] {args.task} 为实验混合场景容器，当前主线不建议直接用于首轮训练。"
+        )
+    recommended_by_skill = {
+        "follow": ("s_follow_basic",),
+        "avoid": ("s_avoid_basic", "s_cylinder", "s_narrow_passage", "s_step_field", "s_dense_obstacles"),
+        "moe": ("s_avoid_basic",),
+    }
+    eval_only_by_skill = {
+        "avoid": ("s_ood_holdout",),
+    }
+    rec_tasks = recommended_by_skill.get(skill_name, tuple())
+    eval_only_tasks = eval_only_by_skill.get(skill_name, tuple())
+    if args.task in eval_only_tasks:
+        print(f"[Info] task={args.task} 属于结构化 OOD 验证场景，建议用于评测而非主训练。")
+    elif rec_tasks and args.task not in rec_tasks:
+        rec_text = "/".join(rec_tasks)
+        print(f"[Warn] 当前 task={args.task} 不在 {skill_name} 主线推荐列表（{rec_text}）。")
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
-    if getattr(args, "skill", "follow") == "moe":
+    if skill_name == "moe":
         if args.num_steps < 48:
             print(f"[Warn] Gate 训练建议 num_steps>=48，当前 num_steps={args.num_steps}。")
         dprint(f"[Info] Gate difficulty 输入: {'ON' if gate_use_difficulty else 'OFF'}")
@@ -1905,17 +1957,31 @@ def train(args):
     action_dim = 1 if is_gate else 3
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
-    use_egpo = bool(getattr(args, "egpo", False)) and (not is_gate) and (skill == "follow") and (args.task == "hex_s0_follow")
+    use_follow_expert = bool(getattr(args, "use_follow_expert", False))
+    if use_follow_expert and (is_gate or skill != "follow"):
+        raise ValueError("--use_follow_expert 仅支持 --skill follow 且 non-gate 路径。")
+    if use_follow_expert and bool(getattr(args, "egpo", False)):
+        print("[Warn] --use_follow_expert 已开启，--egpo 将被忽略。")
+    use_egpo = (
+        bool(getattr(args, "egpo", False))
+        and (not use_follow_expert)
+        and (not is_gate)
+        and (skill == "follow")
+        and (args.task == S0_FOLLOW_TASK_NAME)
+    )
     compute_s0_follow_expert_cmd = None
     if bool(getattr(args, "egpo", False)) and not use_egpo:
-        print("[Warn] --egpo 仅在 --skill follow --task hex_s0_follow 且 non-gate 路径生效；当前配置下将忽略。")
-    if use_egpo:
+        print("[Warn] --egpo 仅在 --skill follow --task s_follow_basic 且 non-gate 路径生效；当前配置下将忽略。")
+    if use_egpo or use_follow_expert:
         from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
         compute_s0_follow_expert_cmd = s0_follow_expert_fn
-        dprint(
-            f"[EGPO] enabled: interface_ratio={EXPERT_INTERFACE_RATIO:.2f}, alpha_min={EXPERT_ALPHA_MIN}, "
-            f"schedule={EXPERT_ALPHA_SCHEDULE}, bc_coef={EXPERT_BC_COEF}"
-        )
+        if use_egpo:
+            dprint(
+                f"[EGPO] enabled: interface_ratio={EXPERT_INTERFACE_RATIO:.2f}, alpha_min={EXPERT_ALPHA_MIN}, "
+                f"schedule={EXPERT_ALPHA_SCHEDULE}, bc_coef={EXPERT_BC_COEF}"
+            )
+        if use_follow_expert:
+            print("[Train] cmd_source=follow_expert (--use_follow_expert)")
 
     if is_gate:
         policy = GatePolicy(
@@ -2389,7 +2455,7 @@ def train(args):
                 cmd, _ = policy.get_action(
                     aff_stack_buf, state, goal, difficulty, deterministic=False
                 )
-                if use_egpo and compute_s0_follow_expert_cmd is not None:
+                if (use_egpo or use_follow_expert) and compute_s0_follow_expert_cmd is not None:
                     policy_cmd_raw = cmd
                     target_world_xy = getattr(env.env, "target_world", None)
                     target_vel_world_xy = getattr(env.env, "target_vel_world", None)
@@ -2420,11 +2486,13 @@ def train(args):
                         target_vel_world_xy=None,
                         target_heading=None,
                         cmd_scale=cmd_scale,
+                        reset_mask=reset_mask_prev,
                     )
-                    egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
-                    egpo_expert_cmd_sum += expert_action.sum(dim=0)
-                    egpo_cmd_count += float(policy_cmd_raw.shape[0])
-                    if debug:
+                    if use_egpo:
+                        egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
+                        egpo_expert_cmd_sum += expert_action.sum(dim=0)
+                        egpo_cmd_count += float(policy_cmd_raw.shape[0])
+                    if debug and use_egpo:
                         # Keep debug heading diagnostics on the same branch used by expert labels
                         # in S0: no target vel/heading, geometric fallback direction only.
                         to_target_world = target_world_xy - env.env.root_states[:, :2]
@@ -2445,11 +2513,14 @@ def train(args):
                         egpo_heading_align_cos_sum += align_cos.sum()
                         heading_err_deg = torch.rad2deg(torch.acos(align_cos))
                         egpo_heading_error_deg_samples.append(heading_err_deg.detach())
-                    expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
-                    cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
-                    if debug:
-                        egpo_diag_yaw_before = robot_heading.detach()
-                        egpo_diag_cmd_omega = cmd[:, 2].detach()
+                    if use_egpo:
+                        expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
+                        cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
+                        if debug:
+                            egpo_diag_yaw_before = robot_heading.detach()
+                            egpo_diag_cmd_omega = cmd[:, 2].detach()
+                    elif use_follow_expert:
+                        cmd = expert_action
                 log_prob, value, _, _ = policy.evaluate_actions(
                     aff_stack_buf, state, goal, difficulty, cmd
                 )
@@ -3241,8 +3312,8 @@ if __name__ == "__main__":
                         help='训练技能: follow / avoid / moe (gate)')
     
     # 环境
-    parser.add_argument('--task', type=str, default='hex_s1',
-                        help='Isaac Gym 任务名称')
+    parser.add_argument('--task', type=str, required=True,
+                        help='Isaac Gym 任务名称（必填，例如 s_follow_basic / s_avoid_basic / s_cylinder）')
     parser.add_argument('--seed', type=int, default=None,
                         help='随机种子（None 使用默认）')
     parser.add_argument('--aff_stack', type=int, default=1,
@@ -3326,7 +3397,9 @@ if __name__ == "__main__":
     parser.add_argument('--t1_goal_occlusion_len', type=int, default=10,
                         help='T1 弱遮挡持续步数')
     parser.add_argument('--egpo', action='store_true',
-                        help='仅在 hex_s0_follow + follow 下启用 EGPO（专家动作混合 + BC）')
+                        help='仅在 s_follow_basic + follow 下启用 EGPO（专家动作混合 + BC）')
+    parser.add_argument('--use_follow_expert', action='store_true',
+                        help='follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --teacher_ckpt）')
     parser.add_argument(
         '--allow_nonfinite_recovery',
         action='store_true',
@@ -3349,6 +3422,7 @@ if __name__ == "__main__":
     )
     
     args, unknown = parser.parse_known_args()
+    args.task = normalize_task_name(getattr(args, "task", ""))
     
     # 传递未知参数给 Isaac Gym
     sys.argv = [sys.argv[0]] + unknown

@@ -1,0 +1,110 @@
+# Scene Name Mapping (Canonical s_* Naming)
+# Last updated: 2026-03-05
+
+This file is the single source for scene naming and scene intent.
+All training/play/eval commands should use the canonical s_* / e_* names below.
+
+## A) Mainline Scenes (Avoid Training)
+
+1) s_avoid_basic
+- Type: Avoid mainline bootstrap scene
+- Current content: 3-stage plane curriculum (all obstacles are PhysX primitive actors)
+  - Stage 1: open sparse capsules (3-5), min spacing 1.2m
+  - Stage 2: open dense mixed capsules+boxes (6-8), min spacing 0.7m
+  - Stage 3: straight corridor with two long box walls; width starts at 1.20m and shrinks to 0.85m by collision metric
+- Status: Active (new baseline entry)
+- Note: Stage switch is metric-driven (recent-100 collision rate + min episode gate), not fixed iteration.
+
+2) s_cylinder
+- Type: Avoid training scene
+- Content summary: Cylinder-style obstacle layout
+- Status: Active
+
+3) s_narrow_passage
+- Type: Avoid training scene
+- Content summary: Narrow passage / gate-constrained layout
+- Status: Active
+
+4) s_step_field
+- Type: Avoid training scene
+- Content summary: Step-like terrain + obstacle constraints
+- Status: Active
+
+5) s_dense_obstacles
+- Type: Avoid training scene
+- Content summary: Dense obstacle distribution
+- Status: Active
+
+6) s_ood_holdout
+- Type: Structured OOD evaluation scene
+- Content summary: Holdout distribution for robustness check
+- Status: Eval-only (not main training)
+
+## B) Follow / Debug / Utility Scenes
+
+7) s_follow_basic
+- Type: Follow expert validation scene (S0 line)
+- Content summary: Flat ground + moving target follow setup
+- Status: Active (follow-only debug and EGPO checks)
+
+8) s_mixed_gate
+- Type: Mixed experimental container scene
+- Content summary: Mixed gate-style layout
+- Status: Experimental (not first-run default)
+
+9) s_calib
+- Type: Calibration scene
+- Content summary: Calibration and sanity checks
+- Status: Utility
+
+10) s_debug_plane
+- Type: Debug scene
+- Content summary: Minimal flat debug setup
+- Status: Utility
+
+11) s_debug_heightfield
+- Type: Debug scene
+- Content summary: Minimal heightfield debug setup
+- Status: Utility
+
+## C) Large Variants
+
+12) s_avoid_basic_large
+13) s_cylinder_large
+14) s_narrow_passage_large
+15) s_step_field_large
+16) s_dense_obstacles_large
+17) s_ood_holdout_large
+18) s_mixed_gate_large
+- Status: Optional large-scale variants
+
+## D) Paper Scenes (e_*)
+
+19) e_L_conflict
+- Type: Paper conflict showcase scene
+- Content summary: Flat field + target goes straight then 90-degree right turn;
+  one cylinder (diameter 0.30m) is tangent to both legs at the inner corner
+  and is created as a scene obstacle actor (not terrain imprint).
+- Status: Active (paper demo / conflict validation)
+
+## E) Legacy Compatibility Notes
+
+- Kept compatibility aliases:
+  - e_L_confilct -> e_L_conflict
+  - hex_s0_follow -> s_follow_basic
+  - hex_s2 -> s_cylinder
+  - hex_s3 -> s_narrow_passage
+  - hex_s4 -> s_step_field
+  - hex_s5 -> s_dense_obstacles
+  - hex_s6 -> s_ood_holdout
+  - hex_mix_gate -> s_mixed_gate
+  - hex_mix_gate_large -> s_mixed_gate_large
+  - hex_calib -> s_calib
+
+- Removed (no longer exposed as active scene entry):
+  - hex_s1
+  - hex_s1_follow
+  - hex_s1_follow_moving
+  - s_open_field
+  - s_follow_static
+  - s_follow_moving
