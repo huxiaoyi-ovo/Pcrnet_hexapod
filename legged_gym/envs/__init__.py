@@ -52,6 +52,8 @@ from .hex_v4.hex_scenes_config import (
     HexS0FollowCfgPPO,
     HexELConflictCfg,
     HexELConflictCfgPPO,
+    HexESCorridorCfg,
+    HexESCorridorCfgPPO,
     HexAvoidBasicCfg,
     HexAvoidBasicCfgPPO,
     HexS1Cfg,
@@ -145,6 +147,7 @@ task_registry.register("s_debug_heightfield", HexGround, HexDebugHeightfieldCfg(
 
 # Paper scene series (e_*): keep explicit names for experiment reproducibility.
 task_registry.register("e_L_conflict", HexGround, HexELConflictCfg(), HexELConflictCfgPPO())
+task_registry.register("e_S_corridor", HexGround, HexESCorridorCfg(), HexESCorridorCfgPPO())
 # Backward-compatible alias (legacy typo).
 task_registry.register("e_L_confilct", HexGround, HexELConflictCfg(), HexELConflictCfgPPO())
 # print("Registered HexGround environment")

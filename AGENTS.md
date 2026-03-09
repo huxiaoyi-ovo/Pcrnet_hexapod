@@ -16,6 +16,7 @@
 - PROJECT_OVERVIEW_CN.md 的“想法”部分仅在用户明确提出需要记忆的想法时维护。
 - 若任务属于“项目架构优化/文档治理”，默认不改核心代码目录：`legged_gym/`、`rsl_rl/`、`resources/`、`tools/`。
 - 每次新对话前，如果对所问问题没把握或者对项目情况不清楚，先仔细查看参考方案文档并以 V7 为准（`技术方案/hexapod_RAL_complete_technical_spec_v7.md`、`技术方案/hexapod_RAL_integrated_final_v7.md`），确保掌握整个项目的目的和方向。
+- V7 文档是阶段性技术方案；若后续实验结论已写入 `AGENTS.md`，且与 V7 表述不一致，默认以 `AGENTS.md` 的最新实验记录为准。
 - 当用户说“要 git 说明/提交说明”时，输出格式为“提交标题一行 + 空行 + 说明要点列表”，不加小标题。
 
 ## 实验协作口径（最高优先级）
@@ -76,6 +77,18 @@
 2. 验证 `goal_buf` 与实时几何投影是否一致（`pre_goal_err`）。
 3. 验证 expert 的 `pre_alpha` 与 `pre_omega` 收敛关系。
 4. 最后再看整段轨迹与 `dist` 变化，避免先入为主误判。
+
+### 避障专家最新口径（更新于 2026-03-06，默认优先于旧方案表述）
+
+- 避障专家默认观测固定为：`state + goal_buf + local_map_2ch`。
+- `local_map_2ch` 的两个通道固定为：
+  - `occupancy`
+  - `clearance/cost`
+- 当前避障任务默认不使用跨越信息，`low_obstacle` 不再作为避障专家的默认必需输入。
+- `goal_buf` 统一解释为“局部子目标”，来源可以是目标跟踪、路径点或外部定位；不要求必须直接是人的真值位置。
+- 避障 sim2real 默认主线固定为：`D435i depth -> local_map_2ch -> avoid expert`。
+- `teacher` 的真值图主要用于仿真训练参考，不作为默认部署输入。
+- `student` 对当前避障主线是可选项；若传统深度处理已经能稳定生成 `local_map_2ch`，则不强制经过 `student`。
 
 ## 角色模式开关（自动路由 + 双阶段执行 + 可强制切换，最高优先级）
 

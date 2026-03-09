@@ -1,0 +1,2 @@
+env_id,episode_id,steps,follow_ratio,collision_steps,collision_step_ratio,collision_events,collided,success,reason
+0,0,120,0.08333333333333333,24,0.2,5,True,False,running

@@ -1,0 +1,2 @@
+env_id,episode_id,steps,tracking_follow_ratio,safety_collision_steps,safety_collision_step_ratio,safety_episode_collided,task_success,reason
+0,0,129,0.07751937984496124,32,0.24806201550387597,True,False,running

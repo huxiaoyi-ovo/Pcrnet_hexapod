@@ -25,3 +25,4 @@ cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/pr
 
 # Paper conflict scene (e_*)
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/play_highlevel.py --task e_L_conflict --mode teacher --skill avoid --teacher_ckpt <YOUR_AVOID_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --seed 42 --debug_cmd --debug_interval 10 --max_steps 800 --debug
+cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/play_highlevel.py --task e_S_corridor --mode teacher --skill follow --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --use_follow_expert --show_expert_cmd --debug_cmd --debug_interval 10 --max_steps 800 --debug

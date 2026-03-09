@@ -1,0 +1,13 @@
+{
+  "task": "e_S_corridor",
+  "stop_reason": "running",
+  "completed_episodes": 1,
+  "safety_episode_collision_rate": 1.0,
+  "safety_collision_step_ratio": 0.24806201550387597,
+  "task_success_rate": 0.0,
+  "tracking_follow_rate": 0.07751937984496124,
+  "follow_dist_tol": 0.25,
+  "follow_bearing_tol_deg": 14.999999999999998,
+  "desired_dist": 1.0,
+  "timeseries_rows": 129
+}

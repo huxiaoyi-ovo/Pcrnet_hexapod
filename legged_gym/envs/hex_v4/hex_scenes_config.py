@@ -267,6 +267,56 @@ class HexELConflictCfgPPO(HexGroundCfgPPO):
         experiment_name = "e_L_conflict"
 
 
+class HexESCorridorCfg(HexS0FollowCfg):
+    """
+    e_S_corridor:
+    Flat paper scene for continuous-turn following inside a narrow S corridor.
+    """
+
+    class env(HexS0FollowCfg.env):
+        env_spacing = 12.0
+        no_episode_timeout = True
+
+    class terrain(HexS0FollowCfg.terrain):
+        mesh_type = "trimesh"
+        debug_allow_plane = False
+        terrain_type = "e_s_corridor"
+        terrain_seed = 602
+        curriculum = False
+        num_rows = 1
+        num_cols = 1
+        terrain_length = 12.0
+        terrain_width = 12.0
+
+        e_s_corridor_width = 1.00
+        e_s_corridor_wall_thickness = 0.12
+        e_s_corridor_wall_height = 0.55
+        e_s_corridor_segment_length = 1.20
+        e_s_corridor_segment_overlap = 0.94
+        e_s_corridor_start_y = -4.20
+        e_s_corridor_straight_in = 1.40
+        e_s_corridor_bend_length = 5.20
+        e_s_corridor_straight_out = 1.40
+        e_s_corridor_amplitude = 0.95
+        e_s_corridor_curvature_scale = 1.0
+        e_s_corridor_wall_margin = 0.25
+        e_s_corridor_mesh_samples = 1201
+        e_s_corridor_smooth_passes = 3
+
+    class navigation(HexS0FollowCfg.navigation):
+        moving_target_enable = True
+        moving_target_mode = "e_s_corridor_script"
+        moving_target_s_corridor_speed = 0.50
+        moving_target_s_corridor_spawn_gap = 1.00
+        moving_target_s_corridor_loop = True
+        moving_target_s_corridor_path_samples = 801
+
+
+class HexESCorridorCfgPPO(HexGroundCfgPPO):
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "e_S_corridor"
+
+
 class HexAvoidBasicCfg(HexGroundCfg):
     """
     s_avoid_basic:
@@ -287,8 +337,9 @@ class HexAvoidBasicCfg(HexGroundCfg):
 
         # Stage switch metrics.
         avoid_stage_switch_window = 100
-        avoid_stage_switch_min_episodes = 200
+        avoid_stage_switch_min_episodes = 800
         avoid_stage12_collision_threshold = 0.05
+        avoid_stage12_exposure_threshold = 0.60
 
         # Stage-3 corridor shrink curriculum.
         avoid_stage3_shrink_window = 50
@@ -306,8 +357,17 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage2_count_max = 8
         avoid_stage2_min_spacing = 0.7
 
-        avoid_spawn_clearance = 0.5
-        avoid_spawn_extra_margin = 0.1
+        avoid_spawn_clearance = 0.85
+        avoid_spawn_extra_margin = 0.2
+        avoid_obstacle_exposure_distance = 1.8
+        avoid_stage12_band_half_width = 1.05
+        avoid_stage12_band_y_min = -0.5
+        avoid_stage12_band_y_max = 2.4
+        avoid_stage12_core_half_width = 0.40
+        avoid_stage12_core_y_min = 0.0
+        avoid_stage12_core_y_max = 1.6
+        avoid_stage1_core_count = 1
+        avoid_stage2_core_count = 2
 
         # Primitive assets.
         avoid_capsule_radius = 0.15
@@ -329,9 +389,32 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Avoid expert stage: no moving target actor (keep target non-collision by design).
         moving_target_enable = False
         spawn_edge_enable = False
+        goal_mode = "random"
+        goal_min_distance = 2.0
+        goal_range_x = [-1.6, 1.6]
+        goal_range_y = [1.2, 2.8]
+        goal_sample_max_tries = 32
+        goal_allow_fallback = True
+        goal_force_blocking_line = False
+        resample_on_reach = False
         heading_offset_rad = 0.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
+        reward_cfg["goal_approach_scale"] = 1.5
+        reward_cfg["goal_reach_bonus"] = 4.0
+        reward_cfg["goal_reach_threshold"] = 0.25
+        reward_cfg["heading_scale"] = 0.05
+        reward_cfg["passable_align_scale"] = 1.2
+        reward_cfg["crossable_align_scale"] = 0.0
+        reward_cfg["risk_barrier_scale"] = -2.0
+        reward_cfg["risk_barrier_safe"] = 0.35
+        reward_cfg["risk_barrier_free"] = 0.80
+        reward_cfg["risk_barrier_tau"] = 0.10
+        reward_cfg["collision_penalty"] = -25.0
+        reward_cfg["time_penalty"] = -0.02
+        reward_cfg["velocity_scale"] = 0.05
+        reward_cfg["backward_scale"] = 0.0
+        reward_cfg["turn_penalty_scale"] = 0.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

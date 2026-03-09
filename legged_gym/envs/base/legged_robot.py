@@ -773,7 +773,7 @@ class LeggedRobot(BaseTask):
             disable_jitter = bool(getattr(self.cfg.terrain, "debug_allow_plane", False))
             if terrain_type is not None:
                 terrain_type = str(terrain_type).lower()
-                if terrain_type in ("s1", "s1_corridor_gate", "e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
+                if terrain_type in ("s1", "s1_corridor_gate", "e_l_conflict", "e_l_confilct", "e_l_conflict_turn", "e_s_corridor"):
                     disable_jitter = True
             if not disable_jitter:
                 pos[:2] += torch_rand_float(-1., 1., (2,1), device=self.device).squeeze(1)

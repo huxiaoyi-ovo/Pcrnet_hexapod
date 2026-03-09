@@ -54,8 +54,9 @@ sys.path.insert(0, PROJECT_ROOT)
 
 # 默认维度定义（实际训练时以环境观测维度为准）
 STATE_DIM = 9   # [pos_x, pos_y, yaw, vx, vy, omega, height, roll, pitch]
-GOAL_DIM = 2    # [goal_x, goal_y] (相对坐标)
-AFFORDANCE_CHANNELS = 3  # [occupancy, passable_gap, low_obstacle]
+GOAL_DIM = 2    # [goal_x, goal_y] (relative goal_buf)
+AFFORDANCE_CHANNELS = 3  # Default GT affordance layout in env
+AVOID_LOCAL_MAP_CHANNELS = 2  # [occupancy, clearance_or_cost]
 GOAL_TH_DEFAULT = 0.1
 GATE_SWITCH_DY_DEFAULT = 0.2
 SCENE_CURRIC_ITERS = 1000
@@ -117,6 +118,34 @@ def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
     gap = torch.nan_to_num(aff_map[:, 1], nan=0.0, posinf=0.0, neginf=0.0)
     difficulty = 1.0 - gap.mean(dim=(1, 2))
     return torch.clamp(difficulty, 0.0, 1.0)
+
+
+def build_avoid_local_map_2ch(aff_map: torch.Tensor) -> torch.Tensor:
+    """Build a compact avoid map: [occupancy, clearance/cost proxy]."""
+    if aff_map.ndim != 4:
+        raise ValueError(f"aff_map shape invalid: {tuple(aff_map.shape)}")
+    if aff_map.size(1) == AVOID_LOCAL_MAP_CHANNELS:
+        occ = torch.clamp(torch.nan_to_num(aff_map[:, 0], nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+        clearance = torch.clamp(torch.nan_to_num(aff_map[:, 1], nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+        return torch.stack([occ, clearance], dim=1)
+
+    occ = torch.nan_to_num(aff_map[:, 0], nan=0.0, posinf=1.0, neginf=0.0)
+    occ = torch.clamp(occ, 0.0, 1.0)
+
+    if aff_map.size(1) >= 2:
+        free_score = torch.nan_to_num(aff_map[:, 1], nan=0.0, posinf=1.0, neginf=0.0)
+    else:
+        free_score = 1.0 - occ
+    free_score = torch.clamp(free_score, 0.0, 1.0)
+
+    # Smooth the free-space score so the second channel behaves more like
+    # a local clearance / safety score instead of a brittle binary mask.
+    clearance = F.avg_pool2d(free_score.unsqueeze(1), kernel_size=3, stride=1, padding=1).squeeze(1)
+    clearance = torch.maximum(clearance, free_score)
+    clearance = clearance * (1.0 - occ)
+    clearance = torch.clamp(clearance, 0.0, 1.0)
+
+    return torch.stack([occ, clearance], dim=1)
 
 
 def apply_goal_occlusion(
@@ -410,7 +439,6 @@ class HierarchicalHexapodEnv:
                 env_cfg.sensor.depth_camera.enable = True
                 if getattr(args, "camera_interval", None) is not None:
                     env_cfg.sensor.depth_camera.capture_interval = args.camera_interval
-
         if hasattr(env_cfg, "navigation") and hasattr(env_cfg.navigation, "reward_cfg"):
             reward_goal_th = float(env_cfg.navigation.reward_cfg.get("goal_reach_threshold", GOAL_TH_DEFAULT))
             env_cfg.navigation.goal_reached_threshold = reward_goal_th
@@ -801,10 +829,7 @@ class HierarchicalHexapodEnv:
         y_body = grid_y.reshape(-1).unsqueeze(0)
 
         robot_xy = self.env.root_states[:, :2]
-        if hasattr(self.env, "robot_state_buf"):
-            yaw = self.env.robot_state_buf[:, 2]
-        else:
-            yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
         cos_h = torch.cos(yaw).unsqueeze(1)
         sin_h = torch.sin(yaw).unsqueeze(1)
 
@@ -843,7 +868,8 @@ class HierarchicalHexapodEnv:
 
     def _compute_gt_affordance_from_scene(self) -> Optional[torch.Tensor]:
         if not hasattr(self.env, "scene_spec_cache"):
-            return None
+            if not hasattr(self.env, "s_avoid_active"):
+                return None
         map_size = self.affordance_map_size
         map_extent = self.affordance_map_extent
         cell = map_extent / map_size
@@ -855,10 +881,7 @@ class HierarchicalHexapodEnv:
         occ_all = torch.zeros(self.num_envs, map_size, map_size, device=self.device)
 
         robot_xy = self.env.root_states[:, :2]
-        if hasattr(self.env, "robot_state_buf"):
-            yaw = self.env.robot_state_buf[:, 2]
-        else:
-            yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
         if not torch.isfinite(yaw).all():
             yaw = yaw.clone()
             yaw[~torch.isfinite(yaw)] = 0.0
@@ -905,15 +928,26 @@ class HierarchicalHexapodEnv:
             iy1 = max(0, min(map_size - 1, iy1))
             occ_all[env_id, ix0:ix1 + 1, iy0:iy1 + 1] = 1.0
 
-        for env_id in range(self.num_envs):
-            scene_spec = self.env.scene_spec_cache[env_id]
-            if scene_spec is None:
-                continue
-            origin = self.env.env_origins[env_id]
-            for spec in scene_spec.static_obstacles:
-                center_x = float(origin[0].item() + spec.position[0])
-                center_y = float(origin[1].item() + spec.position[1])
-                rasterize(env_id, center_x, center_y, spec.size[0], spec.size[1])
+        def rasterize_actor_bbox(env_id: int, center_x: float, center_y: float, half_x: float, half_y: float, yaw_world: float) -> None:
+            if not (math.isfinite(half_x) and math.isfinite(half_y) and math.isfinite(yaw_world)):
+                return
+            rel_yaw = yaw_world - float(yaw[env_id].item())
+            cos_a = abs(math.cos(rel_yaw))
+            sin_a = abs(math.sin(rel_yaw))
+            size_x = 2.0 * (cos_a * half_x + sin_a * half_y)
+            size_y = 2.0 * (sin_a * half_x + cos_a * half_y)
+            rasterize(env_id, center_x, center_y, size_x, size_y)
+
+        if hasattr(self.env, "scene_spec_cache"):
+            for env_id in range(self.num_envs):
+                scene_spec = self.env.scene_spec_cache[env_id]
+                if scene_spec is None:
+                    continue
+                origin = self.env.env_origins[env_id]
+                for spec in scene_spec.static_obstacles:
+                    center_x = float(origin[0].item() + spec.position[0])
+                    center_y = float(origin[1].item() + spec.position[1])
+                    rasterize(env_id, center_x, center_y, spec.size[0], spec.size[1])
 
         if hasattr(self.env, "dynamic_active") and self.env.dynamic_active is not None:
             dyn_size = float(getattr(self.env.cfg.terrain, "scene_dynamic_size", 0.4))
@@ -941,6 +975,32 @@ class HierarchicalHexapodEnv:
                     center_x = float(origin[0].item() + pos_local[0].item())
                     center_y = float(origin[1].item() + pos_local[1].item())
                     rasterize(env_id, center_x, center_y, dyn_size, dyn_size)
+
+        if hasattr(self.env, "s_avoid_active") and self.env.s_avoid_active is not None:
+            cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
+            box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
+            wall_slots = int(getattr(self.env, "s_avoid_wall_slot_count", 0))
+            total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
+            cap_r = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
+            box_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
+            box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
+            wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
+            wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+            for env_id in range(self.num_envs):
+                for slot in range(total_slots):
+                    if not bool(self.env.s_avoid_active[env_id, slot].item()):
+                        continue
+                    center_x = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
+                    center_y = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
+                    if slot < cap_slots:
+                        rasterize(env_id, center_x, center_y, 2.0 * cap_r, 2.0 * cap_r)
+                        continue
+                    quat = self.env.s_avoid_quat_world[env_id, slot]
+                    yaw_world = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
+                    if slot < cap_slots + box_slots:
+                        rasterize_actor_bbox(env_id, center_x, center_y, box_hx, box_hy, yaw_world)
+                    elif slot < cap_slots + box_slots + wall_slots:
+                        rasterize_actor_bbox(env_id, center_x, center_y, wall_hx, wall_hy, yaw_world)
 
         occ_block = occ_all.unsqueeze(1)
         low_obstacle = torch.zeros_like(occ_all)
@@ -976,6 +1036,27 @@ class HierarchicalHexapodEnv:
             passable_gap.unsqueeze(1),
             low_obstacle.unsqueeze(1),
         ], dim=1)
+
+    def _merge_affordance_maps(
+        self,
+        aff_primary: Optional[torch.Tensor],
+        aff_scene: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if aff_primary is None:
+            return aff_scene
+        if aff_scene is None:
+            return aff_primary
+        occ = torch.maximum(aff_primary[:, 0], aff_scene[:, 0])
+        passable = torch.minimum(aff_primary[:, 1], aff_scene[:, 1])
+        if aff_primary.size(1) >= 3 and aff_scene.size(1) >= 3:
+            low = torch.maximum(aff_primary[:, 2], aff_scene[:, 2])
+        elif aff_primary.size(1) >= 3:
+            low = aff_primary[:, 2]
+        elif aff_scene.size(1) >= 3:
+            low = aff_scene[:, 2]
+        else:
+            low = torch.zeros_like(occ)
+        return torch.stack([occ, passable, low], dim=1)
 
     def _build_affordance_dist_map(self) -> torch.Tensor:
         map_size = self.affordance_map_size
@@ -1297,7 +1378,9 @@ class HierarchicalHexapodEnv:
             aff_data = self.env.get_affordance_data()
             obs_dict['gt_affordance'] = aff_data['local_affordance']
         else:
-            aff_map = self._compute_gt_affordance_from_heightfield()
+            aff_height = self._compute_gt_affordance_from_heightfield()
+            aff_scene = self._compute_gt_affordance_from_scene()
+            aff_map = self._merge_affordance_maps(aff_height, aff_scene)
             if aff_map is not None:
                 obs_dict['gt_affordance'] = aff_map
             elif hasattr(self.env, 'measured_heights'):
@@ -1349,7 +1432,6 @@ class HierarchicalHexapodEnv:
                 cmd_vel = cmd_vel.detach()
             cmd_vel = torch.zeros_like(cmd_vel)
             cmd_vel[:, 1] = float(v)
-
         # 1. Command Post-Processor
         clearance_pp = None
         if self.clearance_override is not None:
@@ -1835,6 +1917,9 @@ def train(args):
     # 导入模块
     import_modules()
     
+    skill = getattr(args, "skill", "follow")
+    use_avoid_local_map = skill == "avoid"
+
     # 创建环境
     env = HierarchicalHexapodEnv(args, device)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
@@ -1944,6 +2029,10 @@ def train(args):
                     print("[Debug] env0 applied static obstacles: 0")
         except Exception as exc:
             print(f"[Debug] obstacle position dump failed: {exc}")
+    if use_avoid_local_map:
+        obs_dict['gt_affordance'] = build_avoid_local_map_2ch(obs_dict['gt_affordance'])
+        obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
+
     state_dim = obs_dict['state'].shape[1]
     goal_dim = obs_dict['goal'].shape[1]
     aff_shape = obs_dict['gt_affordance'].shape[1:]
@@ -1951,7 +2040,6 @@ def train(args):
     aff_channels = aff_shape[0] * aff_stack
 
     # 创建 Policy (V5)
-    skill = getattr(args, "skill", "follow")
     is_gate = skill == "moe"
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     action_dim = 1 if is_gate else 3
@@ -2239,6 +2327,9 @@ def train(args):
         cmd_jerk_lin_sum = torch.zeros((), device=device)
         cmd_jerk_ang_sum = torch.zeros((), device=device)
         near_miss_excess_sum = torch.zeros((), device=device)
+        near_miss_step_sum = torch.zeros((), device=device)
+        stuck_step_sum = torch.zeros((), device=device)
+        cmd_active_step_sum = torch.zeros((), device=device)
         gate_switch_count = torch.zeros((), device=device)
         goal_world_delta_sum = torch.zeros((), device=device)
         target_speed_sum = torch.zeros((), device=device)
@@ -2263,6 +2354,13 @@ def train(args):
         egpo_policy_cmd_sum = torch.zeros(3, device=device)
         egpo_expert_cmd_sum = torch.zeros(3, device=device)
         egpo_cmd_count = torch.zeros((), device=device)
+        clearance_min_value = None
+        avoid_stage_value = 0.0
+        avoid_corridor_width_value = 0.0
+        avoid_collision_rate100_value = 0.0
+        avoid_collision_rate50_value = 0.0
+        avoid_exposure_rate100_value = 0.0
+        avoid_nearest_obstacle_dist_value = 5.0
         local_iteration = iteration - start_iteration
         expert_alpha_rollout = (
             _get_expert_alpha(local_iteration, expert_interface_iters)
@@ -2295,14 +2393,22 @@ def train(args):
                         vis_out['passable_gap'],
                         vis_out['low_obstacle'],
                     ], dim=1)
+                    if use_avoid_local_map:
+                        aff_map = build_avoid_local_map_2ch(aff_map)
                     difficulty = difficulty_from_gap(aff_map)
                 env.clearance_override = env._compute_clearance_from_affordance(aff_map)
                 env.reward_affordance_override = aff_map
             else:
                 aff_map = obs_dict['gt_affordance']
-                difficulty = obs_dict['gt_difficulty']
-                env.clearance_override = None
-                env.reward_affordance_override = None
+                if use_avoid_local_map:
+                    aff_map = build_avoid_local_map_2ch(aff_map)
+                    difficulty = difficulty_from_gap(aff_map)
+                    env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+                    env.reward_affordance_override = aff_map
+                else:
+                    difficulty = obs_dict['gt_difficulty']
+                    env.clearance_override = None
+                    env.reward_affordance_override = None
 
             # 初始化/更新 aff 堆叠
             if aff_stack_buf is None:
@@ -2673,6 +2779,12 @@ def train(args):
             clearance = env_info.get('clearance', None) if env_info is not None else None
             if clearance is not None:
                 clearance_sum += clearance.sum()
+                clearance_min_curr = float(clearance.min().item())
+                clearance_min_value = (
+                    clearance_min_curr
+                    if clearance_min_value is None
+                    else min(clearance_min_value, clearance_min_curr)
+                )
             post_info = env_info.get('post_info', None) if env_info is not None else None
             if post_info is not None:
                 cmd_slew = post_info.get('cmd_slew', None)
@@ -2701,6 +2813,39 @@ def train(args):
                             c_thr_tensor = torch.tensor(float(c_thr), device=device)
                         near_miss_excess = torch.clamp(c_thr_tensor - clearance_pp, min=0.0)
                         near_miss_excess_sum += near_miss_excess.sum()
+                        near_miss_step_sum += (clearance_pp < c_thr_tensor).float().sum()
+            if use_avoid_local_map and hasattr(env, "env") and hasattr(env.env, "base_lin_vel"):
+                actual_speed = torch.norm(env.env.base_lin_vel[:, :2], dim=1)
+                cmd_xy_exec = None
+                if env_info is not None and isinstance(env_info, dict):
+                    post_info = env_info.get('post_info', None)
+                    if post_info is not None and isinstance(post_info, dict):
+                        cmd_slew = post_info.get('cmd_slew', None)
+                        if cmd_slew is not None:
+                            if not torch.is_tensor(cmd_slew):
+                                cmd_slew = torch.as_tensor(cmd_slew, device=device)
+                            if cmd_slew.dim() == 1:
+                                cmd_slew = cmd_slew.unsqueeze(0)
+                            if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 2:
+                                cmd_xy_exec = cmd_slew[:, :2]
+                if cmd_xy_exec is None and hasattr(env.env, "commands"):
+                    cmd_xy_exec = env.env.commands[:, :2]
+                if cmd_xy_exec is None and cmd_used is not None:
+                    cmd_xy_exec = cmd_used[:, :2]
+                if cmd_xy_exec is not None:
+                    cmd_speed = torch.norm(cmd_xy_exec, dim=1)
+                    cmd_active = cmd_speed > 0.15
+                    stuck_mask = cmd_active & (actual_speed < 0.05)
+                    stuck_step_sum += stuck_mask.float().sum()
+                    cmd_active_step_sum += cmd_active.float().sum()
+                extras = getattr(env.env, "extras", {})
+                if isinstance(extras, dict):
+                    avoid_stage_value = float(extras.get("avoid_stage", avoid_stage_value))
+                    avoid_corridor_width_value = float(extras.get("avoid_corridor_width", avoid_corridor_width_value))
+                    avoid_collision_rate100_value = float(extras.get("avoid_collision_rate_100", avoid_collision_rate100_value))
+                    avoid_collision_rate50_value = float(extras.get("avoid_collision_rate_50", avoid_collision_rate50_value))
+                    avoid_exposure_rate100_value = float(extras.get("avoid_exposure_rate_100", avoid_exposure_rate100_value))
+                    avoid_nearest_obstacle_dist_value = float(extras.get("avoid_nearest_obstacle_dist", avoid_nearest_obstacle_dist_value))
             reset_mask_prev = dones.clone()
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
@@ -2727,6 +2872,9 @@ def train(args):
             if dones.any():
                 stack_reset_mask = dones.clone()
             obs_dict = next_obs
+            if use_avoid_local_map:
+                obs_dict['gt_affordance'] = build_avoid_local_map_2ch(obs_dict['gt_affordance'])
+                obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
             if dones.any():
                 if last_goal_obs is not None:
                     last_goal_obs = last_goal_obs.clone()
@@ -2742,7 +2890,11 @@ def train(args):
             
             if args.mode == 'teacher':
                 aff_map_next = obs_dict['gt_affordance']
+                if use_avoid_local_map:
+                    aff_map_next = build_avoid_local_map_2ch(aff_map_next)
                 difficulty = obs_dict['gt_difficulty']
+                if use_avoid_local_map:
+                    difficulty = difficulty_from_gap(aff_map_next)
             else:
                 if vision_model is None:
                     raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
@@ -2753,6 +2905,8 @@ def train(args):
                         vis_out['passable_gap'],
                         vis_out['low_obstacle'],
                     ], dim=1)
+                    if use_avoid_local_map:
+                        aff_map_next = build_avoid_local_map_2ch(aff_map_next)
                     difficulty = difficulty_from_gap(aff_map_next)
             
             if aff_stack_buf is None:
@@ -3046,6 +3200,11 @@ def train(args):
         cmd_jerk_lin_mean = (cmd_jerk_lin_sum / total_samples).item()
         cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
+        near_miss_ratio = (near_miss_step_sum / total_samples).item()
+        stuck_ratio = (
+            (stuck_step_sum / cmd_active_step_sum.clamp_min(1.0)).item()
+            if use_avoid_local_map else 0.0
+        )
         gate_switch_rate_mean = (gate_switch_count / total_samples).item() if is_gate else 0.0
         expert_action_diff_mean = (expert_action_diff_sum / total_samples).item() if use_egpo else 0.0
         egpo_heading_align_cos_mean = 0.0
@@ -3091,6 +3250,7 @@ def train(args):
             collision_force_mean = collision_force_all.mean().item()
             collision_force_p95 = torch.quantile(collision_force_all, 0.95).item()
         clearance_mean = (clearance_sum / total_samples).item()
+        clearance_min = clearance_min_value if clearance_min_value is not None else 0.0
         passable_occ_ratio_mean = (passable_occ_ratio_sum / total_samples).item()
         crossable_width_mean = (crossable_width_sum / total_samples).item()
         risk_scale_mean = (risk_scale_sum / total_samples).item()
@@ -3142,6 +3302,7 @@ def train(args):
         writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
+        writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
         writer.add_scalar('Diag/SkippedNonFiniteUpdates', skipped_nonfinite_updates, iteration)
@@ -3151,15 +3312,25 @@ def train(args):
         writer.add_scalar('Diag/AffStackFilled', aff_stack_filled_mean, iteration)
         if collision_threshold_value is not None:
             writer.add_scalar('Diag/CollisionThreshold', collision_threshold_value, iteration)
-        writer.add_scalar('Stats/ClearanceMin', clearance_mean, iteration)
+        writer.add_scalar('Stats/ClearanceMean', clearance_mean, iteration)
+        writer.add_scalar('Stats/ClearanceMin', clearance_min, iteration)
         writer.add_scalar('Stats/PassableOccRatio', passable_occ_ratio_mean, iteration)
         writer.add_scalar('Stats/CrossableWidth', crossable_width_mean, iteration)
         writer.add_scalar('Stats/RiskScale', risk_scale_mean, iteration)
         writer.add_scalar('Stats/CmdJerkLin', cmd_jerk_lin_mean, iteration)
         writer.add_scalar('Stats/CmdJerkAng', cmd_jerk_ang_mean, iteration)
         writer.add_scalar('Stats/NearMissExcess', near_miss_excess_mean, iteration)
+        writer.add_scalar('Stats/NearMissRatio', near_miss_ratio, iteration)
         writer.add_scalar('Stats/GateSwitchRate', gate_switch_rate_mean, iteration)
         writer.add_scalar('Stats/SceneDifficulty', d_scene, iteration)
+        if use_avoid_local_map:
+            writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
+            writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
+            writer.add_scalar('Avoid/CollisionRate100', avoid_collision_rate100_value, iteration)
+            writer.add_scalar('Avoid/CollisionRate50', avoid_collision_rate50_value, iteration)
+            writer.add_scalar('Avoid/ExposureRate100', avoid_exposure_rate100_value, iteration)
+            writer.add_scalar('Avoid/NearestObstacleDist', avoid_nearest_obstacle_dist_value, iteration)
+            writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
@@ -3224,6 +3395,14 @@ def train(args):
                     egpo_line += (
                         f"""{'EGPO yaw response match:':>{pad}} {egpo_yaw_resp_sign_match_rate:.3f}\n"""
                     )
+            avoid_line = ""
+            if use_avoid_local_map:
+                avoid_line = (
+                    f"""{'Avoid stage/width:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f}\n"""
+                    f"""{'Avoid coll100/coll50/exp100:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
+                    f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
+                    f"""{'Avoid stuck/near-miss:':>{pad}} {stuck_ratio:.3f} / {near_miss_ratio:.3f}\n"""
+                )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -3245,9 +3424,10 @@ def train(args):
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""
                           f"""{'Target reset err(d/mdeg):':>{pad}} {target_reset_dist_error_mean:.3f} / {target_reset_bearing_error_deg_mean:.3f}\n"""
-                          f"""{'Clearance / RiskScale:':>{pad}} {clearance_mean:.3f} / {risk_scale_mean:.3f}\n"""
+                          f"""{'Clearance mean/min/risk:':>{pad}} {clearance_mean:.3f} / {clearance_min:.3f} / {risk_scale_mean:.3f}\n"""
                           f"""{gate_line}"""
                           f"""{egpo_line}"""
+                          f"""{avoid_line}"""
                           f"""{'Passable gate/align:':>{pad}} {reward_term_means.get('passable_gate', 0.0):.3f} / {reward_term_means.get('passable_align', 0.0):.3f} (occ {passable_occ_ratio_mean:.3f})\n"""
                           f"""{'Crossable gate/align:':>{pad}} {reward_term_means.get('crossable_gate', 0.0):.3f} / {reward_term_means.get('crossable_align', 0.0):.3f} (width {crossable_width_mean:.3f})\n"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""

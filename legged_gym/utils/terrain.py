@@ -307,6 +307,300 @@ def e_l_conflict_turn_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotC
     return terrain
 
 
+def _get_e_s_corridor_geom(cfg: LeggedRobotCfg.terrain):
+    corridor_width = float(getattr(cfg, "e_s_corridor_width", 1.00))
+    wall_thickness = float(getattr(cfg, "e_s_corridor_wall_thickness", 0.12))
+    wall_height = float(getattr(cfg, "e_s_corridor_wall_height", 0.55))
+    start_y = float(getattr(cfg, "e_s_corridor_start_y", -4.20))
+    straight_in = float(getattr(cfg, "e_s_corridor_straight_in", 1.40))
+    bend_length = float(getattr(cfg, "e_s_corridor_bend_length", 5.20))
+    straight_out = float(getattr(cfg, "e_s_corridor_straight_out", 1.40))
+    amplitude = float(getattr(cfg, "e_s_corridor_amplitude", 0.95))
+    curvature_scale = float(getattr(cfg, "e_s_corridor_curvature_scale", 1.0))
+    wall_margin = float(getattr(cfg, "e_s_corridor_wall_margin", 0.25))
+
+    corridor_width = max(0.6, corridor_width)
+    wall_thickness = max(0.05, wall_thickness)
+    wall_height = max(0.1, wall_height)
+    straight_in = max(0.5, straight_in)
+    bend_length = max(2.0, bend_length)
+    straight_out = max(0.5, straight_out)
+    curvature_scale = float(np.clip(curvature_scale, 0.2, 3.0))
+
+    half_len = 0.5 * float(getattr(cfg, "terrain_length", 12.0))
+    half_wid = 0.5 * float(getattr(cfg, "terrain_width", 12.0))
+    amplitude = amplitude * curvature_scale
+    max_amp = max(0.0, half_wid - 0.5 * corridor_width - wall_thickness - wall_margin)
+    amplitude = float(np.clip(amplitude, 0.0, max_amp))
+
+    total_y = straight_in + bend_length + straight_out
+    y_min = -half_len + wall_margin
+    y_max = half_len - wall_margin
+    start_y = float(np.clip(start_y, y_min, y_max - total_y))
+    end_y = start_y + total_y
+
+    return {
+        "corridor_width": float(corridor_width),
+        "wall_thickness": float(wall_thickness),
+        "wall_height": float(wall_height),
+        "start_y": float(start_y),
+        "end_y": float(end_y),
+        "straight_in": float(straight_in),
+        "bend_length": float(bend_length),
+        "straight_out": float(straight_out),
+        "amplitude": float(amplitude),
+        "curvature_scale": float(curvature_scale),
+        "wall_margin": float(wall_margin),
+    }
+
+
+def _e_s_corridor_center_x(y_world: np.ndarray, geom: dict) -> np.ndarray:
+    y_world = np.asarray(y_world, dtype=np.float64)
+    x = np.zeros_like(y_world)
+    start_y = float(geom["start_y"])
+    straight_in = float(geom["straight_in"])
+    bend_length = float(geom["bend_length"])
+    end_bend = start_y + straight_in + bend_length
+    end_y = float(geom["end_y"])
+    amplitude = float(geom["amplitude"])
+
+    mask = (y_world >= start_y + straight_in) & (y_world <= end_bend)
+    if np.any(mask):
+        u = (y_world[mask] - start_y - straight_in) / max(bend_length, 1e-6)
+        x[mask] = amplitude * np.power(np.sin(2.0 * np.pi * u), 3)
+
+    x[y_world < start_y] = 0.0
+    x[y_world > end_y] = 0.0
+    return x
+
+
+def _e_s_corridor_is_safe_amplitude(amplitude: float, geom: dict) -> bool:
+    amplitude = float(max(0.0, amplitude))
+    if amplitude <= 1e-8:
+        return True
+    safe_geom = dict(geom)
+    safe_geom["amplitude"] = amplitude
+    y = np.linspace(
+        float(safe_geom["start_y"]),
+        float(safe_geom["end_y"]),
+        2001,
+        dtype=np.float64,
+    )
+    x = _e_s_corridor_center_x(y, safe_geom)
+    dx = np.gradient(x, y)
+    ddx = np.gradient(dx, y)
+    kappa = np.abs(ddx) / np.power(1.0 + dx * dx, 1.5)
+    max_kappa = float(np.max(kappa))
+    if max_kappa <= 1e-8:
+        return True
+    min_radius = 1.0 / max_kappa
+    offset_need = 0.5 * float(safe_geom["corridor_width"]) + float(safe_geom["wall_thickness"]) + 0.03
+    return bool(min_radius >= offset_need)
+
+
+def _e_s_corridor_clamp_safe_amplitude(geom: dict) -> dict:
+    target = float(geom["amplitude"])
+    if _e_s_corridor_is_safe_amplitude(target, geom):
+        return geom
+    low = 0.0
+    high = target
+    for _ in range(28):
+        mid = 0.5 * (low + high)
+        if _e_s_corridor_is_safe_amplitude(mid, geom):
+            low = mid
+        else:
+            high = mid
+    out = dict(geom)
+    out["amplitude"] = float(low)
+    return out
+
+
+def _smooth_polyline(points: np.ndarray, passes: int) -> np.ndarray:
+    out = np.asarray(points, dtype=np.float64).copy()
+    passes = max(0, int(passes))
+    if out.shape[0] < 3 or passes <= 0:
+        return out
+    for _ in range(passes):
+        nxt = out.copy()
+        nxt[1:-1] = 0.25 * out[:-2] + 0.5 * out[1:-1] + 0.25 * out[2:]
+        out = nxt
+    return out
+
+
+def _build_e_s_corridor_centerline(cfg: LeggedRobotCfg.terrain, num_samples: int = None):
+    geom = _e_s_corridor_clamp_safe_amplitude(_get_e_s_corridor_geom(cfg))
+    if num_samples is None:
+        num_samples = int(max(401, round(float(getattr(cfg, "e_s_corridor_mesh_samples", 801)))))
+    smooth_passes = int(max(0, round(float(getattr(cfg, "e_s_corridor_smooth_passes", 2)))))
+    sample_y = np.linspace(float(geom["start_y"]), float(geom["end_y"]), int(num_samples), dtype=np.float64)
+    center_x = _e_s_corridor_center_x(sample_y, geom)
+    centerline = np.stack([center_x, sample_y], axis=1)
+    centerline = _smooth_polyline(centerline, smooth_passes)
+
+    diff = np.gradient(centerline, axis=0)
+    tan = diff / np.clip(np.linalg.norm(diff, axis=1, keepdims=True), 1e-8, None)
+    seg = np.linalg.norm(np.diff(centerline, axis=0), axis=1)
+    arc_s = np.zeros(centerline.shape[0], dtype=np.float64)
+    arc_s[1:] = np.cumsum(seg)
+    return geom, centerline, tan, arc_s
+
+
+def _build_e_s_corridor_trimesh(cfg: LeggedRobotCfg.terrain, total_rows: int, total_cols: int, border: int):
+    h_scale = float(cfg.horizontal_scale)
+    border_m = float(border) * h_scale
+    total_width = float(total_cols) * h_scale
+    total_length = float(total_rows) * h_scale
+    env_width = float(getattr(cfg, "terrain_width", 12.0))
+    env_length = float(getattr(cfg, "terrain_length", 12.0))
+    geom, centerline_local, tan_local, arc_s_local = _build_e_s_corridor_centerline(cfg)
+    tx = tan_local[:, 0]
+    ty = tan_local[:, 1]
+    nx = ty
+    ny = -tx
+
+    half_corridor = 0.5 * float(geom["corridor_width"])
+    wall_t = float(geom["wall_thickness"])
+    wall_h = float(geom["wall_height"])
+
+    left_inner = np.stack(
+        [centerline_local[:, 0] - half_corridor * nx, centerline_local[:, 1] - half_corridor * ny],
+        axis=1,
+    )
+    left_outer = np.stack(
+        [centerline_local[:, 0] - (half_corridor + wall_t) * nx, centerline_local[:, 1] - (half_corridor + wall_t) * ny],
+        axis=1,
+    )
+    right_inner = np.stack(
+        [centerline_local[:, 0] + half_corridor * nx, centerline_local[:, 1] + half_corridor * ny],
+        axis=1,
+    )
+    right_outer = np.stack(
+        [centerline_local[:, 0] + (half_corridor + wall_t) * nx, centerline_local[:, 1] + (half_corridor + wall_t) * ny],
+        axis=1,
+    )
+
+    tile_center_x = border_m + 0.5 * env_width
+    tile_center_y = border_m + 0.5 * env_length
+
+    def _to_world(points_xy: np.ndarray) -> np.ndarray:
+        pts = np.asarray(points_xy, dtype=np.float64).copy()
+        pts[:, 0] += tile_center_x
+        pts[:, 1] += tile_center_y
+        return pts
+
+    left_inner = _to_world(left_inner)
+    left_outer = _to_world(left_outer)
+    right_inner = _to_world(right_inner)
+    right_outer = _to_world(right_outer)
+
+    vertices = [
+        [0.0, 0.0, 0.0],
+        [total_width, 0.0, 0.0],
+        [total_width, total_length, 0.0],
+        [0.0, total_length, 0.0],
+    ]
+    triangles = [
+        [0, 1, 2],
+        [0, 2, 3],
+    ]
+
+    def _append_wall(inner_pts: np.ndarray, outer_pts: np.ndarray):
+        base_idx = len(vertices)
+        count = inner_pts.shape[0]
+        for idx in range(count):
+            ix, iy = inner_pts[idx]
+            ox, oy = outer_pts[idx]
+            vertices.extend(
+                [
+                    [float(ix), float(iy), 0.0],
+                    [float(ox), float(oy), 0.0],
+                    [float(ix), float(iy), wall_h],
+                    [float(ox), float(oy), wall_h],
+                ]
+            )
+
+        for idx in range(count - 1):
+            ib0 = base_idx + 4 * idx + 0
+            ob0 = base_idx + 4 * idx + 1
+            it0 = base_idx + 4 * idx + 2
+            ot0 = base_idx + 4 * idx + 3
+            ib1 = base_idx + 4 * (idx + 1) + 0
+            ob1 = base_idx + 4 * (idx + 1) + 1
+            it1 = base_idx + 4 * (idx + 1) + 2
+            ot1 = base_idx + 4 * (idx + 1) + 3
+
+            triangles.extend(
+                [
+                    [it0, ot0, ot1],
+                    [it0, ot1, it1],
+                    [ib0, it0, it1],
+                    [ib0, it1, ib1],
+                    [ob0, ob1, ot1],
+                    [ob0, ot1, ot0],
+                ]
+            )
+
+        ib0 = base_idx + 0
+        ob0 = base_idx + 1
+        it0 = base_idx + 2
+        ot0 = base_idx + 3
+        ib1 = base_idx + 4 * (count - 1) + 0
+        ob1 = base_idx + 4 * (count - 1) + 1
+        it1 = base_idx + 4 * (count - 1) + 2
+        ot1 = base_idx + 4 * (count - 1) + 3
+        triangles.extend(
+            [
+                [ib0, ob0, ot0],
+                [ib0, ot0, it0],
+                [ib1, it1, ot1],
+                [ib1, ot1, ob1],
+            ]
+        )
+
+    _append_wall(left_inner, left_outer)
+    _append_wall(right_inner, right_outer)
+    mesh_meta = dict(geom)
+    mesh_meta["centerline_local"] = np.asarray(centerline_local, dtype=np.float32)
+    mesh_meta["tangent_local"] = np.asarray(tan_local, dtype=np.float32)
+    mesh_meta["arc_s_local"] = np.asarray(arc_s_local, dtype=np.float32)
+    return np.asarray(vertices, dtype=np.float32), np.asarray(triangles, dtype=np.uint32), mesh_meta
+
+
+def e_s_corridor_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
+    """e_S_corridor: flat tile metadata; wall mesh is generated analytically later."""
+    length_px = terrain.length
+    width_px = terrain.width
+    h_scale = terrain.horizontal_scale
+    length_m = length_px * h_scale
+    width_m = width_px * h_scale
+
+    height_field = _tile_contract_view(terrain, length_px, width_px)
+    height_field[:] = 0
+
+    geom = _get_e_s_corridor_geom(cfg)
+
+    terrain.meta = {
+        "scene_type": "e_s_corridor",
+        "params": {
+            "terrain_length": float(length_m),
+            "terrain_width": float(width_m),
+            "corridor_width": float(geom["corridor_width"]),
+            "wall_thickness": float(geom["wall_thickness"]),
+            "wall_height": float(geom["wall_height"]),
+            "start_y": float(geom["start_y"]),
+            "end_y": float(geom["end_y"]),
+            "straight_in": float(geom["straight_in"]),
+            "bend_length": float(geom["bend_length"]),
+            "straight_out": float(geom["straight_out"]),
+            "amplitude": float(geom["amplitude"]),
+            "mesh_mode": "analytic_trimesh",
+        },
+        "layout_seed": int(seed or 0),
+        "static_obstacles": [],
+    }
+    return terrain
+
+
 def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terrain, seed: int = None):
     """S2 forest: poles + blocks with a clear band around x=0."""
     length_px = terrain.length
@@ -1128,12 +1422,18 @@ class Terrain:
 
         self.heightsamples = np.ascontiguousarray(self.height_field_raw, dtype=np.int16)
         if self.type == "trimesh":
-            self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(
-                self.height_field_raw,
-                self.cfg.horizontal_scale,
-                self.cfg.vertical_scale,
-                self.cfg.slope_treshold,
-            )
+            terrain_type = str(getattr(self.cfg, "terrain_type", "") or "").lower()
+            if terrain_type == "e_s_corridor":
+                self.vertices, self.triangles, self.direct_mesh_meta = _build_e_s_corridor_trimesh(
+                    self.cfg, self.tot_rows, self.tot_cols, self.border
+                )
+            else:
+                self.vertices, self.triangles = terrain_utils.convert_heightfield_to_trimesh(
+                    self.height_field_raw,
+                    self.cfg.horizontal_scale,
+                    self.cfg.vertical_scale,
+                    self.cfg.slope_treshold,
+                )
 
     def _tile_seed(self, i: int, j: int) -> int:
         base = int(getattr(self.cfg, "terrain_seed", 0) or 0)
@@ -1199,6 +1499,8 @@ class Terrain:
                 return s0_follow_plane_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
                 return e_l_conflict_turn_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
+            if terrain_type in ("e_s_corridor",):
+                return e_s_corridor_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s1", "s1_corridor_gate"):
                 return s1_corridor_gate_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             if terrain_type in ("s2", "s2_forest"):
@@ -1213,7 +1515,7 @@ class Terrain:
                 return s6_ood_cluster_terrain(terrain, difficulty, rng, self.cfg, seed=seed)
             raise RuntimeError(
                 f"unsupported terrain_type={terrain_type}. "
-                "supported: debug_axis, s0_follow_plane, e_l_conflict_turn, "
+                "supported: debug_axis, s0_follow_plane, e_l_conflict_turn, e_s_corridor, "
                 "s1_corridor_gate, s2_forest, s3_doorway_rooms, s4_crossing, "
                 "s5_sparse_dense, s6_ood_cluster"
             )

@@ -87,6 +87,13 @@ All training/play/eval commands should use the canonical s_* / e_* names below.
   and is created as a scene obstacle actor (not terrain imprint).
 - Status: Active (paper demo / conflict validation)
 
+20) e_S_corridor
+- Type: Paper continuous-turn showcase scene
+- Content summary: Flat field + narrow S-shaped corridor built by continuous trimesh walls;
+  target moves along the corridor centerline with a smooth scripted S trajectory
+  to test continuous-bend follow behavior.
+- Status: Active (paper demo / continuous-bend validation)
+
 ## E) Legacy Compatibility Notes
 
 - Kept compatibility aliases:
