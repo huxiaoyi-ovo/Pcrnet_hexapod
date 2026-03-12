@@ -32,7 +32,7 @@ class PlannerOutput(NamedTuple):
 class AffordanceCNNEncoder(nn.Module):
     """
     Affordance 地图编码器 (CNN)
-    Input: (B, C, 16, 16) [Occupancy, Passable, LowOb]
+    Input: (B, C, H, W) [Occupancy, Passable, LowOb]
     Output: (B, 128)
     """
     def __init__(self, in_channels: int = 2, out_features: int = 128):
@@ -51,6 +51,7 @@ class AffordanceCNNEncoder(nn.Module):
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.ELU(inplace=True),
 
+            nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
         )
 
@@ -496,9 +497,18 @@ class CmdVelExpert(nn.Module):
         self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
         self.state_encoder = StateEncoder(state_dim, 64)
         self.goal_encoder = GoalEncoder(goal_dim, 32)
+        self.critic_affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
+        self.critic_state_encoder = StateEncoder(state_dim, 64)
+        self.critic_goal_encoder = GoalEncoder(goal_dim, 32)
 
         fusion_dim = 128 + 64 + 32 + 1
         self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+        self.critic_fusion = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -534,27 +544,72 @@ class CmdVelExpert(nn.Module):
                     nn.init.constant_(m.bias, 0)
         nn.init.orthogonal_(self.cmd_mean_head[-1].weight, gain=0.01)
 
+    @staticmethod
+    def _format_difficulty(terrain_difficulty: torch.Tensor) -> torch.Tensor:
+        if terrain_difficulty.dim() == 1:
+            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
+        return terrain_difficulty
+
+    def _encode_hidden(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        *,
+        critic: bool = False,
+    ) -> torch.Tensor:
+        terrain_difficulty = self._format_difficulty(terrain_difficulty)
+        if critic:
+            aff_feat = self.critic_affordance_encoder(affordance_map)
+            state_feat = self.critic_state_encoder(robot_state)
+            goal_feat = self.critic_goal_encoder(goal)
+            fusion = self.critic_fusion
+        else:
+            aff_feat = self.affordance_encoder(affordance_map)
+            state_feat = self.state_encoder(robot_state)
+            goal_feat = self.goal_encoder(goal)
+            fusion = self.fusion
+        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
+        return fusion(fused)
+
     def forward(
         self,
         affordance_map: torch.Tensor,
         robot_state: torch.Tensor,
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> CmdVelOutput:
-        aff_feat = self.affordance_encoder(affordance_map)
-        state_feat = self.state_encoder(robot_state)
-        goal_feat = self.goal_encoder(goal)
+        actor_hidden = self._encode_hidden(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic=False,
+        )
+        critic_hidden = actor_hidden
+        if (
+            critic_affordance_map is not None
+            or critic_robot_state is not None
+            or critic_goal is not None
+            or critic_terrain_difficulty is not None
+        ):
+            critic_hidden = self._encode_hidden(
+                affordance_map if critic_affordance_map is None else critic_affordance_map,
+                robot_state if critic_robot_state is None else critic_robot_state,
+                goal if critic_goal is None else critic_goal,
+                terrain_difficulty if critic_terrain_difficulty is None else critic_terrain_difficulty,
+                critic=True,
+            )
 
-        if terrain_difficulty.dim() == 1:
-            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
-
-        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
-        hidden = self.fusion(fused)
-
-        cmd_mean = self.cmd_mean_head(hidden)
-        cmd_std = self.cmd_std_head(hidden)
+        cmd_mean = self.cmd_mean_head(actor_hidden)
+        cmd_std = self.cmd_std_head(actor_hidden)
         cmd_std = torch.clamp(cmd_std, self.min_std, self.max_std)
-        value = self.value_head(hidden)
+        value = self.value_head(critic_hidden)
 
         return CmdVelOutput(cmd_mean=cmd_mean, cmd_std=cmd_std, value=value)
 
@@ -565,8 +620,21 @@ class CmdVelExpert(nn.Module):
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
         deterministic: bool = False,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
-        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        out = self.forward(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic_affordance_map=critic_affordance_map,
+            critic_robot_state=critic_robot_state,
+            critic_goal=critic_goal,
+            critic_terrain_difficulty=critic_terrain_difficulty,
+        )
         if deterministic:
             cmd_raw = out.cmd_mean
         else:
@@ -587,8 +655,21 @@ class CmdVelExpert(nn.Module):
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
         cmd_action: torch.Tensor,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        out = self.forward(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic_affordance_map=critic_affordance_map,
+            critic_robot_state=critic_robot_state,
+            critic_goal=critic_goal,
+            critic_terrain_difficulty=critic_terrain_difficulty,
+        )
 
         cmd_norm = cmd_action / self.cmd_scale
         cmd_norm = torch.clamp(cmd_norm, -0.999999, 0.999999)
@@ -624,9 +705,18 @@ class GatePolicy(nn.Module):
         self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
         self.state_encoder = StateEncoder(state_dim, 64)
         self.goal_encoder = GoalEncoder(goal_dim, 32)
+        self.critic_affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
+        self.critic_state_encoder = StateEncoder(state_dim, 64)
+        self.critic_goal_encoder = GoalEncoder(goal_dim, 32)
 
         fusion_dim = 128 + 64 + 32 + 1
         self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+        self.critic_fusion = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -662,26 +752,71 @@ class GatePolicy(nn.Module):
         nn.init.orthogonal_(self.y_alpha_head[-2].weight, gain=0.01)
         nn.init.orthogonal_(self.y_beta_head[-2].weight, gain=0.01)
 
+    @staticmethod
+    def _format_difficulty(terrain_difficulty: torch.Tensor) -> torch.Tensor:
+        if terrain_difficulty.dim() == 1:
+            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
+        return terrain_difficulty
+
+    def _encode_hidden(
+        self,
+        affordance_map: torch.Tensor,
+        robot_state: torch.Tensor,
+        goal: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+        *,
+        critic: bool = False,
+    ) -> torch.Tensor:
+        terrain_difficulty = self._format_difficulty(terrain_difficulty)
+        if critic:
+            aff_feat = self.critic_affordance_encoder(affordance_map)
+            state_feat = self.critic_state_encoder(robot_state)
+            goal_feat = self.critic_goal_encoder(goal)
+            fusion = self.critic_fusion
+        else:
+            aff_feat = self.affordance_encoder(affordance_map)
+            state_feat = self.state_encoder(robot_state)
+            goal_feat = self.goal_encoder(goal)
+            fusion = self.fusion
+        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
+        return fusion(fused)
+
     def forward(
         self,
         affordance_map: torch.Tensor,
         robot_state: torch.Tensor,
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> GateOutput:
-        aff_feat = self.affordance_encoder(affordance_map)
-        state_feat = self.state_encoder(robot_state)
-        goal_feat = self.goal_encoder(goal)
+        actor_hidden = self._encode_hidden(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic=False,
+        )
+        critic_hidden = actor_hidden
+        if (
+            critic_affordance_map is not None
+            or critic_robot_state is not None
+            or critic_goal is not None
+            or critic_terrain_difficulty is not None
+        ):
+            critic_hidden = self._encode_hidden(
+                affordance_map if critic_affordance_map is None else critic_affordance_map,
+                robot_state if critic_robot_state is None else critic_robot_state,
+                goal if critic_goal is None else critic_goal,
+                terrain_difficulty if critic_terrain_difficulty is None else critic_terrain_difficulty,
+                critic=True,
+            )
 
-        if terrain_difficulty.dim() == 1:
-            terrain_difficulty = terrain_difficulty.unsqueeze(-1)
-
-        fused = torch.cat([aff_feat, state_feat, goal_feat, terrain_difficulty], dim=-1)
-        hidden = self.fusion(fused)
-
-        y_alpha = self.y_alpha_head(hidden) + 1.0
-        y_beta = self.y_beta_head(hidden) + 1.0
-        value = self.value_head(hidden)
+        y_alpha = self.y_alpha_head(actor_hidden) + 1.0
+        y_beta = self.y_beta_head(actor_hidden) + 1.0
+        value = self.value_head(critic_hidden)
         return GateOutput(y_alpha=y_alpha, y_beta=y_beta, value=value)
 
     def get_action(
@@ -691,8 +826,21 @@ class GatePolicy(nn.Module):
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
         deterministic: bool = False,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
-        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        out = self.forward(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic_affordance_map=critic_affordance_map,
+            critic_robot_state=critic_robot_state,
+            critic_goal=critic_goal,
+            critic_terrain_difficulty=critic_terrain_difficulty,
+        )
         if deterministic:
             y = out.y_alpha / (out.y_alpha + out.y_beta)
             y = y.squeeze(-1)
@@ -713,8 +861,21 @@ class GatePolicy(nn.Module):
         goal: torch.Tensor,
         terrain_difficulty: torch.Tensor,
         y_action: torch.Tensor,
+        critic_affordance_map: Optional[torch.Tensor] = None,
+        critic_robot_state: Optional[torch.Tensor] = None,
+        critic_goal: Optional[torch.Tensor] = None,
+        critic_terrain_difficulty: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-        out = self.forward(affordance_map, robot_state, goal, terrain_difficulty)
+        out = self.forward(
+            affordance_map,
+            robot_state,
+            goal,
+            terrain_difficulty,
+            critic_affordance_map=critic_affordance_map,
+            critic_robot_state=critic_robot_state,
+            critic_goal=critic_goal,
+            critic_terrain_difficulty=critic_terrain_difficulty,
+        )
         y_dist = Beta(out.y_alpha, out.y_beta)
         eps = 1e-6
         y_clamped = torch.clamp(y_action, eps, 1.0 - eps)

@@ -132,12 +132,15 @@ class EvalRunner:
         obs = self.env.reset()
         state_dim = int(obs["state"].shape[1])
         goal_dim = int(obs["goal"].shape[1])
-        aff_shape = obs["gt_affordance"].shape[1:]
+        skill = getattr(self.args, "skill", "follow")
+        if skill == "avoid":
+            aff_shape = obs["local_map_2ch"].shape[1:]
+        else:
+            aff_shape = obs["gt_affordance"].shape[1:]
         aff_channels = int(aff_shape[0] * self.aff_stack)
         cmd_scale = tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist())
 
         mode = getattr(self.args, "mode", "teacher")
-        skill = getattr(self.args, "skill", "follow")
 
         if mode == "student":
             if not self.args.vision_ckpt:
@@ -163,7 +166,7 @@ class EvalRunner:
                 goal_dim=goal_dim,
             ).to(self.device)
             gate_ckpt = torch.load(self.args.ckpt, map_location=self.device)
-            self.policy.load_state_dict(_to_state_dict(gate_ckpt))
+            th.load_high_level_state_dict_compat(self.policy, _to_state_dict(gate_ckpt), label="eval_gate")
             self.policy.eval()
 
             self.follow_model = th.CmdVelExpert(
@@ -173,7 +176,11 @@ class EvalRunner:
                 cmd_scale=cmd_scale,
             ).to(self.device)
             follow_ckpt = torch.load(self.args.follow_ckpt, map_location=self.device)
-            self.follow_model.load_state_dict(_to_state_dict(follow_ckpt))
+            th.load_high_level_state_dict_compat(
+                self.follow_model,
+                _to_state_dict(follow_ckpt),
+                label="eval_follow",
+            )
             self.follow_model.eval()
 
             self.avoid_model = th.CmdVelExpert(
@@ -183,7 +190,11 @@ class EvalRunner:
                 cmd_scale=cmd_scale,
             ).to(self.device)
             avoid_ckpt = torch.load(self.args.avoid_ckpt, map_location=self.device)
-            self.avoid_model.load_state_dict(_to_state_dict(avoid_ckpt))
+            th.load_high_level_state_dict_compat(
+                self.avoid_model,
+                _to_state_dict(avoid_ckpt),
+                label="eval_avoid",
+            )
             self.avoid_model.eval()
         else:
             if not self.args.ckpt:
@@ -195,7 +206,7 @@ class EvalRunner:
                 cmd_scale=cmd_scale,
             ).to(self.device)
             ckpt = torch.load(self.args.ckpt, map_location=self.device)
-            self.policy.load_state_dict(_to_state_dict(ckpt))
+            th.load_high_level_state_dict_compat(self.policy, _to_state_dict(ckpt), label="eval_policy")
             self.policy.eval()
 
     def _build_param_info(self) -> Dict[str, float]:
@@ -235,15 +246,37 @@ class EvalRunner:
         return info
 
     def _build_aff_map(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        skill = getattr(self.args, "skill", "follow")
         if getattr(self.args, "mode", "teacher") == "student":
             with torch.no_grad():
                 vis_out = self.vision_model(obs_dict["depth"], normalize=True)
-            aff_map = torch.stack(
+            raw_aff = torch.stack(
                 [vis_out["occupancy"], vis_out["passable_gap"], vis_out["low_obstacle"]],
                 dim=1,
             )
-            return aff_map
+            raw_aff = th.resize_affordance_map(raw_aff, self.env.affordance_map_size)
+            if skill == "avoid":
+                return th.build_avoid_local_map_2ch(
+                    raw_aff,
+                    visible_mask=getattr(self.env, "affordance_visible_mask", None),
+                )
+            return raw_aff
+        if skill == "avoid":
+            return obs_dict.get(
+                "local_map_2ch",
+                th.build_avoid_local_map_2ch(
+                    obs_dict["gt_affordance"],
+                    visible_mask=getattr(self.env, "affordance_visible_mask", None),
+                ),
+            )
         return obs_dict["gt_affordance"]
+
+    def _build_difficulty(self, obs_dict: Dict[str, torch.Tensor], aff_map: torch.Tensor) -> torch.Tensor:
+        if getattr(self.args, "skill", "follow") == "avoid" and "actor_difficulty" in obs_dict:
+            return obs_dict["actor_difficulty"]
+        if getattr(self.args, "mode", "teacher") == "student":
+            return th.difficulty_from_gap(aff_map)
+        return obs_dict["gt_difficulty"]
 
     def _build_aff_stack(self, aff_map: torch.Tensor, done_prev: Optional[torch.Tensor]) -> torch.Tensor:
         if self.aff_stack_buf is None:
@@ -349,7 +382,7 @@ class EvalRunner:
             while done_episodes < per_level_target:
                 aff_map_now = self._build_aff_map(obs)
                 aff_stack = self._build_aff_stack(aff_map_now, self.done_prev)
-                difficulty_now = th.difficulty_from_gap(aff_map_now)
+                difficulty_now = self._build_difficulty(obs, aff_map_now)
 
                 # Pre-step follow error (avoid post-reset contamination on done envs).
                 if hasattr(self.env.env, "target_world"):
@@ -377,6 +410,8 @@ class EvalRunner:
                 )
                 latency_ms_samples.append(lat_ms)
 
+                self.env.clearance_override = self.env._compute_clearance_from_affordance(aff_map_now)
+                self.env.reward_affordance_override = aff_map_now
                 next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y)
 
                 # Step-level energy and distance proxies.

@@ -329,6 +329,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         mesh_type = "plane"
         debug_allow_plane = True
         terrain_type = "s_avoid_basic"
+        avoid_gt_actor_only = True
+        avoid_gt_require_scene = True
         curriculum = False
         num_rows = 1
         num_cols = 1

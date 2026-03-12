@@ -37,6 +37,9 @@ class HexGround(LeggedRobot):
         terrain_type = getattr(cfg.terrain, "terrain_type", None) if hasattr(cfg, "terrain") else None
         debug_allow_plane = bool(getattr(cfg.terrain, "debug_allow_plane", False))
         mesh_type = getattr(cfg.terrain, "mesh_type", None)
+        terrain_type_str = str(terrain_type).strip().lower() if terrain_type is not None else ""
+        if terrain_type_str == "s_avoid_basic" and mesh_type not in ("plane", "none"):
+            raise RuntimeError("s_avoid_basic requires cfg.terrain.mesh_type='plane' (or 'none').")
         if debug_allow_plane:
             if mesh_type not in ("plane", "none"):
                 raise RuntimeError("debug_allow_plane requires cfg.terrain.mesh_type='plane' (or 'none').")
@@ -1226,7 +1229,14 @@ class HexGround(LeggedRobot):
             stage12_ids = env_ids[stage12_mask]
             self.root_states[stage12_ids, 1] += stage12_spawn_y
 
-        yaw = torch.zeros(len(env_ids), device=self.device, dtype=torch.float32)
+        body_plus_y_target_deg = float(getattr(self.cfg.terrain, "avoid_spawn_body_plus_y_deg", 0.0))
+        body_plus_y_target_rad = math.radians(body_plus_y_target_deg)
+        yaw = torch.full(
+            (len(env_ids),),
+            -body_plus_y_target_rad,
+            device=self.device,
+            dtype=torch.float32,
+        )
         qz = torch.sin(0.5 * yaw)
         qw = torch.cos(0.5 * yaw)
         quat = torch.stack([torch.zeros_like(qz), torch.zeros_like(qz), qz, qw], dim=1)
@@ -1241,8 +1251,10 @@ class HexGround(LeggedRobot):
                 robot_xy = self.root_states[env0, :2]
                 obs_xy = self.s_avoid_pos_world[env0, slot, :2]
                 delta = obs_xy - robot_xy
-                local_x = float(delta[0].item())
-                local_y = float(delta[1].item())
+                cos_h = math.cos(body_plus_y_target_rad)
+                sin_h = math.sin(body_plus_y_target_rad)
+                local_x = float(cos_h * delta[0].item() + sin_h * delta[1].item())
+                local_y = float(-sin_h * delta[0].item() + cos_h * delta[1].item())
                 ok = False
                 if debug_case == "front":
                     ok = abs(local_x) < 0.15 and local_y > 0.8
@@ -1250,9 +1262,14 @@ class HexGround(LeggedRobot):
                     ok = local_x < -0.25 and local_y > 0.8
                 elif debug_case == "right":
                     ok = local_x > 0.25 and local_y > 0.8
+                elif debug_case == "side_left":
+                    ok = local_x < -0.8 and abs(local_y) < 0.4
+                elif debug_case == "side_right":
+                    ok = local_x > 0.8 and abs(local_y) < 0.4
                 print(
                     f"[AvoidMapDebug] case={debug_case} env={env0} "
-                    f"yaw_deg=0.0 "
+                    f"target_body+y_vs_world+Y_deg={body_plus_y_target_deg:.1f} "
+                    f"set_root_yaw_deg={float(math.degrees(-body_plus_y_target_rad)):.1f} "
                     f"robot_xy=({float(robot_xy[0].item()):.3f},{float(robot_xy[1].item()):.3f}) "
                     f"obs_xy=({float(obs_xy[0].item()):.3f},{float(obs_xy[1].item()):.3f}) "
                     f"local_xy(x_right,y_forward)=({local_x:.3f},{local_y:.3f}) "
@@ -1472,12 +1489,22 @@ class HexGround(LeggedRobot):
 
             if debug_case:
                 if cap_slots > 0:
+                    cam_cfg = getattr(getattr(self.cfg, "sensor", None), "depth_camera", None)
+                    cam_y = 0.0
+                    if cam_cfg is not None and hasattr(cam_cfg, "position") and len(cam_cfg.position) >= 2:
+                        cam_y = float(cam_cfg.position[1])
                     local_x = 0.0
                     local_y = 1.35
                     if debug_case == "left":
                         local_x = -0.60
                     elif debug_case == "right":
                         local_x = 0.60
+                    elif debug_case == "side_left":
+                        local_x = -1.35
+                        local_y = cam_y
+                    elif debug_case == "side_right":
+                        local_x = 1.35
+                        local_y = cam_y
                     active[0] = True
                     pos[0] = np.array([local_x, stage12_spawn_y + local_y, cap_z], dtype=np.float32)
                 env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
@@ -3532,7 +3559,7 @@ class HexGround(LeggedRobot):
                     else:
                         other_ids = None
 
-                if other_ids is not None and other_ids.numel() > 0:
+                if (not self.s_avoid_enabled) and other_ids is not None and other_ids.numel() > 0:
                     # 出生时朝向目标点：用 heading_offset 对齐策略朝向，并加入 yaw 抖动
                     goal_delta = self.goal_world[other_ids] - self.root_states[other_ids, :2]
                     jitter = torch_rand_float(

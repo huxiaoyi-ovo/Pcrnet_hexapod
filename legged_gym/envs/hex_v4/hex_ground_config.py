@@ -24,11 +24,14 @@ class HexGroundCfg(LeggedRobotCfg):
     class sensor:
         class depth_camera:
             enable = False  # play/调试时可打开
-            width = 128
-            height = 128
+            # Intel RealSense D435i depth stream (official spec)
+            width = 1280
+            height = 720
             horizontal_fov = 87.0
-            near_clip = 0.05
-            far_clip = 5.0
+            vertical_fov = 58.0
+            near_clip = 0.28
+            far_clip = 3.0
+            fps = 90
             # 坐标系：x左右，y前后，z上（body link坐标系）
             position = [0.00, 0.22, 0.08]
             pitch_deg = 0.0
@@ -40,6 +43,13 @@ class HexGroundCfg(LeggedRobotCfg):
             noise_level = 0.02
             hole_ratio = 0.05
             edge_blur_strength = 0.05
+        class rgb_camera:
+            # Intel RealSense D435i RGB stream (official spec, reference only)
+            width = 1920
+            height = 1080
+            horizontal_fov = 69.0
+            vertical_fov = 42.0
+            fps = 30
     class navigation:
         """固定目标避障（Phase 2 基础任务）"""
         # 目标生成模式
@@ -66,6 +76,7 @@ class HexGroundCfg(LeggedRobotCfg):
         crossable_height_max = 0.08
         crossable_width_margin = 0.0
         crossable_sector_deg = 60.0
+        affordance_grid_size = 32
         # affordance 坐标系校验（+Y forward 约定）
         affordance_debug = False
         # 目标采样：是否强制“直线遇障”（actor/heightfield）

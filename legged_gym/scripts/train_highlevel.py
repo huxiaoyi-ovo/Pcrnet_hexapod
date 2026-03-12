@@ -120,13 +120,38 @@ def difficulty_from_gap(aff_map: torch.Tensor) -> torch.Tensor:
     return torch.clamp(difficulty, 0.0, 1.0)
 
 
-def build_avoid_local_map_2ch(aff_map: torch.Tensor) -> torch.Tensor:
+def build_avoid_local_map_2ch(
+    aff_map: torch.Tensor,
+    visible_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Build a compact avoid map: [occupancy, clearance/cost proxy]."""
     if aff_map.ndim != 4:
         raise ValueError(f"aff_map shape invalid: {tuple(aff_map.shape)}")
+    vis = None
+    if visible_mask is not None:
+        vis = visible_mask
+        if vis.ndim == 2:
+            vis = vis.unsqueeze(0)
+        if vis.ndim != 3:
+            raise ValueError(f"visible_mask shape invalid: {tuple(vis.shape)}")
+        if vis.shape[-2:] != aff_map.shape[-2:]:
+            raise ValueError(
+                f"visible_mask spatial shape {tuple(vis.shape[-2:])} does not match aff_map {tuple(aff_map.shape[-2:])}"
+            )
+        if vis.shape[0] == 1 and aff_map.shape[0] != 1:
+            vis = vis.expand(aff_map.shape[0], -1, -1)
+        elif vis.shape[0] != aff_map.shape[0]:
+            raise ValueError(
+                f"visible_mask batch {vis.shape[0]} does not match aff_map batch {aff_map.shape[0]}"
+            )
+        vis = vis.to(device=aff_map.device)
+        vis_f = vis.float()
     if aff_map.size(1) == AVOID_LOCAL_MAP_CHANNELS:
         occ = torch.clamp(torch.nan_to_num(aff_map[:, 0], nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
         clearance = torch.clamp(torch.nan_to_num(aff_map[:, 1], nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+        if vis is not None:
+            occ = occ * vis_f
+            clearance = clearance * vis_f
         return torch.stack([occ, clearance], dim=1)
 
     occ = torch.nan_to_num(aff_map[:, 0], nan=0.0, posinf=1.0, neginf=0.0)
@@ -143,9 +168,71 @@ def build_avoid_local_map_2ch(aff_map: torch.Tensor) -> torch.Tensor:
     clearance = F.avg_pool2d(free_score.unsqueeze(1), kernel_size=3, stride=1, padding=1).squeeze(1)
     clearance = torch.maximum(clearance, free_score)
     clearance = clearance * (1.0 - occ)
+    if vis is not None:
+        occ = occ * vis_f
+        clearance = clearance * vis_f
     clearance = torch.clamp(clearance, 0.0, 1.0)
 
     return torch.stack([occ, clearance], dim=1)
+
+
+def resize_affordance_map(
+    aff_map: torch.Tensor,
+    target_size: int,
+) -> torch.Tensor:
+    if aff_map.ndim != 4:
+        raise ValueError(f"aff_map shape invalid: {tuple(aff_map.shape)}")
+    target_size = int(target_size)
+    if aff_map.shape[-2:] == (target_size, target_size):
+        return aff_map
+    return F.interpolate(
+        aff_map,
+        size=(target_size, target_size),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+
+def load_high_level_state_dict_compat(
+    model: nn.Module,
+    state_dict: Dict[str, torch.Tensor],
+    *,
+    label: str = "policy",
+) -> None:
+    """Load old high-level checkpoints while mirroring actor trunk weights to critic trunk."""
+    if not isinstance(state_dict, dict):
+        raise TypeError(f"{label} state_dict must be dict, got {type(state_dict)}")
+
+    state = dict(state_dict)
+    model_state = model.state_dict()
+    mirror_pairs = [
+        ("affordance_encoder", "critic_affordance_encoder"),
+        ("state_encoder", "critic_state_encoder"),
+        ("goal_encoder", "critic_goal_encoder"),
+        ("fusion", "critic_fusion"),
+    ]
+    for src_prefix, dst_prefix in mirror_pairs:
+        src_token = src_prefix + "."
+        dst_token = dst_prefix + "."
+        for key, value in list(state.items()):
+            if not key.startswith(src_token):
+                continue
+            dst_key = dst_token + key[len(src_token):]
+            if dst_key in state or dst_key not in model_state:
+                continue
+            if not torch.is_tensor(value):
+                continue
+            if model_state[dst_key].shape != value.shape:
+                continue
+            state[dst_key] = value.clone()
+
+    incompatible = model.load_state_dict(state, strict=False)
+    missing = list(incompatible.missing_keys)
+    unexpected = list(incompatible.unexpected_keys)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"{label} checkpoint incompatible: missing={missing}, unexpected={unexpected}"
+        )
 
 
 def apply_goal_occlusion(
@@ -294,6 +381,8 @@ class RolloutBuffer:
         # aff_map_shape 为堆叠后的通道数 (aff_channels, H, W)
         self.aff_maps = torch.zeros(num_steps, num_envs, *aff_map_shape, device=device)
         self.difficulties = torch.zeros(num_steps, num_envs, device=device)
+        self.critic_aff_maps = torch.zeros(num_steps, num_envs, *aff_map_shape, device=device)
+        self.critic_difficulties = torch.zeros(num_steps, num_envs, device=device)
 
         # 动作
         self.actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
@@ -315,6 +404,8 @@ class RolloutBuffer:
         goal,
         aff_map,
         difficulty,
+        critic_aff_map,
+        critic_difficulty,
         action,
         log_prob,
         value,
@@ -328,6 +419,8 @@ class RolloutBuffer:
         self.goals[self.step] = goal
         self.aff_maps[self.step] = aff_map
         self.difficulties[self.step] = difficulty
+        self.critic_aff_maps[self.step] = critic_aff_map
+        self.critic_difficulties[self.step] = critic_difficulty
         self.actions[self.step] = action
         self.log_probs[self.step] = log_prob
         self.values[self.step] = value.squeeze(-1)
@@ -368,6 +461,8 @@ class RolloutBuffer:
         self.goals.zero_()
         self.aff_maps.zero_()
         self.difficulties.zero_()
+        self.critic_aff_maps.zero_()
+        self.critic_difficulties.zero_()
         self.actions.zero_()
         self.log_probs.zero_()
         self.values.zero_()
@@ -477,6 +572,8 @@ class HierarchicalHexapodEnv:
         self.affordance_cell_size = float(cell_size) if cell_size is not None else (map_extent / map_size)
         self.affordance_map_size = map_size
         self.affordance_map_extent = map_extent
+        self.affordance_origin_mode = "base_center"
+        self.affordance_origin_local_xy = torch.zeros(2, device=self.device, dtype=torch.float32)
         clearance = getattr(env_cfg.terrain, "fixed_layout_robot_clearance", None)
         if clearance is None:
             body_shape = getattr(getattr(env_cfg, "asset", None), "body_shape", None)
@@ -486,6 +583,9 @@ class HierarchicalHexapodEnv:
                 clearance = 0.27
         self.affordance_clearance = float(clearance)
         self.affordance_clearance_free = self.affordance_clearance + 0.3
+        self.affordance_difficulty_radius = float(
+            getattr(env_cfg.navigation, "difficulty_radius_m", 2.0)
+        )
         self.affordance_dist_map = self._build_affordance_dist_map()
         crossable_height = getattr(env_cfg.navigation, "crossable_height_max", None)
         if crossable_height is None:
@@ -501,14 +601,46 @@ class HierarchicalHexapodEnv:
         self.crossable_width = self.body_width + width_margin
         self.crossable_sector_deg = float(getattr(env_cfg.navigation, "crossable_sector_deg", 60.0))
         self.camera_fov_rad = None
+        self.camera_vertical_fov_rad = None
         self.camera_bearing_rad = 0.0
+        self.camera_tilt_down_rad = 0.0
+        base_height_m = float(getattr(getattr(env_cfg, "init_state", None), "pos", [0.0, 0.0, 0.1])[2])
+        self.camera_height_m = max(1e-3, base_height_m)
+        self.camera_near = 0.0
         self.camera_far = self.affordance_map_extent
+        use_camera_origin = (
+            str(getattr(args, "skill", "")).lower() == "avoid"
+            or str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower() == "s_avoid_basic"
+        )
         if cam_cfg is not None:
             self.camera_fov_rad = math.radians(float(getattr(cam_cfg, "horizontal_fov", 0.0)))
+            self.camera_vertical_fov_rad = math.radians(float(getattr(cam_cfg, "vertical_fov", 0.0)))
+            self.camera_near = float(getattr(cam_cfg, "near_clip", 0.0))
             self.camera_far = float(getattr(cam_cfg, "far_clip", self.affordance_map_extent))
             yaw_deg = float(getattr(cam_cfg, "yaw_deg", 0.0))
             # Convert camera yaw to bearing_y convention (0 means +Y forward).
             self.camera_bearing_rad = math.radians(yaw_deg) - 0.5 * math.pi
+            cam_pos = getattr(cam_cfg, "position", None)
+            if cam_pos is not None and len(cam_pos) >= 3:
+                self.camera_height_m = max(1e-3, base_height_m + float(cam_pos[2]))
+            tilt_down_deg = float(
+                getattr(
+                    cam_cfg,
+                    "tilt_down_deg",
+                    getattr(cam_cfg, "roll_deg", getattr(cam_cfg, "pitch_deg", 0.0)),
+                )
+            )
+            self.camera_tilt_down_rad = math.radians(tilt_down_deg)
+            if use_camera_origin and cam_pos is not None and len(cam_pos) >= 2:
+                self.affordance_origin_mode = "camera_mount"
+                self.affordance_origin_local_xy = torch.tensor(
+                    [float(cam_pos[0]), float(cam_pos[1])],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+            if cam_pos is not None and len(cam_pos) >= 3:
+                base_height = float(getattr(getattr(env_cfg, "init_state", None), "pos", [0.0, 0.0, 0.1])[2])
+                self.camera_height_m = max(1e-3, base_height + float(cam_pos[2]))
         # S0 moving-target following: keep target centered using a tighter FOV window.
         self.moving_target_enable = bool(getattr(nav_cfg, "moving_target_enable", False)) if nav_cfg is not None else False
         self.target_fov_soft_scale = float(getattr(nav_cfg, "target_fov_soft_scale", 1.0)) if nav_cfg is not None else 1.0
@@ -521,6 +653,14 @@ class HierarchicalHexapodEnv:
          self.affordance_bearing_map,
          self.affordance_visible_mask) = self._build_affordance_geometry()
         terrain_type = str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower()
+        terrain_cfg = getattr(env_cfg, "terrain", None)
+        self.use_actor_only_gt_affordance = bool(getattr(terrain_cfg, "avoid_gt_actor_only", False))
+        self.require_actor_only_gt_affordance = bool(getattr(terrain_cfg, "avoid_gt_require_scene", False))
+        if terrain_type == "s_avoid_basic":
+            self.use_actor_only_gt_affordance = True
+            self.require_actor_only_gt_affordance = True
+        if self.use_actor_only_gt_affordance:
+            print("[Env] actor-only GT affordance enabled: scene actors only, no heightfield fallback.")
         if is_s0_follow_task_name(str(getattr(args, "task", "")).lower()):
             if terrain_type not in ("s0_follow_plane", "s0"):
                 raise RuntimeError(
@@ -805,6 +945,49 @@ class HierarchicalHexapodEnv:
             processed = self.env._process_depth_for_network(depth_raw)
             self.env.depth_images[:] = processed
 
+    def _get_affordance_reference_pose(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        ref_xy = self.env.root_states[:, :2]
+        ref_yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        if not torch.isfinite(ref_yaw).all():
+            ref_yaw = ref_yaw.clone()
+            ref_yaw[~torch.isfinite(ref_yaw)] = 0.0
+        if not torch.isfinite(ref_xy).all():
+            ref_xy = ref_xy.clone()
+            ref_xy[~torch.isfinite(ref_xy)] = 0.0
+        if self.affordance_origin_mode != "camera_mount":
+            return ref_xy, ref_yaw
+
+        offset = self.affordance_origin_local_xy.to(device=ref_xy.device, dtype=ref_xy.dtype).view(1, 2)
+        cos_h = torch.cos(ref_yaw)
+        sin_h = torch.sin(ref_yaw)
+        offset_world_x = cos_h * offset[:, 0] - sin_h * offset[:, 1]
+        offset_world_y = sin_h * offset[:, 0] + cos_h * offset[:, 1]
+        ref_xy = torch.stack([
+            ref_xy[:, 0] + offset_world_x,
+            ref_xy[:, 1] + offset_world_y,
+        ], dim=1)
+        return ref_xy, ref_yaw
+
+    def _world_to_local_xy(
+        self,
+        world_xy: torch.Tensor,
+        ref_xy: torch.Tensor,
+        ref_yaw: torch.Tensor,
+    ) -> torch.Tensor:
+        if world_xy.ndim != 2 or world_xy.shape[1] != 2:
+            raise ValueError(f"world_xy shape invalid: {tuple(world_xy.shape)}")
+        if ref_xy.ndim != 2 or ref_xy.shape[1] != 2:
+            raise ValueError(f"ref_xy shape invalid: {tuple(ref_xy.shape)}")
+        if ref_yaw.ndim != 1 or ref_yaw.shape[0] != world_xy.shape[0]:
+            raise ValueError(f"ref_yaw shape invalid: {tuple(ref_yaw.shape)}")
+        dx = world_xy[:, 0] - ref_xy[:, 0]
+        dy = world_xy[:, 1] - ref_xy[:, 1]
+        cos_h = torch.cos(ref_yaw)
+        sin_h = torch.sin(ref_yaw)
+        x_local = cos_h * dx + sin_h * dy
+        y_local = -sin_h * dx + cos_h * dy
+        return torch.stack([x_local, y_local], dim=1)
+
     def _compute_gt_affordance_from_heightfield(self) -> Optional[torch.Tensor]:
         if getattr(self.env, "height_samples", None) is None:
             return None
@@ -828,13 +1011,12 @@ class HierarchicalHexapodEnv:
         x_body = grid_x.reshape(-1).unsqueeze(0)
         y_body = grid_y.reshape(-1).unsqueeze(0)
 
-        robot_xy = self.env.root_states[:, :2]
-        yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
+        ref_xy, yaw = self._get_affordance_reference_pose()
         cos_h = torch.cos(yaw).unsqueeze(1)
         sin_h = torch.sin(yaw).unsqueeze(1)
 
-        x_world = robot_xy[:, 0:1] + cos_h * x_body - sin_h * y_body
-        y_world = robot_xy[:, 1:2] + sin_h * x_body + cos_h * y_body
+        x_world = ref_xy[:, 0:1] + cos_h * x_body - sin_h * y_body
+        y_world = ref_xy[:, 1:2] + sin_h * x_body + cos_h * y_body
 
         border = self.env.cfg.terrain.border_size
         scale = self.env.cfg.terrain.horizontal_scale
@@ -880,16 +1062,7 @@ class HierarchicalHexapodEnv:
             return None
         occ_all = torch.zeros(self.num_envs, map_size, map_size, device=self.device)
 
-        robot_xy = self.env.root_states[:, :2]
-        yaw = self._quat_to_yaw(self.env.root_states[:, 3:7])
-        if not torch.isfinite(yaw).all():
-            yaw = yaw.clone()
-            yaw[~torch.isfinite(yaw)] = 0.0
-        if not torch.isfinite(robot_xy).all():
-            robot_xy = robot_xy.clone()
-            robot_xy[~torch.isfinite(robot_xy)] = 0.0
-        cos_h = torch.cos(yaw)
-        sin_h = torch.sin(yaw)
+        ref_xy, yaw = self._get_affordance_reference_pose()
 
         x_min = -0.5 * map_extent
         y_min = 0.0
@@ -910,10 +1083,12 @@ class HierarchicalHexapodEnv:
                 return
             if size_x <= 0.0 or size_y <= 0.0:
                 return
-            dx = center_x - float(robot_xy[env_id, 0].item())
-            dy = center_y - float(robot_xy[env_id, 1].item())
-            x_body = float(cos_h[env_id].item()) * dx + float(sin_h[env_id].item()) * dy
-            y_body = -float(sin_h[env_id].item()) * dx + float(cos_h[env_id].item()) * dy
+            world_xy = torch.tensor([[center_x, center_y]], device=self.device, dtype=ref_xy.dtype)
+            x_body, y_body = self._world_to_local_xy(
+                world_xy,
+                ref_xy[env_id:env_id + 1],
+                yaw[env_id:env_id + 1],
+            )[0].tolist()
             x0 = x_body - 0.5 * size_x
             x1 = x_body + 0.5 * size_x
             y0 = y_body - 0.5 * size_y
@@ -1093,7 +1268,8 @@ class HierarchicalHexapodEnv:
             map_size,
             device=self.device,
         )
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        # Keep axis order consistent with scene rasterization: [x_right, y_forward].
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
         bearing_y = torch.atan2(grid_x, grid_y)
         dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
         visible = torch.ones_like(dist, dtype=torch.bool)
@@ -1103,6 +1279,17 @@ class HierarchicalHexapodEnv:
                 torch.cos(bearing_y - self.camera_bearing_rad),
             )
             visible = visible & (torch.abs(angle) <= 0.5 * self.camera_fov_rad)
+        if self.camera_vertical_fov_rad is not None and self.camera_vertical_fov_rad > 0.0:
+            ground_angle_down = torch.atan2(
+                torch.full_like(dist, float(self.camera_height_m)),
+                torch.clamp(dist, min=1e-6),
+            )
+            lower = float(self.camera_tilt_down_rad + 0.5 * self.camera_vertical_fov_rad)
+            upper = max(0.0, float(self.camera_tilt_down_rad - 0.5 * self.camera_vertical_fov_rad))
+            visible = visible & (ground_angle_down >= upper - 1e-6)
+            visible = visible & (ground_angle_down <= lower + 1e-6)
+        if self.camera_near is not None and self.camera_near > 0.0:
+            visible = visible & (dist >= float(self.camera_near) - 1e-6)
         if self.camera_far is not None:
             visible = visible & (dist <= float(self.camera_far) + 1e-6)
         return grid_x, grid_y, bearing_y, visible
@@ -1118,6 +1305,40 @@ class HierarchicalHexapodEnv:
         if no_obs.any():
             min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
         return min_dist
+
+    def _compute_objective_difficulty_from_local_map(
+        self,
+        local_map_2ch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Objective crowding scalar from full GT local map, independent of FOV masking."""
+        if local_map_2ch.ndim != 4 or local_map_2ch.size(1) < 2:
+            return difficulty_from_gap(local_map_2ch)
+
+        occ = torch.clamp(
+            torch.nan_to_num(local_map_2ch[:, 0], nan=0.0, posinf=1.0, neginf=0.0),
+            0.0,
+            1.0,
+        )
+        clearance = torch.clamp(
+            torch.nan_to_num(local_map_2ch[:, 1], nan=0.0, posinf=1.0, neginf=0.0),
+            0.0,
+            1.0,
+        )
+
+        x_map = self.affordance_x_map
+        y_map = self.affordance_y_map
+        if x_map.device != local_map_2ch.device:
+            x_map = x_map.to(local_map_2ch.device)
+            y_map = y_map.to(local_map_2ch.device)
+
+        radius = max(float(self.affordance_difficulty_radius), 1e-3)
+        radial_mask = ((x_map ** 2 + y_map ** 2) <= (radius ** 2)).float()
+        denom = radial_mask.sum().clamp_min(1.0)
+
+        occ_ratio = (occ * radial_mask.unsqueeze(0)).sum(dim=(1, 2)) / denom
+        clearance_cost = ((1.0 - clearance) * radial_mask.unsqueeze(0)).sum(dim=(1, 2)) / denom
+        difficulty = 0.5 * occ_ratio + 0.5 * clearance_cost
+        return torch.clamp(difficulty, 0.0, 1.0)
 
     def _compute_clearance_along_cmd(
         self,
@@ -1311,6 +1532,24 @@ class HierarchicalHexapodEnv:
 
         return center_dir, gate.float(), width, block_mask
 
+    def _build_gt_affordance_map(self) -> Optional[torch.Tensor]:
+        if hasattr(self.env, 'get_affordance_data'):
+            aff_data = self.env.get_affordance_data()
+            return aff_data['local_affordance']
+
+        if self.use_actor_only_gt_affordance:
+            aff_map = self._compute_gt_affordance_from_scene()
+            if aff_map is None and self.require_actor_only_gt_affordance:
+                raise RuntimeError(
+                    "actor-only GT affordance is required for this task, "
+                    "but scene rasterization returned None."
+                )
+            return aff_map
+
+        aff_height = self._compute_gt_affordance_from_heightfield()
+        aff_scene = self._compute_gt_affordance_from_scene()
+        return self._merge_affordance_maps(aff_height, aff_scene)
+
     def _get_high_level_obs(self) -> Dict[str, torch.Tensor]:
         """
         构建高层观测字典
@@ -1320,6 +1559,7 @@ class HierarchicalHexapodEnv:
             - state: (N, 9+1) robot state + prev_gate_y
             - goal: (N, 2) relative goal
             - gt_affordance: (N, 3, 16, 16) ground truth affordance
+            - local_map_2ch: (N, 2, 16, 16) avoid local map
             - gt_difficulty: (N,) difficulty derived from passable_gap
             - depth: (N, 1, H, W) depth image
         """
@@ -1374,29 +1614,52 @@ class HierarchicalHexapodEnv:
             obs_dict['goal'] = torch.stack([goal_x, goal_y], dim=1)
         
         # 3. GT Affordance
-        if hasattr(self.env, 'get_affordance_data'):
-            aff_data = self.env.get_affordance_data()
-            obs_dict['gt_affordance'] = aff_data['local_affordance']
-        else:
-            aff_height = self._compute_gt_affordance_from_heightfield()
-            aff_scene = self._compute_gt_affordance_from_scene()
-            aff_map = self._merge_affordance_maps(aff_height, aff_scene)
-            if aff_map is not None:
-                obs_dict['gt_affordance'] = aff_map
-            elif hasattr(self.env, 'measured_heights'):
-                heights = self.env.measured_heights
-                side_len = int(np.sqrt(heights.shape[1]))
-                
-                if side_len ** 2 == heights.shape[1]:
-                    h_map = heights.view(self.num_envs, 1, side_len, side_len)
-                    h_map = torch.nn.functional.interpolate(h_map, size=(16, 16), mode='bilinear')
-                    low = torch.zeros_like(h_map)
-                    obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map), low], dim=1)
-                else:
-                    obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 3, 16, 16, device=self.device)
+        aff_map = self._build_gt_affordance_map()
+        if aff_map is not None:
+            obs_dict['gt_affordance'] = aff_map
+        elif hasattr(self.env, 'measured_heights'):
+            heights = self.env.measured_heights
+            side_len = int(np.sqrt(heights.shape[1]))
+
+            if side_len ** 2 == heights.shape[1]:
+                h_map = heights.view(self.num_envs, 1, side_len, side_len)
+                h_map = torch.nn.functional.interpolate(
+                    h_map,
+                    size=(self.affordance_map_size, self.affordance_map_size),
+                    mode='bilinear',
+                )
+                low = torch.zeros_like(h_map)
+                obs_dict['gt_affordance'] = torch.cat([h_map, 1 - torch.abs(h_map), low], dim=1)
             else:
-                obs_dict['gt_affordance'] = torch.zeros(self.num_envs, 3, 16, 16, device=self.device)
+                obs_dict['gt_affordance'] = torch.zeros(
+                    self.num_envs,
+                    3,
+                    self.affordance_map_size,
+                    self.affordance_map_size,
+                    device=self.device,
+                )
+        else:
+            obs_dict['gt_affordance'] = torch.zeros(
+                self.num_envs,
+                3,
+                self.affordance_map_size,
+                self.affordance_map_size,
+                device=self.device,
+            )
+        obs_dict['critic_local_map_2ch'] = build_avoid_local_map_2ch(
+            obs_dict['gt_affordance'],
+            visible_mask=None,
+        )
+        obs_dict['local_map_2ch'] = build_avoid_local_map_2ch(
+            obs_dict['gt_affordance'],
+            visible_mask=self.affordance_visible_mask,
+        )
+        objective_difficulty = self._compute_objective_difficulty_from_local_map(
+            obs_dict['critic_local_map_2ch']
+        )
         obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
+        obs_dict['actor_difficulty'] = objective_difficulty
+        obs_dict['critic_difficulty'] = objective_difficulty
         
         # 4. Depth Image
         if hasattr(self.env, 'depth_images'):
@@ -1602,8 +1865,8 @@ class HierarchicalHexapodEnv:
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
                 goal_pos = torch.stack([goal_x, goal_y], dim=1)
             reward_difficulty = reward_obs['gt_difficulty']
-            if override_used and reward_aff_map is not None:
-                reward_difficulty = difficulty_from_gap(reward_aff_map)
+            if 'actor_difficulty' in reward_obs:
+                reward_difficulty = reward_obs['actor_difficulty']
             
             reward_dict = self.reward_func.compute_reward(
                 robot_pos=robot_pos,
@@ -2029,13 +2292,43 @@ def train(args):
                     print("[Debug] env0 applied static obstacles: 0")
         except Exception as exc:
             print(f"[Debug] obstacle position dump failed: {exc}")
-    if use_avoid_local_map:
-        obs_dict['gt_affordance'] = build_avoid_local_map_2ch(obs_dict['gt_affordance'])
-        obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
+
+    def _get_actor_gt_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        if use_avoid_local_map:
+            return current_obs['local_map_2ch'], current_obs['actor_difficulty']
+        return current_obs['gt_affordance'], current_obs['gt_difficulty']
+
+    def _get_critic_gt_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        if use_avoid_local_map:
+            return current_obs['critic_local_map_2ch'], current_obs['critic_difficulty']
+        return current_obs['gt_affordance'], current_obs['gt_difficulty']
+
+    def _predict_actor_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        if vision_model is None:
+            raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
+        with torch.no_grad():
+            vis_out = vision_model(current_obs['depth'], normalize=True)
+            aff_map_pred = torch.stack([
+                vis_out['occupancy'],
+                vis_out['passable_gap'],
+                vis_out['low_obstacle'],
+            ], dim=1)
+            aff_map_pred = resize_affordance_map(aff_map_pred, env.affordance_map_size)
+            if use_avoid_local_map:
+                aff_map_pred = build_avoid_local_map_2ch(
+                    aff_map_pred,
+                    visible_mask=env.affordance_visible_mask,
+                )
+                difficulty_pred = current_obs['actor_difficulty']
+            else:
+                difficulty_pred = difficulty_from_gap(aff_map_pred)
+        return aff_map_pred, difficulty_pred
+
+    actor_aff_init, _ = _get_actor_gt_inputs(obs_dict)
 
     state_dim = obs_dict['state'].shape[1]
     goal_dim = obs_dict['goal'].shape[1]
-    aff_shape = obs_dict['gt_affordance'].shape[1:]
+    aff_shape = actor_aff_init.shape[1:]
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
     aff_channels = aff_shape[0] * aff_stack
 
@@ -2109,9 +2402,17 @@ def train(args):
 
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             if 'model_state_dict' in ckpt:
-                teacher_model.load_state_dict(ckpt['model_state_dict'])
+                load_high_level_state_dict_compat(
+                    teacher_model,
+                    ckpt['model_state_dict'],
+                    label="teacher_model",
+                )
             else:
-                teacher_model.load_state_dict(ckpt)
+                load_high_level_state_dict_compat(
+                    teacher_model,
+                    ckpt,
+                    label="teacher_model",
+                )
             teacher_model.eval()
 
             # 用 Teacher 权重初始化 Student
@@ -2169,9 +2470,17 @@ def train(args):
         for model, ckpt_path in [(follow_model, args.follow_ckpt), (avoid_model, args.avoid_ckpt)]:
             ckpt = torch.load(ckpt_path, map_location=device)
             if 'model_state_dict' in ckpt:
-                model.load_state_dict(ckpt['model_state_dict'])
+                load_high_level_state_dict_compat(
+                    model,
+                    ckpt['model_state_dict'],
+                    label=f"expert:{os.path.basename(ckpt_path)}",
+                )
             else:
-                model.load_state_dict(ckpt)
+                load_high_level_state_dict_compat(
+                    model,
+                    ckpt,
+                    label=f"expert:{os.path.basename(ckpt_path)}",
+                )
             model.eval()
             for param in model.parameters():
                 param.requires_grad = False
@@ -2193,9 +2502,12 @@ def train(args):
             raise FileNotFoundError(f"Resume checkpoint 不存在: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-        policy.load_state_dict(state_dict)
+        load_high_level_state_dict_compat(policy, state_dict, label="resume_policy")
         if isinstance(ckpt, dict) and "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except Exception as exc:
+                print(f"[Warn] Resume optimizer_state_dict 不兼容，改用新优化器继续训练: {exc}")
         else:
             print("[Warn] Resume checkpoint 未包含 optimizer_state_dict。")
         start_iteration = int(ckpt.get("iteration", 0)) + 1 if isinstance(ckpt, dict) else 0
@@ -2213,7 +2525,7 @@ def train(args):
             raise FileNotFoundError(f"Finetune checkpoint 不存在: {finetune_path}")
         ckpt = torch.load(finetune_path, map_location=device)
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-        policy.load_state_dict(state_dict)
+        load_high_level_state_dict_compat(policy, state_dict, label="finetune_policy")
         dprint(f"[Main] Finetune from: {finetune_path}")
 
     # 创建日志目录
@@ -2266,6 +2578,7 @@ def train(args):
     )
     
     aff_stack_buf = None
+    critic_aff_stack_buf = None
     last_goal_obs = None
     teacher_stack_buf = None
     stack_reset_mask = None
@@ -2382,49 +2695,46 @@ def train(args):
                 use_student_aff = True
             if is_gate and args.mode == 'teacher' and moe_use_student_aff:
                 print("[Warn] moe_use_student_aff=True 但当前 mode=teacher，仍会使用 student affordance。")
+            actor_gt_aff_map, actor_gt_difficulty = _get_actor_gt_inputs(obs_dict)
+            critic_aff_map, critic_difficulty = _get_critic_gt_inputs(obs_dict)
             if use_student_aff:
-                # Student: 使用 Vision 模型预测
-                if vision_model is None:
-                    raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
-                with torch.no_grad():
-                    vis_out = vision_model(obs_dict['depth'], normalize=True)
-                    aff_map = torch.stack([
-                        vis_out['occupancy'],
-                        vis_out['passable_gap'],
-                        vis_out['low_obstacle'],
-                    ], dim=1)
-                    if use_avoid_local_map:
-                        aff_map = build_avoid_local_map_2ch(aff_map)
-                    difficulty = difficulty_from_gap(aff_map)
+                aff_map, difficulty = _predict_actor_inputs(obs_dict)
+            else:
+                aff_map, difficulty = actor_gt_aff_map, actor_gt_difficulty
+
+            if use_avoid_local_map:
+                env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+                env.reward_affordance_override = critic_aff_map
+            elif use_student_aff:
                 env.clearance_override = env._compute_clearance_from_affordance(aff_map)
                 env.reward_affordance_override = aff_map
             else:
-                aff_map = obs_dict['gt_affordance']
-                if use_avoid_local_map:
-                    aff_map = build_avoid_local_map_2ch(aff_map)
-                    difficulty = difficulty_from_gap(aff_map)
-                    env.clearance_override = env._compute_clearance_from_affordance(aff_map)
-                    env.reward_affordance_override = aff_map
-                else:
-                    difficulty = obs_dict['gt_difficulty']
-                    env.clearance_override = None
-                    env.reward_affordance_override = None
+                env.clearance_override = None
+                env.reward_affordance_override = None
 
             # 初始化/更新 aff 堆叠
             if aff_stack_buf is None:
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
+                critic_aff_stack_buf = critic_aff_map.repeat(1, aff_stack, 1, 1)
                 aff_stack_fill = torch.ones(env.num_envs, device=device)
+                if args.mode == 'student' and teacher_model is not None and not is_gate:
+                    teacher_stack_buf = actor_gt_aff_map.repeat(1, aff_stack, 1, 1)
             else:
                 reset_mask = stack_reset_mask
                 if stack_reset_mask is not None and stack_reset_mask.any():
                     aff_stack_buf[stack_reset_mask] = aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                    critic_aff_stack_buf[stack_reset_mask] = critic_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     aff_stack_fill[stack_reset_mask] = 1
                     if teacher_stack_buf is not None:
-                        teacher_aff = obs_dict['gt_affordance']
-                        teacher_stack_buf[stack_reset_mask] = teacher_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                        teacher_stack_buf[stack_reset_mask] = actor_gt_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     stack_reset_mask = None
                 aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
                 aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
+                critic_aff_stack_buf = torch.roll(critic_aff_stack_buf, shifts=-critic_aff_map.shape[1], dims=1)
+                critic_aff_stack_buf[:, -critic_aff_map.shape[1]:, :, :] = critic_aff_map
+                if teacher_stack_buf is not None:
+                    teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-actor_gt_aff_map.shape[1], dims=1)
+                    teacher_stack_buf[:, -actor_gt_aff_map.shape[1]:, :, :] = actor_gt_aff_map
                 if aff_stack > 1:
                     if reset_mask is None:
                         aff_stack_fill = torch.clamp(aff_stack_fill + 1, max=aff_stack)
@@ -2479,7 +2789,9 @@ def train(args):
             state = torch.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
             goal = torch.nan_to_num(goal, nan=0.0, posinf=0.0, neginf=0.0)
             aff_stack_buf = torch.nan_to_num(aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
+            critic_aff_stack_buf = torch.nan_to_num(critic_aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
             difficulty = torch.nan_to_num(difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+            critic_difficulty = torch.nan_to_num(critic_difficulty, nan=0.0, posinf=0.0, neginf=0.0)
 
             # Policy 决策
             teacher_action = None
@@ -2488,6 +2800,7 @@ def train(args):
             cmd_used = None
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
+                gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
                 with torch.no_grad():
                     cmd_f, _ = follow_model.get_action(
                         aff_stack_buf, state, goal, difficulty,
@@ -2500,7 +2813,15 @@ def train(args):
                     cmd_f = cmd_f.detach()
                     cmd_a = cmd_a.detach()
                 gate_y, _ = policy.get_action(
-                    aff_stack_buf, state, goal, gate_difficulty, deterministic=False
+                    aff_stack_buf,
+                    state,
+                    goal,
+                    gate_difficulty,
+                    deterministic=False,
+                    critic_affordance_map=critic_aff_stack_buf,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=gate_critic_difficulty,
                 )
                 gate_y_raw = gate_y
                 # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
@@ -2526,7 +2847,15 @@ def train(args):
                     gate_y_raw = gate_y
                     y_eff = gate_y_raw
                 log_prob, value, _, _ = policy.evaluate_actions(
-                    aff_stack_buf, state, goal, gate_difficulty, gate_y
+                    aff_stack_buf,
+                    state,
+                    goal,
+                    gate_difficulty,
+                    gate_y,
+                    critic_affordance_map=critic_aff_stack_buf,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=gate_critic_difficulty,
                 )
                 cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
                 next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
@@ -2559,7 +2888,15 @@ def train(args):
                 cmd_used = cmd
             else:
                 cmd, _ = policy.get_action(
-                    aff_stack_buf, state, goal, difficulty, deterministic=False
+                    aff_stack_buf,
+                    state,
+                    goal,
+                    difficulty,
+                    deterministic=False,
+                    critic_affordance_map=critic_aff_stack_buf,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=critic_difficulty,
                 )
                 if (use_egpo or use_follow_expert) and compute_s0_follow_expert_cmd is not None:
                     policy_cmd_raw = cmd
@@ -2628,21 +2965,25 @@ def train(args):
                     elif use_follow_expert:
                         cmd = expert_action
                 log_prob, value, _, _ = policy.evaluate_actions(
-                    aff_stack_buf, state, goal, difficulty, cmd
+                    aff_stack_buf,
+                    state,
+                    goal,
+                    difficulty,
+                    cmd,
+                    critic_affordance_map=critic_aff_stack_buf,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=critic_difficulty,
                 )
 
                 if args.mode == 'student' and teacher_model is not None:
                     with torch.no_grad():
-                        teacher_aff = obs_dict['gt_affordance']
                         if teacher_stack_buf is None:
-                            teacher_stack_buf = teacher_aff.repeat(1, aff_stack, 1, 1)
-                        else:
-                            teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-teacher_aff.shape[1], dims=1)
-                            teacher_stack_buf[:, -teacher_aff.shape[1]:, :, :] = teacher_aff
+                            teacher_stack_buf = actor_gt_aff_map.repeat(1, aff_stack, 1, 1)
                         t_cmd, _ = teacher_model.get_action(
                             teacher_stack_buf,
                             state, goal,
-                            obs_dict['gt_difficulty'],
+                            actor_gt_difficulty,
                             deterministic=True
                         )
                         teacher_action = t_cmd
@@ -2687,6 +3028,8 @@ def train(args):
                 goal.detach(),
                 aff_stack_buf.detach(),
                 difficulty.detach(),
+                critic_aff_stack_buf.detach(),
+                critic_difficulty.detach(),
                 action.detach(),
                 log_prob.detach(),
                 value.detach(),
@@ -2872,9 +3215,6 @@ def train(args):
             if dones.any():
                 stack_reset_mask = dones.clone()
             obs_dict = next_obs
-            if use_avoid_local_map:
-                obs_dict['gt_affordance'] = build_avoid_local_map_2ch(obs_dict['gt_affordance'])
-                obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
             if dones.any():
                 if last_goal_obs is not None:
                     last_goal_obs = last_goal_obs.clone()
@@ -2887,33 +3227,25 @@ def train(args):
         with torch.no_grad():
             state = obs_dict['state']
             goal = obs_dict['goal']
+            critic_aff_map_next, critic_difficulty_next = _get_critic_gt_inputs(obs_dict)
             
             if args.mode == 'teacher':
-                aff_map_next = obs_dict['gt_affordance']
-                if use_avoid_local_map:
-                    aff_map_next = build_avoid_local_map_2ch(aff_map_next)
-                difficulty = obs_dict['gt_difficulty']
-                if use_avoid_local_map:
-                    difficulty = difficulty_from_gap(aff_map_next)
+                aff_map_next, difficulty = _get_actor_gt_inputs(obs_dict)
             else:
-                if vision_model is None:
-                    raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
-                with torch.no_grad():
-                    vis_out = vision_model(obs_dict['depth'], normalize=True)
-                    aff_map_next = torch.stack([
-                        vis_out['occupancy'],
-                        vis_out['passable_gap'],
-                        vis_out['low_obstacle'],
-                    ], dim=1)
-                    if use_avoid_local_map:
-                        aff_map_next = build_avoid_local_map_2ch(aff_map_next)
-                    difficulty = difficulty_from_gap(aff_map_next)
+                aff_map_next, difficulty = _predict_actor_inputs(obs_dict)
             
             if aff_stack_buf is None:
                 aff_stack_bootstrap = aff_map_next.repeat(1, aff_stack, 1, 1)
+                critic_aff_stack_bootstrap = critic_aff_map_next.repeat(1, aff_stack, 1, 1)
             else:
                 aff_stack_bootstrap = torch.roll(aff_stack_buf, shifts=-aff_map_next.shape[1], dims=1)
                 aff_stack_bootstrap[:, -aff_map_next.shape[1]:, :, :] = aff_map_next
+                critic_aff_stack_bootstrap = torch.roll(
+                    critic_aff_stack_buf,
+                    shifts=-critic_aff_map_next.shape[1],
+                    dims=1,
+                )
+                critic_aff_stack_bootstrap[:, -critic_aff_map_next.shape[1]:, :, :] = critic_aff_map_next
                 if last_dones is not None and last_dones.any():
                     done_mask = last_dones.unsqueeze(1).unsqueeze(2).unsqueeze(3)
                     aff_stack_bootstrap = torch.where(
@@ -2921,12 +3253,38 @@ def train(args):
                         aff_map_next.repeat(1, aff_stack, 1, 1),
                         aff_stack_bootstrap,
                     )
+                    critic_aff_stack_bootstrap = torch.where(
+                        done_mask,
+                        critic_aff_map_next.repeat(1, aff_stack, 1, 1),
+                        critic_aff_stack_bootstrap,
+                    )
 
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
-                out = policy(aff_stack_bootstrap, state, goal, gate_difficulty)
+                gate_critic_difficulty = (
+                    critic_difficulty_next if gate_use_difficulty else torch.zeros_like(critic_difficulty_next)
+                )
+                out = policy(
+                    aff_stack_bootstrap,
+                    state,
+                    goal,
+                    gate_difficulty,
+                    critic_affordance_map=critic_aff_stack_bootstrap,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=gate_critic_difficulty,
+                )
             else:
-                out = policy(aff_stack_bootstrap, state, goal, difficulty)
+                out = policy(
+                    aff_stack_bootstrap,
+                    state,
+                    goal,
+                    difficulty,
+                    critic_affordance_map=critic_aff_stack_bootstrap,
+                    critic_robot_state=state,
+                    critic_goal=goal,
+                    critic_terrain_difficulty=critic_difficulty_next,
+                )
             next_value = out.value
         
         # 计算 Returns 和 Advantages
@@ -2940,6 +3298,8 @@ def train(args):
         _assert_finite_tensor("buffer.goals", buffer.goals)
         _assert_finite_tensor("buffer.aff_maps", buffer.aff_maps)
         _assert_finite_tensor("buffer.difficulties", buffer.difficulties)
+        _assert_finite_tensor("buffer.critic_aff_maps", buffer.critic_aff_maps)
+        _assert_finite_tensor("buffer.critic_difficulties", buffer.critic_difficulties)
         _assert_finite_tensor("returns", returns)
         _assert_finite_tensor("advantages", advantages)
         
@@ -3015,6 +3375,8 @@ def train(args):
                 mb_goals = buffer.goals[step_idx, env_idx]
                 mb_aff_maps = buffer.aff_maps[step_idx, env_idx]
                 mb_difficulties = buffer.difficulties[step_idx, env_idx]
+                mb_critic_aff_maps = buffer.critic_aff_maps[step_idx, env_idx]
+                mb_critic_difficulties = buffer.critic_difficulties[step_idx, env_idx]
                 mb_actions = torch.nan_to_num(mb_actions, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_old_log_probs = torch.nan_to_num(mb_old_log_probs, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_advantages = torch.nan_to_num(mb_advantages, nan=0.0, posinf=0.0, neginf=0.0)
@@ -3023,19 +3385,38 @@ def train(args):
                 mb_goals = torch.nan_to_num(mb_goals, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_aff_maps = torch.nan_to_num(mb_aff_maps, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_difficulties = torch.nan_to_num(mb_difficulties, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_critic_aff_maps = torch.nan_to_num(mb_critic_aff_maps, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_critic_difficulties = torch.nan_to_num(mb_critic_difficulties, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # 评估当前策略
                 try:
                     if is_gate:
                         gate_difficulty = mb_difficulties if gate_use_difficulty else torch.zeros_like(mb_difficulties)
+                        gate_critic_difficulty = (
+                            mb_critic_difficulties if gate_use_difficulty else torch.zeros_like(mb_critic_difficulties)
+                        )
                         new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
-                            mb_aff_maps, mb_states, mb_goals, gate_difficulty,
-                            mb_actions
+                            mb_aff_maps,
+                            mb_states,
+                            mb_goals,
+                            gate_difficulty,
+                            mb_actions,
+                            critic_affordance_map=mb_critic_aff_maps,
+                            critic_robot_state=mb_states,
+                            critic_goal=mb_goals,
+                            critic_terrain_difficulty=gate_critic_difficulty,
                         )
                     else:
                         new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
-                            mb_aff_maps, mb_states, mb_goals, mb_difficulties,
-                            mb_actions
+                            mb_aff_maps,
+                            mb_states,
+                            mb_goals,
+                            mb_difficulties,
+                            mb_actions,
+                            critic_affordance_map=mb_critic_aff_maps,
+                            critic_robot_state=mb_states,
+                            critic_goal=mb_goals,
+                            critic_terrain_difficulty=mb_critic_difficulties,
                         )
                 except ValueError as exc:
                     _handle_nonfinite_event(
@@ -3086,7 +3467,18 @@ def train(args):
                 distill_loss = torch.tensor(0.0, device=device)
                 if args.mode == 'student' and teacher_model is not None and not is_gate:
                     mb_teacher_actions = buffer.teacher_actions[step_idx, env_idx]
-                    distill_loss = nn.functional.mse_loss(mb_actions, mb_teacher_actions)
+                    student_out = policy.forward(
+                        mb_aff_maps,
+                        mb_states,
+                        mb_goals,
+                        mb_difficulties,
+                        critic_affordance_map=mb_critic_aff_maps,
+                        critic_robot_state=mb_states,
+                        critic_goal=mb_goals,
+                        critic_terrain_difficulty=mb_critic_difficulties,
+                    )
+                    student_cmd_det = torch.tanh(student_out.cmd_mean) * policy.cmd_scale
+                    distill_loss = nn.functional.mse_loss(student_cmd_det, mb_teacher_actions)
 
                 bc_loss = torch.tensor(0.0, device=device)
                 expert_log_prob_mean = torch.tensor(0.0, device=device)
@@ -3095,7 +3487,15 @@ def train(args):
                     mb_expert_actions = torch.nan_to_num(mb_expert_actions, nan=0.0, posinf=0.0, neginf=0.0)
                     try:
                         expert_log_prob, _, _, _ = policy.evaluate_actions(
-                            mb_aff_maps, mb_states, mb_goals, mb_difficulties, mb_expert_actions
+                            mb_aff_maps,
+                            mb_states,
+                            mb_goals,
+                            mb_difficulties,
+                            mb_expert_actions,
+                            critic_affordance_map=mb_critic_aff_maps,
+                            critic_robot_state=mb_states,
+                            critic_goal=mb_goals,
+                            critic_terrain_difficulty=mb_critic_difficulties,
                         )
                     except ValueError as exc:
                         _handle_nonfinite_event(
@@ -3294,6 +3694,9 @@ def train(args):
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
         writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
         writer.add_scalar('Perf/DifficultyMax', buffer.difficulties.max().item(), iteration)
+        writer.add_scalar('Perf/CriticDifficultyMean', buffer.critic_difficulties.mean().item(), iteration)
+        writer.add_scalar('Perf/CriticDifficultyMin', buffer.critic_difficulties.min().item(), iteration)
+        writer.add_scalar('Perf/CriticDifficultyMax', buffer.critic_difficulties.max().item(), iteration)
         if terrain_level_mean is not None:
             writer.add_scalar('Perf/TerrainLevelMean', terrain_level_mean, iteration)
         if terrain_level_max is not None:

@@ -11,6 +11,7 @@ import types
 import json
 import csv
 from datetime import datetime
+from typing import Optional
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 from isaacgym import gymapi
@@ -31,6 +32,438 @@ def _prepare_metrics_dir(args) -> str:
         base = os.path.join("outputs", "play_highlevel_metrics", f"{args.task}_{stamp}")
     os.makedirs(base, exist_ok=True)
     return base
+
+
+def _distance_to_oriented_box(center_xy, half_x: float, half_y: float, yaw_rad: float) -> float:
+    px = -float(center_xy[0])
+    py = -float(center_xy[1])
+    cos_y = math.cos(yaw_rad)
+    sin_y = math.sin(yaw_rad)
+    local_x = cos_y * px + sin_y * py
+    local_y = -sin_y * px + cos_y * py
+    dx = abs(local_x) - float(half_x)
+    dy = abs(local_y) - float(half_y)
+    outside_x = max(dx, 0.0)
+    outside_y = max(dy, 0.0)
+    outside = math.hypot(outside_x, outside_y)
+    inside = min(max(dx, dy), 0.0)
+    return float(max(0.0, outside + inside))
+
+
+def _prepare_avoid_map_dump_dir(args) -> str:
+    base = getattr(args, "avoid_map_dump_dir", None)
+    if base is None or str(base).strip() == "":
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        case = str(getattr(args, "avoid_map_debug_case", "")).strip().lower() or "default"
+        base = os.path.join("outputs", "avoid_map_debug", f"{args.task}_{case}_{stamp}")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _extract_s_avoid_debug_meta(env) -> dict:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or not hasattr(env_impl, "s_avoid_active"):
+        return {}
+    env_id = 0
+    active = env_impl.s_avoid_active[env_id]
+    if active.numel() == 0 or (not bool(active.any().item())):
+        return {}
+    slot = int(torch.nonzero(active, as_tuple=False)[0, 0].item())
+    robot_xy = env_impl.root_states[env_id, :2]
+    obs_xy = env_impl.s_avoid_pos_world[env_id, slot, :2]
+    quat = env_impl.root_states[env_id:env_id + 1, 3:7]
+    root_yaw = float(env._quat_to_yaw(quat)[0].item())
+    ref_xy, ref_yaw = env._get_affordance_reference_pose()
+    obs_xy_map = env._world_to_local_xy(
+        obs_xy.view(1, 2),
+        ref_xy[env_id:env_id + 1],
+        ref_yaw[env_id:env_id + 1],
+    )[0]
+    robot_xy_map = env._world_to_local_xy(
+        robot_xy.view(1, 2),
+        ref_xy[env_id:env_id + 1],
+        ref_yaw[env_id:env_id + 1],
+    )[0]
+    obs_xy_robot = env._world_to_local_xy(
+        obs_xy.view(1, 2),
+        robot_xy.view(1, 2),
+        ref_yaw[env_id:env_id + 1],
+    )[0]
+    heading_angle_rad = math.atan2(float(obs_xy_robot[0].item()), float(obs_xy_robot[1].item()))
+    body_forward_world = [-math.sin(root_yaw), math.cos(root_yaw)]
+    body_plus_y_vs_world_plus_y_rad = math.atan2(body_forward_world[0], body_forward_world[1])
+    terrain_cfg = getattr(getattr(getattr(env, "env", None), "cfg", None), "terrain", None)
+    target_body_plus_y_deg = 0.0
+    if terrain_cfg is not None:
+        target_body_plus_y_deg = float(getattr(terrain_cfg, "avoid_spawn_body_plus_y_deg", 0.0))
+    target_body_plus_y_rad = math.radians(target_body_plus_y_deg)
+    body_plus_y_error_rad = math.atan2(
+        math.sin(body_plus_y_vs_world_plus_y_rad - target_body_plus_y_rad),
+        math.cos(body_plus_y_vs_world_plus_y_rad - target_body_plus_y_rad),
+    )
+    world_plus_y_tip = robot_xy + torch.tensor([0.0, 1.0], device=robot_xy.device, dtype=robot_xy.dtype)
+    world_plus_y_in_map = env._world_to_local_xy(
+        world_plus_y_tip.view(1, 2),
+        robot_xy.view(1, 2),
+        ref_yaw[env_id:env_id + 1],
+    )[0]
+    obstacle_center_distance_m = math.hypot(float(obs_xy_map[0].item()), float(obs_xy_map[1].item()))
+    obstacle_surface_distance_m = None
+    obstacle_shape = "unknown"
+    cap_slots = int(getattr(env_impl, "s_avoid_capsule_slot_count", 0))
+    box_slots = int(getattr(env_impl, "s_avoid_box_slot_count", 0))
+    wall_slots = int(getattr(env_impl, "s_avoid_wall_slot_count", 0))
+    if slot < cap_slots:
+        obstacle_shape = "capsule"
+        radius = float(getattr(env_impl.cfg.terrain, "avoid_capsule_radius", 0.15))
+        obstacle_surface_distance_m = max(0.0, obstacle_center_distance_m - radius)
+    else:
+        quat_world = env_impl.s_avoid_quat_world[env_id, slot].unsqueeze(0)
+        yaw_world = float(env._quat_to_yaw(quat_world)[0].item())
+        yaw_local = yaw_world - float(ref_yaw[env_id].item())
+        if slot < cap_slots + box_slots:
+            obstacle_shape = "box"
+            half_x = 0.5 * float(getattr(env_impl.cfg.terrain, "avoid_box_size_x", 0.4))
+            half_y = 0.5 * float(getattr(env_impl.cfg.terrain, "avoid_box_size_y", 0.4))
+            obstacle_surface_distance_m = _distance_to_oriented_box(obs_xy_map, half_x, half_y, yaw_local)
+        elif slot < cap_slots + box_slots + wall_slots:
+            obstacle_shape = "wall"
+            half_x = 0.5 * float(getattr(env_impl.cfg.terrain, "avoid_wall_thickness", 0.12))
+            half_y = 0.5 * float(getattr(env_impl.cfg.terrain, "avoid_wall_length", 6.0))
+            obstacle_surface_distance_m = _distance_to_oriented_box(obs_xy_map, half_x, half_y, yaw_local)
+    obstacle_bearing_rad = math.atan2(float(obs_xy_map[0].item()), float(obs_xy_map[1].item()))
+    obstacle_bearing_deg = math.degrees(obstacle_bearing_rad)
+    obstacle_center_in_depth_fov = True
+    if getattr(env, "camera_fov_rad", None) is not None and env.camera_fov_rad > 0.0:
+        delta_bearing = math.atan2(
+            math.sin(obstacle_bearing_rad - float(getattr(env, "camera_bearing_rad", 0.0))),
+            math.cos(obstacle_bearing_rad - float(getattr(env, "camera_bearing_rad", 0.0))),
+        )
+        obstacle_center_in_depth_fov = abs(delta_bearing) <= 0.5 * float(env.camera_fov_rad) + 1e-6
+    obstacle_center_in_depth_range = True
+    if getattr(env, "camera_near", None) is not None and float(env.camera_near) > 0.0:
+        obstacle_center_in_depth_range = obstacle_center_in_depth_range and (
+            obstacle_center_distance_m >= float(env.camera_near) - 1e-6
+        )
+    if getattr(env, "camera_far", None) is not None:
+        obstacle_center_in_depth_range = obstacle_center_in_depth_range and (
+            obstacle_center_distance_m <= float(env.camera_far) + 1e-6
+        )
+    return {
+        "slot": slot,
+        "affordance_origin_mode": str(getattr(env, "affordance_origin_mode", "base_center")),
+        "camera_mount_xy_local": [
+            float(env.affordance_origin_local_xy[0].item()),
+            float(env.affordance_origin_local_xy[1].item()),
+        ],
+        "affordance_origin_xy_world": [
+            float(ref_xy[env_id, 0].item()),
+            float(ref_xy[env_id, 1].item()),
+        ],
+        "robot_xy_world": [float(robot_xy[0].item()), float(robot_xy[1].item())],
+        "obstacle_xy_world": [float(obs_xy[0].item()), float(obs_xy[1].item())],
+        "robot_center_xy_in_map": [
+            float(robot_xy_map[0].item()),
+            float(robot_xy_map[1].item()),
+        ],
+        "obstacle_xy_map": [
+            float(obs_xy_map[0].item()),
+            float(obs_xy_map[1].item()),
+        ],
+        "obstacle_xy_robot": [
+            float(obs_xy_robot[0].item()),
+            float(obs_xy_robot[1].item()),
+        ],
+        "world_plusY_in_robot_frame": [
+            float(world_plus_y_in_map[0].item()),
+            float(world_plus_y_in_map[1].item()),
+        ],
+        "body_forward_world_xy": [
+            float(body_forward_world[0]),
+            float(body_forward_world[1]),
+        ],
+        "depth_horizontal_fov_deg": float(math.degrees(env.camera_fov_rad)) if getattr(env, "camera_fov_rad", None) is not None else None,
+        "depth_vertical_fov_deg": float(math.degrees(env.camera_vertical_fov_rad)) if getattr(env, "camera_vertical_fov_rad", None) is not None else None,
+        "depth_tilt_down_deg": float(math.degrees(getattr(env, "camera_tilt_down_rad", 0.0))),
+        "depth_camera_height_m": float(getattr(env, "camera_height_m", 0.0)),
+        "depth_range_near_m": float(getattr(env, "camera_near", 0.0)),
+        "depth_range_far_m": float(getattr(env, "camera_far", 0.0)),
+        "obstacle_shape": obstacle_shape,
+        "obstacle_center_distance_true_m": float(obstacle_center_distance_m),
+        "obstacle_surface_distance_true_m": None if obstacle_surface_distance_m is None else float(obstacle_surface_distance_m),
+        "obstacle_center_bearing_deg": float(obstacle_bearing_deg),
+        "obstacle_center_in_depth_fov": bool(obstacle_center_in_depth_fov),
+        "obstacle_center_in_depth_range": bool(obstacle_center_in_depth_range),
+        "target_body_plus_y_vs_world_plusY_rad": float(target_body_plus_y_rad),
+        "target_body_plus_y_vs_world_plusY_deg": float(target_body_plus_y_deg),
+        "body_plus_y_vs_world_plusY_rad": float(body_plus_y_vs_world_plus_y_rad),
+        "body_plus_y_vs_world_plusY_deg": float(math.degrees(body_plus_y_vs_world_plus_y_rad)),
+        "body_plus_y_vs_world_plusY_error_rad": float(body_plus_y_error_rad),
+        "body_plus_y_vs_world_plusY_error_deg": float(math.degrees(body_plus_y_error_rad)),
+        "heading_vs_obstacle_rad": float(heading_angle_rad),
+        "heading_vs_obstacle_deg": float(math.degrees(heading_angle_rad)),
+        "robot_yaw_rad": float(root_yaw),
+    }
+
+
+def _occupancy_center_from_map(raw_occ: np.ndarray, map_extent: float) -> dict:
+    occ_idx = np.argwhere(raw_occ > 0.5)
+    pixel_count = int(occ_idx.shape[0])
+    if occ_idx.size == 0:
+        return {"occupancy_pixel_count": pixel_count}
+    cell = float(map_extent) / float(raw_occ.shape[0])
+    center = occ_idx.mean(axis=0)
+    x_right = -0.5 * float(map_extent) + (float(center[0]) + 0.5) * cell
+    y_forward = (float(center[1]) + 0.5) * cell
+    dist = np.sqrt(
+        (-0.5 * float(map_extent) + (occ_idx[:, 0] + 0.5) * cell) ** 2
+        + ((occ_idx[:, 1] + 0.5) * cell) ** 2
+    )
+    return {
+        "occupancy_pixel_count": pixel_count,
+        "occupancy_center_idx_xy": [float(center[0]), float(center[1])],
+        "occupancy_center_map_xy": [float(x_right), float(y_forward)],
+        "occupancy_min_distance_m": float(dist.min()) if dist.size > 0 else None,
+    }
+
+
+def _save_affordance_grid_figure(
+    save_path: str,
+    tensor: np.ndarray,
+    channel_names,
+    map_extent: float,
+    robot_clearance: float,
+    debug_meta: dict,
+    *,
+    title_prefix: str,
+    visible_mask: Optional[np.ndarray] = None,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+    except Exception as exc:
+        print(f"[PlayHigh] ⚠ matplotlib unavailable; skip affordance figure export ({exc}).")
+        return
+
+    tensor = np.asarray(tensor, dtype=np.float32)
+    channel_count = int(tensor.shape[0])
+    fig, axes = plt.subplots(1, channel_count, figsize=(4.6 * channel_count, 4.8), squeeze=False)
+    axes = axes[0]
+    obstacle_xy = debug_meta.get("obstacle_xy_map", None)
+    robot_xy = debug_meta.get("robot_center_xy_in_map", None)
+    angle_deg = debug_meta.get("heading_vs_obstacle_deg", None)
+    body_world_deg = debug_meta.get("body_plus_y_vs_world_plusY_deg", None)
+    body_target_deg = debug_meta.get("target_body_plus_y_vs_world_plusY_deg", None)
+    body_error_deg = debug_meta.get("body_plus_y_vs_world_plusY_error_deg", None)
+    world_plus_y = debug_meta.get("world_plusY_in_robot_frame", None)
+    extent = [-0.5 * float(map_extent), 0.5 * float(map_extent), 0.0, float(map_extent)]
+    y_min_plot = -0.35
+    if robot_xy is not None and len(robot_xy) == 2:
+        y_min_plot = min(y_min_plot, float(robot_xy[1]) - 0.10)
+    visible_image = None
+    if visible_mask is not None:
+        visible_mask = np.asarray(visible_mask, dtype=np.float32)
+        if visible_mask.ndim == 2 and visible_mask.shape == tensor.shape[-2:]:
+            visible_image = visible_mask.T
+    for idx, ax in enumerate(axes):
+        name = str(channel_names[idx])
+        image = tensor[idx].T
+        cmap = "gray" if ("occupancy" in name) else "magma"
+        im = ax.imshow(image, origin="lower", extent=extent, cmap=cmap, vmin=0.0, vmax=1.0)
+        if visible_image is not None and "occupancy" in name:
+            ax.imshow(
+                visible_image,
+                origin="lower",
+                extent=extent,
+                cmap="Greys",
+                vmin=0.0,
+                vmax=1.0,
+                alpha=0.18,
+            )
+            ax.contour(
+                visible_image,
+                levels=[0.5],
+                origin="lower",
+                extent=extent,
+                colors=["deepskyblue"],
+                linewidths=1.0,
+            )
+        ax.set_title(f"{title_prefix}: {name}")
+        ax.set_xlabel("x_right (m)")
+        ax.set_ylabel("y_forward (m)")
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(y_min_plot, extent[3])
+        ax.scatter([0.0], [0.0], c="cyan", s=28, marker="s")
+        if robot_xy is not None and len(robot_xy) == 2:
+            robot_x = float(robot_xy[0])
+            robot_y = float(robot_xy[1])
+            ax.scatter([robot_x], [robot_y], c="white", s=18, marker="o")
+            ax.add_patch(Circle((robot_x, robot_y), float(robot_clearance), fill=False, color="cyan", linestyle="--", linewidth=1.2))
+            heading_len = 0.55
+            ax.plot(
+                [robot_x, robot_x],
+                [robot_y, robot_y + heading_len],
+                color="dodgerblue",
+                linewidth=2.2,
+            )
+            if world_plus_y is not None and len(world_plus_y) == 2:
+                world_norm = max(
+                    math.hypot(float(world_plus_y[0]), float(world_plus_y[1])),
+                    1e-6,
+                )
+                world_dx = heading_len * float(world_plus_y[0]) / world_norm
+                world_dy = heading_len * float(world_plus_y[1]) / world_norm
+                ax.plot(
+                    [robot_x, robot_x + world_dx],
+                    [robot_y, robot_y + world_dy],
+                    color="lime",
+                    linewidth=2.0,
+                )
+        else:
+            ax.add_patch(Circle((0.0, 0.0), float(robot_clearance), fill=False, color="cyan", linestyle="--", linewidth=1.2))
+        if obstacle_xy is not None and len(obstacle_xy) == 2:
+            obs_x = float(obstacle_xy[0])
+            obs_y = float(obstacle_xy[1])
+            ax.scatter([obs_x], [obs_y], c="red", s=36, marker="x")
+            if robot_xy is not None and len(robot_xy) == 2:
+                ax.plot(
+                    [robot_x, obs_x],
+                    [robot_y, obs_y],
+                    color="purple",
+                    linewidth=2.0,
+                )
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _dump_s_avoid_debug_artifacts(args, env, raw_aff_map: torch.Tensor, local_map_2ch: torch.Tensor) -> None:
+    dump_dir = _prepare_avoid_map_dump_dir(args)
+    case = str(getattr(args, "avoid_map_debug_case", "")).strip().lower() or "default"
+    raw_np = raw_aff_map[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    local_np = local_map_2ch[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    visible_np = None
+    if getattr(env, "affordance_visible_mask", None) is not None:
+        visible_np = env.affordance_visible_mask.detach().float().cpu().numpy().astype(np.float32, copy=False)
+    np.save(os.path.join(dump_dir, f"{case}_raw_gt_affordance.npy"), raw_np)
+    np.save(os.path.join(dump_dir, f"{case}_local_map_2ch.npy"), local_np)
+    if visible_np is not None:
+        np.save(os.path.join(dump_dir, f"{case}_visible_mask.npy"), visible_np)
+
+    debug_meta = _extract_s_avoid_debug_meta(env)
+    occ_meta = _occupancy_center_from_map(raw_np[0], env.affordance_map_extent)
+    debug_meta.update({
+        "debug_case": case,
+        "map_extent_m": float(env.affordance_map_extent),
+        "map_size": int(env.affordance_map_size),
+        "cell_size_m": float(env.affordance_cell_size),
+        "robot_clearance_m": float(env.affordance_clearance),
+    })
+    debug_meta.update(occ_meta)
+    obs_xy = debug_meta.get("obstacle_xy_map", None)
+    occ_xy = debug_meta.get("occupancy_center_map_xy", None)
+    if obs_xy is not None and occ_xy is not None and len(obs_xy) == 2 and len(occ_xy) == 2:
+        debug_meta["occupancy_center_error_map_xy_m"] = [
+            float(occ_xy[0] - obs_xy[0]),
+            float(occ_xy[1] - obs_xy[1]),
+        ]
+        debug_meta["occupancy_center_distance_m"] = float(math.hypot(float(occ_xy[0]), float(occ_xy[1])))
+        debug_meta["occupancy_center_distance_error_m"] = float(
+            debug_meta["occupancy_center_distance_m"] - float(debug_meta.get("obstacle_center_distance_true_m", 0.0))
+        )
+    occ_min_dist = debug_meta.get("occupancy_min_distance_m", None)
+    surf_true_dist = debug_meta.get("obstacle_surface_distance_true_m", None)
+    if occ_min_dist is not None and surf_true_dist is not None:
+        debug_meta["occupancy_min_distance_error_m"] = float(float(occ_min_dist) - float(surf_true_dist))
+
+    with open(os.path.join(dump_dir, f"{case}_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(debug_meta, f, indent=2, ensure_ascii=False)
+
+    _save_affordance_grid_figure(
+        os.path.join(dump_dir, f"{case}_raw_gt_affordance.png"),
+        raw_np,
+        ["occupancy", "passable_gap", "low_obstacle"],
+        env.affordance_map_extent,
+        env.affordance_clearance,
+        debug_meta,
+        title_prefix="raw_gt_affordance",
+        visible_mask=visible_np,
+    )
+    _save_affordance_grid_figure(
+        os.path.join(dump_dir, f"{case}_local_map_2ch.png"),
+        local_np,
+        ["occupancy", "clearance_cost"],
+        env.affordance_map_extent,
+        env.affordance_clearance,
+        debug_meta,
+        title_prefix="local_map_2ch",
+        visible_mask=visible_np,
+    )
+    if visible_np is not None:
+        _save_affordance_grid_figure(
+            os.path.join(dump_dir, f"{case}_visible_mask.png"),
+            visible_np[None, ...],
+            ["visible_mask"],
+            env.affordance_map_extent,
+            env.affordance_clearance,
+            debug_meta,
+            title_prefix="debug",
+        )
+
+    obs_xy = debug_meta.get("obstacle_xy_map", None)
+    occ_xy = debug_meta.get("occupancy_center_map_xy", None)
+    err_xy = debug_meta.get("occupancy_center_error_map_xy_m", None)
+    robot_xy = debug_meta.get("robot_center_xy_in_map", None)
+    heading_angle_deg = debug_meta.get("heading_vs_obstacle_deg", None)
+    body_world_deg = debug_meta.get("body_plus_y_vs_world_plusY_deg", None)
+    body_target_deg = debug_meta.get("target_body_plus_y_vs_world_plusY_deg", None)
+    body_error_deg = debug_meta.get("body_plus_y_vs_world_plusY_error_deg", None)
+    occ_pixels = debug_meta.get("occupancy_pixel_count", 0)
+    occ_min_dist = debug_meta.get("occupancy_min_distance_m", None)
+    surf_true_dist = debug_meta.get("obstacle_surface_distance_true_m", None)
+    occ_min_err = debug_meta.get("occupancy_min_distance_error_m", None)
+    print(f"[PlayHigh] avoid-map debug dump saved to: {dump_dir}")
+    if obs_xy is not None and occ_xy is not None:
+        print(
+            "[PlayHigh] avoid-map check: origin={} robot_in_map=({:.3f},{:.3f}) obstacle_map=({:.3f},{:.3f}) occ_center=({:.3f},{:.3f}) err=({:.3f},{:.3f}) occ_pixels={} occ_min_dist={:.3f} true_surface_dist={:.3f} dist_err={:.3f} heading_vs_obs={:.1f}deg target_body+y_vs_world+Y={:.1f}deg actual_body+y_vs_world+Y={:.1f}deg body_angle_err={:.1f}deg".format(
+                debug_meta.get("affordance_origin_mode", "unknown"),
+                0.0 if robot_xy is None else float(robot_xy[0]),
+                0.0 if robot_xy is None else float(robot_xy[1]),
+                float(obs_xy[0]),
+                float(obs_xy[1]),
+                float(occ_xy[0]),
+                float(occ_xy[1]),
+                0.0 if err_xy is None else float(err_xy[0]),
+                0.0 if err_xy is None else float(err_xy[1]),
+                int(occ_pixels),
+                0.0 if occ_min_dist is None else float(occ_min_dist),
+                0.0 if surf_true_dist is None else float(surf_true_dist),
+                0.0 if occ_min_err is None else float(occ_min_err),
+                0.0 if heading_angle_deg is None else float(heading_angle_deg),
+                0.0 if body_target_deg is None else float(body_target_deg),
+                0.0 if body_world_deg is None else float(body_world_deg),
+                0.0 if body_error_deg is None else float(body_error_deg),
+            )
+        )
+    elif obs_xy is not None:
+        print(
+            "[PlayHigh] avoid-map check: origin={} robot_in_map=({:.3f},{:.3f}) obstacle_map=({:.3f},{:.3f}) occ_pixels={} obstacle_in_fov={} obstacle_in_range={} true_surface_dist={:.3f} heading_vs_obs={:.1f}deg target_body+y_vs_world+Y={:.1f}deg actual_body+y_vs_world+Y={:.1f}deg body_angle_err={:.1f}deg".format(
+                debug_meta.get("affordance_origin_mode", "unknown"),
+                0.0 if robot_xy is None else float(robot_xy[0]),
+                0.0 if robot_xy is None else float(robot_xy[1]),
+                float(obs_xy[0]),
+                float(obs_xy[1]),
+                int(occ_pixels),
+                bool(debug_meta.get("obstacle_center_in_depth_fov", False)),
+                bool(debug_meta.get("obstacle_center_in_depth_range", False)),
+                0.0 if surf_true_dist is None else float(surf_true_dist),
+                0.0 if heading_angle_deg is None else float(heading_angle_deg),
+                0.0 if body_target_deg is None else float(body_target_deg),
+                0.0 if body_world_deg is None else float(body_world_deg),
+                0.0 if body_error_deg is None else float(body_error_deg),
+            )
+        )
 
 
 def _maybe_apply_e_s_corridor_overrides(args, env_cfg) -> None:
@@ -58,6 +491,8 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
         return
     terrain_cfg.avoid_map_debug_case = debug_case
     terrain_cfg.avoid_preview_all_stages = False
+    target_deg = 0.0 if getattr(args, "avoid_spawn_body_plus_y_deg", None) is None else float(args.avoid_spawn_body_plus_y_deg)
+    terrain_cfg.avoid_spawn_body_plus_y_deg = target_deg
 
 
 def _init_e_s_metrics(args, env) -> dict:
@@ -459,8 +894,14 @@ def parse_args():
         "--avoid_map_debug_case",
         type=str,
         default="",
-        choices=["", "front", "left", "right"],
+        choices=["", "front", "left", "right", "side_left", "side_right"],
         help="s_avoid_basic 静态验证：机器人固定不动，障碍按机身前方/左前/右前放置",
+    )
+    parser.add_argument(
+        "--avoid_spawn_body_plus_y_deg",
+        type=float,
+        default=None,
+        help="s_avoid_basic 静态验证：强制设置出生时机体 +y 相对世界 +Y 的夹角（度）",
     )
     parser.add_argument(
         "--expert_k_yaw",
@@ -766,7 +1207,9 @@ def main():
         if max_level <= 0 and hasattr(env.env, "cfg"):
             max_level = int(getattr(env.env.cfg.terrain, "num_rows", 1))
         return max(1, max_level)
-    def _get_aff_map(current_obs):
+    skill = getattr(args, "skill", "follow")
+
+    def _get_aff_maps(current_obs):
         if current_obs is None:
             raise ValueError("obs is None when building affordance map.")
         if args.mode == "student":
@@ -774,25 +1217,45 @@ def main():
                 raise RuntimeError("vision_model is not initialized in student mode.")
             with torch.no_grad():
                 vis_out = vision_model(current_obs["depth"], normalize=True)
-                return torch.stack([
+                raw_aff = torch.stack([
                     vis_out["occupancy"],
                     vis_out["passable_gap"],
                     vis_out["low_obstacle"],
                 ], dim=1)
-        return current_obs["gt_affordance"]
+                raw_aff = th.resize_affordance_map(raw_aff, env.affordance_map_size)
+        else:
+            raw_aff = current_obs["gt_affordance"]
+        if skill == "avoid":
+            if args.mode == "student":
+                policy_aff = th.build_avoid_local_map_2ch(
+                    raw_aff,
+                    visible_mask=getattr(env, "affordance_visible_mask", None),
+                )
+            else:
+                policy_aff = current_obs.get(
+                    "local_map_2ch",
+                    th.build_avoid_local_map_2ch(
+                        raw_aff,
+                        visible_mask=getattr(env, "affordance_visible_mask", None),
+                    ),
+                )
+        else:
+            policy_aff = raw_aff
+        return raw_aff, policy_aff
 
     def _get_difficulty(current_obs, current_aff):
+        if skill == "avoid" and "actor_difficulty" in current_obs:
+            return current_obs["actor_difficulty"]
         if args.mode == "student":
             return th.difficulty_from_gap(current_aff)
         return current_obs["gt_difficulty"]
 
     obs = env.reset()
-    aff_map = _get_aff_map(obs)
+    raw_aff_map, aff_map = _get_aff_maps(obs)
     aff_shape = aff_map.shape[1:]
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
     aff_channels = aff_shape[0] * aff_stack
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
-    skill = getattr(args, "skill", "follow")
     is_gate = skill == "moe"
     expert_only_mode = use_follow_expert or static_avoid_debug
     policy = None
@@ -828,11 +1291,15 @@ def main():
             ).to(device)
             gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
             gate_state = gate_ckpt["model_state_dict"] if isinstance(gate_ckpt, dict) and "model_state_dict" in gate_ckpt else gate_ckpt
-            policy.load_state_dict(gate_state)
+            th.load_high_level_state_dict_compat(policy, gate_state, label="play_gate")
             for model, ckpt_path in [(follow_policy, args.follow_ckpt), (avoid_policy, args.avoid_ckpt)]:
                 ckpt = torch.load(ckpt_path, map_location=device)
                 state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-                model.load_state_dict(state_dict)
+                th.load_high_level_state_dict_compat(
+                    model,
+                    state_dict,
+                    label=f"play_expert:{os.path.basename(ckpt_path)}",
+                )
                 model.eval()
             policy.eval()
         else:
@@ -844,10 +1311,13 @@ def main():
             ).to(device)
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-            policy.load_state_dict(state_dict)
+            th.load_high_level_state_dict_compat(policy, state_dict, label="play_policy")
             policy.eval()
     else:
         dprint("[PlayHigh] expert-only takeover enabled; skip policy checkpoint loading.")
+    if static_avoid_debug:
+        local_map_2ch = obs.get("local_map_2ch", th.build_avoid_local_map_2ch(raw_aff_map))
+        _dump_s_avoid_debug_artifacts(args, env, raw_aff_map, local_map_2ch)
     if expert_only_mode and (
         (args.expert_k_yaw is not None)
         or (args.expert_heading_lock is not None)
@@ -910,7 +1380,7 @@ def main():
                         env.env.env_origins[env_idx] = env.env.terrain_origins[new_level, env.env.terrain_types[env_idx]]
                     print(f"[PlayHigh] curriculum level -> {new_level}")
                 obs = env.reset()
-                aff_map = _get_aff_map(obs)
+                raw_aff_map, aff_map = _get_aff_maps(obs)
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
                 aff_stack_fill.fill_(1)
                 stack_reset_mask = None
@@ -921,14 +1391,11 @@ def main():
                 obs_before_step = {"goal": obs["goal"].detach().clone()}
             reset_mask = stack_reset_mask
             if stack_reset_mask is not None and stack_reset_mask.any():
-                if args.mode == "student":
-                    reset_aff = _get_aff_map(obs)
-                else:
-                    reset_aff = obs["gt_affordance"]
+                _, reset_aff = _get_aff_maps(obs)
                 aff_stack_buf[stack_reset_mask] = reset_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                 aff_stack_fill[stack_reset_mask] = 1
                 stack_reset_mask = None
-            aff_map = _get_aff_map(obs)
+            raw_aff_map, aff_map = _get_aff_maps(obs)
             aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
             aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
             if aff_stack > 1:
@@ -1045,9 +1512,8 @@ def main():
                 cmd = torch.zeros_like(cmd)
             if force_cmd_tensor is not None:
                 cmd = force_cmd_tensor.expand(env.num_envs, -1)
-            if args.mode == "student":
-                env.clearance_override = env._compute_clearance_from_affordance(aff_map)
-                env.reward_affordance_override = aff_map
+            env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+            env.reward_affordance_override = aff_map
             obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
             _update_e_s_metrics(e_s_metrics, env, obs_before_step, info, dones, step_idx, cmd)
             if e_s_metrics.get("enabled", False) and ((step_idx + 1) % e_s_metrics["autosave_steps"] == 0):
@@ -1244,7 +1710,7 @@ def main():
                 cross_width_dbg = 0.0
                 debug_aff = None
                 if obs is not None:
-                    debug_aff = _get_aff_map(obs)
+                    debug_aff = raw_aff_map
                 if debug_aff is not None:
                     cross_dir, cross_gate_dbg, cross_width_dbg, low_block_mask = env._compute_low_obstacle_guidance(
                         debug_aff

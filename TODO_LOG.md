@@ -60,6 +60,33 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-12 Avoid 难度标量解耦与展示/评测口径统一
+
+- [x] ~~[P0] 将 Avoid 的 `actor_difficulty` 从视锥裁剪后的 `local_map_2ch` 脱钩，改为基于全 GT 局部图计算客观拥挤度标量~~
+- [x] ~~[P0] 统一 `play_highlevel` 的后处理输入，让 Teacher/Student 都只基于当前策略输入图计算 `clearance_override`~~
+- [x] ~~[P0] 将 `eval_highlevel` 对齐到当前 Avoid 主线：`local_map_2ch` 输入、旧高层 ckpt 兼容、后处理口径一致~~
+- [x] ~~[P0] 修复 Student 蒸馏 loss 不回传当前策略梯度的问题，避免蒸馏训练挂空挡~~
+- [x] ~~[P0] 将高层局部地图默认提升到 `32x32`，并让高层编码器与 student 预测图共同兼容 `16/32` 输入~~
+
+## 2026-03-12 高层 Avoid Teacher 非对称 PPO 口径
+
+- [x] ~~[P0] 将高层 Avoid Teacher 改为非对称 PPO：Actor 只吃 D435i 视锥约束后的 `local_map_2ch`，Critic 吃全 GT 地图~~
+- [x] ~~[P0] 在高层观测中同时产出 Actor 可视图与 Critic 全图，避免训练阶段再用 `gt_affordance=local_map_2ch` 直接覆盖~~
+- [x] ~~[P0] 将 rollout/buffer/bootstrap/update 全部接上 actor/critic 双输入，并让 reward shaping 与 post-processor 分别走全图/可视图~~
+- [x] ~~[P0] 兼容旧高层 checkpoint：缺失 `critic_*` 权重时自动从 actor 主干镜像初始化，保证 train/play 都能继续加载旧模型~~
+
+## 2026-03-12 s_avoid_basic 完美图验证与 actor-only GT 地图
+
+- [x] ~~[P0] 锁定 `s_avoid_basic` 的 GT affordance 只走 `plane + actor` 几何栅格化，禁止回退到 heightfield 混合口径~~
+- [x] ~~[P0] 在高层观测中显式产出 `local_map_2ch(occupancy + clearance/cost)`，并与 Avoid 专家输入保持一致~~
+- [x] ~~[P0] 在 `play_highlevel` 增加 `front/left/right` 静态导出，保存 `raw gt_affordance`、`local_map_2ch` 与坐标核对结果~~
+- [x] ~~[P0] 将 `s_avoid_basic` 的 GT 图参考点从机身中心切到深度相机安装点，并在静态图里增加“机器人朝向 vs 障碍连线”夹角~~
+- [x] ~~[P0] 为 `s_avoid_basic` 静态调试增加“强制出生朝向”输入，按机体 `+y` 与世界 `+Y` 的夹角设定，并输出目标/实际/误差~~
+- [x] ~~[P0] 将 GT 图可见范围收口到 D435i depth 参数（87x58, 0.3~3.0m），并增加障碍物距离真值对照导出~~
+- [x] ~~[P0] 将 GT 视场从“二维水平扇形”进一步收口到“深度相机视锥与地面的交域”，并避免视场外 clearance 被平滑成已知自由区~~
+- [x] ~~[P0] 修正 `visible_mask` 的 `x/y` 轴顺序，使 `local_map_2ch` 的视锥裁剪与障碍栅格写入使用同一套 `x_right/y_forward` 口径~~
+- [x] ~~[P0] 将 GT 视锥中的相机高度改为“机身初始高度 + 相机安装 z 偏移”，避免把深度相机误当成离地 10cm~~
+
 ## 2026-03-06 避障专家输入与上机主线口径更新
 
 - [x] ~~[P0] 避障专家默认观测更新为 `state + goal_buf + local_map_2ch(occupancy + clearance/cost)`，不再将 `low_obstacle/跨越信息` 作为默认必需输入~~
