@@ -255,14 +255,14 @@ $$cmd_{base} = y_{eff} \cdot cmd_F + (1 - y_{eff}) \cdot cmd_A$$
 ### 2.3.5 条件性融合（解决线性融合陷阱）
 
 定义一致性：
-$$\text{consistency} = \frac{cmd_F[:2] \cdot cmd_A[:2]}{\|cmd_F[:2]\| \cdot \|cmd_A[:2]\| + \epsilon}$$
+$\text{consistency} = \frac{cmd_F[:2] \cdot cmd_A[:2]}{\|cmd_F[:2]\| \cdot \|cmd_A[:2]\| + \epsilon}$
 
 融合规则：
-$$cmd_{raw} = \begin{cases}
+$cmd_{raw} = \begin{cases}
 cmd_{base} & \text{if consistency} > \tau_{consist} \\
 cmd_A & \text{if consistency} \leq \tau_{consist} \text{ and } P_{col} > \tau_{danger} \\
 \text{softmax\_blend}(cmd_F, cmd_A, y_{eff}) & \text{otherwise}
-\end{cases}$$
+\end{cases}$
 
 其中：
 
@@ -270,7 +270,7 @@ cmd_A & \text{if consistency} \leq \tau_{consist} \text{ and } P_{col} > \tau_{d
 - $\tau_{danger} = 0.7$（危险阈值）
 
 Softmax融合：
-$$\text{softmax\_blend} = \frac{e^{y_{eff}/\tau}}{e^{y_{eff}/\tau} + e^{(1-y_{eff})/\tau}} \cdot cmd_F + \frac{e^{(1-y_{eff})/\tau}}{e^{y_{eff}/\tau} + e^{(1-y_{eff})/\tau}} \cdot cmd_A$$
+$\text{softmax\_blend} = \frac{e^{y_{eff}/\tau}}{e^{y_{eff}/\tau} + e^{(1-y_{eff})/\tau}} \cdot cmd_F + \frac{e^{(1-y_{eff})/\tau}}{e^{y_{eff}/\tau} + e^{(1-y_{eff})/\tau}} \cdot cmd_A$
 
 其中$\tau = 0.3$（温度参数）
 
@@ -279,7 +279,7 @@ $$\text{softmax\_blend} = \frac{e^{y_{eff}/\tau}}{e^{y_{eff}/\tau} + e^{(1-y_{ef
 ### 2.4.1 β参数映射
 
 对于参数$\theta$，映射函数为：
-$$\theta(\beta) = \theta_{min} + \beta \cdot (\theta_{max} - \theta_{min})$$
+$\theta(\beta) = \theta_{min} + \beta \cdot (\theta_{max} - \theta_{min})$
 
 具体映射（注意方向）：
 
@@ -294,31 +294,31 @@ $$\theta(\beta) = \theta_{min} + \beta \cdot (\theta_{max} - \theta_{min})$$
 
 ### 2.4.2 速度限幅
 
-$$cmd_{clamp} = \text{clip}(cmd_{raw}, -[v_{max}, v_{max}, \omega_{max}], [v_{max}, v_{max}, \omega_{max}])$$
+$cmd_{clamp} = \text{clip}(cmd_{raw}, -[v_{max}, v_{max}, \omega_{max}], [v_{max}, v_{max}, \omega_{max}])$
 
 ### 2.4.3 变化率限制（Slew Rate Limiting）
 
-$$\Delta cmd = cmd_{clamp} - cmd_{prev}$$
+$\Delta cmd = cmd_{clamp} - cmd_{prev}$
 
-$$\Delta cmd_{limited} = \text{clip}(\Delta cmd, -[\Delta v_{max}, \Delta v_{max}, \Delta\omega_{max}], [\Delta v_{max}, \Delta v_{max}, \Delta\omega_{max}])$$
+$\Delta cmd_{limited} = \text{clip}(\Delta cmd, -[\Delta v_{max}, \Delta v_{max}, \Delta\omega_{max}], [\Delta v_{max}, \Delta v_{max}, \Delta\omega_{max}])$
 
-$$cmd_{smooth} = cmd_{prev} + \Delta cmd_{limited}$$
+$cmd_{smooth} = cmd_{prev} + \Delta cmd_{limited}$
 
 ### 2.4.4 风险钳制
 
 当$clearance < d_{safe}(\beta)$时：
 
-$$scale = \left(\frac{clearance}{d_{safe}(\beta)}\right)^{k_{risk}(\beta)}$$
+$scale = \left(\frac{clearance}{d_{safe}(\beta)}\right)^{k_{risk}(\beta)}$
 
-$$cmd_{safe} = cmd_{smooth} \cdot scale$$
+$cmd_{safe} = cmd_{smooth} \cdot scale$
 
 ### 2.4.5 视野保持约束（六足全向特性）
 
-$$\theta_{error} = \text{atan2}(p_y^{rel}, p_x^{rel}) - 0$$
+$\theta_{error} = \text{atan2}(p_y^{rel}, p_x^{rel}) - 0$
 
-$$\omega_{correction} = K_p \cdot \theta_{error}$$
+$\omega_{correction} = K_p \cdot \theta_{error}$
 
-$$cmd_{final} = (cmd_{safe}[0], cmd_{safe}[1], cmd_{safe}[2] + \omega_{correction})$$
+$cmd_{final} = (cmd_{safe}[0], cmd_{safe}[1], cmd_{safe}[2] + \omega_{correction})$
 
 其中$K_p = 0.5$（视野保持增益）
 
