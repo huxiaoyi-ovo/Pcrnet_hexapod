@@ -1873,6 +1873,7 @@ class HierarchicalHexapodEnv:
                 prev_robot_pos=self.prev_robot_pos,
                 goal_pos=goal_pos,
                 robot_vel=robot_vel,
+                robot_vel_body=self.env.base_lin_vel,
                 robot_quat=robot_quat,
                 gate_y=gate_y,
                 prev_gate_y=self.prev_gate_y,
@@ -2627,6 +2628,7 @@ def train(args):
             'stability',
             'velocity',
             'backward',
+            'body_backward',
             'turn_penalty',
             'yaw_rate_penalty',
             'time',
@@ -2636,6 +2638,8 @@ def train(args):
         gate_y_sum = torch.zeros((), device=device)
         gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
+        body_forward_speed_sum = torch.zeros((), device=device)
+        body_backward_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
         collision_rate_sum = torch.zeros((), device=device)
         collision_force_samples = []
@@ -3063,6 +3067,11 @@ def train(args):
                 cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
             else:
                 cmd_speed_sum += torch.norm(cmd_used[:, :2], dim=1).sum()
+            if hasattr(env.env, "base_lin_vel"):
+                body_lin_vel = env.env.base_lin_vel
+                body_forward = body_lin_vel[:, 1]
+                body_forward_speed_sum += body_forward.sum()
+                body_backward_speed_sum += torch.clamp(-body_forward, min=0.0).sum()
             if hasattr(env.env, "target_speed"):
                 target_speed = torch.nan_to_num(env.env.target_speed, nan=0.0, posinf=0.0, neginf=0.0)
                 target_speed_sum += target_speed.sum()
@@ -3602,6 +3611,8 @@ def train(args):
         total_samples = env.num_envs * args.num_steps
         reward_term_means = {k: (v / total_samples).item() for k, v in reward_term_sums.items()}
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
+        body_forward_speed_mean = (body_forward_speed_sum / total_samples).item()
+        body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
         gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
@@ -3747,6 +3758,8 @@ def train(args):
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
+        writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
+        writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
         writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
         writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
@@ -3833,6 +3846,7 @@ def train(args):
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
+                          f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""
                           f"""{'Target reset err(d/mdeg):':>{pad}} {target_reset_dist_error_mean:.3f} / {target_reset_bearing_error_deg_mean:.3f}\n"""
@@ -3847,7 +3861,7 @@ def train(args):
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(gate/risk/col):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f}\n"""
-                          f"""{'Reward(velocity/backward/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
+                          f"""{'Reward(vel/back/body/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('body_backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
                           f"""{'Reward(turn/yaw/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('yaw_rate_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
             print(log_string)

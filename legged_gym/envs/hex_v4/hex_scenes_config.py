@@ -410,7 +410,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["goal_approach_scale"] = 1.5
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
-        reward_cfg["heading_scale"] = 0.05
+        reward_cfg["heading_scale"] = 0.10
         reward_cfg["passable_align_scale"] = 1.2
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = -2.0
@@ -421,6 +421,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["time_penalty"] = -0.02
         reward_cfg["velocity_scale"] = 0.05
         reward_cfg["backward_scale"] = 0.0
+        reward_cfg["body_backward_scale"] = 0.10
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = -0.05
 

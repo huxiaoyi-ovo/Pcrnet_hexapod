@@ -70,6 +70,7 @@ class NavigationRewardConfig:
     # 速度奖励
     velocity_scale: float = 0.1
     backward_scale: float = 0.0
+    body_backward_scale: float = 0.0
     turn_penalty_scale: float = 0.0
     yaw_rate_penalty: float = 0.0
 
@@ -117,6 +118,7 @@ class NavigationRewardFunction:
         prev_gate_y: Optional[torch.Tensor] = None,  # (N,) 上一门控
         intensity: Optional[torch.Tensor] = None,       # (N,) 兼容字段（将被 gate_y 替代）
         prev_intensity: Optional[torch.Tensor] = None,  # (N,) 兼容字段
+        robot_vel_body: Optional[torch.Tensor] = None,  # (N, 3) 机体系速度
     ) -> Dict[str, torch.Tensor]:
         """
         计算综合奖励
@@ -260,6 +262,14 @@ class NavigationRewardFunction:
             backward_penalty = -backward_speed * self.cfg.backward_scale
         rewards['backward'] = backward_penalty
 
+        body_backward_penalty = torch.zeros(num_envs, device=device)
+        if self.cfg.body_backward_scale != 0.0 and robot_vel_body is not None:
+            # Body-frame convention follows project rule: [x_right, y_forward, z_up].
+            forward_speed_body = torch.clamp(robot_vel_body[:, 1] / 0.7, min=-1.0, max=1.0)
+            backward_speed_body = torch.clamp(-forward_speed_body, min=0.0)
+            body_backward_penalty = -backward_speed_body * self.cfg.body_backward_scale
+        rewards['body_backward'] = body_backward_penalty
+
         # 6.6 无意义转向惩罚（已基本对准目标时，仍给大角速度命令）
         turn_penalty = torch.zeros(num_envs, device=device)
         if self.cfg.turn_penalty_scale != 0.0:
@@ -298,6 +308,7 @@ class NavigationRewardFunction:
             rewards['stability'] +
             rewards['velocity'] +
             rewards['backward'] +
+            rewards['body_backward'] +
             rewards['turn_penalty'] +
             rewards['yaw_rate_penalty'] +
             rewards['time']
