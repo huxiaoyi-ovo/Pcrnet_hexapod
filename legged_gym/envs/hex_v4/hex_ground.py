@@ -154,6 +154,9 @@ class HexGround(LeggedRobot):
         if self.viewer and self.enable_viewer_sync and self.debug_viz and self._moving_target_enabled():
             self._debug_draw_target_and_robot_trajectories()
             return
+        if self.viewer and self.enable_viewer_sync and self.debug_viz and self.s_avoid_enabled:
+            self._debug_draw_goal_and_robot_trajectories()
+            return
 
         terrain_obj = getattr(self, "terrain", None)
         if terrain_obj is None or not hasattr(terrain_obj, "cfg"):
@@ -228,6 +231,63 @@ class HexGround(LeggedRobot):
                 r=None,
             )
             gymutil.draw_lines(self._viz_target_sphere, self.gym, self.viewer, self.envs[i], pose)
+
+    def _debug_draw_goal_and_robot_trajectories(self):
+        """Draw avoid-task local-goal point/trajectory and robot trajectory."""
+        if self.viewer is None or not hasattr(self, "envs"):
+            return
+        if not hasattr(self, "goal_world"):
+            return
+
+        if not hasattr(self, "_viz_goal_traj_time_accum"):
+            self._viz_goal_traj_time_accum = 0.0
+            self._viz_goal_traj_tick = 0
+            self._viz_goal_traj_clear_every = int(getattr(self.cfg.terrain, "debug_viz_clear_every", 0))
+            self._viz_goal_prev_robot = np.zeros((self.num_envs, 3), dtype=np.float32)
+            self._viz_goal_prev_point = np.zeros((self.num_envs, 3), dtype=np.float32)
+            self._viz_goal_prev_valid = np.zeros((self.num_envs,), dtype=np.bool_)
+            self._viz_goal_color_robot = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+            self._viz_goal_color_point = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
+            self._viz_goal_sphere = gymutil.WireframeSphereGeometry(
+                0.04, 6, 6, color=(0.0, 1.0, 0.0)
+            )
+
+        self._viz_goal_traj_time_accum += float(self.dt)
+        dt_high = float(getattr(self.cfg.terrain, "scene_high_dt", 0.1))
+        if self._viz_goal_traj_time_accum + 1e-9 < dt_high:
+            return
+        self._viz_goal_traj_time_accum = 0.0
+        self._viz_goal_traj_tick += 1
+
+        if self._viz_goal_traj_clear_every > 0 and self._viz_goal_traj_tick % self._viz_goal_traj_clear_every == 0:
+            self.gym.clear_lines(self.viewer)
+            self._viz_goal_prev_valid[:] = False
+
+        robot_pos = self.root_states[:, 0:3].detach().cpu().numpy().astype(np.float32, copy=False)
+        goal_xy = self.goal_world.detach().cpu().numpy().astype(np.float32, copy=False)
+
+        goal_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
+        goal_pos[:, 0:2] = goal_xy[:, 0:2]
+        goal_pos[:, 2] = robot_pos[:, 2] + 0.06
+
+        for i in range(self.num_envs):
+            if not self._viz_goal_prev_valid[i]:
+                self._viz_goal_prev_robot[i] = robot_pos[i]
+                self._viz_goal_prev_point[i] = goal_pos[i]
+                self._viz_goal_prev_valid[i] = True
+            else:
+                v_robot = np.stack([self._viz_goal_prev_robot[i], robot_pos[i]], axis=0)
+                v_goal = np.stack([self._viz_goal_prev_point[i], goal_pos[i]], axis=0)
+                self.gym.add_lines(self.viewer, self.envs[i], 1, v_robot, self._viz_goal_color_robot)
+                self.gym.add_lines(self.viewer, self.envs[i], 1, v_goal, self._viz_goal_color_point)
+                self._viz_goal_prev_robot[i] = robot_pos[i]
+                self._viz_goal_prev_point[i] = goal_pos[i]
+
+            pose = gymapi.Transform(
+                gymapi.Vec3(float(goal_pos[i, 0]), float(goal_pos[i, 1]), float(goal_pos[i, 2])),
+                r=None,
+            )
+            gymutil.draw_lines(self._viz_goal_sphere, self.gym, self.viewer, self.envs[i], pose)
 
     def _debug_draw_thick_line(self, env_id: int, p0: np.ndarray, p1: np.ndarray, color, width: float = 0.014):
         direction = p1[:2] - p0[:2]
@@ -3581,6 +3641,13 @@ class HexGround(LeggedRobot):
                 and bool(getattr(self, "debug_viz", False))
                 and self._moving_target_enabled()
             )
+            clear_debug_goal_traj = (
+                self.viewer is not None
+                and bool(getattr(self, "debug_viz", False))
+                and self.s_avoid_enabled
+                and hasattr(self, "goal_world")
+                and (not self._moving_target_enabled())
+            )
             # Default behavior: do NOT clear global viewer lines on each reset.
             # Global clear can make trajectories disappear before the currently viewed env resets.
             if self.viewer is not None:
@@ -3590,6 +3657,8 @@ class HexGround(LeggedRobot):
                 if clear_on_reset and bool(getattr(self, "debug_viz", False)) and self._moving_target_enabled():
                     need_clear = True
                 if clear_debug_target_traj:
+                    need_clear = True
+                if clear_debug_goal_traj:
                     need_clear = True
                 if need_clear:
                     self.gym.clear_lines(self.viewer)
@@ -3601,6 +3670,13 @@ class HexGround(LeggedRobot):
                     self._viz_prev_valid[:] = False
                     if hasattr(self, "_viz_traj_tick"):
                         self._viz_traj_tick = 0
+            if hasattr(self, "_viz_goal_prev_valid"):
+                ids = env_ids.detach().cpu().numpy()
+                self._viz_goal_prev_valid[ids] = False
+                if clear_debug_goal_traj:
+                    self._viz_goal_prev_valid[:] = False
+                    if hasattr(self, "_viz_goal_traj_tick"):
+                        self._viz_goal_traj_tick = 0
         
             # print("reset ids=",env_ids)
             # print("resample commands\n",self.commands)
