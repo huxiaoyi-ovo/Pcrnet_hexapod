@@ -400,6 +400,11 @@ class HexAvoidBasicCfg(HexGroundCfg):
         goal_force_blocking_line = False
         resample_on_reach = False
         heading_offset_rad = 0.0
+        target_fov_soft_scale = 1.0
+        target_fov_hard_scale = 1.0
+        target_lost_k = 0
+        target_center_scale = 0.10
+        target_visible_scale = 0.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 1.5
@@ -417,6 +422,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["velocity_scale"] = 0.05
         reward_cfg["backward_scale"] = 0.0
         reward_cfg["turn_penalty_scale"] = 0.0
+        reward_cfg["yaw_rate_penalty"] = -0.05
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

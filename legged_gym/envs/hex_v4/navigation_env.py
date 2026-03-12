@@ -71,6 +71,7 @@ class NavigationRewardConfig:
     velocity_scale: float = 0.1
     backward_scale: float = 0.0
     turn_penalty_scale: float = 0.0
+    yaw_rate_penalty: float = 0.0
 
 
 class NavigationRewardFunction:
@@ -271,6 +272,15 @@ class NavigationRewardFunction:
             turn_penalty = -omega_excess * aligned.float() * self.cfg.turn_penalty_scale
         rewards['turn_penalty'] = turn_penalty
 
+        yaw_rate_penalty = torch.zeros(num_envs, device=device)
+        if self.cfg.yaw_rate_penalty != 0.0:
+            if cmd_omega is None:
+                omega_cmd = torch.zeros(num_envs, device=device)
+            else:
+                omega_cmd = cmd_omega.view(-1)
+            yaw_rate_penalty = torch.abs(omega_cmd) * self.cfg.yaw_rate_penalty
+        rewards['yaw_rate_penalty'] = yaw_rate_penalty
+
         # 7. 时间惩罚
         time_reward = torch.ones(num_envs, device=device) * self.cfg.time_penalty
         rewards['time'] = time_reward
@@ -289,6 +299,7 @@ class NavigationRewardFunction:
             rewards['velocity'] +
             rewards['backward'] +
             rewards['turn_penalty'] +
+            rewards['yaw_rate_penalty'] +
             rewards['time']
         )
         rewards['total'] = total_reward

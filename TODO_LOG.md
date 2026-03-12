@@ -75,6 +75,10 @@
 - [x] ~~[P0] 将 rollout/buffer/bootstrap/update 全部接上 actor/critic 双输入，并让 reward shaping 与 post-processor 分别走全图/可视图~~
 - [x] ~~[P0] 兼容旧高层 checkpoint：缺失 `critic_*` 权重时自动从 actor 主干镜像初始化，保证 train/play 都能继续加载旧模型~~
 
+## 2026-03-12 Avoid 专家 B 组弱视野约束对照
+
+- [x] ~~[P0] 在 Avoid 高层奖励中加入弱 `target_center(goal_buf)` 与小 `yaw_rate_penalty`，验证是否能减少甩头并为后续 `w` 融合保留更连续的视觉上下文~~
+
 ## 2026-03-12 s_avoid_basic 完美图验证与 actor-only GT 地图
 
 - [x] ~~[P0] 锁定 `s_avoid_basic` 的 GT affordance 只走 `plane + actor` 几何栅格化，禁止回退到 heightfield 混合口径~~

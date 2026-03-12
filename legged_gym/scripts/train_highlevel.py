@@ -1913,8 +1913,16 @@ class HierarchicalHexapodEnv:
             total_reward = accumulated_reward / self.decimation
             reward_terms = {"total": total_reward}
 
-        # S0: add target-in-view centering penalties and optional "lost" reset.
-        if self.moving_target_enable and (self.camera_fov_rad is not None):
+        # Add target centering / visibility shaping when explicitly enabled.
+        use_target_view_reward = (
+            self.camera_fov_rad is not None
+            and (
+                self.moving_target_enable
+                or self.target_center_scale != 0.0
+                or self.target_visible_scale != 0.0
+            )
+        )
+        if use_target_view_reward:
             goal_rel = reward_obs.get("goal", None) if isinstance(reward_obs, dict) else None
             if goal_rel is not None:
                 bearing_body = torch.atan2(goal_rel[:, 0], goal_rel[:, 1])  # 0 means +Y forward
@@ -2620,6 +2628,7 @@ def train(args):
             'velocity',
             'backward',
             'turn_penalty',
+            'yaw_rate_penalty',
             'time',
             'total',
         ]
@@ -3839,7 +3848,7 @@ def train(args):
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(gate/risk/col):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f}\n"""
                           f"""{'Reward(velocity/backward/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
-                          f"""{'Reward(turn_pen/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
+                          f"""{'Reward(turn/yaw/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('yaw_rate_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
             print(log_string)
         
