@@ -1257,7 +1257,7 @@ def main():
     aff_channels = aff_shape[0] * aff_stack
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     is_gate = skill == "moe"
-    expert_only_mode = use_follow_expert or static_avoid_debug
+    expert_only_mode = use_follow_expert or static_avoid_debug or (force_cmd_tensor is not None)
     policy = None
     follow_policy = None
     avoid_policy = None
@@ -1266,6 +1266,8 @@ def main():
     elif static_avoid_debug:
         print(f"[PlayHigh] cmd_source=zero_cmd (--avoid_map_debug_case={avoid_map_debug_case})")
         print("[PlayHigh] static avoid-map debug enabled; robot command is clamped to zero.")
+    elif force_cmd_tensor is not None:
+        print("[PlayHigh] cmd_source=force_cmd (--force_cmd)")
     if not expert_only_mode:
         if not args.teacher_ckpt:
             raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")

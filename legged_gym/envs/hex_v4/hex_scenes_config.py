@@ -407,13 +407,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_visible_scale = 0.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
-        reward_cfg["goal_approach_scale"] = 1.5
+        reward_cfg["goal_approach_scale"] = 2.5
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
         reward_cfg["heading_scale"] = 0.20
-        reward_cfg["passable_align_scale"] = 1.2
+        reward_cfg["passable_align_scale"] = 3.0
         reward_cfg["crossable_align_scale"] = 0.0
-        reward_cfg["risk_barrier_scale"] = -2.0
+        reward_cfg["risk_barrier_scale"] = -1.2
         reward_cfg["risk_barrier_safe"] = 0.35
         reward_cfg["risk_barrier_free"] = 0.80
         reward_cfg["risk_barrier_tau"] = 0.10
@@ -421,7 +421,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["time_penalty"] = -0.02
         reward_cfg["velocity_scale"] = 0.05
         reward_cfg["backward_scale"] = 0.0
-        reward_cfg["body_backward_scale"] = 0.30
+        reward_cfg["body_backward_scale"] = 2.0
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = -0.05
 
