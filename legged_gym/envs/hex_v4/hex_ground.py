@@ -959,6 +959,9 @@ class HexGround(LeggedRobot):
         self.s_avoid_progress_hist_100 = deque(
             maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
         )
+        self.s_avoid_success_hist_100 = deque(
+            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
+        )
         self.s_avoid_collision_hist_50 = deque(
             maxlen=int(getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 50))
         )
@@ -969,6 +972,7 @@ class HexGround(LeggedRobot):
         self.extras["avoid_collision_rate_50"] = 0.0
         self.extras["avoid_exposure_rate_100"] = 0.0
         self.extras["avoid_progress_rate_100"] = 0.0
+        self.extras["avoid_success_rate_100"] = 0.0
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = 0
         self.extras["avoid_nearest_obstacle_dist"] = 5.0
@@ -1182,6 +1186,7 @@ class HexGround(LeggedRobot):
         episode_collision_flags: torch.Tensor,
         episode_exposure_flags: Optional[torch.Tensor] = None,
         episode_progress_flags: Optional[torch.Tensor] = None,
+        episode_success_flags: Optional[torch.Tensor] = None,
     ):
         if not self.s_avoid_enabled or episode_collision_flags.numel() == 0:
             return
@@ -1192,22 +1197,28 @@ class HexGround(LeggedRobot):
         if episode_progress_flags is None:
             episode_progress_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
         progress_flags = episode_progress_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
-        for flag, exposed, progressed in zip(flags, exposure_flags, progress_flags):
+        if episode_success_flags is None:
+            episode_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
+        success_flags = episode_success_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
+        for flag, exposed, progressed, succeeded in zip(flags, exposure_flags, progress_flags, success_flags):
             val = 1.0 if bool(flag) else 0.0
             self.s_avoid_collision_hist_100.append(val)
             self.s_avoid_collision_hist_50.append(val)
             self.s_avoid_exposure_hist_100.append(1.0 if bool(exposed) else 0.0)
             self.s_avoid_progress_hist_100.append(1.0 if bool(progressed) else 0.0)
+            self.s_avoid_success_hist_100.append(1.0 if bool(succeeded) else 0.0)
         self.s_avoid_total_completed_episodes += len(flags)
 
         rate100 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_100)
         rate50 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_50)
         exposure100 = self._s_avoid_collision_rate(self.s_avoid_exposure_hist_100)
         progress100 = self._s_avoid_collision_rate(self.s_avoid_progress_hist_100)
+        success100 = self._s_avoid_collision_rate(self.s_avoid_success_hist_100)
         min_eps = int(getattr(self.cfg.terrain, "avoid_stage_switch_min_episodes", 200))
         stage12_th = float(getattr(self.cfg.terrain, "avoid_stage12_collision_threshold", 0.05))
         stage12_exposure_th = float(getattr(self.cfg.terrain, "avoid_stage12_exposure_threshold", 0.60))
         stage12_progress_th = float(getattr(self.cfg.terrain, "avoid_stage12_progress_threshold", 0.35))
+        stage12_success_th = float(getattr(self.cfg.terrain, "avoid_stage12_success_threshold", 0.30))
         shrink_th = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_collision_threshold", 0.08))
         shrink_step = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_step", 0.05))
         width_min = float(getattr(self.cfg.terrain, "avoid_stage3_width_min", 0.85))
@@ -1221,8 +1232,10 @@ class HexGround(LeggedRobot):
             and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
             and len(self.s_avoid_exposure_hist_100) >= self.s_avoid_exposure_hist_100.maxlen
             and len(self.s_avoid_progress_hist_100) >= self.s_avoid_progress_hist_100.maxlen
+            and len(self.s_avoid_success_hist_100) >= self.s_avoid_success_hist_100.maxlen
             and exposure100 >= stage12_exposure_th
             and progress100 >= stage12_progress_th
+            and success100 >= stage12_success_th
             and rate100 < stage12_th
         ):
             self.s_avoid_stage = 2
@@ -1233,8 +1246,10 @@ class HexGround(LeggedRobot):
             and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
             and len(self.s_avoid_exposure_hist_100) >= self.s_avoid_exposure_hist_100.maxlen
             and len(self.s_avoid_progress_hist_100) >= self.s_avoid_progress_hist_100.maxlen
+            and len(self.s_avoid_success_hist_100) >= self.s_avoid_success_hist_100.maxlen
             and exposure100 >= stage12_exposure_th
             and progress100 >= stage12_progress_th
+            and success100 >= stage12_success_th
             and rate100 < stage12_th
         ):
             self.s_avoid_stage = 3
@@ -1244,7 +1259,8 @@ class HexGround(LeggedRobot):
             print(
                 f"[s_avoid_basic] stage {old_stage}->{self.s_avoid_stage} | "
                 f"episodes={self.s_avoid_total_completed_episodes}, collision100={rate100:.3f}, "
-                f"exposure100={exposure100:.3f}, progress100={progress100:.3f}"
+                f"exposure100={exposure100:.3f}, progress100={progress100:.3f}, "
+                f"success100={success100:.3f}"
             )
 
         if self.s_avoid_stage == 3:
@@ -1271,6 +1287,7 @@ class HexGround(LeggedRobot):
         self.extras["avoid_collision_rate_50"] = float(rate50)
         self.extras["avoid_exposure_rate_100"] = float(exposure100)
         self.extras["avoid_progress_rate_100"] = float(progress100)
+        self.extras["avoid_success_rate_100"] = float(success100)
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
 
@@ -1289,6 +1306,13 @@ class HexGround(LeggedRobot):
         best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
         progress = torch.clamp(init_dist - best_dist, min=0.0)
         return progress >= progress_delta
+
+    def _get_s_avoid_episode_success_flags(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.bool)
+        success_dist = float(getattr(self.cfg.terrain, "avoid_stage12_success_distance", 0.80))
+        best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
+        return best_dist <= success_dist
 
     def _resolve_s_avoid_stage(self, env_id: int, episode_idx: Optional[int] = None) -> int:
         debug_case = str(getattr(self.cfg.terrain, "avoid_map_debug_case", "")).strip().lower()
@@ -3405,7 +3429,13 @@ class HexGround(LeggedRobot):
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
                 completed_progress = self._get_s_avoid_episode_progress_flags(completed_env_ids)
-                self._update_s_avoid_curriculum(completed_flags, completed_exposed, completed_progress)
+                completed_success = self._get_s_avoid_episode_success_flags(completed_env_ids)
+                self._update_s_avoid_curriculum(
+                    completed_flags,
+                    completed_exposed,
+                    completed_progress,
+                    completed_success,
+                )
             self.s_avoid_episode_collision[env_ids] = False
             self.s_avoid_episode_exposed[env_ids] = False
             self.s_avoid_episode_goal_init_dist[env_ids] = 0.0

@@ -339,11 +339,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
 
         # Stage switch metrics.
         avoid_stage_switch_window = 100
-        avoid_stage_switch_min_episodes = 800
+        avoid_stage_switch_min_episodes = 1600
         avoid_stage12_collision_threshold = 0.05
         avoid_stage12_exposure_threshold = 0.60
         avoid_stage12_progress_threshold = 0.35
         avoid_stage12_progress_delta = 0.25
+        avoid_stage12_success_distance = 0.80
+        avoid_stage12_success_threshold = 0.30
 
         # Stage-3 corridor shrink curriculum.
         avoid_stage3_shrink_window = 50
