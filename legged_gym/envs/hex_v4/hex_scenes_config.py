@@ -342,6 +342,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage_switch_min_episodes = 800
         avoid_stage12_collision_threshold = 0.05
         avoid_stage12_exposure_threshold = 0.60
+        avoid_stage12_progress_threshold = 0.35
+        avoid_stage12_progress_delta = 0.25
 
         # Stage-3 corridor shrink curriculum.
         avoid_stage3_shrink_window = 50
@@ -421,7 +423,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["time_penalty"] = -0.02
         reward_cfg["velocity_scale"] = 0.05
         reward_cfg["backward_scale"] = 0.0
-        reward_cfg["body_backward_scale"] = 2.0
+        reward_cfg["body_backward_scale"] = 3.0
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = -0.05
 

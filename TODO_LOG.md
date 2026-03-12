@@ -80,6 +80,10 @@
 - [x] ~~[P0] 在 Avoid 高层奖励中加入弱 `target_center(goal_buf)` 与小 `yaw_rate_penalty`，验证是否能减少甩头并为后续 `w` 融合保留更连续的视觉上下文~~
 - [x] ~~[P0] 在 Avoid 高层奖励中加入机体系倒退弱惩罚，并补充前向/倒退速度日志，压制“全程倒着走”而不明显削弱全向绕障~~
 
+## 2026-03-12 s_avoid_basic 课程升级口径修正
+
+- [x] ~~[P0] 将 `s_avoid_basic` 的 `stage 1->2 / 2->3` 从“低碰撞 + 障碍暴露覆盖”改为“低碰撞 + 障碍暴露覆盖 + 有效推进”，避免靠保守退让也提前升阶段~~
+
 ## 2026-03-12 s_avoid_basic 完美图验证与 actor-only GT 地图
 
 - [x] ~~[P0] 锁定 `s_avoid_basic` 的 GT affordance 只走 `plane + actor` 几何栅格化，禁止回退到 heightfield 混合口径~~
