@@ -296,6 +296,25 @@ def _actor_grad_has_non_finite(module: nn.Module) -> bool:
     return False
 
 
+def _get_cuda_device_index(device: torch.device) -> Optional[int]:
+    if not torch.cuda.is_available():
+        return None
+    if not isinstance(device, torch.device) or device.type != "cuda":
+        return None
+    return torch.cuda.current_device() if device.index is None else int(device.index)
+
+
+def _cuda_mem_stats_text(device_index: Optional[int]) -> str:
+    if device_index is None or not torch.cuda.is_available():
+        return "cuda_mem=n/a"
+    allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 2)
+    max_allocated = torch.cuda.max_memory_allocated(device_index) / (1024 ** 2)
+    return (
+        f"cuda_mem[alloc/res/max]={allocated:.1f}/{reserved:.1f}/{max_allocated:.1f} MiB"
+    )
+
+
 def import_modules():
     """延迟导入，带容错处理"""
     global task_registry, TerrainAdaptivePlanner, HighLevelPlanner, LocomotionAdapter
@@ -2142,6 +2161,9 @@ def train(args):
     print("[Note] Online training stats are for monitoring only; use eval_highlevel.py for paper-report metrics.")
     print(f"{'='*60}\n")
     debug = bool(getattr(args, "debug", False))
+    debug_memory = bool(getattr(args, "debug_memory", False)) and torch.cuda.is_available() and device.type == "cuda"
+    debug_memory_interval = max(1, int(getattr(args, "debug_memory_interval", 10)))
+    debug_memory_device_index = _get_cuda_device_index(device) if debug_memory else None
     def dprint(*vals, **kwargs):
         if debug:
             print(*vals, **kwargs)
@@ -2688,6 +2710,13 @@ def train(args):
         avoid_exposure_rate100_value = 0.0
         avoid_nearest_obstacle_dist_value = 5.0
         local_iteration = iteration - start_iteration
+        log_memory_this_iter = debug_memory and (local_iteration % debug_memory_interval == 0)
+        if log_memory_this_iter and debug_memory_device_index is not None:
+            torch.cuda.reset_peak_memory_stats(debug_memory_device_index)
+            print(
+                f"[MemDebug][iter={iteration}] start "
+                f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+            )
         expert_alpha_rollout = (
             _get_expert_alpha(local_iteration, expert_interface_iters)
             if use_egpo else 0.0
@@ -2825,172 +2854,176 @@ def train(args):
                     )
                     cmd_f = cmd_f.detach()
                     cmd_a = cmd_a.detach()
-                gate_y, _ = policy.get_action(
-                    aff_stack_buf,
-                    state,
-                    goal,
-                    gate_difficulty,
-                    deterministic=False,
-                    critic_affordance_map=critic_aff_stack_buf,
-                    critic_robot_state=state,
-                    critic_goal=goal,
-                    critic_terrain_difficulty=gate_critic_difficulty,
-                )
-                gate_y_raw = gate_y
-                # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
-                # For now, y_eff = y (raw). Later (PCR-Net++), y_eff blends (y, w) and can be smoothed/hysteretic.
-                y_eff = gate_y_raw
-                gate_y_prev = env.prev_gate_y.clone()
-                if getattr(args, "gate_safe_clamp", False):
-                    safe_max = float(getattr(args, "gate_safe_max", 0.3))
-                    clearance_gate = env._compute_clearance_from_affordance(aff_map)
-                    # Keep clamp threshold consistent with the active post-processor (beta-adjusted).
-                    safe_thr = getattr(env.post_processor, "safe_distance", 0.25)
-                    if getattr(args, "beta", None) is not None:
-                        beta_v = float(getattr(args, "beta"))
-                        beta_v = float(np.clip(beta_v, 0.0, 1.0))
-                        if hasattr(env.post_processor, "get_effective_safe_distance"):
-                            safe_thr_t = env.post_processor.get_effective_safe_distance(beta_v)
-                            safe_thr = float(safe_thr_t.squeeze().detach().cpu().item())
-                    gate_y = torch.where(
-                        clearance_gate < safe_thr,
-                        torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
-                        gate_y,
+                with torch.no_grad():
+                    gate_y, _ = policy.get_action(
+                        aff_stack_buf,
+                        state,
+                        goal,
+                        gate_difficulty,
+                        deterministic=False,
+                        critic_affordance_map=critic_aff_stack_buf,
+                        critic_robot_state=state,
+                        critic_goal=goal,
+                        critic_terrain_difficulty=gate_critic_difficulty,
                     )
+                    gate_y = gate_y.detach()
                     gate_y_raw = gate_y
+                    # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
+                    # For now, y_eff = y (raw). Later (PCR-Net++), y_eff blends (y, w) and can be smoothed/hysteretic.
                     y_eff = gate_y_raw
-                log_prob, value, _, _ = policy.evaluate_actions(
-                    aff_stack_buf,
-                    state,
-                    goal,
-                    gate_difficulty,
-                    gate_y,
-                    critic_affordance_map=critic_aff_stack_buf,
-                    critic_robot_state=state,
-                    critic_goal=goal,
-                    critic_terrain_difficulty=gate_critic_difficulty,
-                )
-                cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
-                next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
-                # Record raw/effective gate and command-conditioned risk proxies for diagnostics.
-                if env_info is not None and isinstance(env_info, dict):
-                    post_info = env_info.get("post_info", None)
-                    if post_info is not None and isinstance(post_info, dict):
-                        post_info["gate_y_raw"] = gate_y_raw.detach().clone()
-                        post_info["y_eff"] = y_eff.detach().clone()
-                        # Command-conditioned clearance/risk proxies (cone-min over occupancy).
-                        safe_d = float(
-                            post_info.get(
-                                "post_safe_distance",
-                                getattr(env.post_processor, "safe_distance", 0.25),
-                            )
+                    gate_y_prev = env.prev_gate_y.clone()
+                    if getattr(args, "gate_safe_clamp", False):
+                        safe_max = float(getattr(args, "gate_safe_max", 0.3))
+                        clearance_gate = env._compute_clearance_from_affordance(aff_map)
+                        # Keep clamp threshold consistent with the active post-processor (beta-adjusted).
+                        safe_thr = getattr(env.post_processor, "safe_distance", 0.25)
+                        if getattr(args, "beta", None) is not None:
+                            beta_v = float(getattr(args, "beta"))
+                            beta_v = float(np.clip(beta_v, 0.0, 1.0))
+                            if hasattr(env.post_processor, "get_effective_safe_distance"):
+                                safe_thr_t = env.post_processor.get_effective_safe_distance(beta_v)
+                                safe_thr = float(safe_thr_t.squeeze().detach().cpu().item())
+                        gate_y = torch.where(
+                            clearance_gate < safe_thr,
+                            torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
+                            gate_y,
                         )
-                        free_d = float(
-                            post_info.get(
-                                "post_free_distance",
-                                getattr(env.post_processor, "free_distance", 0.6),
+                        gate_y_raw = gate_y
+                        y_eff = gate_y_raw
+                    log_prob, value, _, _ = policy.evaluate_actions(
+                        aff_stack_buf,
+                        state,
+                        goal,
+                        gate_difficulty,
+                        gate_y,
+                        critic_affordance_map=critic_aff_stack_buf,
+                        critic_robot_state=state,
+                        critic_goal=goal,
+                        critic_terrain_difficulty=gate_critic_difficulty,
+                    )
+                    cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
+                    next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
+                    rewards = rewards.detach()
+                    # Record raw/effective gate and command-conditioned risk proxies for diagnostics.
+                    if env_info is not None and isinstance(env_info, dict):
+                        post_info = env_info.get("post_info", None)
+                        if post_info is not None and isinstance(post_info, dict):
+                            post_info["gate_y_raw"] = gate_y_raw.detach().clone()
+                            post_info["y_eff"] = y_eff.detach().clone()
+                            # Command-conditioned clearance/risk proxies (cone-min over occupancy).
+                            safe_d = float(
+                                post_info.get(
+                                    "post_safe_distance",
+                                    getattr(env.post_processor, "safe_distance", 0.25),
+                                )
                             )
-                        )
-                        clr_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
-                        clr_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
-                        post_info["clearance_F"] = clr_f.detach().clone()
-                        post_info["clearance_A"] = clr_a.detach().clone()
-                        post_info["risk_F"] = env._risk_from_clearance(clr_f, safe_d, free_d).detach().clone()
-                        post_info["risk_A"] = env._risk_from_clearance(clr_a, safe_d, free_d).detach().clone()
+                            free_d = float(
+                                post_info.get(
+                                    "post_free_distance",
+                                    getattr(env.post_processor, "free_distance", 0.6),
+                                )
+                            )
+                            clr_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
+                            clr_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
+                            post_info["clearance_F"] = clr_f.detach().clone()
+                            post_info["clearance_A"] = clr_a.detach().clone()
+                            post_info["risk_F"] = env._risk_from_clearance(clr_f, safe_d, free_d).detach().clone()
+                            post_info["risk_A"] = env._risk_from_clearance(clr_a, safe_d, free_d).detach().clone()
                 action = gate_y.unsqueeze(-1)
                 cmd_used = cmd
             else:
-                cmd, _ = policy.get_action(
-                    aff_stack_buf,
-                    state,
-                    goal,
-                    difficulty,
-                    deterministic=False,
-                    critic_affordance_map=critic_aff_stack_buf,
-                    critic_robot_state=state,
-                    critic_goal=goal,
-                    critic_terrain_difficulty=critic_difficulty,
-                )
-                if (use_egpo or use_follow_expert) and compute_s0_follow_expert_cmd is not None:
-                    policy_cmd_raw = cmd
-                    target_world_xy = getattr(env.env, "target_world", None)
-                    target_vel_world_xy = getattr(env.env, "target_vel_world", None)
-                    target_heading = getattr(env.env, "target_heading", None)
-                    quat = env.env.root_states[:, 3:7]
-                    x_q, y_q, z_q, w_q = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-                    robot_heading = torch.atan2(
-                        2.0 * (w_q * z_q + x_q * y_q),
-                        1.0 - 2.0 * (y_q * y_q + z_q * z_q),
+                with torch.no_grad():
+                    cmd, _ = policy.get_action(
+                        aff_stack_buf,
+                        state,
+                        goal,
+                        difficulty,
+                        deterministic=False,
+                        critic_affordance_map=critic_aff_stack_buf,
+                        critic_robot_state=state,
+                        critic_goal=goal,
+                        critic_terrain_difficulty=critic_difficulty,
                     )
-                    heading_offset = float(getattr(getattr(env, "reward_cfg", None), "heading_offset_rad", 0.0))
-                    robot_heading_for_expert = robot_heading + heading_offset
-                    robot_heading_for_expert = torch.atan2(
-                        torch.sin(robot_heading_for_expert),
-                        torch.cos(robot_heading_for_expert),
-                    )
-                    if target_world_xy is None:
-                        target_world_xy = torch.zeros(env.num_envs, 2, device=device)
-                    if target_vel_world_xy is None:
-                        target_vel_world_xy = torch.zeros(env.num_envs, 2, device=device)
-                    if target_heading is None:
-                        target_heading = torch.zeros(env.num_envs, device=device)
-                    expert_action = compute_s0_follow_expert_cmd(
-                        robot_pos_world_xy=env.env.root_states[:, :2],
-                        robot_heading=robot_heading_for_expert,
-                        target_world_xy=target_world_xy,
-                        # Keep BC labels consistent with policy-observable inputs only.
-                        target_vel_world_xy=None,
-                        target_heading=None,
-                        cmd_scale=cmd_scale,
-                        reset_mask=reset_mask_prev,
-                    )
-                    if use_egpo:
-                        egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
-                        egpo_expert_cmd_sum += expert_action.sum(dim=0)
-                        egpo_cmd_count += float(policy_cmd_raw.shape[0])
-                    if debug and use_egpo:
-                        # Keep debug heading diagnostics on the same branch used by expert labels
-                        # in S0: no target vel/heading, geometric fallback direction only.
-                        to_target_world = target_world_xy - env.env.root_states[:, :2]
-                        dir_world = to_target_world / torch.norm(
-                            to_target_world, dim=1, keepdim=True
-                        ).clamp_min(1e-6)
-                        default_dir = torch.zeros_like(dir_world)
-                        default_dir[:, 1] = 1.0
-                        dir_world = torch.where(
-                            torch.norm(to_target_world, dim=1, keepdim=True) > 1e-6,
-                            dir_world,
-                            default_dir,
+                    cmd = cmd.detach()
+                    if (use_egpo or use_follow_expert) and compute_s0_follow_expert_cmd is not None:
+                        policy_cmd_raw = cmd
+                        target_world_xy = getattr(env.env, "target_world", None)
+                        target_vel_world_xy = getattr(env.env, "target_vel_world", None)
+                        target_heading = getattr(env.env, "target_heading", None)
+                        quat = env.env.root_states[:, 3:7]
+                        x_q, y_q, z_q, w_q = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+                        robot_heading = torch.atan2(
+                            2.0 * (w_q * z_q + x_q * y_q),
+                            1.0 - 2.0 * (y_q * y_q + z_q * z_q),
                         )
-                        robot_fwd_world = torch.stack(
-                            [torch.sin(robot_heading_for_expert), torch.cos(robot_heading_for_expert)], dim=1
+                        heading_offset = float(getattr(getattr(env, "reward_cfg", None), "heading_offset_rad", 0.0))
+                        robot_heading_for_expert = robot_heading + heading_offset
+                        robot_heading_for_expert = torch.atan2(
+                            torch.sin(robot_heading_for_expert),
+                            torch.cos(robot_heading_for_expert),
                         )
-                        align_cos = torch.sum(robot_fwd_world * dir_world, dim=1).clamp(-1.0, 1.0)
-                        egpo_heading_align_cos_sum += align_cos.sum()
-                        heading_err_deg = torch.rad2deg(torch.acos(align_cos))
-                        egpo_heading_error_deg_samples.append(heading_err_deg.detach())
-                    if use_egpo:
-                        expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
-                        cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
-                        if debug:
-                            egpo_diag_yaw_before = robot_heading.detach()
-                            egpo_diag_cmd_omega = cmd[:, 2].detach()
-                    elif use_follow_expert:
-                        cmd = expert_action
-                log_prob, value, _, _ = policy.evaluate_actions(
-                    aff_stack_buf,
-                    state,
-                    goal,
-                    difficulty,
-                    cmd,
-                    critic_affordance_map=critic_aff_stack_buf,
-                    critic_robot_state=state,
-                    critic_goal=goal,
-                    critic_terrain_difficulty=critic_difficulty,
-                )
+                        if target_world_xy is None:
+                            target_world_xy = torch.zeros(env.num_envs, 2, device=device)
+                        if target_vel_world_xy is None:
+                            target_vel_world_xy = torch.zeros(env.num_envs, 2, device=device)
+                        if target_heading is None:
+                            target_heading = torch.zeros(env.num_envs, device=device)
+                        expert_action = compute_s0_follow_expert_cmd(
+                            robot_pos_world_xy=env.env.root_states[:, :2],
+                            robot_heading=robot_heading_for_expert,
+                            target_world_xy=target_world_xy,
+                            # Keep BC labels consistent with policy-observable inputs only.
+                            target_vel_world_xy=None,
+                            target_heading=None,
+                            cmd_scale=cmd_scale,
+                            reset_mask=reset_mask_prev,
+                        )
+                        if use_egpo:
+                            egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
+                            egpo_expert_cmd_sum += expert_action.sum(dim=0)
+                            egpo_cmd_count += float(policy_cmd_raw.shape[0])
+                        if debug and use_egpo:
+                            # Keep debug heading diagnostics on the same branch used by expert labels
+                            # in S0: no target vel/heading, geometric fallback direction only.
+                            to_target_world = target_world_xy - env.env.root_states[:, :2]
+                            dir_world = to_target_world / torch.norm(
+                                to_target_world, dim=1, keepdim=True
+                            ).clamp_min(1e-6)
+                            default_dir = torch.zeros_like(dir_world)
+                            default_dir[:, 1] = 1.0
+                            dir_world = torch.where(
+                                torch.norm(to_target_world, dim=1, keepdim=True) > 1e-6,
+                                dir_world,
+                                default_dir,
+                            )
+                            robot_fwd_world = torch.stack(
+                                [torch.sin(robot_heading_for_expert), torch.cos(robot_heading_for_expert)], dim=1
+                            )
+                            align_cos = torch.sum(robot_fwd_world * dir_world, dim=1).clamp(-1.0, 1.0)
+                            egpo_heading_align_cos_sum += align_cos.sum()
+                            heading_err_deg = torch.rad2deg(torch.acos(align_cos))
+                            egpo_heading_error_deg_samples.append(heading_err_deg.detach())
+                        if use_egpo:
+                            expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
+                            cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
+                            if debug:
+                                egpo_diag_yaw_before = robot_heading.detach()
+                                egpo_diag_cmd_omega = cmd[:, 2].detach()
+                        elif use_follow_expert:
+                            cmd = expert_action
+                    log_prob, value, _, _ = policy.evaluate_actions(
+                        aff_stack_buf,
+                        state,
+                        goal,
+                        difficulty,
+                        cmd,
+                        critic_affordance_map=critic_aff_stack_buf,
+                        critic_robot_state=state,
+                        critic_goal=goal,
+                        critic_terrain_difficulty=critic_difficulty,
+                    )
 
-                if args.mode == 'student' and teacher_model is not None:
-                    with torch.no_grad():
+                    if args.mode == 'student' and teacher_model is not None:
                         if teacher_stack_buf is None:
                             teacher_stack_buf = actor_gt_aff_map.repeat(1, aff_stack, 1, 1)
                         t_cmd, _ = teacher_model.get_action(
@@ -3001,35 +3034,36 @@ def train(args):
                         )
                         teacher_action = t_cmd
 
-                next_obs, rewards, dones, env_info = env.step(cmd)
-                if debug and use_egpo and egpo_diag_yaw_before is not None and egpo_diag_cmd_omega is not None:
-                    cmd_omega_eval = egpo_diag_cmd_omega
-                    if env_info is not None and isinstance(env_info, dict):
-                        post_info = env_info.get("post_info", None)
-                        if post_info is not None and isinstance(post_info, dict):
-                            cmd_slew = post_info.get("cmd_slew", None)
-                            if cmd_slew is not None:
-                                if not torch.is_tensor(cmd_slew):
-                                    cmd_slew = torch.as_tensor(cmd_slew, device=device)
-                                if cmd_slew.dim() == 1:
-                                    cmd_slew = cmd_slew.unsqueeze(0)
-                                if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 3:
-                                    cmd_omega_eval = cmd_slew[:, 2].detach()
-                    quat_after = env.env.root_states[:, 3:7]
-                    x_a, y_a, z_a, w_a = quat_after[:, 0], quat_after[:, 1], quat_after[:, 2], quat_after[:, 3]
-                    yaw_after = torch.atan2(
-                        2.0 * (w_a * z_a + x_a * y_a),
-                        1.0 - 2.0 * (y_a * y_a + z_a * z_a),
-                    )
-                    dyaw = torch.atan2(
-                        torch.sin(yaw_after - egpo_diag_yaw_before),
-                        torch.cos(yaw_after - egpo_diag_yaw_before),
-                    )
-                    valid = torch.abs(cmd_omega_eval) > 0.05
-                    if valid.any():
-                        sign_match = (cmd_omega_eval[valid] * dyaw[valid]) > 0.0
-                        egpo_yaw_resp_sign_match_sum += sign_match.float().sum()
-                        egpo_yaw_resp_sign_count += valid.float().sum()
+                    next_obs, rewards, dones, env_info = env.step(cmd)
+                    rewards = rewards.detach()
+                    if debug and use_egpo and egpo_diag_yaw_before is not None and egpo_diag_cmd_omega is not None:
+                        cmd_omega_eval = egpo_diag_cmd_omega
+                        if env_info is not None and isinstance(env_info, dict):
+                            post_info = env_info.get("post_info", None)
+                            if post_info is not None and isinstance(post_info, dict):
+                                cmd_slew = post_info.get("cmd_slew", None)
+                                if cmd_slew is not None:
+                                    if not torch.is_tensor(cmd_slew):
+                                        cmd_slew = torch.as_tensor(cmd_slew, device=device)
+                                    if cmd_slew.dim() == 1:
+                                        cmd_slew = cmd_slew.unsqueeze(0)
+                                    if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 3:
+                                        cmd_omega_eval = cmd_slew[:, 2].detach()
+                        quat_after = env.env.root_states[:, 3:7]
+                        x_a, y_a, z_a, w_a = quat_after[:, 0], quat_after[:, 1], quat_after[:, 2], quat_after[:, 3]
+                        yaw_after = torch.atan2(
+                            2.0 * (w_a * z_a + x_a * y_a),
+                            1.0 - 2.0 * (y_a * y_a + z_a * z_a),
+                        )
+                        dyaw = torch.atan2(
+                            torch.sin(yaw_after - egpo_diag_yaw_before),
+                            torch.cos(yaw_after - egpo_diag_yaw_before),
+                        )
+                        valid = torch.abs(cmd_omega_eval) > 0.05
+                        if valid.any():
+                            sign_match = (cmd_omega_eval[valid] * dyaw[valid]) > 0.0
+                            egpo_yaw_resp_sign_match_sum += sign_match.float().sum()
+                            egpo_yaw_resp_sign_count += valid.float().sum()
                 action = cmd
                 gate_y_prev = None
                 cmd_used = cmd
@@ -3239,6 +3273,11 @@ def train(args):
                     last_goal_obs[dones] = obs_dict['goal'][dones]
 
         rollout_time = time.time() - rollout_start
+        if log_memory_this_iter and debug_memory_device_index is not None:
+            print(
+                f"[MemDebug][iter={iteration}] after_rollout "
+                f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+            )
         
         # ============ Update Phase ============
         # 计算最后一步的 value (Bootstrap)
@@ -3407,6 +3446,16 @@ def train(args):
                 mb_critic_difficulties = torch.nan_to_num(mb_critic_difficulties, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # 评估当前策略
+                if (
+                    log_memory_this_iter
+                    and debug_memory_device_index is not None
+                    and epoch == 0
+                    and start == 0
+                ):
+                    print(
+                        f"[MemDebug][iter={iteration}] pre_eval "
+                        f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+                    )
                 try:
                     if is_gate:
                         gate_difficulty = mb_difficulties if gate_use_difficulty else torch.zeros_like(mb_difficulties)
@@ -3444,6 +3493,16 @@ def train(args):
                         try_sanitize=True,
                     )
                     continue
+                if (
+                    log_memory_this_iter
+                    and debug_memory_device_index is not None
+                    and epoch == 0
+                    and start == 0
+                ):
+                    print(
+                        f"[MemDebug][iter={iteration}] post_eval "
+                        f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+                    )
                 if (
                     (not torch.isfinite(new_log_probs).all())
                     or (not torch.isfinite(new_values).all())
@@ -3552,8 +3611,18 @@ def train(args):
                     continue
                 
                 # 优化
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if (
+                    log_memory_this_iter
+                    and debug_memory_device_index is not None
+                    and epoch == 0
+                    and start == 0
+                ):
+                    print(
+                        f"[MemDebug][iter={iteration}] post_backward "
+                        f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+                    )
                 if _actor_grad_has_non_finite(policy):
                     _handle_nonfinite_event(
                         "non-finite actor gradients before optimizer.step",
@@ -3570,6 +3639,16 @@ def train(args):
                     )
                     continue
                 optimizer.step()
+                if (
+                    log_memory_this_iter
+                    and debug_memory_device_index is not None
+                    and epoch == 0
+                    and start == 0
+                ):
+                    print(
+                        f"[MemDebug][iter={iteration}] post_step "
+                        f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+                    )
                 if _module_has_non_finite(policy):
                     _handle_nonfinite_event(
                         "non-finite policy params after optimizer.step",
@@ -3589,8 +3668,38 @@ def train(args):
                 effective_bc_loss_sum += effective_bc_loss.item()
                 expert_log_prob_mean_sum += expert_log_prob_mean.item()
                 num_updates += 1
+
+                del (
+                    mb_actions,
+                    mb_old_log_probs,
+                    mb_advantages,
+                    mb_returns,
+                    mb_states,
+                    mb_goals,
+                    mb_aff_maps,
+                    mb_difficulties,
+                    mb_critic_aff_maps,
+                    mb_critic_difficulties,
+                    new_log_probs,
+                    new_values,
+                    entropy,
+                    policy_loss,
+                    value_loss,
+                    entropy_loss,
+                    distill_loss,
+                    bc_loss,
+                    effective_policy_loss,
+                    effective_entropy_loss,
+                    effective_bc_loss,
+                    loss,
+                )
         
         update_time = time.time() - start_time - rollout_time
+        if log_memory_this_iter and debug_memory_device_index is not None:
+            print(
+                f"[MemDebug][iter={iteration}] after_update "
+                f"{_cuda_mem_stats_text(debug_memory_device_index)}"
+            )
 
         # Explained variance (基于 rollout value 估计)
         returns_flat = returns.view(-1)
@@ -4021,6 +4130,10 @@ if __name__ == "__main__":
                         help='保存间隔')
     parser.add_argument('--debug', action='store_true',
                         help='debug 输出（场景/障碍位置等）')
+    parser.add_argument('--debug_memory', action='store_true',
+                        help='打印训练阶段 CUDA 显存诊断（rollout/update/首个mini-batch）')
+    parser.add_argument('--debug_memory_interval', type=int, default=10,
+                        help='显存诊断打印间隔（按 iteration）')
     parser.add_argument(
         '--force_cmd_y',
         action='store_true',
