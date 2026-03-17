@@ -460,10 +460,21 @@ class HexGround(LeggedRobot):
             self.s_avoid_direct_single_obstacle = bool(
                 getattr(self.cfg.terrain, "avoid_direct_single_obstacle", False)
             )
-            asset_options = gymapi.AssetOptions()
-            asset_options.fix_base_link = True
-            asset_options.disable_gravity = True
-            asset_options.collapse_fixed_joints = True
+            fixed_asset_options = gymapi.AssetOptions()
+            fixed_asset_options.fix_base_link = True
+            fixed_asset_options.disable_gravity = True
+            fixed_asset_options.collapse_fixed_joints = True
+
+            pooled_asset_options = gymapi.AssetOptions()
+            pooled_asset_options.fix_base_link = False
+            pooled_asset_options.disable_gravity = True
+            pooled_asset_options.collapse_fixed_joints = True
+            pooled_asset_options.linear_damping = float(
+                getattr(self.cfg.terrain, "avoid_pooled_linear_damping", 50.0)
+            )
+            pooled_asset_options.angular_damping = float(
+                getattr(self.cfg.terrain, "avoid_pooled_angular_damping", 50.0)
+            )
 
             cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
             cap_h = float(getattr(self.cfg.terrain, "avoid_capsule_height", 0.5))
@@ -475,15 +486,17 @@ class HexGround(LeggedRobot):
             wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
             wall_h = float(getattr(self.cfg.terrain, "avoid_wall_height", 0.5))
 
-            self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, asset_options)
-            self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, asset_options)
-            self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, asset_options)
-
             if self.s_avoid_direct_single_obstacle:
+                self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, fixed_asset_options)
+                self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, fixed_asset_options)
+                self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, fixed_asset_options)
                 self.s_avoid_capsule_slot_count = 1
                 self.s_avoid_box_slot_count = 0
                 self.s_avoid_wall_slot_count = 0
             else:
+                self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, pooled_asset_options)
+                self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, pooled_asset_options)
+                self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, pooled_asset_options)
                 self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
                 self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
                 self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
@@ -510,6 +523,14 @@ class HexGround(LeggedRobot):
             )
             if self.s_avoid_direct_single_obstacle:
                 print("[Scene] s_avoid_basic direct-single-obstacle debug enabled")
+            else:
+                pooled_mass = float(getattr(self.cfg.terrain, "avoid_pooled_actor_mass", 1000.0))
+                print(
+                    "[Scene] s_avoid_basic pooled obstacle body: "
+                    f"fix_base_link=False, mass={pooled_mass:.1f}, "
+                    f"lin_damp={pooled_asset_options.linear_damping:.1f}, "
+                    f"ang_damp={pooled_asset_options.angular_damping:.1f}"
+                )
 
         terrain_obj = getattr(self, "terrain", None)
         self.scene_generator = getattr(terrain_obj, "scene_generator", None)
@@ -605,6 +626,33 @@ class HexGround(LeggedRobot):
                 if not getattr(self, flag, False):
                     print(f"[Debug] {tag} shape filter update failed")
                     setattr(self, flag, True)
+
+    def _configure_s_avoid_pooled_body(self, env_handle, actor_handle, env_id: int):
+        if not self.s_avoid_enabled or self.s_avoid_direct_single_obstacle:
+            return
+        target_mass = float(getattr(self.cfg.terrain, "avoid_pooled_actor_mass", 1000.0))
+        try:
+            body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
+            changed = False
+            for prop in body_props:
+                if float(getattr(prop, "mass", 0.0)) < target_mass:
+                    prop.mass = target_mass
+                    changed = True
+            if changed:
+                self.gym.set_actor_rigid_body_properties(
+                    env_handle, actor_handle, body_props, recomputeInertia=True
+                )
+            if getattr(self, "debug_viz", False) and env_id == 0:
+                flag = f"_s_avoid_body_mass_logged_{id(actor_handle)}"
+                if not getattr(self, flag, False):
+                    masses = [float(getattr(prop, "mass", 0.0)) for prop in body_props]
+                    print(f"[Debug] s_avoid pooled actor masses={masses}")
+                    setattr(self, flag, True)
+        except Exception:
+            if getattr(self, "debug_viz", False) and env_id == 0:
+                if not getattr(self, "_s_avoid_body_props_warned", False):
+                    print("[Debug] s_avoid pooled body property update failed")
+                    self._s_avoid_body_props_warned = True
 
     def _on_create_robot(self, env_id, env_handle, actor_handle):
         if hasattr(self, "robot_actor_indices"):
@@ -716,6 +764,7 @@ class HexGround(LeggedRobot):
                 self._apply_actor_collision_filter(
                     env_handle, actor_handle, scene_filter, env_id, debug_tag=f"s_avoid_obs_{slot}"
                 )
+                self._configure_s_avoid_pooled_body(env_handle, actor_handle, env_id)
                 self.s_avoid_actor_handles[env_id][slot] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.s_avoid_actor_indices[env_id, slot] = actor_index
@@ -1918,7 +1967,6 @@ class HexGround(LeggedRobot):
                     gymtorch.unwrap_tensor(flat_indices),
                     int(flat_indices.numel()),
                 )
-            self._sync_s_avoid_actor_body_states(env_ids)
             return
 
         for env_id in env_ids.tolist():
@@ -2090,42 +2138,6 @@ class HexGround(LeggedRobot):
             self.s_avoid_band_y_max[env_id] = band_y_max
 
         self._sync_s_avoid_obstacles(env_ids)
-
-    def _sync_s_avoid_actor_body_states(self, env_ids: torch.Tensor):
-        if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_handles is None:
-            return
-        slot_n = int(self.s_avoid_total_slots)
-        scene_filter = self._scene_collision_filter()
-        for env_id in env_ids.tolist():
-            handles = self.s_avoid_actor_handles[env_id]
-            for slot in range(slot_n):
-                pos = self.s_avoid_pos_world[env_id, slot]
-                quat = self.s_avoid_quat_world[env_id, slot]
-                body_states = self.gym.get_actor_rigid_body_states(
-                    self.envs[env_id], handles[slot], gymapi.STATE_NONE
-                )
-                body_states["pose"]["p"].fill(
-                    (float(pos[0].item()), float(pos[1].item()), float(pos[2].item()))
-                )
-                body_states["pose"]["r"].fill(
-                    (
-                        float(quat[0].item()),
-                        float(quat[1].item()),
-                        float(quat[2].item()),
-                        float(quat[3].item()),
-                    )
-                )
-                body_states["vel"]["linear"].fill((0.0, 0.0, 0.0))
-                body_states["vel"]["angular"].fill((0.0, 0.0, 0.0))
-                # Also push per-actor rigid body states so fixed-base obstacle contacts
-                # are refreshed on resets, instead of relying only on root-state tensors.
-                self.gym.set_actor_rigid_body_states(
-                    self.envs[env_id], handles[slot], body_states, gymapi.STATE_ALL
-                )
-                self._apply_actor_collision_filter(
-                    self.envs[env_id], handles[slot], scene_filter, env_id, debug_tag=f"s_avoid_obs_{slot}"
-                )
-
     def _sync_s_avoid_obstacles(self, env_ids: torch.Tensor):
         if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
             return
@@ -2147,7 +2159,6 @@ class HexGround(LeggedRobot):
             gymtorch.unwrap_tensor(flat_indices),
             int(flat_indices.numel()),
         )
-        self._sync_s_avoid_actor_body_states(env_ids)
 
         scene_filter = self._scene_collision_filter()
         for env_id in env_ids.tolist():
