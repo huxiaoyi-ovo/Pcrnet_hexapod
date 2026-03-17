@@ -1528,6 +1528,11 @@ class HierarchicalHexapodEnv:
             size_y = 2.0 * (sin_a * half_x + cos_a * half_y)
             rasterize(env_id, center_x, center_y, size_x, size_y)
 
+        def get_static_obstacle_field(spec, key: str):
+            if isinstance(spec, dict):
+                return spec[key]
+            return getattr(spec, key)
+
         if hasattr(self.env, "scene_spec_cache"):
             for env_id in range(self.num_envs):
                 scene_spec = self.env.scene_spec_cache[env_id]
@@ -1535,9 +1540,11 @@ class HierarchicalHexapodEnv:
                     continue
                 origin = self.env.env_origins[env_id]
                 for spec in scene_spec.static_obstacles:
-                    center_x = float(origin[0].item() + spec.position[0])
-                    center_y = float(origin[1].item() + spec.position[1])
-                    rasterize(env_id, center_x, center_y, spec.size[0], spec.size[1])
+                    spec_pos = get_static_obstacle_field(spec, "position")
+                    spec_size = get_static_obstacle_field(spec, "size")
+                    center_x = float(origin[0].item() + spec_pos[0])
+                    center_y = float(origin[1].item() + spec_pos[1])
+                    rasterize(env_id, center_x, center_y, spec_size[0], spec_size[1])
 
         if hasattr(self.env, "dynamic_active") and self.env.dynamic_active is not None:
             dyn_size = float(getattr(self.env.cfg.terrain, "scene_dynamic_size", 0.4))
@@ -2798,12 +2805,14 @@ def train(args):
                 num_static = len(scene_spec.static_obstacles)
                 print(f"[Debug] env0 scene_spec static_obstacles: {num_static}")
                 for idx, spec in enumerate(scene_spec.static_obstacles[:5]):
-                    wx = ox + float(spec.position[0])
-                    wy = oy + float(spec.position[1])
-                    wz = oz + float(spec.position[2])
-                    sx, sy, sz = spec.size
+                    spec_pos = spec["position"] if isinstance(spec, dict) else spec.position
+                    spec_size = spec["size"] if isinstance(spec, dict) else spec.size
+                    wx = ox + float(spec_pos[0])
+                    wy = oy + float(spec_pos[1])
+                    wz = oz + float(spec_pos[2])
+                    sx, sy, sz = spec_size
                     print(
-                        f"[Debug] spec[{idx}] pos=({spec.position[0]:.3f},{spec.position[1]:.3f},{spec.position[2]:.3f}) "
+                        f"[Debug] spec[{idx}] pos=({spec_pos[0]:.3f},{spec_pos[1]:.3f},{spec_pos[2]:.3f}) "
                         f"world=({wx:.3f},{wy:.3f},{wz:.3f}) size=({sx:.3f},{sy:.3f},{sz:.3f})"
                     )
             # Applied actor positions (static)
