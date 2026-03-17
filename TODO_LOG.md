@@ -64,6 +64,10 @@
 
 - [x] ~~[P0] 按 Isaac Gym 官方 group/filter 语义修正 actor 障碍碰撞设置：同 env 内 robot/obstacle 保持同组，scene filter 改回 0，先恢复真实物理碰撞~~
 
+## 2026-03-17 Avoid obstacle band 软约束
+
+- [x] ~~[P1] 为 `s_avoid_basic` 增加基于障碍簇几何的 obstacle band 软约束：reset 时缓存 per-env band，训练时按 `y_progress` 激活并对越界距离给软惩罚（先不加 reset）~~
+
 ## 2026-03-17 s_avoid 障碍碰撞根因排查收口
 
 - [x] ~~[P0] 增加 `s_avoid_basic` 的“单障碍直接创建”调试对照，验证穿透是否来自 pooled actor 地下创建后再搬运这条用法~~
@@ -1315,3 +1319,8 @@
 - [x] Must: `s_avoid_basic` 课程统计改为按 stage 独立记账，切换 stage 时清空目标 stage 的滑动窗口，杜绝历史窗口继承导致的连跳
 - [x] Must: `stage1->2` 与 `stage2->3` 拆成两套独立门槛与窗口，不再共用同一套 exposure/progress/success/collision 条件
 - [x] Must: `stage3` corridor 收窄改为独立窗口 + 更长冷却，避免刚进 stage3 就快速连续收窄
+
+## 2026-03-17 训练语义审计 - Avoid 碰撞统计口径收口
+
+- [x] Must: 将 `terminal fail penalty` 从 `reward_terms["collision"]` 中拆出，避免控制台把终止失败误读成真实碰撞项
+- [x] Must: 为 `avoid` 增加最小 obstacle 命中审计量，至少区分“靠近/命中 active obstacle actor”与一般身体接触

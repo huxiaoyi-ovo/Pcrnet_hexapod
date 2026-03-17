@@ -1005,6 +1005,11 @@ class HexGround(LeggedRobot):
             (self.num_envs, self.s_avoid_total_slots, 4), device=self.device, dtype=torch.float
         )
         self.s_avoid_quat_world[..., 3] = 1.0
+        self.s_avoid_band_x_min = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_band_x_max = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_band_y_min = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_band_y_max = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_spawn_world_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_episode_collision = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.s_avoid_episode_exposed = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.s_avoid_episode_goal_init_dist = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
@@ -1056,6 +1061,91 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage3_shrink_event"] = 0.0
         self.extras["avoid_stage3_shrink_from_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
+
+    def _get_s_avoid_spawn_local_y(self, stage: int) -> float:
+        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
+        if int(stage) == 3:
+            return -0.5 * wall_l + 0.8
+        return -1.6
+
+    def _compute_s_avoid_band_world(
+        self,
+        env_id: int,
+        stage: int,
+        active: np.ndarray,
+        pos_local: np.ndarray,
+        quat: np.ndarray,
+    ) -> Tuple[float, float, float, float]:
+        margin_x = float(getattr(self.cfg.terrain, "avoid_band_margin_x", 0.45))
+        margin_y = float(getattr(self.cfg.terrain, "avoid_band_margin_y", 0.30))
+        activate_progress = float(getattr(self.nav_cfg, "avoid_band_activate_progress", 0.50))
+        goal_y_range = getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])
+        goal_y_max = float(goal_y_range[1]) if len(goal_y_range) >= 2 else 2.8
+
+        cap_slots = int(self.s_avoid_capsule_slot_count)
+        box_slots = int(self.s_avoid_box_slot_count)
+        box_end = cap_slots + box_slots
+
+        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        box_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_y", 0.4))
+        wall_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
+
+        x_min = float("inf")
+        x_max = float("-inf")
+        y_min = float("inf")
+        y_max = float("-inf")
+
+        for slot in range(int(self.s_avoid_total_slots)):
+            if not bool(active[slot]):
+                continue
+            cx = float(pos_local[slot, 0])
+            cy = float(pos_local[slot, 1])
+            if slot < cap_slots:
+                half_x = cap_r
+                half_y = cap_r
+            else:
+                qz = float(quat[slot, 2])
+                qw = float(quat[slot, 3])
+                yaw = 2.0 * math.atan2(qz, qw)
+                cos_yaw = abs(math.cos(yaw))
+                sin_yaw = abs(math.sin(yaw))
+                if slot < box_end:
+                    half_x = cos_yaw * box_hx + sin_yaw * box_hy
+                    half_y = sin_yaw * box_hx + cos_yaw * box_hy
+                else:
+                    half_x = cos_yaw * wall_hx + sin_yaw * wall_hy
+                    half_y = sin_yaw * wall_hx + cos_yaw * wall_hy
+            x_min = min(x_min, cx - half_x)
+            x_max = max(x_max, cx + half_x)
+            y_min = min(y_min, cy - half_y)
+            y_max = max(y_max, cy + half_y)
+
+        spawn_local_y = self._get_s_avoid_spawn_local_y(stage)
+        band_front_start_y = spawn_local_y + activate_progress
+        if not math.isfinite(x_min) or not math.isfinite(y_min):
+            half_w = 0.5 * float(self.cfg.terrain.terrain_width)
+            env_origin_x = float(self.env_origins[env_id, 0].item())
+            env_origin_y = float(self.env_origins[env_id, 1].item())
+            return (
+                env_origin_x - half_w,
+                env_origin_x + half_w,
+                env_origin_y + band_front_start_y,
+                env_origin_y + max(goal_y_max + margin_y, band_front_start_y + 0.5),
+            )
+
+        x_half = max(abs(x_min), abs(x_max)) + margin_x
+        band_y_min_local = min(y_min - margin_y, band_front_start_y)
+        band_y_max_local = max(y_max + margin_y, goal_y_max + margin_y)
+        env_origin_x = float(self.env_origins[env_id, 0].item())
+        env_origin_y = float(self.env_origins[env_id, 1].item())
+        return (
+            env_origin_x - x_half,
+            env_origin_x + x_half,
+            env_origin_y + band_y_min_local,
+            env_origin_y + band_y_max_local,
+        )
 
 
     def _get_scene_spec(self, env_id: int):
@@ -1534,6 +1624,7 @@ class HexGround(LeggedRobot):
         if stage12_mask.any():
             stage12_ids = env_ids[stage12_mask]
             self.root_states[stage12_ids, 1] += stage12_spawn_y
+        self.s_avoid_spawn_world_y[env_ids] = self.root_states[env_ids, 1]
 
         body_plus_y_target_deg = float(getattr(self.cfg.terrain, "avoid_spawn_body_plus_y_deg", 0.0))
         body_plus_y_target_rad = math.radians(body_plus_y_target_deg)
@@ -1801,9 +1892,20 @@ class HexGround(LeggedRobot):
                 pos_world[:, 0] += env_origin[0]
                 pos_world[:, 1] += env_origin[1]
                 pos_world[:, 2] += env_origin[2]
+                band_x_min, band_x_max, band_y_min, band_y_max = self._compute_s_avoid_band_world(
+                    env_id=env_id,
+                    stage=1,
+                    active=active,
+                    pos_local=pos,
+                    quat=quat,
+                )
                 self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
                 self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
                 self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+                self.s_avoid_band_x_min[env_id] = band_x_min
+                self.s_avoid_band_x_max[env_id] = band_x_max
+                self.s_avoid_band_y_min[env_id] = band_y_min
+                self.s_avoid_band_y_max[env_id] = band_y_max
             if root_states is not None and flat_indices.numel() > 0:
                 pos_flat = self.s_avoid_pos_world[env_ids].reshape(-1, 3)
                 quat_flat = self.s_avoid_quat_world[env_ids].reshape(-1, 4)
@@ -1863,9 +1965,20 @@ class HexGround(LeggedRobot):
                 pos_world[:, 0] += env_origin[0]
                 pos_world[:, 1] += env_origin[1]
                 pos_world[:, 2] += env_origin[2]
+                band_x_min, band_x_max, band_y_min, band_y_max = self._compute_s_avoid_band_world(
+                    env_id=env_id,
+                    stage=stage,
+                    active=active,
+                    pos_local=pos,
+                    quat=quat,
+                )
                 self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
                 self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
                 self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+                self.s_avoid_band_x_min[env_id] = band_x_min
+                self.s_avoid_band_x_max[env_id] = band_x_max
+                self.s_avoid_band_y_min[env_id] = band_y_min
+                self.s_avoid_band_y_max[env_id] = band_y_max
                 continue
 
             if stage == 1:
@@ -1959,10 +2072,21 @@ class HexGround(LeggedRobot):
             pos_world[:, 0] += env_origin[0]
             pos_world[:, 1] += env_origin[1]
             pos_world[:, 2] += env_origin[2]
+            band_x_min, band_x_max, band_y_min, band_y_max = self._compute_s_avoid_band_world(
+                env_id=env_id,
+                stage=stage,
+                active=active,
+                pos_local=pos,
+                quat=quat,
+            )
 
             self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
             self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
             self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+            self.s_avoid_band_x_min[env_id] = band_x_min
+            self.s_avoid_band_x_max[env_id] = band_x_max
+            self.s_avoid_band_y_min[env_id] = band_y_min
+            self.s_avoid_band_y_max[env_id] = band_y_max
 
         self._sync_s_avoid_obstacles(env_ids)
 

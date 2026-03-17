@@ -2255,6 +2255,12 @@ class HierarchicalHexapodEnv:
         collision_threshold_src = None
         collision_indices_src = None
         contact_norm = None
+        obstacle_contact_candidate_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        obstacle_contact_candidate_min_clearance = torch.full(
+            (self.num_envs,), 5.0, dtype=torch.float32, device=self.device
+        )
+        avoid_band_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        avoid_band_outside_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         clearance = None
         clearance_global = None
         reward_aff_map = reward_obs['gt_affordance'] if reward_obs is not None else None
@@ -2270,6 +2276,68 @@ class HierarchicalHexapodEnv:
                 contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
                 collision_force_max = contact_norm.max(dim=1).values
                 collision_mask = torch.any(contact_norm > collision_threshold, dim=1)
+                if (
+                    hasattr(self.env, "s_avoid_enabled")
+                    and bool(getattr(self.env, "s_avoid_enabled", False))
+                    and hasattr(self.env, "rb_states")
+                    and hasattr(self.env, "s_avoid_active")
+                    and hasattr(self.env, "s_avoid_pos_world")
+                    and hasattr(self.env, "s_avoid_quat_world")
+                ):
+                    body_xy = self.env.rb_states[:, indices, :2]
+                    inf_clearance = torch.full_like(body_xy[..., 0], 1.0e6)
+                    min_clearance_per_body = inf_clearance.clone()
+                    obstacle_contact_margin = float(
+                        getattr(self.env.cfg.terrain, "avoid_obstacle_contact_margin", 0.03)
+                    )
+                    cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
+                    box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
+                    total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
+                    cap_r = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
+                    box_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
+                    box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
+                    wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
+                    wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+                    for slot in range(total_slots):
+                        active_slot = self.env.s_avoid_active[:, slot].unsqueeze(1)
+                        if not bool(active_slot.any().item()):
+                            continue
+                        delta = body_xy - self.env.s_avoid_pos_world[:, slot, :2].unsqueeze(1)
+                        if slot < cap_slots:
+                            clearance_slot = torch.norm(delta, dim=-1) - cap_r
+                        else:
+                            quat = self.env.s_avoid_quat_world[:, slot]
+                            yaw = 2.0 * torch.atan2(quat[:, 2], quat[:, 3])
+                            cos_yaw = torch.cos(yaw).unsqueeze(1)
+                            sin_yaw = torch.sin(yaw).unsqueeze(1)
+                            local_x = cos_yaw * delta[..., 0] + sin_yaw * delta[..., 1]
+                            local_y = -sin_yaw * delta[..., 0] + cos_yaw * delta[..., 1]
+                            if slot < cap_slots + box_slots:
+                                hx, hy = box_hx, box_hy
+                            else:
+                                hx, hy = wall_hx, wall_hy
+                            dx = torch.abs(local_x) - hx
+                            dy = torch.abs(local_y) - hy
+                            outside = torch.norm(
+                                torch.stack(
+                                    [torch.clamp(dx, min=0.0), torch.clamp(dy, min=0.0)],
+                                    dim=-1,
+                                ),
+                                dim=-1,
+                            )
+                            inside = torch.clamp(torch.maximum(dx, dy), max=0.0)
+                            clearance_slot = outside + inside
+                        clearance_slot = torch.where(active_slot, clearance_slot, inf_clearance)
+                        min_clearance_per_body = torch.minimum(min_clearance_per_body, clearance_slot)
+                    body_min_clearance = min_clearance_per_body.min(dim=1).values
+                    obstacle_contact_candidate_min_clearance = torch.where(
+                        body_min_clearance >= 1.0e5,
+                        torch.full_like(body_min_clearance, 5.0),
+                        body_min_clearance,
+                    )
+                    obstacle_contact_candidate_mask = (
+                        obstacle_contact_candidate_min_clearance <= obstacle_contact_margin
+                    ) & collision_mask
         if self.clearance_override is not None:
             clearance = self.clearance_override
             self.clearance_override = None
@@ -2372,6 +2440,38 @@ class HierarchicalHexapodEnv:
         else:
             total_reward = accumulated_reward / self.decimation
             reward_terms = {"total": total_reward}
+
+        avoid_band_scale = 0.0
+        if getattr(self.env, "nav_cfg", None) is not None:
+            avoid_band_scale = float(getattr(self.env.nav_cfg, "avoid_band_penalty_scale", 0.0))
+        if (
+            getattr(self.env, "s_avoid_enabled", False)
+            and avoid_band_scale != 0.0
+            and hasattr(self.env, "s_avoid_band_x_min")
+            and hasattr(self.env, "s_avoid_spawn_world_y")
+        ):
+            activate_progress = float(getattr(self.env.nav_cfg, "avoid_band_activate_progress", 0.50))
+            band_x_min = self.env.s_avoid_band_x_min
+            band_x_max = self.env.s_avoid_band_x_max
+            band_y_min = self.env.s_avoid_band_y_min
+            band_y_max = self.env.s_avoid_band_y_max
+            y_progress = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
+            avoid_band_active_mask = y_progress > activate_progress
+            dx_out = torch.clamp(band_x_min - robot_pos[:, 0], min=0.0) + torch.clamp(
+                robot_pos[:, 0] - band_x_max, min=0.0
+            )
+            dy_out = torch.clamp(band_y_min - robot_pos[:, 1], min=0.0) + torch.clamp(
+                robot_pos[:, 1] - band_y_max, min=0.0
+            )
+            avoid_band_outside_dist = torch.where(
+                avoid_band_active_mask,
+                dx_out + dy_out,
+                torch.zeros_like(dx_out),
+            )
+            band_term = -avoid_band_scale * avoid_band_outside_dist
+            total_reward = total_reward + band_term
+            reward_terms["avoid_band_penalty"] = band_term
+            reward_terms["total"] = total_reward
 
         # Add target centering / visibility shaping when explicitly enabled.
         use_target_view_reward = (
@@ -2502,17 +2602,16 @@ class HierarchicalHexapodEnv:
             safe_reward = torch.full_like(total_reward, terminal_fail_penalty)
             total_reward = torch.where(done_during, safe_reward, total_reward)
             if reward_terms is not None:
+                reward_terms["terminal_penalty"] = torch.where(
+                    done_during,
+                    safe_reward,
+                    torch.zeros_like(total_reward),
+                )
                 for key, value in list(reward_terms.items()):
-                    if key == "total" or (not torch.is_tensor(value)):
+                    if key in ("total", "terminal_penalty") or (not torch.is_tensor(value)):
                         continue
                     if value.shape[:1] == done_during.shape:
                         reward_terms[key] = torch.where(done_during, torch.zeros_like(value), value)
-                if "collision" in reward_terms and torch.is_tensor(reward_terms["collision"]):
-                    reward_terms["collision"] = torch.where(
-                        done_during,
-                        safe_reward,
-                        reward_terms["collision"],
-                    )
                 reward_terms["total"] = total_reward
         if self.debug and (collision_mask.any() or done_during.any()):
             debug_count = int(getattr(self, "_collision_debug_count", 0))
@@ -2572,14 +2671,20 @@ class HierarchicalHexapodEnv:
                     collision_reward_dbg = 0.0
                     if reward_terms is not None and "collision" in reward_terms and torch.is_tensor(reward_terms["collision"]):
                         collision_reward_dbg = float(reward_terms["collision"][debug_env].item())
+                    terminal_penalty_dbg = 0.0
+                    if reward_terms is not None and "terminal_penalty" in reward_terms and torch.is_tensor(reward_terms["terminal_penalty"]):
+                        terminal_penalty_dbg = float(reward_terms["terminal_penalty"][debug_env].item())
                     threshold_dbg = float(collision_threshold) if collision_threshold is not None else -1.0
                     print(
                         "[CollisionDebug] "
                         f"env={debug_env} collision_mask={int(bool(collision_mask[debug_env].item()))} "
+                        f"obstacle_contact_candidate={int(bool(obstacle_contact_candidate_mask[debug_env].item()))} "
                         f"done_during={int(bool(done_during[debug_env].item()))} "
                         f"collision_reward={collision_reward_dbg:.3f} "
+                        f"terminal_penalty={terminal_penalty_dbg:.3f} "
                         f"force_max={float(collision_force_max[debug_env].item()):.3f} "
                         f"threshold={threshold_dbg:.3f} "
+                        f"obs_candidate_min_clearance={float(obstacle_contact_candidate_min_clearance[debug_env].item()):.3f} "
                         f"nearest_active_obs_slot={nearest_slot} nearest_active_obs_dist={nearest_obs_dist:.3f} "
                         f"body_hits={body_hits if body_hits else ['none']}"
                     )
@@ -2654,6 +2759,10 @@ class HierarchicalHexapodEnv:
             'collision_threshold': collision_threshold,
             'collision_threshold_src': collision_threshold_src,
             'collision_indices_src': collision_indices_src,
+            'obstacle_contact_candidate_mask': obstacle_contact_candidate_mask,
+            'obstacle_contact_candidate_min_clearance': obstacle_contact_candidate_min_clearance,
+            'avoid_band_active_mask': avoid_band_active_mask,
+            'avoid_band_outside_dist': avoid_band_outside_dist,
             'clearance': clearance,
             'clearance_global': clearance_global,
             'done_during': done_during,
@@ -3503,7 +3612,9 @@ def train(args):
             'body_backward',
             'turn_penalty',
             'yaw_rate_penalty',
+            'avoid_band_penalty',
             'time',
+            'terminal_penalty',
             'total',
         ]
         reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
@@ -3514,6 +3625,10 @@ def train(args):
         body_backward_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
         collision_rate_sum = torch.zeros((), device=device)
+        obstacle_contact_candidate_rate_sum = torch.zeros((), device=device)
+        obstacle_contact_candidate_min_clearance_sum = torch.zeros((), device=device)
+        avoid_band_active_rate_sum = torch.zeros((), device=device)
+        avoid_band_outside_dist_sum = torch.zeros((), device=device)
         collision_force_samples = []
         collision_threshold_value = None
         collision_threshold_src_value = None
@@ -4184,6 +4299,18 @@ def train(args):
             collision_mask = env_info.get('collision_mask', None) if env_info is not None else None
             if collision_mask is not None:
                 collision_rate_sum += collision_mask.float().sum()
+            obstacle_contact_candidate_mask = env_info.get('obstacle_contact_candidate_mask', None) if env_info is not None else None
+            if obstacle_contact_candidate_mask is not None:
+                obstacle_contact_candidate_rate_sum += obstacle_contact_candidate_mask.float().sum()
+            obstacle_contact_candidate_min_clearance = env_info.get('obstacle_contact_candidate_min_clearance', None) if env_info is not None else None
+            if obstacle_contact_candidate_min_clearance is not None:
+                obstacle_contact_candidate_min_clearance_sum += obstacle_contact_candidate_min_clearance.sum()
+            avoid_band_active_mask = env_info.get('avoid_band_active_mask', None) if env_info is not None else None
+            if avoid_band_active_mask is not None:
+                avoid_band_active_rate_sum += avoid_band_active_mask.float().sum()
+            avoid_band_outside_dist = env_info.get('avoid_band_outside_dist', None) if env_info is not None else None
+            if avoid_band_outside_dist is not None:
+                avoid_band_outside_dist_sum += avoid_band_outside_dist.sum()
             collision_force_max = env_info.get('collision_force_max', None) if env_info is not None else None
             if collision_force_max is not None:
                 collision_force_samples.append(collision_force_max.detach().cpu())
@@ -4868,6 +4995,12 @@ def train(args):
         reward_residual = mean_step_reward - breakdown_total_mean
         resid_rollout = rollout_mean_step_reward - breakdown_total_mean
         collision_rate_mean = (collision_rate_sum / total_samples).item()
+        obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
+        obstacle_contact_candidate_min_clearance_mean = (
+            obstacle_contact_candidate_min_clearance_sum / total_samples
+        ).item()
+        avoid_band_active_rate_mean = (avoid_band_active_rate_sum / total_samples).item()
+        avoid_band_outside_dist_mean = (avoid_band_outside_dist_sum / total_samples).item()
         collision_force_mean = 0.0
         collision_force_p95 = 0.0
         if collision_force_samples:
@@ -4932,6 +5065,10 @@ def train(args):
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
+        writer.add_scalar('Diag/ObstacleContactCandidateRate', obstacle_contact_candidate_rate_mean, iteration)
+        writer.add_scalar('Diag/ObstacleContactCandidateMinClearance', obstacle_contact_candidate_min_clearance_mean, iteration)
+        writer.add_scalar('Diag/AvoidBandActiveRate', avoid_band_active_rate_mean, iteration)
+        writer.add_scalar('Diag/AvoidBandOutsideDist', avoid_band_outside_dist_mean, iteration)
         writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
         writer.add_scalar('Diag/SkippedNonFiniteUpdates', skipped_nonfinite_updates, iteration)
@@ -5060,6 +5197,8 @@ def train(args):
                     f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
                     f"""{'Avoid stuck/near-miss:':>{pad}} {stuck_ratio:.3f} / {near_miss_ratio:.3f}\n"""
+                    f"""{'Avoid band out/active:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {avoid_band_active_rate_mean:.3f}\n"""
+                    f"""{'Avoid obs-hit cand/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
                 )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
@@ -5095,7 +5234,8 @@ def train(args):
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
-                          f"""{'Reward(gate/risk/col):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f}\n"""
+                          f"""{'Reward(gate/risk/col/term):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(avoid_band):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(vel/back/body/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('body_backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
                           f"""{'Reward(turn/yaw/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('yaw_rate_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")

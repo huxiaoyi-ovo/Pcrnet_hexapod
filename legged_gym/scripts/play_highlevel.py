@@ -642,11 +642,7 @@ def _update_e_s_metrics(metrics: dict, env, obs_before_step, info, dones, step_i
     if isinstance(info, dict):
         collision_mask = info.get("collision_mask", None)
     if collision_mask is None:
-        done_during = info.get("done_during", None) if isinstance(info, dict) else None
-        if done_during is None:
-            collision_mask = torch.zeros_like(dones, dtype=torch.bool)
-        else:
-            collision_mask = done_during.to(device=dones.device, dtype=torch.bool)
+        collision_mask = torch.zeros_like(dones, dtype=torch.bool)
     else:
         collision_mask = collision_mask.to(device=dones.device, dtype=torch.bool)
 

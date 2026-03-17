@@ -385,6 +385,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage12_core_y_max = 1.6
         avoid_stage1_core_count = 1
         avoid_stage2_core_count = 2
+        avoid_band_margin_x = 0.45
+        avoid_band_margin_y = 0.30
 
         # Primitive assets.
         avoid_capsule_radius = 0.15
@@ -420,6 +422,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_lost_k = 0
         target_center_scale = 0.10
         target_visible_scale = 0.0
+        avoid_band_activate_progress = 0.50
+        avoid_band_penalty_scale = 0.75
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 2.5
