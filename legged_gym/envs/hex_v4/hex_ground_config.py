@@ -122,7 +122,7 @@ class HexGroundCfg(LeggedRobotCfg):
         terrain_type = None  # required for heightfield tasks (hex_s1/hex_s2)
         terrain_seed = 0
         debug_allow_plane = False
-        scene_collision_filter = 0xFFFFFFFF
+        scene_collision_filter = 0
         scene_static_block_size = 0.4
         scene_static_block_height = 0.35
         scene_static_block_sizes = []

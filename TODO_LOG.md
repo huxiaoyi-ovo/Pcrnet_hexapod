@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-17 actor 障碍碰撞口径纠正
+
+- [x] ~~[P0] 按 Isaac Gym 官方 group/filter 语义修正 actor 障碍碰撞设置：同 env 内 robot/obstacle 保持同组，scene filter 改回 0，先恢复真实物理碰撞~~
+
 ## 2026-03-17 s_avoid 障碍碰撞根因排查收口
 
 - [x] ~~[P0] 增加 `s_avoid_basic` 的“单障碍直接创建”调试对照，验证穿透是否来自 pooled actor 地下创建后再搬运这条用法~~
