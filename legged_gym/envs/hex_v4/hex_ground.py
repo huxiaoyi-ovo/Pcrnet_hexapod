@@ -662,11 +662,11 @@ class HexGround(LeggedRobot):
                     pose,
                     f"s_avoid_obs_{slot}",
                     group_id,
-                    0,
+                    scene_filter,
                     0,
                 )
                 self._apply_actor_collision_filter(
-                    env_handle, actor_handle, 0, env_id, debug_tag=f"s_avoid_obs_{slot}"
+                    env_handle, actor_handle, scene_filter, env_id, debug_tag=f"s_avoid_obs_{slot}"
                 )
                 self.s_avoid_actor_handles[env_id][slot] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
@@ -1900,7 +1900,7 @@ class HexGround(LeggedRobot):
             env_active = self.s_avoid_active[env_id]
             handles = self.s_avoid_actor_handles[env_id]
             for slot in range(slot_n):
-                filter_v = scene_filter if bool(env_active[slot].item()) else 0
+                filter_v = scene_filter
                 self._apply_actor_collision_filter(
                     self.envs[env_id], handles[slot], filter_v, env_id, debug_tag=f"s_avoid_obs_{slot}"
                 )
