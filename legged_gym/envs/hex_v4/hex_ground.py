@@ -540,19 +540,32 @@ class HexGround(LeggedRobot):
     def _apply_actor_collision_filter(self, env_handle, actor_handle, target_filter: int, env_id: int, debug_tag: str = ""):
         try:
             shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+            before_filters = [int(getattr(prop, "filter", 0)) for prop in shape_props]
             for prop in shape_props:
                 prop.filter = target_filter
             self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
+            if getattr(self, "debug_viz", False) and env_id == 0 and debug_tag.startswith("s_avoid_obs_"):
+                debug_count = int(getattr(self, "_s_avoid_filter_debug_count", 0))
+                if debug_count < 40:
+                    after_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+                    after_filters = [int(getattr(prop, "filter", 0)) for prop in after_props]
+                    actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+                    print(
+                        f"[Debug][s_avoid_filter] tag={debug_tag} actor_index={actor_index} "
+                        f"target={int(target_filter)} before={before_filters} after={after_filters}"
+                    )
+                    self._s_avoid_filter_debug_count = debug_count + 1
             if getattr(self, "debug_viz", False) and env_id == 0 and debug_tag:
                 flag = f"_{debug_tag}_filter_logged"
                 if not getattr(self, flag, False):
                     print(f"[Debug] {debug_tag} shape filter={target_filter}")
                     setattr(self, flag, True)
         except Exception:
-            if getattr(self, "debug_viz", False) and debug_tag:
-                flag = f"_{debug_tag}_filter_warned"
+            if getattr(self, "debug_viz", False):
+                tag = debug_tag or "unnamed_actor"
+                flag = f"_{tag}_filter_warned"
                 if not getattr(self, flag, False):
-                    print(f"[Debug] {debug_tag} shape filter update failed")
+                    print(f"[Debug] {tag} shape filter update failed")
                     setattr(self, flag, True)
 
     def _on_create_robot(self, env_id, env_handle, actor_handle):
@@ -652,7 +665,9 @@ class HexGround(LeggedRobot):
                     0,
                     0,
                 )
-                self._apply_actor_collision_filter(env_handle, actor_handle, 0, env_id, debug_tag="")
+                self._apply_actor_collision_filter(
+                    env_handle, actor_handle, 0, env_id, debug_tag=f"s_avoid_obs_{slot}"
+                )
                 self.s_avoid_actor_handles[env_id][slot] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.s_avoid_actor_indices[env_id, slot] = actor_index
@@ -1887,8 +1902,20 @@ class HexGround(LeggedRobot):
             for slot in range(slot_n):
                 filter_v = scene_filter if bool(env_active[slot].item()) else 0
                 self._apply_actor_collision_filter(
-                    self.envs[env_id], handles[slot], filter_v, env_id, debug_tag=""
+                    self.envs[env_id], handles[slot], filter_v, env_id, debug_tag=f"s_avoid_obs_{slot}"
                 )
+                if getattr(self, "debug_viz", False) and env_id == 0:
+                    sync_count = int(getattr(self, "_s_avoid_sync_debug_count", 0))
+                    if sync_count < 40:
+                        actor_index = int(self.s_avoid_actor_indices[env_id, slot].item())
+                        pos = self.s_avoid_pos_world[env_id, slot]
+                        print(
+                            "[Debug][s_avoid_sync] "
+                            f"slot={slot} actor_index={actor_index} active={int(bool(env_active[slot].item()))} "
+                            f"target_filter={int(filter_v)} root_xyz=({float(pos[0].item()):.3f},"
+                            f"{float(pos[1].item()):.3f},{float(pos[2].item()):.3f})"
+                        )
+                        self._s_avoid_sync_debug_count = sync_count + 1
 
     def _sync_robot_root_states(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:

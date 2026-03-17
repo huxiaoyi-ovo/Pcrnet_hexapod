@@ -60,6 +60,18 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-17 checkpoint 保存频率补充
+
+- [x] ~~[P1] 在 `train_highlevel.py` 增加固定 checkpoint 留存：除原有 `save_interval` 外，每 100 轮额外保存一次策略 `pt`~~
+
+## 2026-03-17 Python 命令口径固定
+
+- [x] ~~[P1] 在 `AGENTS.md` 增加长期规则：命令行运行 Python 与语法检查默认使用 `python3`，避免系统 `python` 落到 `python2.7`~~
+
+## 2026-03-17 训练输出频率补充
+
+- [x] ~~[P1] 在 `train_highlevel.py` 保持原有日志格式不变的前提下，额外增加“每 30 轮输出一次训练总结”的控制台打印~~
+
 ## 2026-03-17 协议留痕闭环与 Student 视觉契约校验
 
 - [x] ~~[P0] 补齐 `eval/play` 的最终生效协议落盘，并为 `student/moe` checkpoint 增加口径一致性硬检查，避免评测/回放继续混用不兼容模型~~

@@ -978,6 +978,18 @@ def parse_args():
         help="打印每次 done 的重置原因归类（success/done_during/timeout/other）",
     )
     parser.add_argument(
+        "--zero_goal",
+        action="store_true",
+        default=False,
+        help="Debug: policy 输入前将 goal_buf 置零（只做高层对照，不改环境内部 goal）",
+    )
+    parser.add_argument(
+        "--zero_local_map",
+        action="store_true",
+        default=False,
+        help="Debug: policy 输入前将 local_map / affordance 输入置零（只做高层对照）",
+    )
+    parser.add_argument(
         "--show_expert_cmd",
         action="store_true",
         default=False,
@@ -1579,40 +1591,69 @@ def main():
             else:
                 aff_stack_fill.fill_(1)
             difficulty = aff_bundle["policy_difficulty"]
+            difficulty_input = (
+                torch.zeros_like(difficulty)
+                if bool(getattr(args, "zero_local_map", False))
+                else difficulty
+            )
             gate_y = None
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
+            goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
+            aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
+            follow_aff_input = (
+                torch.zeros_like(follow_aff_stack_buf)
+                if is_gate and bool(getattr(args, "zero_local_map", False))
+                else follow_aff_stack_buf
+            )
+            avoid_aff_input = (
+                torch.zeros_like(avoid_aff_stack_buf)
+                if is_gate and bool(getattr(args, "zero_local_map", False))
+                else avoid_aff_stack_buf
+            )
             if not expert_only_mode:
                 with torch.no_grad():
                     if is_gate:
                         gate_difficulty = aff_bundle["gate_difficulty"] if args.gate_use_difficulty else torch.zeros_like(aff_bundle["gate_difficulty"])
+                        if bool(getattr(args, "zero_local_map", False)):
+                            gate_difficulty = torch.zeros_like(gate_difficulty)
+                        follow_difficulty_input = (
+                            torch.zeros_like(aff_bundle["follow_difficulty"])
+                            if bool(getattr(args, "zero_local_map", False))
+                            else aff_bundle["follow_difficulty"]
+                        )
+                        avoid_difficulty_input = (
+                            torch.zeros_like(aff_bundle["avoid_difficulty"])
+                            if bool(getattr(args, "zero_local_map", False))
+                            else aff_bundle["avoid_difficulty"]
+                        )
                         cmd_f, _ = follow_policy.get_action(
-                            follow_aff_stack_buf,
+                            follow_aff_input,
                             obs["state"],
-                            obs["goal"],
-                            aff_bundle["follow_difficulty"],
+                            goal_input,
+                            follow_difficulty_input,
                             deterministic=True,
                         )
                         cmd_a, _ = avoid_policy.get_action(
-                            avoid_aff_stack_buf,
+                            avoid_aff_input,
                             obs["state"],
-                            obs["goal"],
-                            aff_bundle["avoid_difficulty"],
+                            goal_input,
+                            avoid_difficulty_input,
                             deterministic=True,
                         )
                         gate_y, _ = policy.get_action(
-                            aff_stack_buf,
+                            aff_input,
                             obs["state"],
-                            obs["goal"],
+                            goal_input,
                             gate_difficulty,
                             deterministic=deterministic,
                         )
                         cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
                     else:
                         cmd, _ = policy.get_action(
-                            aff_stack_buf,
+                            aff_input,
                             obs["state"],
-                            obs["goal"],
-                            difficulty,
+                            goal_input,
+                            difficulty_input,
                             deterministic=deterministic,
                         )
             expert_cmd = None
@@ -1698,6 +1739,13 @@ def main():
                 done_during = done_during.to(device=dones.device, dtype=torch.bool)
 
             reward_terms = info.get("reward_terms") if isinstance(info, dict) else None
+            manual_reset_mask = None
+            if info is not None and isinstance(info, dict):
+                manual_reset_mask = info.get("manual_reset_mask", None)
+            if manual_reset_mask is None:
+                manual_reset_mask = torch.zeros_like(dones, dtype=torch.bool)
+            else:
+                manual_reset_mask = manual_reset_mask.to(device=dones.device, dtype=torch.bool)
             success_mask = torch.zeros_like(dones, dtype=torch.bool)
             if isinstance(reward_terms, dict) and ("success_bonus" in reward_terms):
                 success_bonus = reward_terms["success_bonus"]
@@ -1711,7 +1759,12 @@ def main():
                     timeout_mask = ep_len_snapshot.to(device=dones.device) >= int(getattr(env, "max_episode_length", 0))
                     timeout_mask &= dones
 
-            other_done_mask = dones & (~done_during) & (~success_mask) & (~timeout_mask)
+            reach_mask = torch.zeros_like(dones, dtype=torch.bool)
+            if isinstance(reward_terms, dict) and ("reach" in reward_terms):
+                reach_term = reward_terms["reach"]
+                if torch.is_tensor(reach_term):
+                    reach_mask = dones & (reach_term.to(device=dones.device) > 0.0)
+            other_done_mask = dones & (~done_during) & (~success_mask) & (~timeout_mask) & (~reach_mask)
             if dones.any():
                 stack_reset_mask = dones.clone()
                 track_done = bool(dones[track_env_idx].item())
@@ -1727,6 +1780,7 @@ def main():
                     phys_n = int(done_during.sum().item())
                     succ_n = int(success_mask.sum().item())
                     tout_n = int(timeout_mask.sum().item())
+                    reach_n = int(reach_mask.sum().item())
                     other_n = int(other_done_mask.sum().item())
                     track_reason = "none"
                     if track_done:
@@ -1736,11 +1790,13 @@ def main():
                             track_reason = "success"
                         elif bool(timeout_mask[track_env_idx].item()):
                             track_reason = "timeout"
+                        elif bool(reach_mask[track_env_idx].item()):
+                            track_reason = "reach"
                         else:
                             track_reason = "other"
                     print(
-                        "[PlayHigh][reset] step={} done={} reason(physics/success/timeout/other)={}/{}/{}/{} track_env_reason={}".format(
-                            step_idx, done_n, phys_n, succ_n, tout_n, other_n, track_reason
+                        "[PlayHigh][reset] step={} done={} reason(physics/success/timeout/reach/other)={}/{}/{}/{}/{} track_env_reason={}".format(
+                            step_idx, done_n, phys_n, succ_n, tout_n, reach_n, other_n, track_reason
                         )
                     )
 

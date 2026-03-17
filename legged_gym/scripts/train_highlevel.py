@@ -2247,6 +2247,7 @@ class HierarchicalHexapodEnv:
         collision_threshold = None
         collision_threshold_src = None
         collision_indices_src = None
+        contact_norm = None
         clearance = None
         clearance_global = None
         reward_aff_map = reward_obs['gt_affordance'] if reward_obs is not None else None
@@ -2506,6 +2507,76 @@ class HierarchicalHexapodEnv:
                         reward_terms["collision"],
                     )
                 reward_terms["total"] = total_reward
+        if self.debug and (collision_mask.any() or done_during.any()):
+            debug_count = int(getattr(self, "_collision_debug_count", 0))
+            if debug_count < 20:
+                debug_env = None
+                if bool(collision_mask.any().item()):
+                    debug_env = int(collision_mask.nonzero(as_tuple=False).flatten()[0].item())
+                elif bool(done_during.any().item()):
+                    debug_env = int(done_during.nonzero(as_tuple=False).flatten()[0].item())
+                if debug_env is not None:
+                    if not hasattr(self, "_penalised_contact_body_names"):
+                        try:
+                            body_names_all = self.env.gym.get_actor_rigid_body_names(
+                                self.env.envs[0], self.env.actor_handles[0]
+                            )
+                        except Exception:
+                            body_names_all = []
+                        indices_dbg = getattr(self.env, "penalised_contact_indices", None)
+                        body_name_cache = []
+                        if indices_dbg is not None:
+                            for idx_v in indices_dbg.detach().cpu().tolist():
+                                idx_i = int(idx_v)
+                                if 0 <= idx_i < len(body_names_all):
+                                    body_name_cache.append(str(body_names_all[idx_i]))
+                                else:
+                                    body_name_cache.append(f"body_{idx_i}")
+                        self._penalised_contact_body_names = body_name_cache
+                    body_hits = []
+                    if contact_norm is not None:
+                        env_contact = contact_norm[debug_env]
+                        for local_i, force_v in enumerate(env_contact.detach().cpu().tolist()):
+                            force_f = float(force_v)
+                            if collision_threshold is not None and force_f > float(collision_threshold):
+                                body_name = (
+                                    self._penalised_contact_body_names[local_i]
+                                    if local_i < len(self._penalised_contact_body_names)
+                                    else f"body_{local_i}"
+                                )
+                                body_hits.append(f"{body_name}:{force_f:.3f}")
+                    nearest_slot = -1
+                    nearest_obs_dist = -1.0
+                    if (
+                        hasattr(self.env, "s_avoid_enabled")
+                        and bool(getattr(self.env, "s_avoid_enabled", False))
+                        and hasattr(self.env, "s_avoid_active")
+                        and hasattr(self.env, "s_avoid_pos_world")
+                    ):
+                        active_mask = self.env.s_avoid_active[debug_env]
+                        if bool(active_mask.any().item()):
+                            active_slots = active_mask.nonzero(as_tuple=False).flatten()
+                            obs_xy = self.env.s_avoid_pos_world[debug_env, active_slots, :2]
+                            robot_xy = self.env.root_states[debug_env, :2].unsqueeze(0)
+                            dists = torch.norm(obs_xy - robot_xy, dim=1)
+                            min_i = int(torch.argmin(dists).item())
+                            nearest_slot = int(active_slots[min_i].item())
+                            nearest_obs_dist = float(dists[min_i].item())
+                    collision_reward_dbg = 0.0
+                    if reward_terms is not None and "collision" in reward_terms and torch.is_tensor(reward_terms["collision"]):
+                        collision_reward_dbg = float(reward_terms["collision"][debug_env].item())
+                    threshold_dbg = float(collision_threshold) if collision_threshold is not None else -1.0
+                    print(
+                        "[CollisionDebug] "
+                        f"env={debug_env} collision_mask={int(bool(collision_mask[debug_env].item()))} "
+                        f"done_during={int(bool(done_during[debug_env].item()))} "
+                        f"collision_reward={collision_reward_dbg:.3f} "
+                        f"force_max={float(collision_force_max[debug_env].item()):.3f} "
+                        f"threshold={threshold_dbg:.3f} "
+                        f"nearest_active_obs_slot={nearest_slot} nearest_active_obs_dist={nearest_obs_dist:.3f} "
+                        f"body_hits={body_hits if body_hits else ['none']}"
+                    )
+                    self._collision_debug_count = debug_count + 1
 
         # 4.5 高层 episode 统计（与 breakdown 口径对齐）
         self.episode_return_buf += total_reward
@@ -4932,7 +5003,12 @@ def train(args):
             print(f"[EGPO][alpha~0.5] Policy cmd mean: [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]")
             print(f"[EGPO][alpha~0.5] Expert cmd mean: [{e[0]:.4f}, {e[1]:.4f}, {e[2]:.4f}]")
             egpo_alpha_half_logged = True
-        if iteration % args.log_interval == 0:
+        extra_console_log_interval = 30
+        should_log_console = (
+            iteration % args.log_interval == 0
+            or iteration % extra_console_log_interval == 0
+        )
+        if should_log_console:
             width = 80
             pad = 32
             header = f" Learning iteration {iteration}/{total_iterations} "
@@ -5017,7 +5093,14 @@ def train(args):
             print(log_string)
         
         # Save checkpoint
-        if iteration % args.save_interval == 0 and iteration > 0:
+        fixed_checkpoint_interval = 100
+        should_save_checkpoint = (
+            iteration > 0 and (
+                iteration % args.save_interval == 0
+                or iteration % fixed_checkpoint_interval == 0
+            )
+        )
+        if should_save_checkpoint:
             ckpt_path = os.path.join(log_dir, f'model_{iteration}.pt')
             torch.save({
                 'iteration': iteration,
