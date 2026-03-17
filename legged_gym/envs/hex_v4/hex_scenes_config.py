@@ -320,7 +320,7 @@ class HexESCorridorCfgPPO(HexGroundCfgPPO):
 class HexAvoidBasicCfg(HexGroundCfg):
     """
     s_avoid_basic:
-    3-stage avoid curriculum on plane with PhysX primitive actors only.
+    4-stage avoid curriculum on plane with PhysX primitive actors only.
     """
     class env(HexGroundCfg.env):
         env_spacing = 12.0
@@ -337,7 +337,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         terrain_length = 6.0
         terrain_width = 6.0
 
-        # Stage 1 -> 2: wide path, require stable forward progress toward goal.
+        # Stage 1 -> 1.5: wide path, require stable forward progress toward goal.
         avoid_stage12_window = 200
         avoid_stage12_min_episodes = 2800
         avoid_stage12_collision_threshold = 0.05
@@ -347,7 +347,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage12_success_distance = 0.80
         avoid_stage12_success_threshold = 0.45
 
-        # Stage 2 -> 3: medium corridor, require more stable avoid-and-arrive behavior.
+        # Stage 1.5 -> 2: denser capsule field, still no boxes.
         avoid_stage23_window = 300
         avoid_stage23_min_episodes = 3200
         avoid_stage23_collision_threshold = 0.05
@@ -357,7 +357,17 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage23_success_distance = 0.65
         avoid_stage23_success_threshold = 0.55
 
-        # Stage-3 corridor shrink curriculum.
+        # Stage 2 -> 3: mixed capsule/box field before corridor walls.
+        avoid_stage34_window = 300
+        avoid_stage34_min_episodes = 3200
+        avoid_stage34_collision_threshold = 0.05
+        avoid_stage34_exposure_threshold = 0.85
+        avoid_stage34_progress_threshold = 0.70
+        avoid_stage34_progress_delta = 0.35
+        avoid_stage34_success_distance = 0.65
+        avoid_stage34_success_threshold = 0.55
+
+        # Stage-4 corridor shrink curriculum.
         avoid_stage3_shrink_window = 100
         avoid_stage3_shrink_collision_threshold = 0.08
         avoid_stage3_shrink_success_threshold = 0.60
@@ -370,6 +380,9 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_count_min = 3
         avoid_stage1_count_max = 5
         avoid_stage1_min_spacing = 1.2
+        avoid_stage15_count_min = 5
+        avoid_stage15_count_max = 6
+        avoid_stage15_min_spacing = 0.9
         avoid_stage2_count_min = 6
         avoid_stage2_count_max = 8
         avoid_stage2_min_spacing = 0.7
@@ -384,9 +397,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage12_core_y_min = 0.0
         avoid_stage12_core_y_max = 1.6
         avoid_stage1_core_count = 1
+        avoid_stage15_core_count = 2
         avoid_stage2_core_count = 2
         avoid_band_margin_x = 0.45
         avoid_band_margin_y = 0.30
+        avoid_stage1_preset_count = 48
+        avoid_stage15_preset_count = 48
+        avoid_stage2_preset_count = 56
 
         # Primitive assets.
         avoid_capsule_radius = 0.15

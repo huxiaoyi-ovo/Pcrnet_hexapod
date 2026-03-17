@@ -1325,7 +1325,12 @@
 - [x] Must: 将 `terminal fail penalty` 从 `reward_terms["collision"]` 中拆出，避免控制台把终止失败误读成真实碰撞项
 - [x] Must: 为 `avoid` 增加最小 obstacle 命中审计量，至少区分“靠近/命中 active obstacle actor”与一般身体接触
 
-## 2026-03-17 s_avoid 物理修复 - 对齐 e_L 的 actor 障碍更新语义
+## 2026-03-17 s_avoid 物理修复 - 清理地下 actor 池残留
 
-- [ ] Must: 对照 Isaac Gym 官方状态更新文档，修正 `s_avoid` 障碍 reset 后的刚体状态回写方式
-- [ ] Must: 让 `s_avoid` 的单刚体障碍在 reset 后同时更新 actor root state 与 rigid body state，避免“显示/GT 图正常但物理接触不成立”
+- [ ] Must: 不再让 `s_avoid` 的 pooled 障碍共用 `(0, 0, -5)` 地下待机点，避免下一回合出现障碍从地底冒出
+- [ ] Must: 保留已恢复的 actor 碰撞，同时把 inactive pooled 障碍移到场景外独立停车位，保证 avoid 训练场景干净
+
+## 2026-03-17 s_avoid 课程主线调整 - 预设场景 + 过渡 stage
+
+- [ ] Must: `s_avoid_basic` 从连续随机采样切到“预生成预设库 + 回合间切预设索引”，先保证碰撞和场景语义稳定
+- [ ] Must: 课程改成 `stage1 -> stage1.5 -> stage2 -> stage3`，降低 `stage1` 到混合障碍阶段的难度跳变
