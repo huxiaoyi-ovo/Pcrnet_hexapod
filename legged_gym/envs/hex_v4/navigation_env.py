@@ -114,6 +114,8 @@ class NavigationRewardFunction:
         crossable_dir: Optional[torch.Tensor] = None,  # (N, 2) 低障中心方向
         crossable_gate: Optional[torch.Tensor] = None,  # (N,) 低障门控
         cmd_omega: Optional[torch.Tensor] = None,  # (N,) 实际执行角速度命令
+        risk_barrier_safe_override: Optional[float] = None,
+        risk_barrier_free_override: Optional[float] = None,
         gate_y: Optional[torch.Tensor] = None,  # (N,) 门控权重
         prev_gate_y: Optional[torch.Tensor] = None,  # (N,) 上一门控
         intensity: Optional[torch.Tensor] = None,       # (N,) 兼容字段（将被 gate_y 替代）
@@ -145,12 +147,19 @@ class NavigationRewardFunction:
             # Encourage staying near the band center.
             band_scale = float(getattr(self.cfg, "follow_band_scale", 1.0))
             band_reward = band_scale * torch.exp(-0.5 * (err / sigma) ** 2)
+            outside_penalty = torch.zeros_like(err)
+            outside_scale = float(getattr(self.cfg, "follow_outside_penalty", 0.0))
+            if outside_scale != 0.0:
+                outside_excess = torch.clamp(err - sigma, min=0.0)
+                outside_penalty = outside_scale * (outside_excess / sigma)
             rewards['approach'] = approach_reward + band_reward
+            rewards['follow_outside'] = outside_penalty
             rewards['reach'] = torch.zeros_like(dist_to_goal)
         else:
             # 进度奖励: 距离减少则正奖励
             approach_reward = (prev_dist - dist_to_goal) * self.cfg.goal_approach_scale
             rewards['approach'] = approach_reward
+            rewards['follow_outside'] = torch.zeros_like(dist_to_goal)
 
             # 到达目标奖励
             reached = dist_to_goal < self.cfg.goal_reach_threshold
@@ -232,8 +241,9 @@ class NavigationRewardFunction:
         risk_barrier = torch.zeros(num_envs, device=device)
         risk_scale = None
         if clearance is not None and self.cfg.risk_barrier_scale != 0.0:
-            safe = self.cfg.risk_barrier_safe
-            free = max(self.cfg.risk_barrier_free, safe + 1e-6)
+            safe = self.cfg.risk_barrier_safe if risk_barrier_safe_override is None else float(risk_barrier_safe_override)
+            free_cfg = self.cfg.risk_barrier_free if risk_barrier_free_override is None else float(risk_barrier_free_override)
+            free = max(free_cfg, safe + 1e-6)
             tau = max(self.cfg.risk_barrier_tau, 1e-3)
             risk = torch.exp(-(clearance - safe) / tau)
             risk_barrier = self.cfg.risk_barrier_scale * risk
@@ -298,6 +308,7 @@ class NavigationRewardFunction:
         # 总奖励
         total_reward = (
             rewards['approach'] +
+            rewards['follow_outside'] +
             rewards['reach'] +
             rewards['heading'] +
             rewards['passable_align'] +

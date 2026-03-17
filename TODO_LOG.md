@@ -60,6 +60,43 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-17 协议留痕闭环与 Student 视觉契约校验
+
+- [x] ~~[P0] 补齐 `eval/play` 的最终生效协议落盘，并为 `student/moe` checkpoint 增加口径一致性硬检查，避免评测/回放继续混用不兼容模型~~
+
+## 2026-03-17 训练样本语义与 sim2real 留痕收口
+
+- [x] ~~[P0] 修复 `invalid sample` 对 GAE 的跨步污染，补齐非有限观测的 fail-fast / recovery 语义，并让 reward / eval / play / checkpoint 对齐当前观测与 D435i 口径~~
+
+## 2026-03-17 D435i sim2real 训练基准固化
+
+- [x] ~~[P0] 联网核对 `Intel RealSense D435i` 官方参数，并将“仿真默认对齐 D435i 实机口径”写入 `AGENTS.md`，作为后续视觉相关训练的长期硬约束~~
+
+## 2026-03-15 训练协议与结果留痕收口
+
+- [x] ~~[P1] 将“训练一致性审计”规则固化到 `AGENTS.md`：统一审计双层输出、AGENTS 写入边界、高危静默污染检查项与固定收尾格式~~
+- [x] ~~[P0] 禁止 `s_ood_holdout` 被误当训练场景，补齐训练/评测命令与脚本的硬约束~~
+- [x] ~~[P0] 禁止 `student + moe` 伪蒸馏训练，并把 `best_model` 在线监控口径改名，避免误当论文最优 checkpoint~~
+- [x] ~~[P0] 让无效动作样本彻底退出 value loss，并修复 gate 安全钳制、`prev_robot_pos`、`done_during` 的训练口径偏差~~
+- [x] ~~[P0] 补齐 run/checkpoint/eval 的关键信息留痕与 resume 一致性检查，避免 teacher/vision 来源被静默替换~~
+- [x] ~~[P0] 把 avoid 课程切换证据保存在 TB，避免只在 console 短暂打印后丢失~~
+
+## 2026-03-15 训练动力学与实验对照口径补齐
+
+- [x] ~~[P0] 区分 `timeout` 与真实终止，补齐 GAE timeout bootstrap，避免长回合 value/advantage 被系统性截断~~
+- [x] ~~[P0] 让 expert 接管样本彻底退出 advantage 标准化，避免不同接管比例下 PPO 更新强度不可比~~
+- [x] ~~[P0] 强制 `student` 模式必须提供 `teacher_ckpt`，并让 student 路径的 reward 回到 GT 几何口径~~
+- [x] ~~[P0] 将 `risk_barrier` 改成基于 GT 几何的沿命令方向风险，并修复 low-level 提前 done 时的 reward 分项污染~~
+- [x] ~~[P0] 显式暴露并记录 EGPO 学习率策略，清理 `s_ood_holdout` 的训练命令冲突，保证实验协议可解释~~
+
+## 2026-03-15 高层训练口径与动作后处理一致性修复
+
+- [x] ~~[P0] 将 `s_avoid_basic` 课程统计改为按 episode 实际所属 stage 记账，避免旧 stage 尾部样本污染新 stage 升级窗口~~
+- [x] ~~[P0] 去掉 avoid actor/student 的特权 `difficulty` 泄漏，并补齐 `moe` 下 follow/avoid/gate 各自正确的输入口径~~
+- [x] ~~[P0] 修正 `goal occlusion` bootstrap、expert/teacher 有限值防护，以及 expert 接管时的 PPO 更新口径~~
+- [x] ~~[P0] 让 `CommandPostProcessor` 记住真实执行命令，改用沿命令方向的 clearance，并把必要历史量补进高层观测~~
+- [x] ~~[P0] 统一课程/诊断命名与指标：stage23 独立 progress/success 定义、命令诊断口径一致、TB/console 正确展示 progress/success 与 stage 窗口~~
+
 ## 2026-03-12 Avoid 难度标量解耦与展示/评测口径统一
 
 - [x] ~~[P0] 将 Avoid 的 `actor_difficulty` 从视锥裁剪后的 `local_map_2ch` 脱钩，改为基于全 GT 局部图计算客观拥挤度标量~~
@@ -1252,3 +1289,9 @@
 - [x] Must: `gt_affordance` 在平地 actor 障碍场景下优先走 scene/actor 栅格化，不再被 heightfield/空测量支路吞掉
 - [x] Must: `s_avoid_basic` 的 capsule/box/wall actor 进入完美图，先验证“正前/左前/右前能进图”
 - [x] Must: 导出 raw `gt_affordance` 与 `local_map_2ch` 的 sanity 图，避免继续盲训
+
+## 2026-03-13 22:49:31 - Avoid 课程升级判据改为分 stage 能力证明
+
+- [x] Must: `s_avoid_basic` 课程统计改为按 stage 独立记账，切换 stage 时清空目标 stage 的滑动窗口，杜绝历史窗口继承导致的连跳
+- [x] Must: `stage1->2` 与 `stage2->3` 拆成两套独立门槛与窗口，不再共用同一套 exposure/progress/success/collision 条件
+- [x] Must: `stage3` corridor 收窄改为独立窗口 + 更长冷却，避免刚进 stage3 就快速连续收窄

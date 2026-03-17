@@ -309,7 +309,12 @@ class TerrainAdaptivePlanner(nn.Module):
         log_det_jacobian = 2.0 * (np.log(2.0) - subgoal_raw - F.softplus(-2.0 * subgoal_raw))
         
         subgoal_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
-        subgoal_entropy = subgoal_dist.entropy().sum(dim=-1)
+        subgoal_entropy_raw = subgoal_dist.rsample()
+        subgoal_entropy_log_prob_raw = subgoal_dist.log_prob(subgoal_entropy_raw)
+        subgoal_entropy_log_det = 2.0 * (
+            np.log(2.0) - subgoal_entropy_raw - F.softplus(-2.0 * subgoal_entropy_raw)
+        )
+        subgoal_entropy = -(subgoal_entropy_log_prob_raw - subgoal_entropy_log_det).sum(dim=-1)
 
         # -----------------------------------------------------------
         # 2. Intensity LogProb (Beta)
@@ -679,7 +684,10 @@ class CmdVelExpert(nn.Module):
         log_prob_raw = cmd_dist.log_prob(cmd_raw)
         log_det_jacobian = 2.0 * (np.log(2.0) - cmd_raw - F.softplus(-2.0 * cmd_raw))
         cmd_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
-        cmd_entropy = cmd_dist.entropy().sum(dim=-1)
+        cmd_entropy_raw = cmd_dist.rsample()
+        cmd_entropy_log_prob_raw = cmd_dist.log_prob(cmd_entropy_raw)
+        cmd_entropy_log_det = 2.0 * (np.log(2.0) - cmd_entropy_raw - F.softplus(-2.0 * cmd_entropy_raw))
+        cmd_entropy = -(cmd_entropy_log_prob_raw - cmd_entropy_log_det).sum(dim=-1)
 
         return cmd_log_prob, out.value, cmd_entropy, None
 
@@ -976,6 +984,32 @@ class CommandPostProcessor:
     def get_effective_safe_distance(self, beta: torch.Tensor) -> torch.Tensor:
         return self.get_effective_params(beta)["safe_distance"]
 
+    def preview_cmd_before_risk(
+        self,
+        cmd: torch.Tensor,
+        beta: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if cmd.dim() == 1:
+            cmd = cmd.unsqueeze(0)
+
+        device = cmd.device
+        max_cmd = self.max_cmd.to(device=device, dtype=cmd.dtype)
+        max_delta = self.max_delta.to(device=device, dtype=cmd.dtype)
+
+        if beta is not None:
+            beta_t = self._normalize_beta(beta, device=device, dtype=cmd.dtype)
+            beta_params = self._compute_beta_params(beta_t, device=device, dtype=cmd.dtype)
+            max_cmd = beta_params["max_cmd"]
+            max_delta = beta_params["max_delta"]
+
+        cmd_clamped = torch.clamp(cmd, -max_cmd, max_cmd)
+        if self.last_cmd is None or self.last_cmd.shape != cmd_clamped.shape:
+            last_cmd = torch.zeros_like(cmd_clamped)
+        else:
+            last_cmd = self.last_cmd.to(device=device, dtype=cmd.dtype)
+        delta = torch.clamp(cmd_clamped - last_cmd, -max_delta, max_delta)
+        return last_cmd + delta
+
     def process(
         self,
         cmd: torch.Tensor,
@@ -1009,8 +1043,8 @@ class CommandPostProcessor:
         if self.last_cmd is None or self.last_cmd.shape != cmd_clamped.shape:
             self.last_cmd = torch.zeros_like(cmd_clamped)
         delta = torch.clamp(cmd_clamped - self.last_cmd, -max_delta, max_delta)
-        cmd_slew = self.last_cmd + delta
-        self.last_cmd = cmd_slew.detach()
+        cmd_slew_pre_scale = self.last_cmd + delta
+        cmd_exec = cmd_slew_pre_scale
 
         # 3) Risk-based scaling
         scale = None
@@ -1033,17 +1067,19 @@ class CommandPostProcessor:
                 1.0,
             )
             if risk_clamp_gain is None:
-                cmd_slew = cmd_slew * scale.unsqueeze(-1)
+                cmd_exec = cmd_exec * scale.unsqueeze(-1)
             else:
                 gain = risk_clamp_gain
                 if gain.dim() == 1:
                     gain = gain.view(-1, 1)
-                cmd_slew = cmd_slew * torch.pow(scale.unsqueeze(-1), gain)
+                cmd_exec = cmd_exec * torch.pow(scale.unsqueeze(-1), gain)
+        self.last_cmd = cmd_exec.detach()
 
         info = {
             "cmd_raw": cmd,
             "cmd_clamped": cmd_clamped,
-            "cmd_slew": cmd_slew,
+            "cmd_slew_pre_scale": cmd_slew_pre_scale,
+            "cmd_slew": cmd_exec,
             "risk_scale": scale,
         }
         if beta is not None:
@@ -1054,7 +1090,7 @@ class CommandPostProcessor:
             info["max_delta"] = max_delta
             if risk_clamp_gain is not None:
                 info["risk_clamp_gain"] = risk_clamp_gain
-        return cmd_slew, info
+        return cmd_exec, info
 
     def reset_numpy(self):
         """重置NumPy状态（真机部署时每个Episode开始调用）"""

@@ -18,8 +18,8 @@ scripts/train_highlevel.py - V5 Command-Space MoE 训练脚本
     Gate:
         python scripts/train_highlevel.py --mode teacher --skill moe --task s_avoid_basic \\
             --low_level_ckpt agents/fast_2000.pt \\
-            --follow_ckpt outputs/planner/follow/best_model.pt \\
-            --avoid_ckpt outputs/planner/avoid/best_model.pt
+            --follow_ckpt <FOLLOW_CKPT> \\
+            --avoid_ckpt <AVOID_CKPT>
 """
 
 import os
@@ -28,6 +28,7 @@ import time
 import argparse
 import math
 import copy
+import json
 import types
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 import torch
@@ -222,9 +223,40 @@ def load_high_level_state_dict_compat(
                 continue
             if not torch.is_tensor(value):
                 continue
-            if model_state[dst_key].shape != value.shape:
+            if model_state[dst_key].shape == value.shape:
+                state[dst_key] = value.clone()
                 continue
-            state[dst_key] = value.clone()
+            if (
+                value.ndim == 2
+                and model_state[dst_key].ndim == 2
+                and model_state[dst_key].shape[0] == value.shape[0]
+                and model_state[dst_key].shape[1] > value.shape[1]
+            ):
+                padded = model_state[dst_key].clone()
+                padded[:, :value.shape[1]] = value
+                state[dst_key] = padded
+
+    # Allow loading old checkpoints when we append a few extra state features
+    # (e.g., post-processor command history) to the policy state.
+    state_linear_keys = (
+        "state_encoder.mlp.0.weight",
+        "critic_state_encoder.mlp.0.weight",
+    )
+    for key in state_linear_keys:
+        if key not in state or key not in model_state:
+            continue
+        value = state[key]
+        target = model_state[key]
+        if (
+            torch.is_tensor(value)
+            and value.ndim == 2
+            and target.ndim == 2
+            and value.shape[0] == target.shape[0]
+            and value.shape[1] < target.shape[1]
+        ):
+            padded = target.clone()
+            padded[:, :value.shape[1]] = value
+            state[key] = padded
 
     incompatible = model.load_state_dict(state, strict=False)
     missing = list(incompatible.missing_keys)
@@ -233,6 +265,8 @@ def load_high_level_state_dict_compat(
         raise RuntimeError(
             f"{label} checkpoint incompatible: missing={missing}, unexpected={unexpected}"
         )
+    if _module_has_non_finite(model):
+        raise RuntimeError(f"{label} checkpoint has non-finite parameters after load")
 
 
 def apply_goal_occlusion(
@@ -283,6 +317,352 @@ def _assert_finite_tensor(name: str, t: torch.Tensor) -> None:
     if torch.isfinite(t).all():
         return
     raise RuntimeError(f"[NonFinite] {name} has non-finite values ({_tensor_min_max_text(t)})")
+
+
+def _sanitize_or_fail_action_tensor(
+    name: str,
+    t: torch.Tensor,
+    *,
+    allow_recovery: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    bad_rows = ~_row_finite_mask(t)
+    if not bool(bad_rows.any().item()):
+        return t, bad_rows
+    if not allow_recovery:
+        raise RuntimeError(
+            f"[NonFinite-FailFast] {name} has non-finite values ({_tensor_min_max_text(t)}). "
+            "Use --allow_nonfinite_recovery to fallback to nan_to_num mode."
+        )
+    return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0), bad_rows
+
+
+def _row_finite_mask(t: torch.Tensor) -> torch.Tensor:
+    if not torch.is_tensor(t):
+        raise TypeError("_row_finite_mask expects a tensor input.")
+    if t.ndim == 0:
+        return torch.isfinite(t).view(1)
+    if t.ndim == 1:
+        return torch.isfinite(t)
+    return torch.isfinite(t).reshape(t.shape[0], -1).all(dim=1)
+
+
+EXPERIMENT_META_REPLAY_KEYS = (
+    "aff_stack",
+    "beta",
+    "cmd_slew_lin",
+    "cmd_slew_ang",
+    "cmd_safe_dist",
+    "cmd_free_dist",
+    "disable_risk_scale",
+    "gate_use_difficulty",
+    "gate_safe_clamp",
+    "gate_safe_max",
+    "camera_enable",
+    "camera_interval",
+    "decimation",
+)
+CHECKPOINT_CONTRACT_KEY_PATHS = (
+    "aff_stack",
+    "decimation",
+    "low_level_ckpt",
+    "observation_contract.affordance_map_size",
+    "observation_contract.affordance_map_extent_m",
+    "observation_contract.affordance_origin_mode",
+    "observation_contract.camera_enable",
+    "observation_contract.camera_interval",
+    "observation_contract.camera_width",
+    "observation_contract.camera_height",
+    "observation_contract.camera_horizontal_fov_deg",
+    "observation_contract.camera_vertical_fov_deg",
+    "observation_contract.camera_near_m",
+    "observation_contract.camera_far_m",
+    "observation_contract.camera_fps_cfg",
+)
+RESOLVED_PROTOCOL_ARG_KEYS = (
+    "task",
+    "mode",
+    "skill",
+    "seed",
+    "num_envs",
+    "num_steps",
+    "num_epochs",
+    "mini_batch_size",
+    "lr",
+    "aff_stack",
+    "beta",
+    "gate_use_difficulty",
+    "cmd_slew_lin",
+    "cmd_slew_ang",
+    "cmd_safe_dist",
+    "cmd_free_dist",
+    "disable_risk_scale",
+    "camera_enable",
+    "camera_interval",
+    "decimation",
+)
+VISION_NATIVE_OUTPUT_SIZE = 16
+
+
+def _coerce_meta_value_like(raw_value: Any, template_value: Any) -> Any:
+    if raw_value is None:
+        return None
+    if isinstance(template_value, bool):
+        if isinstance(raw_value, str):
+            return raw_value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(raw_value)
+    if isinstance(template_value, int) and not isinstance(template_value, bool):
+        return int(raw_value)
+    if isinstance(template_value, float):
+        return float(raw_value)
+    return raw_value
+
+
+def apply_experiment_meta_to_args(
+    args: argparse.Namespace,
+    ckpt_meta: Optional[Dict[str, Any]],
+    *,
+    context: str,
+    overwrite: bool = True,
+) -> None:
+    if not isinstance(ckpt_meta, dict):
+        return
+    applied = []
+    for key in EXPERIMENT_META_REPLAY_KEYS:
+        if key not in ckpt_meta:
+            continue
+        raw_value = ckpt_meta.get(key, None)
+        if raw_value is None:
+            continue
+        current_value = getattr(args, key, None)
+        new_value = _coerce_meta_value_like(raw_value, current_value)
+        if (not overwrite) and getattr(args, key, None) is not None:
+            continue
+        if getattr(args, key, None) != new_value:
+            setattr(args, key, new_value)
+            applied.append(f"{key}={new_value}")
+    if applied:
+        print(f"[{context}] replay checkpoint contract: " + ", ".join(applied))
+
+
+def apply_observation_contract_to_env_cfg(
+    env_cfg,
+    ckpt_meta: Optional[Dict[str, Any]],
+    *,
+    context: str,
+) -> None:
+    if not isinstance(ckpt_meta, dict):
+        return
+    contract = ckpt_meta.get("observation_contract", None)
+    if not isinstance(contract, dict):
+        return
+    cam_cfg = getattr(getattr(env_cfg, "sensor", None), "depth_camera", None)
+    nav_cfg = getattr(env_cfg, "navigation", None)
+    terrain_cfg = getattr(env_cfg, "terrain", None)
+    applied = []
+    if cam_cfg is not None:
+        camera_fields = {
+            "camera_enable": "enable",
+            "camera_width": "width",
+            "camera_height": "height",
+            "camera_horizontal_fov_deg": "horizontal_fov",
+            "camera_vertical_fov_deg": "vertical_fov",
+            "camera_near_m": "near_clip",
+            "camera_far_m": "far_clip",
+            "camera_fps_cfg": "fps",
+            "camera_interval": "capture_interval",
+        }
+        for meta_key, attr_name in camera_fields.items():
+            if meta_key not in contract or contract[meta_key] is None:
+                continue
+            current_value = getattr(cam_cfg, attr_name, None)
+            new_value = _coerce_meta_value_like(contract[meta_key], current_value)
+            if current_value != new_value:
+                setattr(cam_cfg, attr_name, new_value)
+                applied.append(f"{attr_name}={new_value}")
+    map_size = contract.get("affordance_map_size", None)
+    if map_size is not None:
+        map_size = int(map_size)
+        if nav_cfg is not None and getattr(nav_cfg, "affordance_grid_size", None) != map_size:
+            nav_cfg.affordance_grid_size = map_size
+            applied.append(f"navigation.affordance_grid_size={map_size}")
+        if terrain_cfg is not None and hasattr(terrain_cfg, "affordance_grid_size"):
+            if getattr(terrain_cfg, "affordance_grid_size", None) != map_size:
+                terrain_cfg.affordance_grid_size = map_size
+                applied.append(f"terrain.affordance_grid_size={map_size}")
+    if applied:
+        print(f"[{context}] replay observation contract: " + ", ".join(applied))
+
+
+def get_vision_native_output_size() -> int:
+    return int(VISION_NATIVE_OUTPUT_SIZE)
+
+
+def _get_nested_meta_value(meta: Optional[Dict[str, Any]], key_path: str) -> Any:
+    if not isinstance(meta, dict):
+        return None
+    current: Any = meta
+    for key in str(key_path).split("."):
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current.get(key, None)
+    return current
+
+
+def _normalize_contract_compare_value(key_path: str, value: Any) -> Any:
+    if isinstance(value, str) and key_path.endswith("_ckpt") and value.strip():
+        return os.path.abspath(value)
+    return value
+
+
+def collect_runtime_observation_contract(
+    args: argparse.Namespace,
+    env,
+) -> Dict[str, Any]:
+    cam_cfg = getattr(getattr(env, "env", None), "camera_cfg", None)
+    low_level_dt = float(getattr(getattr(env, "env", None), "dt", 0.0))
+    capture_interval = 1
+    if cam_cfg is not None:
+        capture_interval = int(getattr(cam_cfg, "capture_interval", 1))
+    elif getattr(args, "camera_interval", None) is not None:
+        capture_interval = int(getattr(args, "camera_interval", 1))
+    capture_interval = max(1, int(capture_interval))
+    effective_depth_hz = None
+    if low_level_dt > 0.0:
+        effective_depth_hz = 1.0 / (low_level_dt * float(capture_interval))
+    high_level_dt = float(getattr(env, "high_level_dt", 0.0))
+    return {
+        "use_avoid_local_map": bool(getattr(args, "skill", "follow") in ("avoid", "moe")),
+        "affordance_map_size": int(getattr(env, "affordance_map_size", get_vision_native_output_size())),
+        "affordance_map_extent_m": float(getattr(env, "affordance_map_extent", 0.0)),
+        "affordance_origin_mode": str(getattr(env, "affordance_origin_mode", "base_center")),
+        "camera_enable": bool(getattr(args, "camera_enable", False)),
+        "camera_interval": int(capture_interval),
+        "camera_width": None if cam_cfg is None else int(getattr(cam_cfg, "width", 0)),
+        "camera_height": None if cam_cfg is None else int(getattr(cam_cfg, "height", 0)),
+        "camera_horizontal_fov_deg": None if cam_cfg is None else float(getattr(cam_cfg, "horizontal_fov", 0.0)),
+        "camera_vertical_fov_deg": None if cam_cfg is None else float(getattr(cam_cfg, "vertical_fov", 0.0)),
+        "camera_near_m": None if cam_cfg is None else float(getattr(cam_cfg, "near_clip", 0.0)),
+        "camera_far_m": None if cam_cfg is None else float(getattr(cam_cfg, "far_clip", 0.0)),
+        "camera_fps_cfg": None if cam_cfg is None else int(getattr(cam_cfg, "fps", 0)),
+        "camera_effective_rate_hz": effective_depth_hz,
+        "low_level_dt_s": low_level_dt,
+        "high_level_dt_s": high_level_dt,
+        "high_level_rate_hz": None if high_level_dt <= 0.0 else (1.0 / high_level_dt),
+    }
+
+
+def build_runtime_contract_meta(
+    args: argparse.Namespace,
+    env,
+) -> Dict[str, Any]:
+    low_level_ckpt = getattr(args, "low_level_ckpt", None)
+    return {
+        "aff_stack": int(getattr(args, "aff_stack", 1)),
+        "decimation": None if getattr(args, "decimation", None) is None else int(getattr(args, "decimation")),
+        "low_level_ckpt": None if not low_level_ckpt else os.path.abspath(str(low_level_ckpt)),
+        "observation_contract": collect_runtime_observation_contract(args, env),
+    }
+
+
+def validate_checkpoint_contract_compatibility(
+    reference_meta: Optional[Dict[str, Any]],
+    candidate_meta: Optional[Dict[str, Any]],
+    *,
+    reference_name: str,
+    candidate_name: str,
+    strict: bool = True,
+    key_paths: Tuple[str, ...] = CHECKPOINT_CONTRACT_KEY_PATHS,
+) -> None:
+    if not isinstance(reference_meta, dict) or not isinstance(candidate_meta, dict):
+        return
+    mismatch_msgs = []
+    for key_path in key_paths:
+        ref_value = _get_nested_meta_value(reference_meta, key_path)
+        cand_value = _get_nested_meta_value(candidate_meta, key_path)
+        if ref_value is None or cand_value is None:
+            continue
+        ref_value = _normalize_contract_compare_value(key_path, ref_value)
+        cand_value = _normalize_contract_compare_value(key_path, cand_value)
+        if ref_value != cand_value:
+            mismatch_msgs.append(f"{key_path}: {reference_name}={ref_value}, {candidate_name}={cand_value}")
+    if mismatch_msgs:
+        msg = (
+            f"{candidate_name} 与 {reference_name} 的训练口径不一致，继续运行会污染实验归因："
+            + " | ".join(mismatch_msgs)
+        )
+        if strict:
+            raise ValueError(msg)
+        print(f"[Warn] {msg}")
+
+
+def validate_vision_runtime_contract(
+    args: argparse.Namespace,
+    env,
+    *,
+    source_name: str,
+    ckpt_meta: Optional[Dict[str, Any]] = None,
+    strict_meta: bool = True,
+) -> Dict[str, Any]:
+    runtime_meta = build_runtime_contract_meta(args, env)
+    runtime_contract = runtime_meta["observation_contract"]
+    native_size = get_vision_native_output_size()
+    runtime_map_size = int(runtime_contract.get("affordance_map_size", native_size))
+    if runtime_map_size != native_size:
+        print(
+            f"[{source_name}] vision native output_size={native_size}, "
+            f"runtime affordance_map_size={runtime_map_size}; prediction will be resized before use."
+        )
+    if isinstance(ckpt_meta, dict):
+        validate_checkpoint_contract_compatibility(
+            runtime_meta,
+            ckpt_meta,
+            reference_name="current runtime",
+            candidate_name=source_name,
+            strict=strict_meta,
+        )
+    else:
+        print(f"[Warn] {source_name} 未包含 experiment_meta；只能校验当前 runtime 与原生输出尺寸。")
+    return {
+        "vision_native_output_size": native_size,
+        "runtime_affordance_map_size": runtime_map_size,
+        "resize_before_use": bool(runtime_map_size != native_size),
+    }
+
+
+def build_resolved_protocol(
+    args: argparse.Namespace,
+    env,
+    *,
+    primary_ckpt_path: Optional[str],
+    primary_meta: Optional[Dict[str, Any]],
+    aux_sources: Optional[Dict[str, Dict[str, Any]]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    runtime_args = {}
+    for key in RESOLVED_PROTOCOL_ARG_KEYS:
+        if hasattr(args, key):
+            runtime_args[key] = getattr(args, key)
+    protocol = {
+        "sim2real_sensor_target": "Intel RealSense D435i",
+        "runtime_args": runtime_args,
+        "unknown_cli_args": list(getattr(args, "_unknown_cli", [])),
+        "runtime_contract": build_runtime_contract_meta(args, env),
+        "primary_checkpoint": {
+            "path": None if not primary_ckpt_path else os.path.abspath(str(primary_ckpt_path)),
+            "experiment_meta": primary_meta,
+        },
+        "aux_checkpoints": aux_sources or {},
+        "vision_native_output_size": get_vision_native_output_size(),
+    }
+    if extra:
+        protocol.update(extra)
+    return protocol
+
+
+def write_resolved_protocol_json(path: str, protocol: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(protocol, f, ensure_ascii=False, indent=2)
 
 
 def _actor_grad_has_non_finite(module: nn.Module) -> bool:
@@ -411,6 +791,7 @@ class RolloutBuffer:
         self.values = torch.zeros(num_steps, num_envs, device=device)
         self.rewards = torch.zeros(num_steps, num_envs, device=device)
         self.dones = torch.zeros(num_steps, num_envs, device=device)
+        self.action_valid = torch.ones(num_steps, num_envs, device=device, dtype=torch.bool)
         
         # 蒸馏目标 (Student 模式)
         self.teacher_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
@@ -430,6 +811,7 @@ class RolloutBuffer:
         value,
         reward,
         done,
+        action_valid=None,
         teacher_action=None,
         expert_action=None,
     ):
@@ -445,6 +827,10 @@ class RolloutBuffer:
         self.values[self.step] = value.squeeze(-1)
         self.rewards[self.step] = reward
         self.dones[self.step] = done.float()
+        if action_valid is None:
+            self.action_valid[self.step].fill_(True)
+        else:
+            self.action_valid[self.step] = action_valid.bool()
         
         if teacher_action is not None:
             self.teacher_actions[self.step] = teacher_action
@@ -457,18 +843,24 @@ class RolloutBuffer:
                         gae_lambda: float = 0.95) -> Tuple[torch.Tensor, torch.Tensor]:
         """计算 GAE 和 Returns"""
         advantages = torch.zeros_like(self.rewards)
-        last_gae = 0
+        last_gae = torch.zeros(self.num_envs, device=self.device)
         
         for t in reversed(range(self.num_steps)):
+            current_valid = self.action_valid[t]
             if t == self.num_steps - 1:
                 next_non_terminal = 1.0 - self.dones[t]
                 next_values = next_value.squeeze(-1)
+                next_valid = torch.ones_like(current_valid, dtype=torch.bool)
             else:
                 next_non_terminal = 1.0 - self.dones[t]
                 next_values = self.values[t + 1]
-            
-            delta = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
-            advantages[t] = last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
+                next_valid = self.action_valid[t + 1]
+
+            continuation = next_non_terminal * next_valid.float()
+            delta = self.rewards[t] + gamma * next_values * continuation - self.values[t]
+            last_gae = delta + gamma * gae_lambda * continuation * last_gae
+            last_gae = torch.where(current_valid, last_gae, torch.zeros_like(last_gae))
+            advantages[t] = torch.where(current_valid, last_gae, torch.zeros_like(last_gae))
         
         returns = advantages + self.values
         return returns, advantages
@@ -487,6 +879,7 @@ class RolloutBuffer:
         self.values.zero_()
         self.rewards.zero_()
         self.dones.zero_()
+        self.action_valid.fill_(True)
         self.teacher_actions.zero_()
         self.expert_actions.zero_()
 
@@ -515,6 +908,8 @@ class HierarchicalHexapodEnv:
         self.device = device
         self.mode = args.mode
         self.debug = bool(getattr(args, "debug", False))
+        if getattr(self.args, "mode", "teacher") == "student":
+            setattr(self.args, "camera_enable", True)
         beta_arg = getattr(args, "beta", None)
         self.beta_override = None if beta_arg is None else float(beta_arg)
 
@@ -766,6 +1161,7 @@ class HierarchicalHexapodEnv:
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
+        self.clearance_affordance_override = None
         self.reward_affordance_override = None
         self.last_obs = None
         
@@ -1618,6 +2014,9 @@ class HierarchicalHexapodEnv:
         if hasattr(self, "prev_gate_y"):
             prev_gate_y = self.prev_gate_y.unsqueeze(1)
             obs_dict['state'] = torch.cat([obs_dict['state'], prev_gate_y], dim=1)
+        # 1.6 添加上一时刻实际执行命令（解决后处理变化率记忆的非马尔可夫性）
+        if hasattr(self, "post_processor") and getattr(self.post_processor, "last_cmd", None) is not None:
+            obs_dict['state'] = torch.cat([obs_dict['state'], self.post_processor.last_cmd.detach().clone()], dim=1)
 
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
@@ -1673,12 +2072,15 @@ class HierarchicalHexapodEnv:
             obs_dict['gt_affordance'],
             visible_mask=self.affordance_visible_mask,
         )
-        objective_difficulty = self._compute_objective_difficulty_from_local_map(
+        actor_difficulty = self._compute_objective_difficulty_from_local_map(
+            obs_dict['local_map_2ch']
+        )
+        critic_difficulty = self._compute_objective_difficulty_from_local_map(
             obs_dict['critic_local_map_2ch']
         )
         obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
-        obs_dict['actor_difficulty'] = objective_difficulty
-        obs_dict['critic_difficulty'] = objective_difficulty
+        obs_dict['actor_difficulty'] = actor_difficulty
+        obs_dict['critic_difficulty'] = critic_difficulty
         
         # 4. Depth Image
         if hasattr(self.env, 'depth_images'):
@@ -1716,16 +2118,29 @@ class HierarchicalHexapodEnv:
             cmd_vel[:, 1] = float(v)
         # 1. Command Post-Processor
         clearance_pp = None
-        if self.clearance_override is not None:
-            clearance_pp = self.clearance_override
+        clearance_aff_map = None
+        cmd_preview = None
+        cmd_xy_for_clearance = None
+        if cmd_vel is not None:
+            cmd_preview = self.post_processor.preview_cmd_before_risk(
+                cmd_vel,
+                beta=self.beta_override,
+            )
+            cmd_xy_for_clearance = cmd_preview[:, :2]
+        if self.clearance_affordance_override is not None:
+            clearance_aff_map = self.clearance_affordance_override
         elif self.last_obs is not None and 'gt_affordance' in self.last_obs:
-            clearance_pp = self._compute_clearance_from_affordance(self.last_obs['gt_affordance'])
+            clearance_aff_map = self.last_obs['gt_affordance']
+        if clearance_aff_map is not None and cmd_xy_for_clearance is not None:
+            clearance_pp = self._compute_clearance_along_cmd(clearance_aff_map, cmd_xy_for_clearance)
         velocity_cmd, post_info = self.post_processor.process(
             cmd_vel, clearance_pp, beta=self.beta_override
         )
         post_info_payload = {}
         if isinstance(post_info, dict):
             post_info_payload.update(post_info)
+        if cmd_preview is not None:
+            post_info_payload["cmd_preview_for_clearance"] = cmd_preview.detach().clone()
         post_info_payload.setdefault("cmd_raw", cmd_vel)
         post_info_payload.setdefault("cmd_slew", velocity_cmd)
         if "cmd_clamped" not in post_info_payload:
@@ -1765,16 +2180,23 @@ class HierarchicalHexapodEnv:
         accumulated_reward = torch.zeros(self.num_envs, device=self.device)
         done_any = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         active_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        cmd_exec_sum = torch.zeros(self.num_envs, 3, device=self.device)
+        cmd_exec_steps = torch.zeros(self.num_envs, device=self.device)
+        cmd_exec_last = torch.zeros(self.num_envs, 3, device=self.device)
 
         for _ in range(self.decimation):
             if not active_mask.any():
                 break
             if hasattr(self.env, "commands"):
+                active_before = active_mask.float()
                 velocity_cmd_step = velocity_cmd.detach()
                 if (~active_mask).any():
                     velocity_cmd_step = velocity_cmd_step.clone()
                     velocity_cmd_step[~active_mask] = 0.0
                 self.env.commands[:, :3] = velocity_cmd_step
+                cmd_exec_sum += velocity_cmd_step
+                cmd_exec_steps += active_before
+                cmd_exec_last = velocity_cmd_step
                 if hasattr(self.env, "commands_scale") and hasattr(self.env, "obs_buf"):
                     if self.env.obs_buf.shape[1] >= 3:
                         self.env.obs_buf[:, -3:] = velocity_cmd_step * self.env.commands_scale
@@ -1792,6 +2214,10 @@ class HierarchicalHexapodEnv:
             accumulated_reward += rewards
             done_any |= dones
             active_mask &= ~dones
+        cmd_exec_mean = cmd_exec_sum / cmd_exec_steps.clamp_min(1.0).unsqueeze(-1)
+        post_info_payload["cmd_exec_mean"] = cmd_exec_mean.detach().clone()
+        post_info_payload["cmd_exec_last"] = cmd_exec_last.detach().clone()
+        post_info_payload["cmd_exec_steps"] = cmd_exec_steps.detach().clone()
         
         self.episode_length_buf += 1
         length_snapshot = self.episode_length_buf.clone()
@@ -1822,9 +2248,9 @@ class HierarchicalHexapodEnv:
         collision_threshold_src = None
         collision_indices_src = None
         clearance = None
+        clearance_global = None
         reward_aff_map = reward_obs['gt_affordance'] if reward_obs is not None else None
-        override_used = getattr(self, "reward_affordance_override", None) is not None
-        if override_used:
+        if getattr(self, "reward_affordance_override", None) is not None:
             reward_aff_map = self.reward_affordance_override
             self.reward_affordance_override = None
         if hasattr(self.env, "contact_forces"):
@@ -1840,7 +2266,9 @@ class HierarchicalHexapodEnv:
             clearance = self.clearance_override
             self.clearance_override = None
         elif reward_aff_map is not None:
-            clearance = self._compute_clearance_from_affordance(reward_aff_map)
+            clearance_global = self._compute_clearance_from_affordance(reward_aff_map)
+            clearance = self._compute_clearance_along_cmd(reward_aff_map, cmd_exec_mean[:, :2])
+        self.clearance_affordance_override = None
         passable_dir = None
         passable_gate = None
         passable_occ_ratio = None
@@ -1884,8 +2312,8 @@ class HierarchicalHexapodEnv:
                 goal_y = robot_pos[:, 1] + sin_h * goal_local[:, 0] + cos_h * goal_local[:, 1]
                 goal_pos = torch.stack([goal_x, goal_y], dim=1)
             reward_difficulty = reward_obs['gt_difficulty']
-            if 'actor_difficulty' in reward_obs:
-                reward_difficulty = reward_obs['actor_difficulty']
+            if 'critic_difficulty' in reward_obs:
+                reward_difficulty = reward_obs['critic_difficulty']
             
             reward_dict = self.reward_func.compute_reward(
                 robot_pos=robot_pos,
@@ -1899,15 +2327,19 @@ class HierarchicalHexapodEnv:
                 terrain_difficulty=reward_difficulty,
                 collision_mask=collision_mask,
                 clearance=clearance,
-                cmd_xy=velocity_cmd[:, :2],
-                cmd_omega=velocity_cmd[:, 2],
+                cmd_xy=cmd_exec_mean[:, :2],
+                cmd_omega=cmd_exec_mean[:, 2],
                 passable_dir=passable_dir,
                 passable_gate=passable_gate,
                 crossable_dir=crossable_dir,
                 crossable_gate=crossable_gate,
+                risk_barrier_safe_override=post_info_payload.get("post_safe_distance", None),
+                risk_barrier_free_override=post_info_payload.get("post_free_distance", None),
             )
             if clearance is not None:
                 reward_dict['clearance'] = clearance
+            if clearance_global is not None:
+                reward_dict['clearance_global'] = clearance_global
             if passable_occ_ratio is not None:
                 reward_dict['passable_occ_ratio'] = passable_occ_ratio
             if crossable_width is not None:
@@ -2056,9 +2488,23 @@ class HierarchicalHexapodEnv:
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
-            safe_reward = accumulated_reward / self.decimation
+            terminal_fail_penalty = 0.0
+            if self.reward_cfg is not None:
+                terminal_fail_penalty = float(getattr(self.reward_cfg, "collision_penalty", -10.0))
+            safe_reward = torch.full_like(total_reward, terminal_fail_penalty)
             total_reward = torch.where(done_during, safe_reward, total_reward)
             if reward_terms is not None:
+                for key, value in list(reward_terms.items()):
+                    if key == "total" or (not torch.is_tensor(value)):
+                        continue
+                    if value.shape[:1] == done_during.shape:
+                        reward_terms[key] = torch.where(done_during, torch.zeros_like(value), value)
+                if "collision" in reward_terms and torch.is_tensor(reward_terms["collision"]):
+                    reward_terms["collision"] = torch.where(
+                        done_during,
+                        safe_reward,
+                        reward_terms["collision"],
+                    )
                 reward_terms["total"] = total_reward
 
         # 4.5 高层 episode 统计（与 breakdown 口径对齐）
@@ -2069,6 +2515,11 @@ class HierarchicalHexapodEnv:
         timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if not self.no_episode_timeout:
             timeout = self.episode_length_buf >= self.max_episode_length
+        timeout_bootstrap_obs = None
+        if timeout.any():
+            timeout_bootstrap_obs = {}
+            for key, value in reward_obs.items():
+                timeout_bootstrap_obs[key] = value.detach().clone() if torch.is_tensor(value) else value
         done_any |= timeout
         manual_reset_mask |= timeout
 
@@ -2085,6 +2536,9 @@ class HierarchicalHexapodEnv:
             if hasattr(self.env, "compute_observations"):
                 self.env.compute_observations()
             self._refresh_depth_images(force=True)
+            self.prev_robot_pos[reset_ids] = self.env.root_states[reset_ids, :3]
+            if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
+                self.prev_goal_world[reset_ids] = self.env.goal_world[reset_ids]
         
         goal_change_count_snapshot = self.goal_change_count.clone()
         episode_info = None
@@ -2101,6 +2555,7 @@ class HierarchicalHexapodEnv:
             self.stable_follow_steps[done_any] = 0
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
+            self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[done_any] = self.env.goal_world[done_any]
             # 重置 Post-Processor 的变化率限制记忆
@@ -2122,8 +2577,11 @@ class HierarchicalHexapodEnv:
             'collision_threshold_src': collision_threshold_src,
             'collision_indices_src': collision_indices_src,
             'clearance': clearance,
+            'clearance_global': clearance_global,
             'done_during': done_during,
             'manual_reset_mask': manual_reset_mask,
+            'timeout': timeout,
+            'timeout_bootstrap_obs': timeout_bootstrap_obs,
             'target_turn_events': getattr(self.env, "target_turn_events", None),
             'target_preturn_events': getattr(self.env, "target_preturn_events", None),
             'target_reflect_events': getattr(self.env, "target_reflect_events", None),
@@ -2183,12 +2641,17 @@ def train(args):
         "moe": ("s_avoid_basic",),
     }
     eval_only_by_skill = {
-        "avoid": ("s_ood_holdout",),
+        "avoid": ("s_ood_holdout", "s_ood_holdout_large"),
     }
     rec_tasks = recommended_by_skill.get(skill_name, tuple())
     eval_only_tasks = eval_only_by_skill.get(skill_name, tuple())
     if args.task in eval_only_tasks:
-        print(f"[Info] task={args.task} 属于结构化 OOD 验证场景，建议用于评测而非主训练。")
+        if not bool(getattr(args, "allow_eval_only_train", False)):
+            raise ValueError(
+                f"task={args.task} 属于结构化 OOD hold-out，只允许评测；"
+                "如确需临时训练，请显式加 --allow_eval_only_train。"
+            )
+        print(f"[Warn] task={args.task} 属于结构化 OOD hold-out；当前因 --allow_eval_only_train 被放行。")
     elif rec_tasks and args.task not in rec_tasks:
         rec_text = "/".join(rec_tasks)
         print(f"[Warn] 当前 task={args.task} 不在 {skill_name} 主线推荐列表（{rec_text}）。")
@@ -2212,7 +2675,11 @@ def train(args):
     import_modules()
     
     skill = getattr(args, "skill", "follow")
-    use_avoid_local_map = skill == "avoid"
+    if args.mode == "student" and not getattr(args, "teacher_ckpt", None):
+        raise ValueError("Student 模式必须提供 --teacher_ckpt，避免把纯视觉从头训练误记为蒸馏实验。")
+    if args.mode == "student" and skill == "moe":
+        raise ValueError("当前未实现 Gate 的 student 蒸馏训练链路，禁止使用 --mode student --skill moe。")
+    use_avoid_local_map = skill in ("avoid", "moe")
 
     # 创建环境
     env = HierarchicalHexapodEnv(args, device)
@@ -2334,7 +2801,24 @@ def train(args):
             return current_obs['critic_local_map_2ch'], current_obs['critic_difficulty']
         return current_obs['gt_affordance'], current_obs['gt_difficulty']
 
-    def _predict_actor_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_moe_follow_gt_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        return current_obs['gt_affordance'], current_obs['gt_difficulty']
+
+    def _get_moe_avoid_gt_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        return current_obs['local_map_2ch'], current_obs['actor_difficulty']
+
+    def _get_moe_expert_state_inputs(state_tensor: torch.Tensor) -> torch.Tensor:
+        # Standalone follow/avoid experts were trained with prev_gate_y fixed to 0.
+        # Keep the same state contract when they are reused under MoE gating.
+        if state_tensor.dim() != 2 or state_tensor.shape[1] <= 9:
+            return state_tensor
+        expert_state = state_tensor.clone()
+        expert_state[:, 9] = 0.0
+        return expert_state
+
+    def _predict_affordance_triplet(
+        current_obs: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if vision_model is None:
             raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
         with torch.no_grad():
@@ -2345,15 +2829,25 @@ def train(args):
                 vis_out['low_obstacle'],
             ], dim=1)
             aff_map_pred = resize_affordance_map(aff_map_pred, env.affordance_map_size)
-            if use_avoid_local_map:
-                aff_map_pred = build_avoid_local_map_2ch(
-                    aff_map_pred,
-                    visible_mask=env.affordance_visible_mask,
-                )
-                difficulty_pred = current_obs['actor_difficulty']
-            else:
-                difficulty_pred = difficulty_from_gap(aff_map_pred)
-        return aff_map_pred, difficulty_pred
+            avoid_map_pred = build_avoid_local_map_2ch(
+                aff_map_pred,
+                visible_mask=env.affordance_visible_mask,
+            )
+            avoid_difficulty_pred = env._compute_objective_difficulty_from_local_map(avoid_map_pred)
+            gt_difficulty_pred = difficulty_from_gap(aff_map_pred)
+        return aff_map_pred, avoid_map_pred, avoid_difficulty_pred, gt_difficulty_pred
+
+    def _predict_actor_inputs(current_obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        aff_map_pred, avoid_map_pred, avoid_difficulty_pred, gt_difficulty_pred = _predict_affordance_triplet(current_obs)
+        if use_avoid_local_map:
+            return avoid_map_pred, avoid_difficulty_pred
+        return aff_map_pred, gt_difficulty_pred
+
+    def _predict_moe_expert_inputs(
+        current_obs: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        aff_map_pred, avoid_map_pred, avoid_difficulty_pred, gt_difficulty_pred = _predict_affordance_triplet(current_obs)
+        return aff_map_pred, gt_difficulty_pred, avoid_map_pred, avoid_difficulty_pred
 
     actor_aff_init, _ = _get_actor_gt_inputs(obs_dict)
 
@@ -2381,10 +2875,11 @@ def train(args):
         and (skill == "follow")
         and (args.task == S0_FOLLOW_TASK_NAME)
     )
+    use_expert_guidance = use_egpo or use_follow_expert
     compute_s0_follow_expert_cmd = None
     if bool(getattr(args, "egpo", False)) and not use_egpo:
         print("[Warn] --egpo 仅在 --skill follow --task s_follow_basic 且 non-gate 路径生效；当前配置下将忽略。")
-    if use_egpo or use_follow_expert:
+    if use_expert_guidance:
         from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
         compute_s0_follow_expert_cmd = s0_follow_expert_fn
         if use_egpo:
@@ -2394,6 +2889,133 @@ def train(args):
             )
         if use_follow_expert:
             print("[Train] cmd_source=follow_expert (--use_follow_expert)")
+
+    run_mode_tag = args.mode + ("_studentaff" if (is_gate and moe_use_student_aff) else "")
+
+    def _normalize_meta_value(value):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [_normalize_meta_value(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): _normalize_meta_value(v) for k, v in value.items()}
+        return str(value)
+
+    def _build_experiment_meta() -> Dict[str, object]:
+        tracked_keys = [
+            "task",
+            "mode",
+            "skill",
+            "seed",
+            "num_envs",
+            "num_steps",
+            "num_epochs",
+            "mini_batch_size",
+            "lr",
+            "egpo",
+            "egpo_lr_guided",
+            "egpo_lr_post",
+            "use_follow_expert",
+            "moe_use_student_aff",
+            "gate_use_difficulty",
+            "aff_stack",
+            "beta",
+            "t1_goal_occlusion",
+            "allow_eval_only_train",
+            "allow_inexact_resume",
+            "teacher_ckpt",
+            "vision_ckpt",
+            "follow_ckpt",
+            "avoid_ckpt",
+            "low_level_ckpt",
+            "output_dir",
+            "save_interval",
+            "gamma",
+            "gae_lambda",
+            "clip_range",
+            "value_loss_coef",
+            "entropy_coef",
+            "max_grad_norm",
+            "cmd_slew_lin",
+            "cmd_slew_ang",
+            "cmd_safe_dist",
+            "cmd_free_dist",
+            "gate_safe_clamp",
+            "gate_safe_max",
+            "moe_expert_deterministic",
+            "disable_risk_scale",
+            "camera_enable",
+            "camera_interval",
+            "decimation",
+        ]
+        meta = {key: _normalize_meta_value(getattr(args, key, None)) for key in tracked_keys}
+        for key in ("teacher_ckpt", "vision_ckpt", "follow_ckpt", "avoid_ckpt", "low_level_ckpt"):
+            if meta.get(key):
+                meta[key] = os.path.abspath(str(meta[key]))
+        meta["sim2real_sensor_target"] = "Intel RealSense D435i"
+        meta["observation_contract"] = collect_runtime_observation_contract(args, env)
+        meta["run_mode_tag"] = run_mode_tag
+        meta["online_best_metric"] = "online_mean_reward_monitor_only"
+        meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
+        meta["unknown_cli_args"] = list(getattr(args, "_unknown_cli", []))
+        return meta
+
+    def _check_checkpoint_meta(
+        ckpt_meta: Optional[Dict[str, object]],
+        *,
+        source_name: str,
+        strict_source: bool,
+    ) -> None:
+        if not isinstance(ckpt_meta, dict):
+            print(f"[Warn] {source_name} 未包含 experiment_meta；无法校验 teacher/vision 来源一致性。")
+            return
+        current_meta = _build_experiment_meta()
+        hard_keys = ("task", "mode", "skill")
+        for key in hard_keys:
+            prev_v = ckpt_meta.get(key, None)
+            curr_v = current_meta.get(key, None)
+            if prev_v is not None and curr_v is not None and prev_v != curr_v:
+                raise ValueError(
+                    f"{source_name} 与当前运行的 {key} 不一致：checkpoint={prev_v}, current={curr_v}。"
+                )
+        source_keys = ("teacher_ckpt", "vision_ckpt", "follow_ckpt", "avoid_ckpt", "low_level_ckpt")
+        mismatch_msgs = []
+        for key in source_keys:
+            prev_v = ckpt_meta.get(key, None)
+            curr_v = current_meta.get(key, None)
+            if prev_v is None or curr_v is None or prev_v == curr_v:
+                continue
+            mismatch_msgs.append(f"{key}: checkpoint={prev_v}, current={curr_v}")
+        if mismatch_msgs:
+            msg = (
+                f"{source_name} 的来源配置与当前命令不一致，可能污染实验归因："
+                + " | ".join(mismatch_msgs)
+            )
+            if strict_source:
+                raise ValueError(msg)
+            print(f"[Warn] {msg}")
+
+    def _check_aux_model_meta(
+        ckpt_meta: Optional[Dict[str, object]],
+        *,
+        source_name: str,
+        expected_mode: Optional[str] = None,
+        expected_skill: Optional[str] = None,
+    ) -> None:
+        if not isinstance(ckpt_meta, dict):
+            return
+        if expected_mode is not None:
+            meta_mode = ckpt_meta.get("mode", None)
+            if meta_mode is not None and meta_mode != expected_mode:
+                raise ValueError(
+                    f"{source_name} 的 mode 与当前实验预期不一致: checkpoint={meta_mode}, expected={expected_mode}"
+                )
+        if expected_skill is not None:
+            meta_skill = ckpt_meta.get("skill", None)
+            if meta_skill is not None and meta_skill != expected_skill:
+                raise ValueError(
+                    f"{source_name} 的 skill 与当前实验预期不一致: checkpoint={meta_skill}, expected={expected_skill}"
+                )
 
     if is_gate:
         policy = GatePolicy(
@@ -2432,6 +3054,20 @@ def train(args):
             ).to(device)
 
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
+            _check_aux_model_meta(
+                ckpt_meta,
+                source_name="Teacher checkpoint",
+                expected_mode="teacher",
+                expected_skill=skill,
+            )
+            validate_checkpoint_contract_compatibility(
+                build_runtime_contract_meta(args, env),
+                ckpt_meta,
+                reference_name="current runtime",
+                candidate_name="Teacher checkpoint",
+                strict=True,
+            )
             if 'model_state_dict' in ckpt:
                 load_high_level_state_dict_compat(
                     teacher_model,
@@ -2454,11 +3090,18 @@ def train(args):
         if args.vision_ckpt and AffordanceEstimator is not None:
             vision_model = AffordanceEstimator(
                 depth_channels=1,
-                output_size=16,
+                output_size=get_vision_native_output_size(),
                 max_depth_range=5.0
             ).to(device)
 
             ckpt = torch.load(args.vision_ckpt, map_location=device)
+            validate_vision_runtime_contract(
+                args,
+                env,
+                source_name="Student vision checkpoint",
+                ckpt_meta=ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None,
+                strict_meta=True,
+            )
             if 'model_state_dict' in ckpt:
                 vision_model.load_state_dict(ckpt['model_state_dict'])
             else:
@@ -2472,10 +3115,17 @@ def train(args):
             raise ValueError("AffordanceEstimator 不可用，无法使用 student affordance。")
         vision_model = AffordanceEstimator(
             depth_channels=1,
-            output_size=16,
+            output_size=get_vision_native_output_size(),
             max_depth_range=5.0
         ).to(device)
         ckpt = torch.load(args.vision_ckpt, map_location=device)
+        validate_vision_runtime_contract(
+            args,
+            env,
+            source_name="Gate vision checkpoint",
+            ckpt_meta=ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None,
+            strict_meta=True,
+        )
         if 'model_state_dict' in ckpt:
             vision_model.load_state_dict(ckpt['model_state_dict'])
         else:
@@ -2486,20 +3136,36 @@ def train(args):
     if is_gate:
         if not getattr(args, "follow_ckpt", None) or not getattr(args, "avoid_ckpt", None):
             raise ValueError("Gate 模式需要提供 --follow_ckpt 和 --avoid_ckpt。")
+        follow_aff_channels = AFFORDANCE_CHANNELS * aff_stack
+        avoid_aff_channels = AVOID_LOCAL_MAP_CHANNELS * aff_stack
         follow_model = CmdVelExpert(
-            affordance_channels=aff_channels,
+            affordance_channels=follow_aff_channels,
             state_dim=state_dim,
             goal_dim=goal_dim,
             cmd_scale=cmd_scale,
         ).to(device)
         avoid_model = CmdVelExpert(
-            affordance_channels=aff_channels,
+            affordance_channels=avoid_aff_channels,
             state_dim=state_dim,
             goal_dim=goal_dim,
             cmd_scale=cmd_scale,
         ).to(device)
         for model, ckpt_path in [(follow_model, args.follow_ckpt), (avoid_model, args.avoid_ckpt)]:
             ckpt = torch.load(ckpt_path, map_location=device)
+            expected_skill = "follow" if model is follow_model else "avoid"
+            ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
+            _check_aux_model_meta(
+                ckpt_meta,
+                source_name=f"Expert checkpoint ({expected_skill})",
+                expected_skill=expected_skill,
+            )
+            validate_checkpoint_contract_compatibility(
+                _build_experiment_meta(),
+                ckpt_meta,
+                reference_name="current gate run",
+                candidate_name=f"Expert checkpoint ({expected_skill})",
+                strict=True,
+            )
             if 'model_state_dict' in ckpt:
                 load_high_level_state_dict_compat(
                     model,
@@ -2529,9 +3195,22 @@ def train(args):
     start_iteration = 0
     best_reward = float("-inf")
     if resume_path:
+        if not bool(getattr(args, "allow_inexact_resume", False)):
+            raise ValueError(
+                "当前 checkpoint 不保存 env/curriculum 完整状态，--resume 只属于近似续训；"
+                "默认已禁用。若你明确接受，请显式加 --allow_inexact_resume；"
+                "若只想继续权重训练，请优先用 --finetune_from。"
+            )
         if not os.path.exists(resume_path):
             raise FileNotFoundError(f"Resume checkpoint 不存在: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
+        if os.path.basename(resume_path) == "best_online_reward.pt":
+            raise ValueError("best_online_reward.pt 仅用于在线监控挑点，不允许作为 --resume；请改用 --finetune_from。")
+        _check_checkpoint_meta(
+            ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None,
+            source_name="Resume checkpoint",
+            strict_source=True,
+        )
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         load_high_level_state_dict_compat(policy, state_dict, label="resume_policy")
         if isinstance(ckpt, dict) and "optimizer_state_dict" in ckpt:
@@ -2540,9 +3219,11 @@ def train(args):
             except Exception as exc:
                 print(f"[Warn] Resume optimizer_state_dict 不兼容，改用新优化器继续训练: {exc}")
         else:
-            print("[Warn] Resume checkpoint 未包含 optimizer_state_dict。")
+            raise ValueError("Resume checkpoint 未包含 optimizer_state_dict；请改用 --finetune_from。")
         start_iteration = int(ckpt.get("iteration", 0)) + 1 if isinstance(ckpt, dict) else 0
-        best_reward = float(ckpt.get("best_reward", ckpt.get("mean_reward", -float("inf")))) if isinstance(ckpt, dict) else best_reward
+        best_reward = float(
+            ckpt.get("best_online_reward", ckpt.get("best_reward", ckpt.get("mean_reward", -float("inf"))))
+        ) if isinstance(ckpt, dict) else best_reward
         if isinstance(ckpt, dict) and "torch_rng_state" in ckpt:
             torch.set_rng_state(ckpt["torch_rng_state"])
         if isinstance(ckpt, dict) and "numpy_rng_state" in ckpt:
@@ -2555,6 +3236,11 @@ def train(args):
         if not os.path.exists(finetune_path):
             raise FileNotFoundError(f"Finetune checkpoint 不存在: {finetune_path}")
         ckpt = torch.load(finetune_path, map_location=device)
+        _check_checkpoint_meta(
+            ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None,
+            source_name="Finetune checkpoint",
+            strict_source=False,
+        )
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         load_high_level_state_dict_compat(policy, state_dict, label="finetune_policy")
         dprint(f"[Main] Finetune from: {finetune_path}")
@@ -2564,14 +3250,90 @@ def train(args):
         os.makedirs(log_dir, exist_ok=True)
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_dir = os.path.join(args.output_dir, f"{skill}_{args.mode}_{timestamp}")
+        log_dir = os.path.join(args.output_dir, f"{skill}_{run_mode_tag}_{timestamp}")
         os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     print(f"[Main] 日志目录: {log_dir}")
+    run_meta = _build_experiment_meta()
+    run_meta["log_dir"] = os.path.abspath(log_dir)
+    with open(os.path.join(log_dir, "run_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(run_meta, f, ensure_ascii=False, indent=2)
     
     # 创建 Rollout Buffer
     aff_map_shape = (aff_channels, aff_shape[1], aff_shape[2])
     buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_map_shape, action_dim, device)
+
+    def _build_next_aff_stacks(
+        current_actor_stack: Optional[torch.Tensor],
+        current_critic_stack: Optional[torch.Tensor],
+        next_actor_aff: torch.Tensor,
+        next_critic_aff: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if current_actor_stack is None or current_critic_stack is None:
+            return (
+                next_actor_aff.repeat(1, aff_stack, 1, 1),
+                next_critic_aff.repeat(1, aff_stack, 1, 1),
+            )
+
+        actor_stack_next = torch.roll(current_actor_stack, shifts=-next_actor_aff.shape[1], dims=1)
+        actor_stack_next[:, -next_actor_aff.shape[1]:, :, :] = next_actor_aff
+        critic_stack_next = torch.roll(current_critic_stack, shifts=-next_critic_aff.shape[1], dims=1)
+        critic_stack_next[:, -next_critic_aff.shape[1]:, :, :] = next_critic_aff
+        return actor_stack_next, critic_stack_next
+
+    def _compute_bootstrap_value_for_obs(
+        bootstrap_obs: Dict[str, torch.Tensor],
+        current_actor_stack: Optional[torch.Tensor],
+        current_critic_stack: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        with torch.no_grad():
+            bootstrap_state = bootstrap_obs['state']
+            bootstrap_goal = bootstrap_obs['goal']
+            bootstrap_critic_aff_map, bootstrap_critic_difficulty = _get_critic_gt_inputs(bootstrap_obs)
+            bootstrap_use_student_aff = args.mode != 'teacher'
+            if is_gate and moe_use_student_aff:
+                bootstrap_use_student_aff = True
+            if bootstrap_use_student_aff:
+                bootstrap_aff_map, bootstrap_difficulty = _predict_actor_inputs(bootstrap_obs)
+            else:
+                bootstrap_aff_map, bootstrap_difficulty = _get_actor_gt_inputs(bootstrap_obs)
+            bootstrap_aff_stack, bootstrap_critic_stack = _build_next_aff_stacks(
+                current_actor_stack,
+                current_critic_stack,
+                bootstrap_aff_map,
+                bootstrap_critic_aff_map,
+            )
+
+            if is_gate:
+                gate_difficulty = (
+                    bootstrap_difficulty if gate_use_difficulty else torch.zeros_like(bootstrap_difficulty)
+                )
+                gate_critic_difficulty = (
+                    bootstrap_critic_difficulty
+                    if gate_use_difficulty else torch.zeros_like(bootstrap_critic_difficulty)
+                )
+                out = policy(
+                    bootstrap_aff_stack,
+                    bootstrap_state,
+                    bootstrap_goal,
+                    gate_difficulty,
+                    critic_affordance_map=bootstrap_critic_stack,
+                    critic_robot_state=bootstrap_state,
+                    critic_goal=bootstrap_goal,
+                    critic_terrain_difficulty=gate_critic_difficulty,
+                )
+            else:
+                out = policy(
+                    bootstrap_aff_stack,
+                    bootstrap_state,
+                    bootstrap_goal,
+                    bootstrap_difficulty,
+                    critic_affordance_map=bootstrap_critic_stack,
+                    critic_robot_state=bootstrap_state,
+                    critic_goal=bootstrap_goal,
+                    critic_terrain_difficulty=bootstrap_critic_difficulty,
+                )
+        return out.value.squeeze(-1)
     
     # 训练统计
     episode_rewards = deque(maxlen=100)
@@ -2589,7 +3351,13 @@ def train(args):
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
     dprint(f"  - Steps per iteration: {args.num_steps}")
     dprint(f"  - Batch size: {env.num_envs * args.num_steps}")
-    dprint(f"  - Learning rate: {args.lr}")
+    if use_egpo:
+        dprint(
+            f"  - EGPO learning rate (guided/post): "
+            f"{args.egpo_lr_guided} / {args.egpo_lr_post}"
+        )
+    else:
+        dprint(f"  - Learning rate: {args.lr}")
     dprint(f"  - Console log interval: {args.log_interval} iters (auto: num_iterations/20)")
     if hasattr(env, "max_episode_length") and hasattr(env, "high_level_dt"):
         dprint(
@@ -2610,6 +3378,8 @@ def train(args):
     
     aff_stack_buf = None
     critic_aff_stack_buf = None
+    moe_follow_aff_stack_buf = None
+    moe_avoid_aff_stack_buf = None
     last_goal_obs = None
     teacher_stack_buf = None
     stack_reset_mask = None
@@ -2618,10 +3388,10 @@ def train(args):
     egpo_alpha_half_logged = False
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
+        schedule_iteration = iteration
         if env.is_s0_follow_task:
-            local_iter = iteration - start_iteration
             denom = max(1, int(args.num_iterations) - 1)
-            d_scene = float(np.clip(float(local_iter) / float(denom), 0.0, 1.0))
+            d_scene = float(np.clip(float(schedule_iteration) / float(denom), 0.0, 1.0))
         else:
             d_scene = float(np.clip(float(iteration) / float(SCENE_CURRIC_ITERS), 0.0, 1.0))
         env.set_scene_difficulty_target(d_scene)
@@ -2704,11 +3474,32 @@ def train(args):
         egpo_cmd_count = torch.zeros((), device=device)
         clearance_min_value = None
         avoid_stage_value = 0.0
+        avoid_stage_window_value = 0.0
+        avoid_shrink_window_value = 0.0
+        avoid_stage_completed_eps_value = 0.0
         avoid_corridor_width_value = 0.0
         avoid_collision_rate100_value = 0.0
         avoid_collision_rate50_value = 0.0
         avoid_exposure_rate100_value = 0.0
+        avoid_progress_rate_value = 0.0
+        avoid_success_rate_value = 0.0
         avoid_nearest_obstacle_dist_value = 5.0
+        avoid_stage_switch_event_value = 0.0
+        avoid_stage_switch_from_value = 0.0
+        avoid_stage_switch_to_value = 0.0
+        avoid_stage_switch_collision_value = 0.0
+        avoid_stage_switch_exposure_value = 0.0
+        avoid_stage_switch_progress_value = 0.0
+        avoid_stage_switch_success_value = 0.0
+        avoid_stage3_shrink_event_value = 0.0
+        avoid_stage3_shrink_from_width_value = 0.0
+        avoid_stage3_shrink_to_width_value = 0.0
+        timeout_bootstrap_count = torch.zeros((), device=device)
+        policy_nonfinite_action_count = 0
+        expert_nonfinite_action_count = 0
+        teacher_nonfinite_action_count = 0
+        nonfinite_input_sample_count = 0
+        allow_nonfinite_recovery = bool(getattr(args, "allow_nonfinite_recovery", False))
         local_iteration = iteration - start_iteration
         log_memory_this_iter = debug_memory and (local_iteration % debug_memory_interval == 0)
         if log_memory_this_iter and debug_memory_device_index is not None:
@@ -2718,7 +3509,7 @@ def train(args):
                 f"{_cuda_mem_stats_text(debug_memory_device_index)}"
             )
         expert_alpha_rollout = (
-            _get_expert_alpha(local_iteration, expert_interface_iters)
+            _get_expert_alpha(schedule_iteration, expert_interface_iters)
             if use_egpo else 0.0
         )
         prev_goal_world_rollout = None
@@ -2739,18 +3530,39 @@ def train(args):
                 print("[Warn] moe_use_student_aff=True 但当前 mode=teacher，仍会使用 student affordance。")
             actor_gt_aff_map, actor_gt_difficulty = _get_actor_gt_inputs(obs_dict)
             critic_aff_map, critic_difficulty = _get_critic_gt_inputs(obs_dict)
-            if use_student_aff:
+            follow_aff_map = None
+            follow_difficulty = None
+            avoid_aff_map = None
+            avoid_difficulty = None
+            if is_gate:
+                follow_gt_aff_map, follow_gt_difficulty = _get_moe_follow_gt_inputs(obs_dict)
+                avoid_gt_aff_map, avoid_gt_difficulty = _get_moe_avoid_gt_inputs(obs_dict)
+                if use_student_aff:
+                    (
+                        follow_aff_map,
+                        follow_difficulty,
+                        avoid_aff_map,
+                        avoid_difficulty,
+                    ) = _predict_moe_expert_inputs(obs_dict)
+                else:
+                    follow_aff_map, follow_difficulty = follow_gt_aff_map, follow_gt_difficulty
+                    avoid_aff_map, avoid_difficulty = avoid_gt_aff_map, avoid_gt_difficulty
+                aff_map, difficulty = avoid_aff_map, avoid_difficulty
+            elif use_student_aff:
                 aff_map, difficulty = _predict_actor_inputs(obs_dict)
             else:
                 aff_map, difficulty = actor_gt_aff_map, actor_gt_difficulty
 
             if use_avoid_local_map:
-                env.clearance_override = env._compute_clearance_from_affordance(aff_map)
-                env.reward_affordance_override = critic_aff_map
+                env.clearance_affordance_override = aff_map
+                env.clearance_override = None
+                env.reward_affordance_override = aff_map
             elif use_student_aff:
-                env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+                env.clearance_affordance_override = aff_map
+                env.clearance_override = None
                 env.reward_affordance_override = aff_map
             else:
+                env.clearance_affordance_override = None
                 env.clearance_override = None
                 env.reward_affordance_override = None
 
@@ -2759,6 +3571,9 @@ def train(args):
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
                 critic_aff_stack_buf = critic_aff_map.repeat(1, aff_stack, 1, 1)
                 aff_stack_fill = torch.ones(env.num_envs, device=device)
+                if is_gate:
+                    moe_follow_aff_stack_buf = follow_aff_map.repeat(1, aff_stack, 1, 1)
+                    moe_avoid_aff_stack_buf = avoid_aff_map.repeat(1, aff_stack, 1, 1)
                 if args.mode == 'student' and teacher_model is not None and not is_gate:
                     teacher_stack_buf = actor_gt_aff_map.repeat(1, aff_stack, 1, 1)
             else:
@@ -2766,6 +3581,9 @@ def train(args):
                 if stack_reset_mask is not None and stack_reset_mask.any():
                     aff_stack_buf[stack_reset_mask] = aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     critic_aff_stack_buf[stack_reset_mask] = critic_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                    if is_gate:
+                        moe_follow_aff_stack_buf[stack_reset_mask] = follow_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
+                        moe_avoid_aff_stack_buf[stack_reset_mask] = avoid_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     aff_stack_fill[stack_reset_mask] = 1
                     if teacher_stack_buf is not None:
                         teacher_stack_buf[stack_reset_mask] = actor_gt_aff_map[stack_reset_mask].repeat(1, aff_stack, 1, 1)
@@ -2774,6 +3592,15 @@ def train(args):
                 aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
                 critic_aff_stack_buf = torch.roll(critic_aff_stack_buf, shifts=-critic_aff_map.shape[1], dims=1)
                 critic_aff_stack_buf[:, -critic_aff_map.shape[1]:, :, :] = critic_aff_map
+                if is_gate:
+                    moe_follow_aff_stack_buf = torch.roll(
+                        moe_follow_aff_stack_buf, shifts=-follow_aff_map.shape[1], dims=1
+                    )
+                    moe_follow_aff_stack_buf[:, -follow_aff_map.shape[1]:, :, :] = follow_aff_map
+                    moe_avoid_aff_stack_buf = torch.roll(
+                        moe_avoid_aff_stack_buf, shifts=-avoid_aff_map.shape[1], dims=1
+                    )
+                    moe_avoid_aff_stack_buf[:, -avoid_aff_map.shape[1]:, :, :] = avoid_aff_map
                 if teacher_stack_buf is not None:
                     teacher_stack_buf = torch.roll(teacher_stack_buf, shifts=-actor_gt_aff_map.shape[1], dims=1)
                     teacher_stack_buf[:, -actor_gt_aff_map.shape[1]:, :, :] = actor_gt_aff_map
@@ -2827,13 +3654,48 @@ def train(args):
                 goal = goal_raw
                 last_goal_obs = goal_raw.detach()
 
-            # Runtime finite-guards for policy inputs.
-            state = torch.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
-            goal = torch.nan_to_num(goal, nan=0.0, posinf=0.0, neginf=0.0)
-            aff_stack_buf = torch.nan_to_num(aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
-            critic_aff_stack_buf = torch.nan_to_num(critic_aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
-            difficulty = torch.nan_to_num(difficulty, nan=0.0, posinf=0.0, neginf=0.0)
-            critic_difficulty = torch.nan_to_num(critic_difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+            finite_masks = [
+                _row_finite_mask(state),
+                _row_finite_mask(goal),
+                _row_finite_mask(aff_stack_buf),
+                _row_finite_mask(critic_aff_stack_buf),
+                _row_finite_mask(difficulty),
+                _row_finite_mask(critic_difficulty),
+            ]
+            if is_gate:
+                finite_masks.extend([
+                    _row_finite_mask(moe_follow_aff_stack_buf),
+                    _row_finite_mask(moe_avoid_aff_stack_buf),
+                    _row_finite_mask(follow_difficulty),
+                    _row_finite_mask(avoid_difficulty),
+                ])
+            finite_input_mask = finite_masks[0].clone()
+            for mask in finite_masks[1:]:
+                finite_input_mask &= mask
+            if not bool(finite_input_mask.all().item()):
+                bad_count = int((~finite_input_mask).sum().item())
+                nonfinite_input_sample_count += bad_count
+                if not allow_nonfinite_recovery:
+                    raise RuntimeError(
+                        f"[NonFinite-FailFast] policy inputs contain non-finite values "
+                        f"(invalid_envs={bad_count}). Use --allow_nonfinite_recovery to sanitize and mask these samples."
+                    )
+                state = torch.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
+                goal = torch.nan_to_num(goal, nan=0.0, posinf=0.0, neginf=0.0)
+                aff_stack_buf = torch.nan_to_num(aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
+                critic_aff_stack_buf = torch.nan_to_num(critic_aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0)
+                difficulty = torch.nan_to_num(difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+                critic_difficulty = torch.nan_to_num(critic_difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+                if is_gate:
+                    moe_follow_aff_stack_buf = torch.nan_to_num(
+                        moe_follow_aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    moe_avoid_aff_stack_buf = torch.nan_to_num(
+                        moe_avoid_aff_stack_buf, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    follow_difficulty = torch.nan_to_num(follow_difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+                    avoid_difficulty = torch.nan_to_num(avoid_difficulty, nan=0.0, posinf=0.0, neginf=0.0)
+            action_valid = finite_input_mask.clone()
 
             # Policy 决策
             teacher_action = None
@@ -2843,17 +3705,28 @@ def train(args):
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
+                moe_expert_state = _get_moe_expert_state_inputs(state)
                 with torch.no_grad():
                     cmd_f, _ = follow_model.get_action(
-                        aff_stack_buf, state, goal, difficulty,
+                        moe_follow_aff_stack_buf, moe_expert_state, goal, follow_difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True))
                     )
                     cmd_a, _ = avoid_model.get_action(
-                        aff_stack_buf, state, goal, difficulty,
+                        moe_avoid_aff_stack_buf, moe_expert_state, goal, avoid_difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True))
                     )
-                    cmd_f = cmd_f.detach()
-                    cmd_a = cmd_a.detach()
+                    cmd_f, cmd_f_bad = _sanitize_or_fail_action_tensor(
+                        "moe_follow_action",
+                        cmd_f.detach(),
+                        allow_recovery=allow_nonfinite_recovery,
+                    )
+                    cmd_a, cmd_a_bad = _sanitize_or_fail_action_tensor(
+                        "moe_avoid_action",
+                        cmd_a.detach(),
+                        allow_recovery=allow_nonfinite_recovery,
+                    )
+                    expert_nonfinite_action_count += int(cmd_f_bad.sum().item()) + int(cmd_a_bad.sum().item())
+                    action_valid = action_valid & (~cmd_f_bad) & (~cmd_a_bad)
                 with torch.no_grad():
                     gate_y, _ = policy.get_action(
                         aff_stack_buf,
@@ -2866,15 +3739,22 @@ def train(args):
                         critic_goal=goal,
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
-                    gate_y = gate_y.detach()
-                    gate_y_raw = gate_y
+                    gate_y, gate_y_bad = _sanitize_or_fail_action_tensor(
+                        "gate_action",
+                        gate_y.detach(),
+                        allow_recovery=allow_nonfinite_recovery,
+                    )
+                    policy_nonfinite_action_count += int(gate_y_bad.sum().item())
+                    action_valid = action_valid & (~gate_y_bad)
+                    gate_y_raw = gate_y.clone()
                     # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
                     # For now, y_eff = y (raw). Later (PCR-Net++), y_eff blends (y, w) and can be smoothed/hysteretic.
                     y_eff = gate_y_raw
                     gate_y_prev = env.prev_gate_y.clone()
                     if getattr(args, "gate_safe_clamp", False):
                         safe_max = float(getattr(args, "gate_safe_max", 0.3))
-                        clearance_gate = env._compute_clearance_from_affordance(aff_map)
+                        clearance_follow = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
+                        clearance_avoid = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
                         # Keep clamp threshold consistent with the active post-processor (beta-adjusted).
                         safe_thr = getattr(env.post_processor, "safe_distance", 0.25)
                         if getattr(args, "beta", None) is not None:
@@ -2883,13 +3763,15 @@ def train(args):
                             if hasattr(env.post_processor, "get_effective_safe_distance"):
                                 safe_thr_t = env.post_processor.get_effective_safe_distance(beta_v)
                                 safe_thr = float(safe_thr_t.squeeze().detach().cpu().item())
+                        follow_is_riskier = clearance_follow <= clearance_avoid
+                        clamp_mask = follow_is_riskier & (clearance_follow < safe_thr)
                         gate_y = torch.where(
-                            clearance_gate < safe_thr,
+                            clamp_mask,
                             torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
                             gate_y,
                         )
-                        gate_y_raw = gate_y
-                        y_eff = gate_y_raw
+                        y_eff = gate_y
+                        action_valid = action_valid & torch.isclose(gate_y, gate_y_raw, atol=1e-6, rtol=0.0)
                     log_prob, value, _, _ = policy.evaluate_actions(
                         aff_stack_buf,
                         state,
@@ -2903,6 +3785,21 @@ def train(args):
                     )
                     cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
                     next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
+                    timeout_mask = env_info.get("timeout", None) if env_info is not None else None
+                    timeout_bootstrap_obs = env_info.get("timeout_bootstrap_obs", None) if env_info is not None else None
+                    if (
+                        timeout_mask is not None
+                        and timeout_bootstrap_obs is not None
+                        and torch.is_tensor(timeout_mask)
+                        and bool(timeout_mask.any().item())
+                    ):
+                        timeout_values = _compute_bootstrap_value_for_obs(
+                            timeout_bootstrap_obs,
+                            aff_stack_buf,
+                            critic_aff_stack_buf,
+                        )
+                        rewards = rewards + args.gamma * timeout_values * timeout_mask.float()
+                        timeout_bootstrap_count += timeout_mask.float().sum()
                     rewards = rewards.detach()
                     # Record raw/effective gate and command-conditioned risk proxies for diagnostics.
                     if env_info is not None and isinstance(env_info, dict):
@@ -2944,8 +3841,14 @@ def train(args):
                         critic_goal=goal,
                         critic_terrain_difficulty=critic_difficulty,
                     )
-                    cmd = cmd.detach()
-                    if (use_egpo or use_follow_expert) and compute_s0_follow_expert_cmd is not None:
+                    cmd, cmd_bad = _sanitize_or_fail_action_tensor(
+                        "policy_action",
+                        cmd.detach(),
+                        allow_recovery=allow_nonfinite_recovery,
+                    )
+                    policy_nonfinite_action_count += int(cmd_bad.sum().item())
+                    action_valid = action_valid & (~cmd_bad)
+                    if use_expert_guidance and compute_s0_follow_expert_cmd is not None:
                         policy_cmd_raw = cmd
                         target_world_xy = getattr(env.env, "target_world", None)
                         target_vel_world_xy = getattr(env.env, "target_vel_world", None)
@@ -2978,6 +3881,12 @@ def train(args):
                             cmd_scale=cmd_scale,
                             reset_mask=reset_mask_prev,
                         )
+                        expert_action, expert_bad = _sanitize_or_fail_action_tensor(
+                            "follow_expert_action",
+                            expert_action,
+                            allow_recovery=allow_nonfinite_recovery,
+                        )
+                        expert_nonfinite_action_count += int(expert_bad.sum().item())
                         if use_egpo:
                             egpo_policy_cmd_sum += policy_cmd_raw.sum(dim=0)
                             egpo_expert_cmd_sum += expert_action.sum(dim=0)
@@ -3005,12 +3914,15 @@ def train(args):
                             egpo_heading_error_deg_samples.append(heading_err_deg.detach())
                         if use_egpo:
                             expert_action_diff_sum += torch.norm(cmd - expert_action, dim=1).sum()
-                            cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
+                            if expert_alpha_rollout > 0.0:
+                                cmd = expert_alpha_rollout * expert_action + (1.0 - expert_alpha_rollout) * cmd
+                                action_valid.zero_()
                             if debug:
                                 egpo_diag_yaw_before = robot_heading.detach()
                                 egpo_diag_cmd_omega = cmd[:, 2].detach()
                         elif use_follow_expert:
                             cmd = expert_action
+                            action_valid.zero_()
                     log_prob, value, _, _ = policy.evaluate_actions(
                         aff_stack_buf,
                         state,
@@ -3032,9 +3944,29 @@ def train(args):
                             actor_gt_difficulty,
                             deterministic=True
                         )
-                        teacher_action = t_cmd
+                        teacher_action, teacher_bad = _sanitize_or_fail_action_tensor(
+                            "teacher_action",
+                            t_cmd.detach(),
+                            allow_recovery=allow_nonfinite_recovery,
+                        )
+                        teacher_nonfinite_action_count += int(teacher_bad.sum().item())
 
                     next_obs, rewards, dones, env_info = env.step(cmd)
+                    timeout_mask = env_info.get("timeout", None) if env_info is not None else None
+                    timeout_bootstrap_obs = env_info.get("timeout_bootstrap_obs", None) if env_info is not None else None
+                    if (
+                        timeout_mask is not None
+                        and timeout_bootstrap_obs is not None
+                        and torch.is_tensor(timeout_mask)
+                        and bool(timeout_mask.any().item())
+                    ):
+                        timeout_values = _compute_bootstrap_value_for_obs(
+                            timeout_bootstrap_obs,
+                            aff_stack_buf,
+                            critic_aff_stack_buf,
+                        )
+                        rewards = rewards + args.gamma * timeout_values * timeout_mask.float()
+                        timeout_bootstrap_count += timeout_mask.float().sum()
                     rewards = rewards.detach()
                     if debug and use_egpo and egpo_diag_yaw_before is not None and egpo_diag_cmd_omega is not None:
                         cmd_omega_eval = egpo_diag_cmd_omega
@@ -3082,6 +4014,7 @@ def train(args):
                 value.detach(),
                 rewards.detach(),
                 dones.detach(),
+                action_valid.detach(),
                 teacher_action.detach() if teacher_action is not None else None,
                 expert_action.detach() if expert_action is not None else None,
             )
@@ -3097,10 +4030,22 @@ def train(args):
                         delta_gate[reset_mask_prev] = 0.0
                     gate_y_change_sum += torch.abs(delta_gate).sum()
                     gate_switch_count += (torch.abs(delta_gate) > GATE_SWITCH_DY_DEFAULT).float().sum()
-            if hasattr(env.env, "commands"):
-                cmd_speed_sum += torch.norm(env.env.commands[:, :2], dim=1).sum()
-            else:
-                cmd_speed_sum += torch.norm(cmd_used[:, :2], dim=1).sum()
+            cmd_diag_exec = None
+            post_info = env_info.get('post_info', None) if env_info is not None else None
+            if post_info is not None and isinstance(post_info, dict):
+                cmd_diag_exec = post_info.get('cmd_exec_mean', None)
+                if cmd_diag_exec is None:
+                    cmd_diag_exec = post_info.get('cmd_slew', None)
+                if cmd_diag_exec is not None and not torch.is_tensor(cmd_diag_exec):
+                    cmd_diag_exec = torch.as_tensor(cmd_diag_exec, device=device)
+                if torch.is_tensor(cmd_diag_exec) and cmd_diag_exec.dim() == 1:
+                    cmd_diag_exec = cmd_diag_exec.unsqueeze(0)
+            if cmd_diag_exec is None and hasattr(env.env, "commands"):
+                cmd_diag_exec = env.env.commands[:, :3]
+            if cmd_diag_exec is None:
+                cmd_diag_exec = cmd_used
+            if cmd_diag_exec is not None:
+                cmd_speed_sum += torch.norm(cmd_diag_exec[:, :2], dim=1).sum()
             if hasattr(env.env, "base_lin_vel"):
                 body_lin_vel = env.env.base_lin_vel
                 body_forward = body_lin_vel[:, 1]
@@ -3180,20 +4125,19 @@ def train(args):
                     if clearance_min_value is None
                     else min(clearance_min_value, clearance_min_curr)
                 )
-            post_info = env_info.get('post_info', None) if env_info is not None else None
             if post_info is not None:
-                cmd_slew = post_info.get('cmd_slew', None)
-                if cmd_slew is not None:
-                    if not torch.is_tensor(cmd_slew):
-                        cmd_slew = torch.as_tensor(cmd_slew, device=device)
-                    if cmd_slew.dim() == 1:
-                        cmd_slew = cmd_slew.unsqueeze(0)
-                    delta_cmd = cmd_slew - prev_cmd_slew
+                cmd_exec_for_diag = post_info.get('cmd_exec_mean', post_info.get('cmd_slew', None))
+                if cmd_exec_for_diag is not None:
+                    if not torch.is_tensor(cmd_exec_for_diag):
+                        cmd_exec_for_diag = torch.as_tensor(cmd_exec_for_diag, device=device)
+                    if cmd_exec_for_diag.dim() == 1:
+                        cmd_exec_for_diag = cmd_exec_for_diag.unsqueeze(0)
+                    delta_cmd = cmd_exec_for_diag - prev_cmd_slew
                     if reset_mask_prev.any():
                         delta_cmd[reset_mask_prev] = 0.0
                     cmd_jerk_lin_sum += torch.norm(delta_cmd[:, :2], dim=1).sum()
                     cmd_jerk_ang_sum += torch.abs(delta_cmd[:, 2]).sum()
-                    prev_cmd_slew = cmd_slew.detach()
+                    prev_cmd_slew = cmd_exec_for_diag.detach()
                 clearance_pp = post_info.get('clearance_pp', None)
                 if clearance_pp is not None:
                     if not torch.is_tensor(clearance_pp):
@@ -3211,36 +4155,77 @@ def train(args):
                         near_miss_step_sum += (clearance_pp < c_thr_tensor).float().sum()
             if use_avoid_local_map and hasattr(env, "env") and hasattr(env.env, "base_lin_vel"):
                 actual_speed = torch.norm(env.env.base_lin_vel[:, :2], dim=1)
-                cmd_xy_exec = None
-                if env_info is not None and isinstance(env_info, dict):
-                    post_info = env_info.get('post_info', None)
-                    if post_info is not None and isinstance(post_info, dict):
-                        cmd_slew = post_info.get('cmd_slew', None)
-                        if cmd_slew is not None:
-                            if not torch.is_tensor(cmd_slew):
-                                cmd_slew = torch.as_tensor(cmd_slew, device=device)
-                            if cmd_slew.dim() == 1:
-                                cmd_slew = cmd_slew.unsqueeze(0)
-                            if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 2:
-                                cmd_xy_exec = cmd_slew[:, :2]
-                if cmd_xy_exec is None and hasattr(env.env, "commands"):
-                    cmd_xy_exec = env.env.commands[:, :2]
-                if cmd_xy_exec is None and cmd_used is not None:
-                    cmd_xy_exec = cmd_used[:, :2]
-                if cmd_xy_exec is not None:
-                    cmd_speed = torch.norm(cmd_xy_exec, dim=1)
-                    cmd_active = cmd_speed > 0.15
-                    stuck_mask = cmd_active & (actual_speed < 0.05)
+                actual_turn_speed = torch.abs(env.env.base_ang_vel[:, 2]) if hasattr(env.env, "base_ang_vel") else None
+                cmd_exec = cmd_diag_exec
+                if cmd_exec is not None:
+                    cmd_speed = torch.norm(cmd_exec[:, :2], dim=1)
+                    cmd_turn = torch.abs(cmd_exec[:, 2])
+                    cmd_active_lin = cmd_speed > 0.15
+                    cmd_active_ang = cmd_turn > 0.20
+                    stuck_lin = cmd_active_lin & (actual_speed < 0.05)
+                    if actual_turn_speed is None:
+                        stuck_ang = torch.zeros_like(stuck_lin)
+                    else:
+                        stuck_ang = cmd_active_ang & (actual_turn_speed < 0.10)
+                    cmd_active = cmd_active_lin | cmd_active_ang
+                    stuck_mask = cmd_active & (stuck_lin | stuck_ang)
                     stuck_step_sum += stuck_mask.float().sum()
                     cmd_active_step_sum += cmd_active.float().sum()
                 extras = getattr(env.env, "extras", {})
                 if isinstance(extras, dict):
                     avoid_stage_value = float(extras.get("avoid_stage", avoid_stage_value))
+                    avoid_stage_window_value = float(extras.get("avoid_stage_window", avoid_stage_window_value))
+                    avoid_shrink_window_value = float(extras.get("avoid_shrink_window", avoid_shrink_window_value))
+                    avoid_stage_completed_eps_value = float(
+                        extras.get("avoid_stage_completed_episodes", avoid_stage_completed_eps_value)
+                    )
                     avoid_corridor_width_value = float(extras.get("avoid_corridor_width", avoid_corridor_width_value))
-                    avoid_collision_rate100_value = float(extras.get("avoid_collision_rate_100", avoid_collision_rate100_value))
-                    avoid_collision_rate50_value = float(extras.get("avoid_collision_rate_50", avoid_collision_rate50_value))
-                    avoid_exposure_rate100_value = float(extras.get("avoid_exposure_rate_100", avoid_exposure_rate100_value))
+                    avoid_collision_rate100_value = float(
+                        extras.get("avoid_stage_collision_rate", avoid_collision_rate100_value)
+                    )
+                    avoid_collision_rate50_value = float(
+                        extras.get("avoid_shrink_collision_rate", avoid_collision_rate50_value)
+                    )
+                    avoid_exposure_rate100_value = float(
+                        extras.get("avoid_stage_exposure_rate", avoid_exposure_rate100_value)
+                    )
+                    avoid_progress_rate_value = float(
+                        extras.get("avoid_stage_progress_rate", avoid_progress_rate_value)
+                    )
+                    avoid_success_rate_value = float(
+                        extras.get("avoid_stage_success_rate", avoid_success_rate_value)
+                    )
                     avoid_nearest_obstacle_dist_value = float(extras.get("avoid_nearest_obstacle_dist", avoid_nearest_obstacle_dist_value))
+                    avoid_stage_switch_event_value = float(
+                        extras.get("avoid_stage_switch_event", avoid_stage_switch_event_value)
+                    )
+                    avoid_stage_switch_from_value = float(
+                        extras.get("avoid_stage_switch_from", avoid_stage_switch_from_value)
+                    )
+                    avoid_stage_switch_to_value = float(
+                        extras.get("avoid_stage_switch_to", avoid_stage_switch_to_value)
+                    )
+                    avoid_stage_switch_collision_value = float(
+                        extras.get("avoid_stage_switch_collision_rate", avoid_stage_switch_collision_value)
+                    )
+                    avoid_stage_switch_exposure_value = float(
+                        extras.get("avoid_stage_switch_exposure_rate", avoid_stage_switch_exposure_value)
+                    )
+                    avoid_stage_switch_progress_value = float(
+                        extras.get("avoid_stage_switch_progress_rate", avoid_stage_switch_progress_value)
+                    )
+                    avoid_stage_switch_success_value = float(
+                        extras.get("avoid_stage_switch_success_rate", avoid_stage_switch_success_value)
+                    )
+                    avoid_stage3_shrink_event_value = float(
+                        extras.get("avoid_stage3_shrink_event", avoid_stage3_shrink_event_value)
+                    )
+                    avoid_stage3_shrink_from_width_value = float(
+                        extras.get("avoid_stage3_shrink_from_width", avoid_stage3_shrink_from_width_value)
+                    )
+                    avoid_stage3_shrink_to_width_value = float(
+                        extras.get("avoid_stage3_shrink_to_width", avoid_stage3_shrink_to_width_value)
+                    )
             reset_mask_prev = dones.clone()
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
@@ -3284,12 +4269,17 @@ def train(args):
         with torch.no_grad():
             state = obs_dict['state']
             goal = obs_dict['goal']
+            if getattr(args, "t1_goal_occlusion", False) and last_goal_obs is not None:
+                goal = last_goal_obs
             critic_aff_map_next, critic_difficulty_next = _get_critic_gt_inputs(obs_dict)
             
-            if args.mode == 'teacher':
-                aff_map_next, difficulty = _get_actor_gt_inputs(obs_dict)
-            else:
+            bootstrap_use_student_aff = args.mode != 'teacher'
+            if is_gate and moe_use_student_aff:
+                bootstrap_use_student_aff = True
+            if bootstrap_use_student_aff:
                 aff_map_next, difficulty = _predict_actor_inputs(obs_dict)
+            else:
+                aff_map_next, difficulty = _get_actor_gt_inputs(obs_dict)
             
             if aff_stack_buf is None:
                 aff_stack_bootstrap = aff_map_next.repeat(1, aff_stack, 1, 1)
@@ -3347,8 +4337,17 @@ def train(args):
         # 计算 Returns 和 Advantages
         returns, advantages = buffer.compute_returns(next_value, args.gamma, args.gae_lambda)
         
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Normalize advantages only on true on-policy samples.
+        valid_adv_mask = buffer.action_valid.bool()
+        if valid_adv_mask.any():
+            valid_advantages = advantages[valid_adv_mask]
+            adv_mean = valid_advantages.mean()
+            adv_std = valid_advantages.std(unbiased=False).clamp_min(1e-8)
+            advantages = advantages.clone()
+            advantages[valid_adv_mask] = (valid_advantages - adv_mean) / adv_std
+            advantages[~valid_adv_mask] = 0.0
+        else:
+            advantages = torch.zeros_like(advantages)
         _assert_finite_tensor("buffer.actions", buffer.actions)
         _assert_finite_tensor("buffer.log_probs", buffer.log_probs)
         _assert_finite_tensor("buffer.states", buffer.states)
@@ -3375,11 +4374,11 @@ def train(args):
         clip_frac_sum = 0
         num_updates = 0
         expert_alpha_update = (
-            _get_expert_alpha(local_iteration, expert_interface_iters)
+            _get_expert_alpha(schedule_iteration, expert_interface_iters)
             if use_egpo else 0.0
         )
         if use_egpo:
-            current_lr = 1.5e-4 if expert_alpha_update <= 0.0 else 1.5e-5
+            current_lr = args.egpo_lr_post if expert_alpha_update <= 0.0 else args.egpo_lr_guided
         else:
             current_lr = args.lr
         for param_group in optimizer.param_groups:
@@ -3424,6 +4423,7 @@ def train(args):
                 # 获取 mini-batch 数据
                 mb_actions = buffer.actions[step_idx, env_idx]
                 mb_old_log_probs = buffer.log_probs[step_idx, env_idx]
+                mb_action_valid = buffer.action_valid[step_idx, env_idx].bool()
                 mb_advantages = advantages[step_idx, env_idx]
                 mb_returns = returns[step_idx, env_idx]
                 
@@ -3515,30 +4515,38 @@ def train(args):
                     )
                     continue
                 
-                # PPO Clipped Loss
-                log_ratio_raw = new_log_probs - mb_old_log_probs
-                if not torch.isfinite(log_ratio_raw).all():
-                    _handle_nonfinite_event(
-                        "non-finite log-ratio",
-                        epoch=epoch,
-                        try_sanitize=False,
-                    )
-                    continue
-                log_ratio = torch.clamp(log_ratio_raw, min=-20.0, max=20.0)
-                ratio = torch.exp(log_ratio)
-                surr1 = ratio * mb_advantages
-                surr2 = torch.clamp(ratio, 1 - args.clip_range, 1 + args.clip_range) * mb_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
+                # PPO Clipped Loss only on true on-policy actions.
+                policy_loss = torch.tensor(0.0, device=device)
+                if mb_action_valid.any():
+                    log_ratio_raw = new_log_probs[mb_action_valid] - mb_old_log_probs[mb_action_valid]
+                    if not torch.isfinite(log_ratio_raw).all():
+                        _handle_nonfinite_event(
+                            "non-finite log-ratio",
+                            epoch=epoch,
+                            try_sanitize=False,
+                        )
+                        continue
+                    log_ratio = torch.clamp(log_ratio_raw, min=-20.0, max=20.0)
+                    ratio = torch.exp(log_ratio)
+                    valid_advantages = mb_advantages[mb_action_valid]
+                    surr1 = ratio * valid_advantages
+                    surr2 = torch.clamp(ratio, 1 - args.clip_range, 1 + args.clip_range) * valid_advantages
+                    policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Diagnostics
-                approx_kl_sum += (0.5 * (log_ratio ** 2).mean()).item()
-                clip_frac_sum += (torch.abs(ratio - 1.0) > args.clip_range).float().mean().item()
+                    # Diagnostics
+                    approx_kl_sum += (0.5 * (log_ratio ** 2).mean()).item()
+                    clip_frac_sum += (torch.abs(ratio - 1.0) > args.clip_range).float().mean().item()
                 
-                # Value Loss
-                value_loss = 0.5 * ((new_values.squeeze(-1) - mb_returns) ** 2).mean()
+                # Value loss only on true on-policy samples.
+                value_loss = torch.tensor(0.0, device=device)
+                if mb_action_valid.any():
+                    value_err = new_values.squeeze(-1)[mb_action_valid] - mb_returns[mb_action_valid]
+                    value_loss = 0.5 * (value_err ** 2).mean()
                 
                 # Entropy Loss
-                entropy_loss = -entropy.mean()
+                entropy_loss = torch.tensor(0.0, device=device)
+                if mb_action_valid.any():
+                    entropy_loss = -entropy[mb_action_valid].mean()
                 
                 # 蒸馏 Loss (Student 模式)
                 distill_loss = torch.tensor(0.0, device=device)
@@ -3559,24 +4567,26 @@ def train(args):
 
                 bc_loss = torch.tensor(0.0, device=device)
                 expert_log_prob_mean = torch.tensor(0.0, device=device)
-                if use_egpo:
-                    mb_expert_actions = buffer.expert_actions[step_idx, env_idx]
+                mb_expert_actions = None
+                if use_expert_guidance and (~mb_action_valid).any():
+                    mb_expert_actions = buffer.expert_actions[step_idx, env_idx][~mb_action_valid]
                     mb_expert_actions = torch.nan_to_num(mb_expert_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                if use_expert_guidance and mb_expert_actions is not None:
                     try:
                         expert_log_prob, _, _, _ = policy.evaluate_actions(
-                            mb_aff_maps,
-                            mb_states,
-                            mb_goals,
-                            mb_difficulties,
+                            mb_aff_maps[~mb_action_valid],
+                            mb_states[~mb_action_valid],
+                            mb_goals[~mb_action_valid],
+                            mb_difficulties[~mb_action_valid],
                             mb_expert_actions,
-                            critic_affordance_map=mb_critic_aff_maps,
-                            critic_robot_state=mb_states,
-                            critic_goal=mb_goals,
-                            critic_terrain_difficulty=mb_critic_difficulties,
+                            critic_affordance_map=mb_critic_aff_maps[~mb_action_valid],
+                            critic_robot_state=mb_states[~mb_action_valid],
+                            critic_goal=mb_goals[~mb_action_valid],
+                            critic_terrain_difficulty=mb_critic_difficulties[~mb_action_valid],
                         )
                     except ValueError as exc:
                         _handle_nonfinite_event(
-                            "EGPO evaluate_actions non-finite minibatch",
+                            "expert-guided evaluate_actions non-finite minibatch",
                             epoch=epoch,
                             exc=exc,
                             try_sanitize=True,
@@ -3584,7 +4594,8 @@ def train(args):
                         continue
                     expert_log_prob = torch.nan_to_num(expert_log_prob, nan=-20.0, posinf=20.0, neginf=-20.0)
                     expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
-                    bc_loss = (-expert_log_prob_mean) * expert_alpha_update * EXPERT_BC_COEF
+                    expert_bc_weight = expert_alpha_update if use_egpo else 1.0
+                    bc_loss = (-expert_log_prob_mean) * expert_bc_weight * EXPERT_BC_COEF
                 
                 # Total loss (full EGPO update path, no hold-phase masking).
                 policy_loss_weight = 1.0
@@ -3702,8 +4713,13 @@ def train(args):
             )
 
         # Explained variance (基于 rollout value 估计)
-        returns_flat = returns.view(-1)
-        values_flat = buffer.values.view(-1)
+        valid_ev_mask = buffer.action_valid.view(-1).bool()
+        if valid_ev_mask.any():
+            returns_flat = returns.view(-1)[valid_ev_mask]
+            values_flat = buffer.values.view(-1)[valid_ev_mask]
+        else:
+            returns_flat = returns.view(-1)
+            values_flat = buffer.values.view(-1)
         var_returns = returns_flat.var()
         explained_var = 1.0 - (returns_flat - values_flat).var() / (var_returns + 1e-8)
 
@@ -3819,6 +4835,7 @@ def train(args):
         writer.add_scalar('Perf/RolloutMeanStepReward', rollout_mean_step_reward, iteration)
         writer.add_scalar('Perf/RolloutRewardResidual', resid_rollout, iteration)
         writer.add_scalar('Perf/FPS', fps, iteration)
+        writer.add_scalar('Perf/LearningRate', current_lr, iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
         writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
@@ -3839,6 +4856,11 @@ def train(args):
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
         writer.add_scalar('Diag/SkippedNonFiniteUpdates', skipped_nonfinite_updates, iteration)
         writer.add_scalar('Diag/SanitizedParamCount', sanitized_param_count, iteration)
+        writer.add_scalar('Diag/TimeoutBootstrapCount', timeout_bootstrap_count.item(), iteration)
+        writer.add_scalar('Diag/NonFiniteInputSamples', float(nonfinite_input_sample_count), iteration)
+        writer.add_scalar('Diag/PolicyNonFiniteActions', policy_nonfinite_action_count, iteration)
+        writer.add_scalar('Diag/ExpertNonFiniteActions', expert_nonfinite_action_count, iteration)
+        writer.add_scalar('Diag/TeacherNonFiniteActions', teacher_nonfinite_action_count, iteration)
         writer.add_scalar('Diag/AffStackDelta', aff_stack_delta_mean, iteration)
         writer.add_scalar('Diag/AffStackStd', aff_stack_std_mean, iteration)
         writer.add_scalar('Diag/AffStackFilled', aff_stack_filled_mean, iteration)
@@ -3858,10 +4880,25 @@ def train(args):
         if use_avoid_local_map:
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
             writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
-            writer.add_scalar('Avoid/CollisionRate100', avoid_collision_rate100_value, iteration)
-            writer.add_scalar('Avoid/CollisionRate50', avoid_collision_rate50_value, iteration)
-            writer.add_scalar('Avoid/ExposureRate100', avoid_exposure_rate100_value, iteration)
+            writer.add_scalar('Avoid/StageWindow', avoid_stage_window_value, iteration)
+            writer.add_scalar('Avoid/ShrinkWindow', avoid_shrink_window_value, iteration)
+            writer.add_scalar('Avoid/StageCompletedEpisodes', avoid_stage_completed_eps_value, iteration)
+            writer.add_scalar('Avoid/StageCollisionRate', avoid_collision_rate100_value, iteration)
+            writer.add_scalar('Avoid/ShrinkCollisionRate', avoid_collision_rate50_value, iteration)
+            writer.add_scalar('Avoid/StageExposureRate', avoid_exposure_rate100_value, iteration)
+            writer.add_scalar('Avoid/StageProgressRate', avoid_progress_rate_value, iteration)
+            writer.add_scalar('Avoid/StageSuccessRate', avoid_success_rate_value, iteration)
             writer.add_scalar('Avoid/NearestObstacleDist', avoid_nearest_obstacle_dist_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchEvent', avoid_stage_switch_event_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchFrom', avoid_stage_switch_from_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchTo', avoid_stage_switch_to_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchCollisionRate', avoid_stage_switch_collision_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchExposureRate', avoid_stage_switch_exposure_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchProgressRate', avoid_stage_switch_progress_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchSuccessRate', avoid_stage_switch_success_value, iteration)
+            writer.add_scalar('Avoid/Stage3ShrinkEvent', avoid_stage3_shrink_event_value, iteration)
+            writer.add_scalar('Avoid/Stage3ShrinkFromWidth', avoid_stage3_shrink_from_width_value, iteration)
+            writer.add_scalar('Avoid/Stage3ShrinkToWidth', avoid_stage3_shrink_to_width_value, iteration)
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
@@ -3932,14 +4969,17 @@ def train(args):
             avoid_line = ""
             if use_avoid_local_map:
                 avoid_line = (
-                    f"""{'Avoid stage/width:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f}\n"""
-                    f"""{'Avoid coll100/coll50/exp100:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
+                    f"""{'Avoid stage/width/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
+                    f"""{'Avoid stage eps/shrink win:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
+                    f"""{'Avoid coll(stage/shrink)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
+                    f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
                     f"""{'Avoid stuck/near-miss:':>{pad}} {stuck_ratio:.3f} / {near_miss_ratio:.3f}\n"""
                 )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
+                          f"""{'Learning rate:':>{pad}} {current_lr:.2e}\n"""
                           f"""{'Value function loss:':>{pad}} {value_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Policy loss:':>{pad}} {policy_loss_sum / max(num_updates, 1):.4f}\n"""
                           f"""{'Policy loss (effective):':>{pad}} {effective_policy_loss_sum / max(num_updates, 1):.4f}\n"""
@@ -3953,6 +4993,7 @@ def train(args):
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
+                          f"""{'Nonfinite act(pol/exp/tch):':>{pad}} {policy_nonfinite_action_count} / {expert_nonfinite_action_count} / {teacher_nonfinite_action_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
@@ -3984,28 +5025,34 @@ def train(args):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
+                'best_online_reward': best_reward,
+                'selection_metric': 'periodic_checkpoint',
+                'experiment_meta': run_meta,
                 'torch_rng_state': torch.get_rng_state(),
                 'numpy_rng_state': np.random.get_state(),
                 'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }, ckpt_path)
             dprint(f"  Saved: {ckpt_path}")
         
-        # Save best
+        # Save best online-monitor checkpoint.
         if mean_reward > best_reward and len(episode_rewards) >= 10:
             best_reward = mean_reward
-            best_path = os.path.join(log_dir, 'best_model.pt')
+            best_path = os.path.join(log_dir, 'best_online_reward.pt')
             torch.save({
                 'iteration': iteration,
                 'model_state_dict': policy.state_dict(),
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
+                'best_online_reward': best_reward,
+                'selection_metric': 'online_mean_reward_monitor_only',
+                'experiment_meta': run_meta,
             }, best_path)
-            dprint(f"  ★ New best: {mean_reward:.2f}")
+            dprint(f"  ★ New online best: {mean_reward:.2f}")
     
     # 训练结束
     print(f"\n{'='*60}")
     print(f"Training Complete!")
-    print(f"Best Reward: {best_reward:.2f}")
+    print(f"Best Online Reward: {best_reward:.2f}")
     print(f"Output: {log_dir}")
     print(f"{'='*60}")
     
@@ -4029,6 +5076,8 @@ if __name__ == "__main__":
     # 环境
     parser.add_argument('--task', type=str, required=True,
                         help='Isaac Gym 任务名称（必填，例如 s_follow_basic / s_avoid_basic / s_cylinder）')
+    parser.add_argument('--allow_eval_only_train', action='store_true',
+                        help='仅用于临时调试：允许在结构化 OOD hold-out 场景上训练')
     parser.add_argument('--seed', type=int, default=None,
                         help='随机种子（None 使用默认）')
     parser.add_argument('--aff_stack', type=int, default=1,
@@ -4037,6 +5086,8 @@ if __name__ == "__main__":
                         help='并行环境数量')
     parser.add_argument('--decimation', type=int, default=5,
                         help='高层/低层频率比 (50Hz / 10Hz = 5)')
+    parser.add_argument('--camera_interval', type=int, default=None,
+                        help='深度相机采样间隔（按 low-level step 计；None 使用任务默认）')
     
     # Checkpoints
     parser.add_argument('--low_level_ckpt', type=str, required=True,
@@ -4053,6 +5104,8 @@ if __name__ == "__main__":
                         help='恢复训练 checkpoint 路径（含优化器与迭代）')
     parser.add_argument('--finetune_from', type=str, default=None,
                         help='微调 checkpoint 路径（仅加载权重）')
+    parser.add_argument('--allow_inexact_resume', action='store_true',
+                        help='允许近似续训：接受 checkpoint 未保存 env/curriculum 完整状态')
     
     # 训练超参数
     parser.add_argument('--num_iterations', type=int, default=1000,
@@ -4113,6 +5166,10 @@ if __name__ == "__main__":
                         help='T1 弱遮挡持续步数')
     parser.add_argument('--egpo', action='store_true',
                         help='仅在 s_follow_basic + follow 下启用 EGPO（专家动作混合 + BC）')
+    parser.add_argument('--egpo_lr_guided', type=float, default=1.5e-5,
+                        help='EGPO 专家接管阶段学习率（alpha>0 时生效）')
+    parser.add_argument('--egpo_lr_post', type=float, default=1.5e-4,
+                        help='EGPO 接口结束后学习率（alpha<=0 时生效）')
     parser.add_argument('--use_follow_expert', action='store_true',
                         help='follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --teacher_ckpt）')
     parser.add_argument(
@@ -4142,6 +5199,7 @@ if __name__ == "__main__":
     
     args, unknown = parser.parse_known_args()
     args.task = normalize_task_name(getattr(args, "task", ""))
+    args._unknown_cli = list(unknown)
     
     # 传递未知参数给 Isaac Gym
     sys.argv = [sys.argv[0]] + unknown

@@ -34,6 +34,17 @@ def _to_state_dict(ckpt_obj):
     return ckpt_obj
 
 
+def _load_experiment_meta_from_ckpt(path: Optional[str], device: torch.device) -> Optional[Dict]:
+    if path is None or str(path).strip() == "":
+        return None
+    ckpt_obj = torch.load(path, map_location=device)
+    if isinstance(ckpt_obj, dict):
+        meta = ckpt_obj.get("experiment_meta", None)
+        if isinstance(meta, dict):
+            return meta
+    return None
+
+
 def _count_params(module: torch.nn.Module) -> Tuple[int, int]:
     total = sum(int(p.numel()) for p in module.parameters())
     trainable = sum(int(p.numel()) for p in module.parameters() if p.requires_grad)
@@ -97,12 +108,20 @@ class EvalRunner:
         th.import_modules()
         _setup_seed(args.seed)
 
+        primary_meta = _load_experiment_meta_from_ckpt(getattr(args, "ckpt", None), self.device)
+        self.primary_meta = primary_meta
+        th.apply_experiment_meta_to_args(self.args, primary_meta, context="EvalHigh")
+        self.args.camera_enable = bool(getattr(self.args, "camera_enable", False)) or (self.args.mode == "student")
+
         env_cfg, train_cfg = th.task_registry.get_cfgs(name=args.task)
         env_cfg.seed = int(args.seed)
+        th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="EvalHigh")
         self.env = th.HierarchicalHexapodEnv(args, self.device, env_cfg=env_cfg, train_cfg=train_cfg)
 
         self.aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
         self.aff_stack_buf = None
+        self.follow_aff_stack_buf = None
+        self.avoid_aff_stack_buf = None
         self.done_prev = None
 
         self.mass_kg = self._estimate_robot_mass_kg()
@@ -112,10 +131,19 @@ class EvalRunner:
         self.follow_model = None
         self.avoid_model = None
         self.vision_model = None
+        self.policy_meta = None
+        self.aux_checkpoint_meta: Dict[str, Dict] = {}
 
         self._load_models()
 
         self.param_info = self._build_param_info()
+        self.resolved_protocol = th.build_resolved_protocol(
+            self.args,
+            self.env,
+            primary_ckpt_path=getattr(self.args, "ckpt", None),
+            primary_meta=self.policy_meta if isinstance(self.policy_meta, dict) else self.primary_meta,
+            aux_sources=self.aux_checkpoint_meta,
+        )
 
     def _estimate_robot_mass_kg(self) -> float:
         try:
@@ -128,12 +156,30 @@ class EvalRunner:
         except Exception:
             return 15.0
 
+    def _ckpt_meta(self, ckpt_obj) -> Optional[Dict]:
+        if isinstance(ckpt_obj, dict):
+            meta = ckpt_obj.get("experiment_meta", None)
+            if isinstance(meta, dict):
+                return meta
+        return None
+
+    def _validate_ckpt_meta(self, ckpt_meta: Optional[Dict], *, expected_skill: str, source_name: str) -> None:
+        if not isinstance(ckpt_meta, dict):
+            return
+        meta_skill = ckpt_meta.get("skill", None)
+        if meta_skill is not None and meta_skill != expected_skill:
+            raise ValueError(f"{source_name} 的 skill 与当前评测不一致: checkpoint={meta_skill}, expected={expected_skill}")
+        meta_mode = ckpt_meta.get("mode", None)
+        eval_mode = getattr(self.args, "mode", "teacher")
+        if expected_skill != "moe" and meta_mode is not None and meta_mode != eval_mode:
+            raise ValueError(f"{source_name} 的 mode 与当前评测不一致: checkpoint={meta_mode}, expected={eval_mode}")
+
     def _load_models(self) -> None:
         obs = self.env.reset()
         state_dim = int(obs["state"].shape[1])
         goal_dim = int(obs["goal"].shape[1])
         skill = getattr(self.args, "skill", "follow")
-        if skill == "avoid":
+        if skill in ("avoid", "moe"):
             aff_shape = obs["local_map_2ch"].shape[1:]
         else:
             aff_shape = obs["gt_affordance"].shape[1:]
@@ -141,18 +187,32 @@ class EvalRunner:
         cmd_scale = tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist())
 
         mode = getattr(self.args, "mode", "teacher")
+        if mode == "student" and skill == "moe":
+            raise ValueError("当前未实现 Gate 的 student 评测契约，禁止 --mode student --skill moe。")
 
         if mode == "student":
             if not self.args.vision_ckpt:
                 raise ValueError("Student mode requires --vision_ckpt")
             self.vision_model = th.AffordanceEstimator(
                 depth_channels=1,
-                output_size=16,
+                output_size=th.get_vision_native_output_size(),
                 max_depth_range=5.0,
             ).to(self.device)
             ckpt = torch.load(self.args.vision_ckpt, map_location=self.device)
+            vision_meta = self._ckpt_meta(ckpt)
+            th.validate_vision_runtime_contract(
+                self.args,
+                self.env,
+                source_name="Eval vision checkpoint",
+                ckpt_meta=vision_meta,
+                strict_meta=True,
+            )
             self.vision_model.load_state_dict(_to_state_dict(ckpt))
             self.vision_model.eval()
+            self.aux_checkpoint_meta["vision_ckpt"] = {
+                "path": os.path.abspath(self.args.vision_ckpt),
+                "experiment_meta": vision_meta,
+            }
 
         if skill == "moe":
             if not self.args.ckpt:
@@ -166,36 +226,73 @@ class EvalRunner:
                 goal_dim=goal_dim,
             ).to(self.device)
             gate_ckpt = torch.load(self.args.ckpt, map_location=self.device)
+            self.policy_meta = self._ckpt_meta(gate_ckpt)
+            self._validate_ckpt_meta(self.policy_meta, expected_skill="moe", source_name="gate ckpt")
+            th.validate_checkpoint_contract_compatibility(
+                th.build_runtime_contract_meta(self.args, self.env),
+                self.policy_meta,
+                reference_name="current eval runtime",
+                candidate_name="gate ckpt",
+                strict=True,
+            )
             th.load_high_level_state_dict_compat(self.policy, _to_state_dict(gate_ckpt), label="eval_gate")
             self.policy.eval()
 
+            follow_aff_channels = int(obs["gt_affordance"].shape[1] * self.aff_stack)
             self.follow_model = th.CmdVelExpert(
-                affordance_channels=aff_channels,
+                affordance_channels=follow_aff_channels,
                 state_dim=state_dim,
                 goal_dim=goal_dim,
                 cmd_scale=cmd_scale,
             ).to(self.device)
             follow_ckpt = torch.load(self.args.follow_ckpt, map_location=self.device)
+            follow_meta = self._ckpt_meta(follow_ckpt)
+            self._validate_ckpt_meta(follow_meta, expected_skill="follow", source_name="follow expert ckpt")
+            th.validate_checkpoint_contract_compatibility(
+                self.policy_meta,
+                follow_meta,
+                reference_name="gate ckpt",
+                candidate_name="follow expert ckpt",
+                strict=True,
+            )
             th.load_high_level_state_dict_compat(
                 self.follow_model,
                 _to_state_dict(follow_ckpt),
                 label="eval_follow",
             )
             self.follow_model.eval()
+            self.aux_checkpoint_meta["follow_ckpt"] = {
+                "path": os.path.abspath(self.args.follow_ckpt),
+                "experiment_meta": follow_meta,
+            }
 
+            avoid_aff_channels = int(obs["local_map_2ch"].shape[1] * self.aff_stack)
             self.avoid_model = th.CmdVelExpert(
-                affordance_channels=aff_channels,
+                affordance_channels=avoid_aff_channels,
                 state_dim=state_dim,
                 goal_dim=goal_dim,
                 cmd_scale=cmd_scale,
             ).to(self.device)
             avoid_ckpt = torch.load(self.args.avoid_ckpt, map_location=self.device)
+            avoid_meta = self._ckpt_meta(avoid_ckpt)
+            self._validate_ckpt_meta(avoid_meta, expected_skill="avoid", source_name="avoid expert ckpt")
+            th.validate_checkpoint_contract_compatibility(
+                self.policy_meta,
+                avoid_meta,
+                reference_name="gate ckpt",
+                candidate_name="avoid expert ckpt",
+                strict=True,
+            )
             th.load_high_level_state_dict_compat(
                 self.avoid_model,
                 _to_state_dict(avoid_ckpt),
                 label="eval_avoid",
             )
             self.avoid_model.eval()
+            self.aux_checkpoint_meta["avoid_ckpt"] = {
+                "path": os.path.abspath(self.args.avoid_ckpt),
+                "experiment_meta": avoid_meta,
+            }
         else:
             if not self.args.ckpt:
                 raise ValueError("Follow/Avoid mode requires --ckpt")
@@ -206,6 +303,15 @@ class EvalRunner:
                 cmd_scale=cmd_scale,
             ).to(self.device)
             ckpt = torch.load(self.args.ckpt, map_location=self.device)
+            self.policy_meta = self._ckpt_meta(ckpt)
+            self._validate_ckpt_meta(self.policy_meta, expected_skill=skill, source_name="policy ckpt")
+            th.validate_checkpoint_contract_compatibility(
+                th.build_runtime_contract_meta(self.args, self.env),
+                self.policy_meta,
+                reference_name="current eval runtime",
+                candidate_name="policy ckpt",
+                strict=True,
+            )
             th.load_high_level_state_dict_compat(self.policy, _to_state_dict(ckpt), label="eval_policy")
             self.policy.eval()
 
@@ -245,74 +351,91 @@ class EvalRunner:
         )
         return info
 
-    def _build_aff_map(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        skill = getattr(self.args, "skill", "follow")
-        if getattr(self.args, "mode", "teacher") == "student":
+    def _build_affordance_bundle(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        mode = getattr(self.args, "mode", "teacher")
+        if mode == "student":
             with torch.no_grad():
                 vis_out = self.vision_model(obs_dict["depth"], normalize=True)
-            raw_aff = torch.stack(
+            follow_aff = torch.stack(
                 [vis_out["occupancy"], vis_out["passable_gap"], vis_out["low_obstacle"]],
                 dim=1,
             )
-            raw_aff = th.resize_affordance_map(raw_aff, self.env.affordance_map_size)
-            if skill == "avoid":
-                return th.build_avoid_local_map_2ch(
-                    raw_aff,
-                    visible_mask=getattr(self.env, "affordance_visible_mask", None),
-                )
-            return raw_aff
-        if skill == "avoid":
-            return obs_dict.get(
+            follow_aff = th.resize_affordance_map(follow_aff, self.env.affordance_map_size)
+            avoid_aff = th.build_avoid_local_map_2ch(
+                follow_aff,
+                visible_mask=getattr(self.env, "affordance_visible_mask", None),
+            )
+            follow_difficulty = th.difficulty_from_gap(follow_aff)
+            avoid_difficulty = self.env._compute_objective_difficulty_from_local_map(avoid_aff)
+        else:
+            follow_aff = obs_dict["gt_affordance"]
+            avoid_aff = obs_dict.get(
                 "local_map_2ch",
                 th.build_avoid_local_map_2ch(
-                    obs_dict["gt_affordance"],
+                    follow_aff,
                     visible_mask=getattr(self.env, "affordance_visible_mask", None),
                 ),
             )
-        return obs_dict["gt_affordance"]
+            follow_difficulty = obs_dict.get("gt_difficulty", th.difficulty_from_gap(follow_aff))
+            if "actor_difficulty" in obs_dict:
+                avoid_difficulty = obs_dict["actor_difficulty"]
+            else:
+                avoid_difficulty = self.env._compute_objective_difficulty_from_local_map(avoid_aff)
 
-    def _build_difficulty(self, obs_dict: Dict[str, torch.Tensor], aff_map: torch.Tensor) -> torch.Tensor:
-        if getattr(self.args, "skill", "follow") == "avoid" and "actor_difficulty" in obs_dict:
-            return obs_dict["actor_difficulty"]
-        if getattr(self.args, "mode", "teacher") == "student":
-            return th.difficulty_from_gap(aff_map)
-        return obs_dict["gt_difficulty"]
+        return {
+            "follow_aff": follow_aff,
+            "follow_difficulty": follow_difficulty,
+            "avoid_aff": avoid_aff,
+            "avoid_difficulty": avoid_difficulty,
+            "gate_aff": avoid_aff,
+            "gate_difficulty": avoid_difficulty,
+        }
 
-    def _build_aff_stack(self, aff_map: torch.Tensor, done_prev: Optional[torch.Tensor]) -> torch.Tensor:
-        if self.aff_stack_buf is None:
-            self.aff_stack_buf = aff_map.repeat(1, self.aff_stack, 1, 1)
-            return self.aff_stack_buf
-
+    def _roll_aff_stack(
+        self,
+        stack_buf: Optional[torch.Tensor],
+        aff_map: torch.Tensor,
+        done_prev: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if stack_buf is None:
+            return aff_map.repeat(1, self.aff_stack, 1, 1)
         if done_prev is not None and done_prev.any():
-            self.aff_stack_buf[done_prev] = aff_map[done_prev].repeat(1, self.aff_stack, 1, 1)
-
-        self.aff_stack_buf = torch.roll(self.aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
-        self.aff_stack_buf[:, -aff_map.shape[1] :, :, :] = aff_map
-        return self.aff_stack_buf
+            stack_buf = stack_buf.clone()
+            stack_buf[done_prev] = aff_map[done_prev].repeat(1, self.aff_stack, 1, 1)
+        stack_buf = torch.roll(stack_buf, shifts=-aff_map.shape[1], dims=1)
+        stack_buf[:, -aff_map.shape[1] :, :, :] = aff_map
+        return stack_buf
 
     def _policy_step(
         self,
         obs_dict: Dict[str, torch.Tensor],
         aff_stack: torch.Tensor,
         difficulty: torch.Tensor,
+        *,
+        follow_aff_stack: Optional[torch.Tensor] = None,
+        follow_difficulty: Optional[torch.Tensor] = None,
+        avoid_aff_stack: Optional[torch.Tensor] = None,
+        avoid_difficulty: Optional[torch.Tensor] = None,
     ):
         state = obs_dict["state"]
         goal = obs_dict["goal"]
 
         if self.args.skill == "moe":
+            if follow_aff_stack is None or avoid_aff_stack is None or follow_difficulty is None or avoid_difficulty is None:
+                raise ValueError("MoE eval requires separate follow/avoid affordance stacks and difficulties.")
             with torch.no_grad():
                 cmd_f, _ = self.follow_model.get_action(
-                    aff_stack,
+                    follow_aff_stack,
                     state,
                     goal,
-                    difficulty,
+                    follow_difficulty,
                     deterministic=not self.args.stochastic,
                 )
                 cmd_a, _ = self.avoid_model.get_action(
-                    aff_stack,
+                    avoid_aff_stack,
                     state,
                     goal,
-                    difficulty,
+                    avoid_difficulty,
                     deterministic=not self.args.stochastic,
                 )
 
@@ -374,15 +497,36 @@ class EvalRunner:
             self.env._apply_scene_difficulty_for_resets(None)
             obs = self.env.reset()
             self.aff_stack_buf = None
+            self.follow_aff_stack_buf = None
+            self.avoid_aff_stack_buf = None
             self.done_prev = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
 
             acc = [EpisodeAccumulator() for _ in range(self.env.num_envs)]
             done_episodes = 0
 
             while done_episodes < per_level_target:
-                aff_map_now = self._build_aff_map(obs)
-                aff_stack = self._build_aff_stack(aff_map_now, self.done_prev)
-                difficulty_now = self._build_difficulty(obs, aff_map_now)
+                aff_bundle = self._build_affordance_bundle(obs)
+                if self.args.skill == "moe":
+                    self.aff_stack_buf = self._roll_aff_stack(
+                        self.aff_stack_buf, aff_bundle["gate_aff"], self.done_prev
+                    )
+                    self.follow_aff_stack_buf = self._roll_aff_stack(
+                        self.follow_aff_stack_buf, aff_bundle["follow_aff"], self.done_prev
+                    )
+                    self.avoid_aff_stack_buf = self._roll_aff_stack(
+                        self.avoid_aff_stack_buf, aff_bundle["avoid_aff"], self.done_prev
+                    )
+                    aff_stack = self.aff_stack_buf
+                    difficulty_now = aff_bundle["gate_difficulty"]
+                else:
+                    if self.args.skill == "avoid":
+                        actor_aff_map = aff_bundle["avoid_aff"]
+                        difficulty_now = aff_bundle["avoid_difficulty"]
+                    else:
+                        actor_aff_map = aff_bundle["follow_aff"]
+                        difficulty_now = aff_bundle["follow_difficulty"]
+                    self.aff_stack_buf = self._roll_aff_stack(self.aff_stack_buf, actor_aff_map, self.done_prev)
+                    aff_stack = self.aff_stack_buf
 
                 # Pre-step follow error (avoid post-reset contamination on done envs).
                 if hasattr(self.env.env, "target_world"):
@@ -401,17 +545,27 @@ class EvalRunner:
                     valid_follow = freeze_timer <= 1e-6
 
                 t_pol0 = time.perf_counter()
-                cmd_raw, gate_y = self._policy_step(obs, aff_stack, difficulty_now)
+                cmd_raw, gate_y = self._policy_step(
+                    obs,
+                    aff_stack,
+                    difficulty_now,
+                    follow_aff_stack=self.follow_aff_stack_buf,
+                    follow_difficulty=aff_bundle["follow_difficulty"],
+                    avoid_aff_stack=self.avoid_aff_stack_buf,
+                    avoid_difficulty=aff_bundle["avoid_difficulty"],
+                )
                 t_pol1 = time.perf_counter()
                 lat_ms = self._measure_inference_latency_ms(
                     cmd_raw,
-                    aff_map_now,
+                    aff_bundle["gate_aff"] if self.args.skill == "moe" else actor_aff_map,
                     policy_elapsed_s=(t_pol1 - t_pol0),
                 )
                 latency_ms_samples.append(lat_ms)
 
-                self.env.clearance_override = self.env._compute_clearance_from_affordance(aff_map_now)
-                self.env.reward_affordance_override = aff_map_now
+                aff_for_post = aff_bundle["gate_aff"] if self.args.skill == "moe" else actor_aff_map
+                self.env.clearance_affordance_override = aff_for_post
+                self.env.clearance_override = None
+                self.env.reward_affordance_override = None
                 next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y)
 
                 # Step-level energy and distance proxies.
@@ -573,10 +727,26 @@ class EvalRunner:
                 "num_envs": int(self.args.num_envs),
                 "deterministic_policy": bool(not self.args.stochastic),
                 "mass_kg_for_cot": float(self.mass_kg),
+                "aff_stack": int(self.args.aff_stack),
+                "gate_use_difficulty": bool(self.args.gate_use_difficulty),
+                "beta": None if self.args.beta is None else float(self.args.beta),
+                "cmd_slew_lin": float(self.args.cmd_slew_lin),
+                "cmd_slew_ang": float(self.args.cmd_slew_ang),
+                "cmd_safe_dist": None if self.args.cmd_safe_dist is None else float(self.args.cmd_safe_dist),
+                "cmd_free_dist": None if self.args.cmd_free_dist is None else float(self.args.cmd_free_dist),
+                "disable_risk_scale": bool(self.args.disable_risk_scale),
+                "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
+                "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
+                "avoid_ckpt": os.path.abspath(self.args.avoid_ckpt) if getattr(self.args, "avoid_ckpt", None) else None,
+                "vision_ckpt": os.path.abspath(self.args.vision_ckpt) if getattr(self.args, "vision_ckpt", None) else None,
+                "low_level_ckpt": os.path.abspath(self.args.low_level_ckpt) if getattr(self.args, "low_level_ckpt", None) else None,
+                "unknown_cli_args": list(getattr(self.args, "_unknown_cli", [])),
+                "policy_experiment_meta": self.policy_meta,
             },
             "params": self.param_info,
             "overall": overall,
             "by_difficulty": by_diff,
+            "resolved_protocol": self.resolved_protocol,
             "per_episode": rows,
         }
         return result
@@ -589,6 +759,12 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
+    resolved_protocol = metrics.get("resolved_protocol", None)
+    if isinstance(resolved_protocol, dict):
+        th.write_resolved_protocol_json(
+            os.path.join(out_dir, "resolved_protocol.json"),
+            resolved_protocol,
+        )
 
     rows = metrics.get("per_episode", [])
     fieldnames = [
@@ -646,6 +822,7 @@ def parse_args():
     args, unknown = parser.parse_known_args()
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
+    args._unknown_cli = list(unknown)
     sys.argv = [sys.argv[0]] + unknown
     return args
 

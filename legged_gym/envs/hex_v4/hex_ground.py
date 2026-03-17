@@ -950,32 +950,49 @@ class HexGround(LeggedRobot):
         self.s_avoid_stage_per_env = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage = 1
         self.s_avoid_total_completed_episodes = 0
-        self.s_avoid_collision_hist_100 = deque(
-            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
+        stage12_window = int(
+            getattr(
+                self.cfg.terrain,
+                "avoid_stage12_window",
+                getattr(self.cfg.terrain, "avoid_stage_switch_window", 100),
+            )
         )
-        self.s_avoid_exposure_hist_100 = deque(
-            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
-        )
-        self.s_avoid_progress_hist_100 = deque(
-            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
-        )
-        self.s_avoid_success_hist_100 = deque(
-            maxlen=int(getattr(self.cfg.terrain, "avoid_stage_switch_window", 100))
-        )
-        self.s_avoid_collision_hist_50 = deque(
-            maxlen=int(getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 50))
-        )
+        stage23_window = int(getattr(self.cfg.terrain, "avoid_stage23_window", stage12_window))
+        stage3_window = int(getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 100))
+        self.s_avoid_stage_metric_hists = {
+            1: self._make_s_avoid_metric_history(stage12_window),
+            2: self._make_s_avoid_metric_history(stage23_window),
+            3: self._make_s_avoid_metric_history(stage3_window),
+        }
+        self.s_avoid_stage_completed_episodes = {
+            1: 0,
+            2: 0,
+            3: 0,
+        }
         self.s_avoid_corridor_width = float(getattr(self.cfg.terrain, "avoid_stage3_width_start", 1.2))
-        self.s_avoid_last_shrink_episode = 0
+        self.s_avoid_last_shrink_stage_episode = 0
         self.extras["avoid_stage"] = int(self.s_avoid_stage)
-        self.extras["avoid_collision_rate_100"] = 0.0
-        self.extras["avoid_collision_rate_50"] = 0.0
-        self.extras["avoid_exposure_rate_100"] = 0.0
-        self.extras["avoid_progress_rate_100"] = 0.0
-        self.extras["avoid_success_rate_100"] = 0.0
+        self.extras["avoid_stage_collision_rate"] = 0.0
+        self.extras["avoid_shrink_collision_rate"] = 0.0
+        self.extras["avoid_stage_exposure_rate"] = 0.0
+        self.extras["avoid_stage_progress_rate"] = 0.0
+        self.extras["avoid_stage_success_rate"] = 0.0
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = 0
+        self.extras["avoid_stage_completed_episodes"] = 0
+        self.extras["avoid_stage_window"] = int(stage12_window)
+        self.extras["avoid_shrink_window"] = int(stage3_window)
         self.extras["avoid_nearest_obstacle_dist"] = 5.0
+        self.extras["avoid_stage_switch_event"] = 0.0
+        self.extras["avoid_stage_switch_from"] = 0.0
+        self.extras["avoid_stage_switch_to"] = 0.0
+        self.extras["avoid_stage_switch_collision_rate"] = 0.0
+        self.extras["avoid_stage_switch_exposure_rate"] = 0.0
+        self.extras["avoid_stage_switch_progress_rate"] = 0.0
+        self.extras["avoid_stage_switch_success_rate"] = 0.0
+        self.extras["avoid_stage3_shrink_event"] = 0.0
+        self.extras["avoid_stage3_shrink_from_width"] = float(self.s_avoid_corridor_width)
+        self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
 
 
     def _get_scene_spec(self, env_id: int):
@@ -1131,6 +1148,52 @@ class HexGround(LeggedRobot):
             return 0.0
         return float(sum(history) / len(history))
 
+    def _make_s_avoid_metric_history(self, window_size: int):
+        maxlen = max(1, int(window_size))
+        return {
+            "collision": deque(maxlen=maxlen),
+            "exposure": deque(maxlen=maxlen),
+            "progress": deque(maxlen=maxlen),
+            "success": deque(maxlen=maxlen),
+        }
+
+    def _clear_s_avoid_metric_history(self, stage: int) -> None:
+        stage = int(stage)
+        stage_hists = self.s_avoid_stage_metric_hists.get(stage, None)
+        if stage_hists is None:
+            return
+        for hist in stage_hists.values():
+            hist.clear()
+        self.s_avoid_stage_completed_episodes[stage] = 0
+        if stage == 3:
+            self.s_avoid_last_shrink_stage_episode = 0
+
+    def _get_s_avoid_stage_metric_rates(self, stage: int) -> Tuple[float, float, float, float]:
+        stage = int(stage)
+        stage_hists = self.s_avoid_stage_metric_hists.get(stage, None)
+        if stage_hists is None:
+            return 0.0, 0.0, 0.0, 0.0
+        return (
+            self._s_avoid_collision_rate(stage_hists["collision"]),
+            self._s_avoid_collision_rate(stage_hists["exposure"]),
+            self._s_avoid_collision_rate(stage_hists["progress"]),
+            self._s_avoid_collision_rate(stage_hists["success"]),
+        )
+
+    def _get_s_avoid_stage_window_size(self, stage: int) -> int:
+        stage = int(stage)
+        stage_hists = self.s_avoid_stage_metric_hists.get(stage, None)
+        if stage_hists is None:
+            return 0
+        return int(stage_hists["collision"].maxlen)
+
+    def _advance_s_avoid_stage(self, next_stage: int) -> None:
+        next_stage = int(next_stage)
+        if next_stage <= int(self.s_avoid_stage):
+            return
+        self._clear_s_avoid_metric_history(next_stage)
+        self.s_avoid_stage = next_stage
+
     def _compute_s_avoid_nearest_obstacle_distance(self) -> Optional[torch.Tensor]:
         if not self.s_avoid_enabled or self.s_avoid_actor_indices is None:
             return None
@@ -1184,6 +1247,7 @@ class HexGround(LeggedRobot):
     def _update_s_avoid_curriculum(
         self,
         episode_collision_flags: torch.Tensor,
+        episode_stage_ids: Optional[torch.Tensor] = None,
         episode_exposure_flags: Optional[torch.Tensor] = None,
         episode_progress_flags: Optional[torch.Tensor] = None,
         episode_success_flags: Optional[torch.Tensor] = None,
@@ -1191,6 +1255,9 @@ class HexGround(LeggedRobot):
         if not self.s_avoid_enabled or episode_collision_flags.numel() == 0:
             return
         flags = episode_collision_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
+        if episode_stage_ids is None:
+            episode_stage_ids = torch.full_like(episode_collision_flags, int(self.s_avoid_stage), dtype=torch.long)
+        stage_ids = episode_stage_ids.detach().to(device="cpu", dtype=torch.long).tolist()
         if episode_exposure_flags is None:
             episode_exposure_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
         exposure_flags = episode_exposure_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
@@ -1200,96 +1267,129 @@ class HexGround(LeggedRobot):
         if episode_success_flags is None:
             episode_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
         success_flags = episode_success_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
-        for flag, exposed, progressed, succeeded in zip(flags, exposure_flags, progress_flags, success_flags):
-            val = 1.0 if bool(flag) else 0.0
-            self.s_avoid_collision_hist_100.append(val)
-            self.s_avoid_collision_hist_50.append(val)
-            self.s_avoid_exposure_hist_100.append(1.0 if bool(exposed) else 0.0)
-            self.s_avoid_progress_hist_100.append(1.0 if bool(progressed) else 0.0)
-            self.s_avoid_success_hist_100.append(1.0 if bool(succeeded) else 0.0)
+        for stage_id, flag, exposed, progressed, succeeded in zip(
+            stage_ids,
+            flags,
+            exposure_flags,
+            progress_flags,
+            success_flags,
+        ):
+            stage_hists = self.s_avoid_stage_metric_hists.get(int(stage_id), None)
+            if stage_hists is None:
+                continue
+            stage_hists["collision"].append(1.0 if bool(flag) else 0.0)
+            stage_hists["exposure"].append(1.0 if bool(exposed) else 0.0)
+            stage_hists["progress"].append(1.0 if bool(progressed) else 0.0)
+            stage_hists["success"].append(1.0 if bool(succeeded) else 0.0)
+            self.s_avoid_stage_completed_episodes[int(stage_id)] = (
+                int(self.s_avoid_stage_completed_episodes.get(int(stage_id), 0)) + 1
+            )
         self.s_avoid_total_completed_episodes += len(flags)
 
-        rate100 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_100)
-        rate50 = self._s_avoid_collision_rate(self.s_avoid_collision_hist_50)
-        exposure100 = self._s_avoid_collision_rate(self.s_avoid_exposure_hist_100)
-        progress100 = self._s_avoid_collision_rate(self.s_avoid_progress_hist_100)
-        success100 = self._s_avoid_collision_rate(self.s_avoid_success_hist_100)
-        min_eps = int(getattr(self.cfg.terrain, "avoid_stage_switch_min_episodes", 200))
-        stage12_th = float(getattr(self.cfg.terrain, "avoid_stage12_collision_threshold", 0.05))
-        stage12_exposure_th = float(getattr(self.cfg.terrain, "avoid_stage12_exposure_threshold", 0.60))
-        stage12_progress_th = float(getattr(self.cfg.terrain, "avoid_stage12_progress_threshold", 0.35))
-        stage12_success_th = float(getattr(self.cfg.terrain, "avoid_stage12_success_threshold", 0.30))
+        current_stage = int(self.s_avoid_stage)
+        stage_hists = self.s_avoid_stage_metric_hists.get(current_stage, None)
+        if stage_hists is None:
+            return
+        rate_stage, exposure_stage, progress_stage, success_stage = self._get_s_avoid_stage_metric_rates(current_stage)
+        stage_window_size = self._get_s_avoid_stage_window_size(current_stage)
+        stage_completed_eps = int(self.s_avoid_stage_completed_episodes.get(current_stage, 0))
         shrink_th = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_collision_threshold", 0.08))
+        shrink_success_th = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_success_threshold", 0.60))
         shrink_step = float(getattr(self.cfg.terrain, "avoid_stage3_shrink_step", 0.05))
         width_min = float(getattr(self.cfg.terrain, "avoid_stage3_width_min", 0.85))
         shrink_cooldown = int(getattr(self.cfg.terrain, "avoid_stage3_shrink_cooldown_episodes", 50))
 
         switched = False
-        old_stage = int(self.s_avoid_stage)
+        old_stage = current_stage
+        self.extras["avoid_stage_switch_event"] = 0.0
+        self.extras["avoid_stage3_shrink_event"] = 0.0
         if (
-            self.s_avoid_stage == 1
-            and self.s_avoid_total_completed_episodes >= min_eps
-            and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
-            and len(self.s_avoid_exposure_hist_100) >= self.s_avoid_exposure_hist_100.maxlen
-            and len(self.s_avoid_progress_hist_100) >= self.s_avoid_progress_hist_100.maxlen
-            and len(self.s_avoid_success_hist_100) >= self.s_avoid_success_hist_100.maxlen
-            and exposure100 >= stage12_exposure_th
-            and progress100 >= stage12_progress_th
-            and success100 >= stage12_success_th
-            and rate100 < stage12_th
+            current_stage == 1
+            and stage_completed_eps >= int(getattr(self.cfg.terrain, "avoid_stage12_min_episodes", 200))
+            and len(stage_hists["collision"]) >= stage_hists["collision"].maxlen
+            and exposure_stage >= float(getattr(self.cfg.terrain, "avoid_stage12_exposure_threshold", 0.60))
+            and progress_stage >= float(getattr(self.cfg.terrain, "avoid_stage12_progress_threshold", 0.35))
+            and success_stage >= float(getattr(self.cfg.terrain, "avoid_stage12_success_threshold", 0.30))
+            and rate_stage < float(getattr(self.cfg.terrain, "avoid_stage12_collision_threshold", 0.05))
         ):
-            self.s_avoid_stage = 2
+            self._advance_s_avoid_stage(2)
             switched = True
         elif (
-            self.s_avoid_stage == 2
-            and self.s_avoid_total_completed_episodes >= min_eps
-            and len(self.s_avoid_collision_hist_100) >= self.s_avoid_collision_hist_100.maxlen
-            and len(self.s_avoid_exposure_hist_100) >= self.s_avoid_exposure_hist_100.maxlen
-            and len(self.s_avoid_progress_hist_100) >= self.s_avoid_progress_hist_100.maxlen
-            and len(self.s_avoid_success_hist_100) >= self.s_avoid_success_hist_100.maxlen
-            and exposure100 >= stage12_exposure_th
-            and progress100 >= stage12_progress_th
-            and success100 >= stage12_success_th
-            and rate100 < stage12_th
+            current_stage == 2
+            and stage_completed_eps >= int(getattr(self.cfg.terrain, "avoid_stage23_min_episodes", 200))
+            and len(stage_hists["collision"]) >= stage_hists["collision"].maxlen
+            and exposure_stage >= float(getattr(self.cfg.terrain, "avoid_stage23_exposure_threshold", 0.60))
+            and progress_stage >= float(getattr(self.cfg.terrain, "avoid_stage23_progress_threshold", 0.35))
+            and success_stage >= float(getattr(self.cfg.terrain, "avoid_stage23_success_threshold", 0.30))
+            and rate_stage < float(getattr(self.cfg.terrain, "avoid_stage23_collision_threshold", 0.05))
         ):
-            self.s_avoid_stage = 3
+            self._advance_s_avoid_stage(3)
             switched = True
 
         if switched:
+            self.extras["avoid_stage_switch_event"] = 1.0
+            self.extras["avoid_stage_switch_from"] = float(old_stage)
+            self.extras["avoid_stage_switch_to"] = float(self.s_avoid_stage)
+            self.extras["avoid_stage_switch_collision_rate"] = float(rate_stage)
+            self.extras["avoid_stage_switch_exposure_rate"] = float(exposure_stage)
+            self.extras["avoid_stage_switch_progress_rate"] = float(progress_stage)
+            self.extras["avoid_stage_switch_success_rate"] = float(success_stage)
             print(
                 f"[s_avoid_basic] stage {old_stage}->{self.s_avoid_stage} | "
-                f"episodes={self.s_avoid_total_completed_episodes}, collision100={rate100:.3f}, "
-                f"exposure100={exposure100:.3f}, progress100={progress100:.3f}, "
-                f"success100={success100:.3f}"
+                f"stage_episodes={stage_completed_eps}, total_episodes={self.s_avoid_total_completed_episodes}, "
+                f"window={stage_window_size}, collision={rate_stage:.3f}, exposure={exposure_stage:.3f}, "
+                f"progress={progress_stage:.3f}, success={success_stage:.3f}"
             )
 
+        current_stage = int(self.s_avoid_stage)
+        rate_stage, exposure_stage, progress_stage, success_stage = self._get_s_avoid_stage_metric_rates(current_stage)
+        stage_window_size = self._get_s_avoid_stage_window_size(current_stage)
+        stage_completed_eps = int(self.s_avoid_stage_completed_episodes.get(current_stage, 0))
+        shrink_rate = 0.0
         if self.s_avoid_stage == 3:
-            enough_window = len(self.s_avoid_collision_hist_50) >= self.s_avoid_collision_hist_50.maxlen
+            shrink_rate = rate_stage
+            shrink_success = success_stage
+            stage3_hists = self.s_avoid_stage_metric_hists.get(3, None)
+            enough_window = (
+                stage3_hists is not None
+                and len(stage3_hists["collision"]) >= stage3_hists["collision"].maxlen
+            )
             enough_cooldown = (
-                self.s_avoid_total_completed_episodes - self.s_avoid_last_shrink_episode
+                stage_completed_eps - self.s_avoid_last_shrink_stage_episode
             ) >= shrink_cooldown
             if (
                 enough_window
                 and enough_cooldown
-                and rate50 < shrink_th
+                and shrink_rate < shrink_th
+                and shrink_success >= shrink_success_th
                 and self.s_avoid_corridor_width > width_min + 1e-6
             ):
                 old_width = float(self.s_avoid_corridor_width)
                 self.s_avoid_corridor_width = max(width_min, old_width - shrink_step)
-                self.s_avoid_last_shrink_episode = self.s_avoid_total_completed_episodes
+                self.s_avoid_last_shrink_stage_episode = stage_completed_eps
+                self.extras["avoid_stage3_shrink_event"] = 1.0
+                self.extras["avoid_stage3_shrink_from_width"] = float(old_width)
+                self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
                 print(
                     f"[s_avoid_basic] stage3 corridor width {old_width:.2f}->{self.s_avoid_corridor_width:.2f} "
-                    f"(collision50={rate50:.3f})"
+                    f"(stage_episodes={stage_completed_eps}, window={stage_window_size}, "
+                    f"collision={shrink_rate:.3f}, success={shrink_success:.3f})"
                 )
+        elif self.extras.get("avoid_stage3_shrink_event", 0.0) == 0.0:
+            self.extras["avoid_stage3_shrink_from_width"] = float(self.s_avoid_corridor_width)
+            self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
 
         self.extras["avoid_stage"] = int(self.s_avoid_stage)
-        self.extras["avoid_collision_rate_100"] = float(rate100)
-        self.extras["avoid_collision_rate_50"] = float(rate50)
-        self.extras["avoid_exposure_rate_100"] = float(exposure100)
-        self.extras["avoid_progress_rate_100"] = float(progress100)
-        self.extras["avoid_success_rate_100"] = float(success100)
+        self.extras["avoid_stage_collision_rate"] = float(rate_stage)
+        self.extras["avoid_shrink_collision_rate"] = float(shrink_rate)
+        self.extras["avoid_stage_exposure_rate"] = float(exposure_stage)
+        self.extras["avoid_stage_progress_rate"] = float(progress_stage)
+        self.extras["avoid_stage_success_rate"] = float(success_stage)
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
+        self.extras["avoid_stage_completed_episodes"] = int(stage_completed_eps)
+        self.extras["avoid_stage_window"] = int(stage_window_size)
+        self.extras["avoid_shrink_window"] = int(getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 100))
 
     def _reset_s_avoid_episode_progress(self, env_ids: torch.Tensor) -> None:
         if (not self.s_avoid_enabled) or env_ids.numel() == 0 or (not hasattr(self, "goal_world")):
@@ -1298,21 +1398,45 @@ class HexGround(LeggedRobot):
         self.s_avoid_episode_goal_init_dist[env_ids] = goal_dist
         self.s_avoid_episode_goal_best_dist[env_ids] = goal_dist
 
-    def _get_s_avoid_episode_progress_flags(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def _get_s_avoid_episode_progress_flags(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if env_ids.numel() == 0:
             return torch.zeros(0, device=self.device, dtype=torch.bool)
-        progress_delta = float(getattr(self.cfg.terrain, "avoid_stage12_progress_delta", 0.25))
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
         init_dist = self.s_avoid_episode_goal_init_dist[env_ids]
         best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
         progress = torch.clamp(init_dist - best_dist, min=0.0)
-        return progress >= progress_delta
+        progress_delta12 = float(getattr(self.cfg.terrain, "avoid_stage12_progress_delta", 0.25))
+        progress_delta23 = float(getattr(self.cfg.terrain, "avoid_stage23_progress_delta", progress_delta12))
+        thresholds = torch.where(
+            stage_ids.to(device=self.device) == 1,
+            torch.full_like(progress, progress_delta12),
+            torch.full_like(progress, progress_delta23),
+        )
+        return progress >= thresholds
 
-    def _get_s_avoid_episode_success_flags(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def _get_s_avoid_episode_success_flags(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if env_ids.numel() == 0:
             return torch.zeros(0, device=self.device, dtype=torch.bool)
-        success_dist = float(getattr(self.cfg.terrain, "avoid_stage12_success_distance", 0.80))
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
         best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
-        return best_dist <= success_dist
+        success_dist12 = float(getattr(self.cfg.terrain, "avoid_stage12_success_distance", 0.80))
+        success_dist23 = float(getattr(self.cfg.terrain, "avoid_stage23_success_distance", success_dist12))
+        thresholds = torch.where(
+            stage_ids.to(device=self.device) == 1,
+            torch.full_like(best_dist, success_dist12),
+            torch.full_like(best_dist, success_dist23),
+        )
+        return best_dist <= thresholds
 
     def _resolve_s_avoid_stage(self, env_id: int, episode_idx: Optional[int] = None) -> int:
         debug_case = str(getattr(self.cfg.terrain, "avoid_map_debug_case", "")).strip().lower()
@@ -3426,12 +3550,20 @@ class HexGround(LeggedRobot):
             completed_mask = self.episode_length_buf[env_ids] > 0
             if bool(completed_mask.any().item()):
                 completed_env_ids = env_ids[completed_mask]
+                completed_stage_ids = self.s_avoid_stage_per_env[completed_env_ids].clone()
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
-                completed_progress = self._get_s_avoid_episode_progress_flags(completed_env_ids)
-                completed_success = self._get_s_avoid_episode_success_flags(completed_env_ids)
+                completed_progress = self._get_s_avoid_episode_progress_flags(
+                    completed_env_ids,
+                    stage_ids=completed_stage_ids,
+                )
+                completed_success = self._get_s_avoid_episode_success_flags(
+                    completed_env_ids,
+                    stage_ids=completed_stage_ids,
+                )
                 self._update_s_avoid_curriculum(
                     completed_flags,
+                    completed_stage_ids,
                     completed_exposed,
                     completed_progress,
                     completed_success,

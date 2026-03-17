@@ -337,21 +337,32 @@ class HexAvoidBasicCfg(HexGroundCfg):
         terrain_length = 6.0
         terrain_width = 6.0
 
-        # Stage switch metrics.
-        avoid_stage_switch_window = 100
-        avoid_stage_switch_min_episodes = 1600
+        # Stage 1 -> 2: wide path, require stable forward progress toward goal.
+        avoid_stage12_window = 200
+        avoid_stage12_min_episodes = 2800
         avoid_stage12_collision_threshold = 0.05
-        avoid_stage12_exposure_threshold = 0.60
-        avoid_stage12_progress_threshold = 0.35
+        avoid_stage12_exposure_threshold = 0.70
+        avoid_stage12_progress_threshold = 0.55
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
-        avoid_stage12_success_threshold = 0.30
+        avoid_stage12_success_threshold = 0.45
+
+        # Stage 2 -> 3: medium corridor, require more stable avoid-and-arrive behavior.
+        avoid_stage23_window = 300
+        avoid_stage23_min_episodes = 3200
+        avoid_stage23_collision_threshold = 0.05
+        avoid_stage23_exposure_threshold = 0.80
+        avoid_stage23_progress_threshold = 0.65
+        avoid_stage23_progress_delta = 0.35
+        avoid_stage23_success_distance = 0.65
+        avoid_stage23_success_threshold = 0.55
 
         # Stage-3 corridor shrink curriculum.
-        avoid_stage3_shrink_window = 50
+        avoid_stage3_shrink_window = 100
         avoid_stage3_shrink_collision_threshold = 0.08
+        avoid_stage3_shrink_success_threshold = 0.60
         avoid_stage3_shrink_step = 0.05
-        avoid_stage3_shrink_cooldown_episodes = 50
+        avoid_stage3_shrink_cooldown_episodes = 200
         avoid_stage3_width_start = 1.20
         avoid_stage3_width_min = 0.85
 

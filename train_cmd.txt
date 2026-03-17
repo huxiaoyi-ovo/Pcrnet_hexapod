@@ -1,10 +1,13 @@
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_follow_basic --mode teacher --skill follow --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 1000 --seed 42 --headless --egpo
-cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/play_highlevel.py --task s_follow_basic --mode teacher --skill follow --teacher_ckpt outputs/planner/follow_teacher_20260228_132458/best_model.pt --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --seed 42 --debug
+# EGPO 默认会切换 guided/post 学习率：1.5e-5 / 1.5e-4；如需严格对照，请显式传 --egpo_lr_guided / --egpo_lr_post
+# 论文对照优先用固定 iteration 的 model_N.pt + eval_highlevel.py；best_online_reward.pt 只表示在线监控最优，不作为标准评测选择规则。
+cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/play_highlevel.py --task s_follow_basic --mode teacher --skill follow --teacher_ckpt <YOUR_FOLLOW_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --seed 42 --debug
+cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/eval_highlevel.py --task s_follow_basic --mode teacher --skill follow --ckpt <YOUR_FOLLOW_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 256 --episodes 200 --seed 42
 
 # Avoid mainline training (canonical naming)
 # s_avoid_basic now uses 3-stage plane curriculum:
 # stage1 sparse capsules -> stage2 mixed capsules+boxes -> stage3 corridor walls.
-# Stage switch is metric-driven (recent-100 collision + min episodes).
+# Stage switch is metric-driven (stage-local collision/exposure/progress/success window + min episodes).
 # Train: s_avoid_basic, s_cylinder, s_narrow_passage, s_step_field, s_dense_obstacles
 # Eval-only: s_ood_holdout
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_avoid_basic --mode teacher --skill avoid --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 2000 --seed 42 --headless --save_interval 200
@@ -12,7 +15,10 @@ cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/pr
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_narrow_passage --mode teacher --skill avoid --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 2000 --seed 42 --headless --save_interval 200
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_step_field --mode teacher --skill avoid --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 2000 --seed 42 --headless --save_interval 200
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_dense_obstacles --mode teacher --skill avoid --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 2000 --seed 42 --headless --save_interval 200
-cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/train_highlevel.py --task s_ood_holdout --mode teacher --skill avoid --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 2048 --num_iterations 200 --seed 42 --headless --save_interval 200
+# DO NOT train on s_ood_holdout; keep it as distribution-held-out evaluation only.
+# Example:
+# cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/eval_highlevel.py --task s_ood_holdout --mode teacher --skill avoid --ckpt <YOUR_AVOID_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 256 --seed 42
+cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/eval_highlevel.py --task s_avoid_basic --mode teacher --skill avoid --ckpt <YOUR_AVOID_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 256 --episodes 200 --seed 42
 
 # Quick play checks for avoid scenes (remember --task is required in play_highlevel.py)
 cd /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym && source /home/hxy/anaconda3/etc/profile.d/conda.sh && conda activate hexapod_rl_env && python legged_gym/scripts/play_highlevel.py --task s_avoid_basic --mode teacher --skill avoid --teacher_ckpt <YOUR_AVOID_CKPT> --low_level_ckpt logs/hex_ground/Dec31_16-52-59_/model_6000.pt --num_envs 1 --debug_cmd --debug_interval 10 --max_steps 600 --debug

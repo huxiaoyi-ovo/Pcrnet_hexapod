@@ -31,13 +31,15 @@ class HexGroundCfg(LeggedRobotCfg):
             vertical_fov = 58.0
             near_clip = 0.28
             far_clip = 3.0
-            fps = 90
+            fps = 30
             # 坐标系：x左右，y前后，z上（body link坐标系）
             position = [0.00, 0.22, 0.08]
             pitch_deg = 0.0
             roll_deg = 20.0
             yaw_deg = 90.0
-            capture_interval = 5
+            # With a 50 Hz low-level control step, interval=2 approximates a 25 Hz
+            # depth refresh, which is closer to D435i 30 Hz than the old 10 Hz setting.
+            capture_interval = 2
             output_size = 128
             add_noise = True
             noise_level = 0.02
