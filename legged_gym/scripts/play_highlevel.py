@@ -536,6 +536,22 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
     terrain_cfg.avoid_spawn_body_plus_y_deg = target_deg
 
 
+def _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg) -> None:
+    if env_cfg is None or str(getattr(args, "task", "")) != "e_L_conflict":
+        return
+    if getattr(args, "force_cmd", None) is None:
+        return
+    terrain_cfg = getattr(env_cfg, "terrain", None)
+    if terrain_cfg is None:
+        return
+    nav_cfg = getattr(env_cfg, "navigation", None)
+    if nav_cfg is None:
+        return
+    terrain_cfg.e_l_conflict_corner_y = 1.2
+    terrain_cfg.e_l_conflict_obstacle_y = 1.05
+    print("[PlayHigh] e_L_conflict debug override: obstacle moved closer for force_cmd collision check.")
+
+
 def _init_e_s_metrics(args, env) -> dict:
     tol_bearing_rad = math.radians(float(getattr(args, "follow_bearing_tol_deg", 15.0)))
     desired = 1.0
@@ -1161,6 +1177,7 @@ def main():
         th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="PlayHigh")
         _maybe_apply_e_s_corridor_overrides(args, env_cfg)
         _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
+        _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
     if args.camera_interval is None:
         args.camera_interval = int(getattr(getattr(env.env, "camera_cfg", None), "capture_interval", 1))
