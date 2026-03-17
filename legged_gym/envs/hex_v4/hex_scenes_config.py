@@ -368,13 +368,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage34_success_threshold = 0.55
 
         # Stage-4 corridor shrink curriculum.
-        avoid_stage3_shrink_window = 100
-        avoid_stage3_shrink_collision_threshold = 0.08
-        avoid_stage3_shrink_success_threshold = 0.60
-        avoid_stage3_shrink_step = 0.05
-        avoid_stage3_shrink_cooldown_episodes = 200
-        avoid_stage3_width_start = 1.20
-        avoid_stage3_width_min = 0.85
+        avoid_stage4_shrink_window = 100
+        avoid_stage4_shrink_collision_threshold = 0.08
+        avoid_stage4_shrink_success_threshold = 0.60
+        avoid_stage4_shrink_step = 0.05
+        avoid_stage4_shrink_cooldown_episodes = 200
+        avoid_stage4_width_start = 1.20
+        avoid_stage4_width_min = 0.85
 
         # Stage geometry (all units in meters).
         avoid_stage1_count_min = 3
@@ -416,8 +416,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
         avoid_stage2_preset_count = 56
+        avoid_stage12_passage_width_min = 0.72
+        avoid_stage23_passage_width_min = 0.64
+        avoid_stage34_passage_width_min = 0.56
         avoid_preset_passage_width_min = 0.72
         avoid_preset_passage_samples = 17
+        avoid_preset_validation_attempts = 96
 
         # Primitive assets.
         avoid_capsule_radius = 0.15

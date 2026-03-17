@@ -1334,15 +1334,21 @@
 
 ## 2026-03-17 s_avoid 物理修复 - 清理地下 actor 池残留
 
-- [ ] Must: 不再让 `s_avoid` 的 pooled 障碍共用 `(0, 0, -5)` 地下待机点，避免下一回合出现障碍从地底冒出
-- [ ] Must: 保留已恢复的 actor 碰撞，同时把 inactive pooled 障碍移到场景外独立停车位，保证 avoid 训练场景干净
+- [x] Must: 不再让 `s_avoid` 的 pooled 障碍共用 `(0, 0, -5)` 地下待机点，避免下一回合出现障碍从地底冒出
+- [x] Must: 保留已恢复的 actor 碰撞，同时把 inactive pooled 障碍移到场景外独立停车位，保证 avoid 训练场景干净
 
 ## 2026-03-17 s_avoid 课程主线调整 - 预设场景 + 过渡 stage
 
-- [ ] Must: `s_avoid_basic` 从连续随机采样切到“预生成预设库 + 回合间切预设索引”，先保证碰撞和场景语义稳定
-- [ ] Must: 课程改成 `stage1 -> stage1.5 -> stage2 -> stage3`，降低 `stage1` 到混合障碍阶段的难度跳变
+- [x] Must: `s_avoid_basic` 从连续随机采样切到“预生成预设库 + 回合间切预设索引”，先保证碰撞和场景语义稳定
+- [x] Must: 课程改成 `stage1 -> stage1.5 -> stage2 -> stage3`，降低 `stage1` 到混合障碍阶段的难度跳变
 
 ## 2026-03-17 融合训练顺序结论 - 先 avoid，后统一 follow 输入契约
 
 - [ ] Must: 当前先继续推进 `avoid expert`，不要因为 follow 输入契约统一而打断避障主线
 - [ ] Must: 在进入 follow/avoid 融合训练前，统一所有专家与仲裁层的目标输入口径，禁止继续依赖部署不可得的真值目标信息
+
+## 2026-03-17 avoid 训练链路最后收口 - 固定墙 + 硬筛选 + 课程命名统一
+
+- [x] Must: `stage4` 的墙单独处理，避免继续沿用前 3 段 pooled 可动障碍语义
+- [x] Must: 预设筛选改成硬保证，禁止连续失败后静默回退到未验收预设
+- [x] Must: `avoid_stage3_*` 的旧 shrink 配置与日志口径统一收成 `stage4`
