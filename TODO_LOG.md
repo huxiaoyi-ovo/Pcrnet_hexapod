@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-17 s_avoid 障碍碰撞根因排查收口
+
+- [x] ~~[P0] 增加 `s_avoid_basic` 的“单障碍直接创建”调试对照，验证穿透是否来自 pooled actor 地下创建后再搬运这条用法~~
+
 ## 2026-03-17 checkpoint 保存频率补充
 
 - [x] ~~[P1] 在 `train_highlevel.py` 增加固定 checkpoint 留存：除原有 `save_interval` 外，每 100 轮额外保存一次策略 `pt`~~

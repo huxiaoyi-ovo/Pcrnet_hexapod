@@ -387,6 +387,7 @@ class HexGround(LeggedRobot):
         self.s_avoid_total_slots = 0
         self.s_avoid_capsule_quat = None
         self.s_avoid_identity_quat = None
+        self.s_avoid_direct_single_obstacle = False
 
         terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
         if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
@@ -456,6 +457,9 @@ class HexGround(LeggedRobot):
             )
 
         if terrain_type == "s_avoid_basic":
+            self.s_avoid_direct_single_obstacle = bool(
+                getattr(self.cfg.terrain, "avoid_direct_single_obstacle", False)
+            )
             asset_options = gymapi.AssetOptions()
             asset_options.fix_base_link = True
             asset_options.disable_gravity = True
@@ -475,9 +479,14 @@ class HexGround(LeggedRobot):
             self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, asset_options)
             self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, asset_options)
 
-            self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
-            self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
-            self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
+            if self.s_avoid_direct_single_obstacle:
+                self.s_avoid_capsule_slot_count = 1
+                self.s_avoid_box_slot_count = 0
+                self.s_avoid_wall_slot_count = 0
+            else:
+                self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
+                self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
+                self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
             self.s_avoid_total_slots = (
                 self.s_avoid_capsule_slot_count
                 + self.s_avoid_box_slot_count
@@ -499,6 +508,8 @@ class HexGround(LeggedRobot):
                 f"capsule_d={2.0 * cap_r:.2f}, box=({box_x:.2f},{box_y:.2f},{box_z:.2f}), "
                 f"wall=({wall_t:.2f},{wall_l:.2f},{wall_h:.2f})"
             )
+            if self.s_avoid_direct_single_obstacle:
+                print("[Scene] s_avoid_basic direct-single-obstacle debug enabled")
 
         terrain_obj = getattr(self, "terrain", None)
         self.scene_generator = getattr(terrain_obj, "scene_generator", None)
@@ -514,6 +525,33 @@ class HexGround(LeggedRobot):
                 self.dynamic_asset = self.gym.create_box(self.sim, size_xy, size_xy, height, asset_options)
                 self.dynamic_actor_handles = [[None for _ in range(max_dyn)] for _ in range(self.num_envs)]
                 self.dynamic_actor_indices = np.zeros((self.num_envs, max_dyn), dtype=np.int32)
+
+    def _get_s_avoid_debug_case(self) -> str:
+        debug_case = str(getattr(self.cfg.terrain, "avoid_map_debug_case", "")).strip().lower()
+        if self.s_avoid_direct_single_obstacle and debug_case == "":
+            return "front"
+        return debug_case
+
+    def _get_s_avoid_debug_local_pose(self):
+        cam_cfg = getattr(getattr(self.cfg, "sensor", None), "depth_camera", None)
+        cam_y = 0.0
+        if cam_cfg is not None and hasattr(cam_cfg, "position") and len(cam_cfg.position) >= 2:
+            cam_y = float(cam_cfg.position[1])
+        local_x = 0.0
+        local_y = 1.35
+        debug_case = self._get_s_avoid_debug_case()
+        if debug_case == "left":
+            local_x = -0.60
+        elif debug_case == "right":
+            local_x = 0.60
+        elif debug_case == "side_left":
+            local_x = -1.35
+            local_y = cam_y
+        elif debug_case == "side_right":
+            local_x = 1.35
+            local_y = cam_y
+        stage12_spawn_y = -1.6
+        return local_x, stage12_spawn_y + local_y
 
     def _post_create_envs(self):
         if not hasattr(self, "robot_actor_indices"):
@@ -655,7 +693,17 @@ class HexGround(LeggedRobot):
                     asset = self.s_avoid_wall_asset
                     pose = gymapi.Transform()
                     pose.r = self.s_avoid_identity_quat
-                pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
+                if self.s_avoid_direct_single_obstacle:
+                    env_origin = self.env_origins[env_id]
+                    local_x, local_y = self._get_s_avoid_debug_local_pose()
+                    cap_h = float(getattr(self.cfg.terrain, "avoid_capsule_height", 0.5))
+                    pose.p = gymapi.Vec3(
+                        float(env_origin[0].item() + local_x),
+                        float(env_origin[1].item() + local_y),
+                        float(env_origin[2].item() + 0.5 * cap_h),
+                    )
+                else:
+                    pose.p = gymapi.Vec3(0.0, 0.0, -5.0)
                 actor_handle = self.gym.create_actor(
                     env_handle,
                     asset,
@@ -1723,7 +1771,52 @@ class HexGround(LeggedRobot):
         stage12_forbidden = [
             (0.0, stage12_spawn_y, spawn_clear + max(cap_r, box_r)),
         ]
-        debug_case = str(getattr(self.cfg.terrain, "avoid_map_debug_case", "")).strip().lower()
+        debug_case = self._get_s_avoid_debug_case()
+
+        if self.s_avoid_direct_single_obstacle:
+            local_x, local_y = self._get_s_avoid_debug_local_pose()
+            flat_indices = self.s_avoid_actor_indices[env_ids].reshape(-1).contiguous()
+            flat_indices_long = flat_indices.to(torch.long)
+            root_states = getattr(self, "all_root_states", None)
+            for env_id in env_ids.tolist():
+                self.s_avoid_env_episode_count[env_id] += 1
+                active = np.zeros((total_slots,), dtype=np.bool_)
+                pos = np.zeros((total_slots, 3), dtype=np.float32)
+                pos[:, 2] = -5.0
+                quat = np.zeros((total_slots, 4), dtype=np.float32)
+                quat[:, 3] = 1.0
+                active[0] = True
+                pos[0] = np.array([local_x, local_y, cap_z], dtype=np.float32)
+                quat[0] = np.array(
+                    [
+                        self.s_avoid_capsule_quat.x,
+                        self.s_avoid_capsule_quat.y,
+                        self.s_avoid_capsule_quat.z,
+                        self.s_avoid_capsule_quat.w,
+                    ],
+                    dtype=np.float32,
+                )
+                env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
+                pos_world = pos.copy()
+                pos_world[:, 0] += env_origin[0]
+                pos_world[:, 1] += env_origin[1]
+                pos_world[:, 2] += env_origin[2]
+                self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
+                self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
+                self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+            if root_states is not None and flat_indices.numel() > 0:
+                pos_flat = self.s_avoid_pos_world[env_ids].reshape(-1, 3)
+                quat_flat = self.s_avoid_quat_world[env_ids].reshape(-1, 4)
+                root_states[flat_indices_long, :3] = pos_flat
+                root_states[flat_indices_long, 3:7] = quat_flat
+                root_states[flat_indices_long, 7:13] = 0.0
+                self.gym.set_actor_root_state_tensor_indexed(
+                    self.sim,
+                    gymtorch.unwrap_tensor(root_states),
+                    gymtorch.unwrap_tensor(flat_indices),
+                    int(flat_indices.numel()),
+                )
+            return
 
         for env_id in env_ids.tolist():
             episode_idx = int(self.s_avoid_env_episode_count[env_id].item())
@@ -1875,6 +1968,8 @@ class HexGround(LeggedRobot):
 
     def _sync_s_avoid_obstacles(self, env_ids: torch.Tensor):
         if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
+            return
+        if self.s_avoid_direct_single_obstacle:
             return
         slot_n = int(self.s_avoid_total_slots)
         flat_indices = self.s_avoid_actor_indices[env_ids].reshape(-1).contiguous()

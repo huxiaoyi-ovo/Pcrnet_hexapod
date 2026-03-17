@@ -522,6 +522,8 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
     if env_cfg is None or str(getattr(args, "task", "")) != "s_avoid_basic":
         return
     debug_case = str(getattr(args, "avoid_map_debug_case", "")).strip().lower()
+    if bool(getattr(args, "avoid_direct_single_obstacle", False)) and debug_case == "":
+        debug_case = "front"
     if debug_case == "":
         return
     terrain_cfg = getattr(env_cfg, "terrain", None)
@@ -529,6 +531,7 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
         return
     terrain_cfg.avoid_map_debug_case = debug_case
     terrain_cfg.avoid_preview_all_stages = False
+    terrain_cfg.avoid_direct_single_obstacle = bool(getattr(args, "avoid_direct_single_obstacle", False))
     target_deg = 0.0 if getattr(args, "avoid_spawn_body_plus_y_deg", None) is None else float(args.avoid_spawn_body_plus_y_deg)
     terrain_cfg.avoid_spawn_body_plus_y_deg = target_deg
 
@@ -940,6 +943,11 @@ def parse_args():
         type=float,
         default=None,
         help="s_avoid_basic 静态验证：强制设置出生时机体 +y 相对世界 +Y 的夹角（度）",
+    )
+    parser.add_argument(
+        "--avoid_direct_single_obstacle",
+        action="store_true",
+        help="s_avoid_basic 碰撞 sanity check：默认固定前方单障碍，直接创建在最终位置，不走池子和后续搬运",
     )
     parser.add_argument(
         "--expert_k_yaw",
