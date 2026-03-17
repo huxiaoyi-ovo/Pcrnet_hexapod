@@ -529,7 +529,7 @@ class HexGround(LeggedRobot):
             raise RuntimeError(f"robot_actor_indices not strictly increasing: {indices}")
 
     def _scene_group_id(self, env_id: int) -> int:
-        return env_id + 1
+        return 1
 
     def _scene_collision_filter(self) -> int:
         scene_filter = int(getattr(self.cfg.terrain, "scene_collision_filter", 0xFFFFFFFF))
