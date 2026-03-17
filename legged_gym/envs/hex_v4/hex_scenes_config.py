@@ -396,6 +396,18 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage12_core_half_width = 0.40
         avoid_stage12_core_y_min = 0.0
         avoid_stage12_core_y_max = 1.6
+        avoid_stage23_band_half_width = 0.95
+        avoid_stage23_band_y_min = -0.35
+        avoid_stage23_band_y_max = 2.35
+        avoid_stage23_core_half_width = 0.34
+        avoid_stage23_core_y_min = 0.05
+        avoid_stage23_core_y_max = 1.70
+        avoid_stage34_band_half_width = 0.82
+        avoid_stage34_band_y_min = -0.20
+        avoid_stage34_band_y_max = 2.25
+        avoid_stage34_core_half_width = 0.28
+        avoid_stage34_core_y_min = 0.10
+        avoid_stage34_core_y_max = 1.65
         avoid_stage1_core_count = 1
         avoid_stage15_core_count = 2
         avoid_stage2_core_count = 2
@@ -404,6 +416,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
         avoid_stage2_preset_count = 56
+        avoid_preset_passage_width_min = 0.72
+        avoid_preset_passage_samples = 17
 
         # Primitive assets.
         avoid_capsule_radius = 0.15
@@ -420,6 +434,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_box_slots = 2
         avoid_wall_slots = 2
         avoid_seed = 7001
+        avoid_pooled_wall_mass = 50000.0
 
     class navigation(HexGroundCfg.navigation):
         # Avoid expert stage: no moving target actor (keep target non-collision by design).
@@ -437,8 +452,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_fov_soft_scale = 1.0
         target_fov_hard_scale = 1.0
         target_lost_k = 0
-        target_center_scale = 0.10
-        target_visible_scale = 0.0
+        target_center_scale = 0.20
+        target_visible_scale = 0.15
         avoid_band_activate_progress = 0.50
         avoid_band_penalty_scale = 0.75
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)

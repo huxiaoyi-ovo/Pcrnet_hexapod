@@ -525,9 +525,10 @@ class HexGround(LeggedRobot):
                 print("[Scene] s_avoid_basic direct-single-obstacle debug enabled")
             else:
                 pooled_mass = float(getattr(self.cfg.terrain, "avoid_pooled_actor_mass", 1000.0))
+                pooled_wall_mass = float(getattr(self.cfg.terrain, "avoid_pooled_wall_mass", 50000.0))
                 print(
                     "[Scene] s_avoid_basic pooled obstacle body: "
-                    f"fix_base_link=False, mass={pooled_mass:.1f}, "
+                    f"fix_base_link=False, mass={pooled_mass:.1f}, wall_mass={pooled_wall_mass:.1f}, "
                     f"lin_damp={pooled_asset_options.linear_damping:.1f}, "
                     f"ang_damp={pooled_asset_options.angular_damping:.1f}"
                 )
@@ -627,10 +628,14 @@ class HexGround(LeggedRobot):
                     print(f"[Debug] {tag} shape filter update failed")
                     setattr(self, flag, True)
 
-    def _configure_s_avoid_pooled_body(self, env_handle, actor_handle, env_id: int):
+    def _configure_s_avoid_pooled_body(self, env_handle, actor_handle, env_id: int, slot: int):
         if not self.s_avoid_enabled or self.s_avoid_direct_single_obstacle:
             return
-        target_mass = float(getattr(self.cfg.terrain, "avoid_pooled_actor_mass", 1000.0))
+        wall_slot_start = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
+        if int(slot) >= wall_slot_start:
+            target_mass = float(getattr(self.cfg.terrain, "avoid_pooled_wall_mass", 50000.0))
+        else:
+            target_mass = float(getattr(self.cfg.terrain, "avoid_pooled_actor_mass", 1000.0))
         try:
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
             changed = False
@@ -699,10 +704,9 @@ class HexGround(LeggedRobot):
                             self._s_avoid_color_warned = True
 
     def _get_s_avoid_park_local_pose(self, slot: int) -> Tuple[float, float, float]:
-        half_w = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
-        half_l = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
-        lane_x = half_w + 8.0 + 1.8 * float(slot)
-        lane_y = -half_l - 8.0 - 1.2 * float(slot)
+        # Keep inactive obstacles far outside every env's visible/task area.
+        lane_x = 1000.0 + 6.0 * float(slot)
+        lane_y = -1000.0 - 4.0 * float(slot)
         lane_z = 0.25
         return lane_x, lane_y, lane_z
 
@@ -822,7 +826,7 @@ class HexGround(LeggedRobot):
                 self._apply_actor_collision_filter(
                     env_handle, actor_handle, scene_filter, env_id, debug_tag=f"s_avoid_obs_{slot}"
                 )
-                self._configure_s_avoid_pooled_body(env_handle, actor_handle, env_id)
+                self._configure_s_avoid_pooled_body(env_handle, actor_handle, env_id, slot)
                 self.s_avoid_actor_handles[env_id][slot] = actor_handle
                 actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                 self.s_avoid_actor_indices[env_id, slot] = actor_index
@@ -1169,6 +1173,9 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage_switch_exposure_rate"] = 0.0
         self.extras["avoid_stage_switch_progress_rate"] = 0.0
         self.extras["avoid_stage_switch_success_rate"] = 0.0
+        self.extras["avoid_stage4_shrink_event"] = 0.0
+        self.extras["avoid_stage4_shrink_from_width"] = float(self.s_avoid_corridor_width)
+        self.extras["avoid_stage4_shrink_to_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_stage3_shrink_event"] = 0.0
         self.extras["avoid_stage3_shrink_from_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
@@ -1190,6 +1197,150 @@ class HexGround(LeggedRobot):
         active = np.zeros((total_slots,), dtype=np.bool_)
         return active, pos, quat
 
+    def _get_s_avoid_stage_sampling_ranges(self, stage: int) -> dict:
+        stage = int(stage)
+        if stage == 1:
+            prefix = "avoid_stage12"
+        elif stage == 2:
+            prefix = "avoid_stage23"
+        else:
+            prefix = "avoid_stage34"
+        return {
+            "band_half_width": float(getattr(self.cfg.terrain, f"{prefix}_band_half_width", 1.05)),
+            "band_y_min": float(getattr(self.cfg.terrain, f"{prefix}_band_y_min", -0.5)),
+            "band_y_max": float(getattr(self.cfg.terrain, f"{prefix}_band_y_max", 2.4)),
+            "core_half_width": float(getattr(self.cfg.terrain, f"{prefix}_core_half_width", 0.4)),
+            "core_y_min": float(getattr(self.cfg.terrain, f"{prefix}_core_y_min", 0.0)),
+            "core_y_max": float(getattr(self.cfg.terrain, f"{prefix}_core_y_max", 1.6)),
+        }
+
+    def _s_avoid_preset_has_passage(
+        self,
+        *,
+        active: np.ndarray,
+        pos: np.ndarray,
+        quat: np.ndarray,
+        stage: int,
+    ) -> bool:
+        cap_slots = int(self.s_avoid_capsule_slot_count)
+        box_end = cap_slots + int(self.s_avoid_box_slot_count)
+        cfg = self.cfg.terrain
+        ranges = self._get_s_avoid_stage_sampling_ranges(stage)
+        x_min = -float(ranges["band_half_width"])
+        x_max = float(ranges["band_half_width"])
+        passage_min = float(getattr(cfg, "avoid_preset_passage_width_min", 0.72))
+        sample_n = max(5, int(getattr(cfg, "avoid_preset_passage_samples", 17)))
+        y_lo = max(
+            float(ranges["band_y_min"]),
+            float(self._get_s_avoid_spawn_local_y(stage) + 0.35),
+        )
+        y_hi = max(y_lo + 0.4, float(ranges["band_y_max"]))
+        y_samples = np.linspace(y_lo, y_hi, sample_n, dtype=np.float32)
+        cap_r = float(getattr(cfg, "avoid_capsule_radius", 0.15))
+        box_hx = 0.5 * float(getattr(cfg, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(cfg, "avoid_box_size_y", 0.4))
+
+        for y in y_samples.tolist():
+            blocked = []
+            for slot in range(int(self.s_avoid_total_slots)):
+                if not bool(active[slot]):
+                    continue
+                cx = float(pos[slot, 0])
+                cy = float(pos[slot, 1])
+                if slot < cap_slots:
+                    dy = abs(y - cy)
+                    if dy >= cap_r:
+                        continue
+                    dx = math.sqrt(max(cap_r * cap_r - dy * dy, 0.0))
+                    blocked.append((cx - dx, cx + dx))
+                    continue
+                if slot >= box_end:
+                    continue
+                yaw = 2.0 * math.atan2(float(quat[slot, 2]), float(quat[slot, 3]))
+                cos_yaw = abs(math.cos(yaw))
+                sin_yaw = abs(math.sin(yaw))
+                half_x = cos_yaw * box_hx + sin_yaw * box_hy
+                half_y = sin_yaw * box_hx + cos_yaw * box_hy
+                if abs(y - cy) > half_y:
+                    continue
+                blocked.append((cx - half_x, cx + half_x))
+
+            if not blocked:
+                continue
+            blocked.sort(key=lambda item: item[0])
+            merged = []
+            cur_l, cur_r = blocked[0]
+            for left, right in blocked[1:]:
+                if left <= cur_r:
+                    cur_r = max(cur_r, right)
+                else:
+                    merged.append((cur_l, cur_r))
+                    cur_l, cur_r = left, right
+            merged.append((cur_l, cur_r))
+
+            free_max = 0.0
+            cursor = x_min
+            for left, right in merged:
+                free_max = max(free_max, left - cursor)
+                cursor = max(cursor, right)
+            free_max = max(free_max, x_max - cursor)
+            if free_max < passage_min:
+                return False
+        return True
+
+    def _build_s_avoid_validated_preset(
+        self,
+        *,
+        stage: int,
+        seed: int,
+        cap_count: int,
+        box_count: int,
+        spacing: float,
+        core_count: int,
+        spawn_clear: float,
+        cap_r: float,
+        box_r: float,
+        cap_z: float,
+        box_z: float,
+        half_extent: float,
+        stage_ranges: dict,
+        stage_forbidden,
+        max_attempts: int = 24,
+    ):
+        fallback = None
+        for attempt in range(max_attempts):
+            rng = np.random.RandomState(int(seed + 7919 * attempt))
+            preset = self._make_s_avoid_preset(
+                stage=stage,
+                rng=rng,
+                cap_count=cap_count,
+                box_count=box_count,
+                spacing=spacing,
+                core_count=core_count,
+                spawn_clear=spawn_clear,
+                cap_r=cap_r,
+                box_r=box_r,
+                cap_z=cap_z,
+                box_z=box_z,
+                half_extent=half_extent,
+                core_half_width=float(stage_ranges["core_half_width"]),
+                core_y_min=float(stage_ranges["core_y_min"]),
+                core_y_max=float(stage_ranges["core_y_max"]),
+                band_half_width=float(stage_ranges["band_half_width"]),
+                band_y_min=float(stage_ranges["band_y_min"]),
+                band_y_max=float(stage_ranges["band_y_max"]),
+                forbidden_zones=stage_forbidden,
+            )
+            fallback = preset
+            if self._s_avoid_preset_has_passage(
+                active=preset["active"],
+                pos=preset["pos"],
+                quat=preset["quat"],
+                stage=stage,
+            ):
+                return preset
+        return fallback
+
     def _make_s_avoid_preset(
         self,
         *,
@@ -1205,13 +1356,13 @@ class HexGround(LeggedRobot):
         cap_z: float,
         box_z: float,
         half_extent: float,
-        stage12_core_half_width: float,
-        stage12_core_y_min: float,
-        stage12_core_y_max: float,
-        stage12_band_half_width: float,
-        stage12_band_y_min: float,
-        stage12_band_y_max: float,
-        stage12_forbidden,
+        core_half_width: float,
+        core_y_min: float,
+        core_y_max: float,
+        band_half_width: float,
+        band_y_min: float,
+        band_y_max: float,
+        forbidden_zones,
     ):
         active, pos, quat = self._get_s_avoid_stage_template()
         cap_slots = int(self.s_avoid_capsule_slot_count)
@@ -1226,9 +1377,9 @@ class HexGround(LeggedRobot):
             half_extent=half_extent,
             min_spacing=spacing,
             spawn_clearance=spawn_clear + safe_r,
-            x_range=(-stage12_core_half_width, stage12_core_half_width),
-            y_range=(stage12_core_y_min, stage12_core_y_max),
-            avoid_zones=stage12_forbidden,
+            x_range=(-core_half_width, core_half_width),
+            y_range=(core_y_min, core_y_max),
+            avoid_zones=forbidden_zones,
         )
         points = self._sample_s_avoid_points(
             rng=rng,
@@ -1236,9 +1387,9 @@ class HexGround(LeggedRobot):
             half_extent=half_extent,
             min_spacing=spacing,
             spawn_clearance=spawn_clear + safe_r,
-            x_range=(-stage12_band_half_width, stage12_band_half_width),
-            y_range=(stage12_band_y_min, stage12_band_y_max),
-            avoid_zones=stage12_forbidden,
+            x_range=(-band_half_width, band_half_width),
+            y_range=(band_y_min, band_y_max),
+            avoid_zones=forbidden_zones,
             existing_points=points,
         )
         for i in range(min(cap_count, cap_slots)):
@@ -1274,14 +1425,8 @@ class HexGround(LeggedRobot):
         half_extent = 0.5 * min(float(self.cfg.terrain.terrain_width), float(self.cfg.terrain.terrain_length))
         half_extent = max(half_extent - float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.1)), 0.6)
         spawn_clear = float(getattr(self.cfg.terrain, "avoid_spawn_clearance", 0.5))
-        stage12_band_half_width = float(getattr(self.cfg.terrain, "avoid_stage12_band_half_width", 1.05))
-        stage12_band_y_min = float(getattr(self.cfg.terrain, "avoid_stage12_band_y_min", -0.5))
-        stage12_band_y_max = float(getattr(self.cfg.terrain, "avoid_stage12_band_y_max", 2.4))
-        stage12_core_half_width = float(getattr(self.cfg.terrain, "avoid_stage12_core_half_width", 0.4))
-        stage12_core_y_min = float(getattr(self.cfg.terrain, "avoid_stage12_core_y_min", 0.0))
-        stage12_core_y_max = float(getattr(self.cfg.terrain, "avoid_stage12_core_y_max", 1.6))
         stage12_spawn_y = -1.6
-        stage12_forbidden = [
+        stage_forbidden = [
             (0.0, stage12_spawn_y, spawn_clear + max(cap_r, box_r)),
         ]
 
@@ -1306,9 +1451,9 @@ class HexGround(LeggedRobot):
             rng = np.random.RandomState(seed0 + 100000 + 97 * preset_idx)
             cap_count = int(rng.randint(stage1_min, min(stage1_max, cap_slots) + 1))
             presets[1].append(
-                self._make_s_avoid_preset(
+                self._build_s_avoid_validated_preset(
                     stage=1,
-                    rng=rng,
+                    seed=seed0 + 100000 + 97 * preset_idx,
                     cap_count=cap_count,
                     box_count=0,
                     spacing=stage1_spacing,
@@ -1319,22 +1464,17 @@ class HexGround(LeggedRobot):
                     cap_z=cap_z,
                     box_z=box_z,
                     half_extent=half_extent,
-                    stage12_core_half_width=stage12_core_half_width,
-                    stage12_core_y_min=stage12_core_y_min,
-                    stage12_core_y_max=stage12_core_y_max,
-                    stage12_band_half_width=stage12_band_half_width,
-                    stage12_band_y_min=stage12_band_y_min,
-                    stage12_band_y_max=stage12_band_y_max,
-                    stage12_forbidden=stage12_forbidden,
+                    stage_ranges=self._get_s_avoid_stage_sampling_ranges(1),
+                    stage_forbidden=stage_forbidden,
                 )
             )
         for preset_idx in range(max(1, stage15_count)):
             rng = np.random.RandomState(seed0 + 200000 + 97 * preset_idx)
             cap_count = int(rng.randint(stage15_min, min(stage15_max, cap_slots) + 1))
             presets[2].append(
-                self._make_s_avoid_preset(
+                self._build_s_avoid_validated_preset(
                     stage=2,
-                    rng=rng,
+                    seed=seed0 + 200000 + 97 * preset_idx,
                     cap_count=cap_count,
                     box_count=0,
                     spacing=stage15_spacing,
@@ -1345,13 +1485,8 @@ class HexGround(LeggedRobot):
                     cap_z=cap_z,
                     box_z=box_z,
                     half_extent=half_extent,
-                    stage12_core_half_width=stage12_core_half_width,
-                    stage12_core_y_min=stage12_core_y_min,
-                    stage12_core_y_max=stage12_core_y_max,
-                    stage12_band_half_width=stage12_band_half_width,
-                    stage12_band_y_min=stage12_band_y_min,
-                    stage12_band_y_max=stage12_band_y_max,
-                    stage12_forbidden=stage12_forbidden,
+                    stage_ranges=self._get_s_avoid_stage_sampling_ranges(2),
+                    stage_forbidden=stage_forbidden,
                 )
             )
         for preset_idx in range(max(1, stage2_count)):
@@ -1362,9 +1497,9 @@ class HexGround(LeggedRobot):
             cap_count = max(0, min(cap_slots, total_count - box_count))
             box_count = min(box_slots, max(0, total_count - cap_count))
             presets[3].append(
-                self._make_s_avoid_preset(
+                self._build_s_avoid_validated_preset(
                     stage=3,
-                    rng=rng,
+                    seed=seed0 + 300000 + 97 * preset_idx,
                     cap_count=cap_count,
                     box_count=box_count,
                     spacing=stage2_spacing,
@@ -1375,13 +1510,8 @@ class HexGround(LeggedRobot):
                     cap_z=cap_z,
                     box_z=box_z,
                     half_extent=half_extent,
-                    stage12_core_half_width=stage12_core_half_width,
-                    stage12_core_y_min=stage12_core_y_min,
-                    stage12_core_y_max=stage12_core_y_max,
-                    stage12_band_half_width=stage12_band_half_width,
-                    stage12_band_y_min=stage12_band_y_min,
-                    stage12_band_y_max=stage12_band_y_max,
-                    stage12_forbidden=stage12_forbidden,
+                    stage_ranges=self._get_s_avoid_stage_sampling_ranges(3),
+                    stage_forbidden=stage_forbidden,
                 )
             )
         return presets
@@ -1642,7 +1772,7 @@ class HexGround(LeggedRobot):
         for hist in stage_hists.values():
             hist.clear()
         self.s_avoid_stage_completed_episodes[stage] = 0
-        if stage == 3:
+        if stage == 4:
             self.s_avoid_last_shrink_stage_episode = 0
 
     def _get_s_avoid_stage_metric_rates(self, stage: int) -> Tuple[float, float, float, float]:
@@ -1779,6 +1909,7 @@ class HexGround(LeggedRobot):
         switched = False
         old_stage = current_stage
         self.extras["avoid_stage_switch_event"] = 0.0
+        self.extras["avoid_stage4_shrink_event"] = 0.0
         self.extras["avoid_stage3_shrink_event"] = 0.0
         if (
             current_stage == 1
@@ -1855,15 +1986,20 @@ class HexGround(LeggedRobot):
                 old_width = float(self.s_avoid_corridor_width)
                 self.s_avoid_corridor_width = max(width_min, old_width - shrink_step)
                 self.s_avoid_last_shrink_stage_episode = stage_completed_eps
+                self.extras["avoid_stage4_shrink_event"] = 1.0
+                self.extras["avoid_stage4_shrink_from_width"] = float(old_width)
+                self.extras["avoid_stage4_shrink_to_width"] = float(self.s_avoid_corridor_width)
                 self.extras["avoid_stage3_shrink_event"] = 1.0
                 self.extras["avoid_stage3_shrink_from_width"] = float(old_width)
                 self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
                 print(
-                    f"[s_avoid_basic] stage3 corridor width {old_width:.2f}->{self.s_avoid_corridor_width:.2f} "
+                    f"[s_avoid_basic] stage4 corridor width {old_width:.2f}->{self.s_avoid_corridor_width:.2f} "
                     f"(stage_episodes={stage_completed_eps}, window={stage_window_size}, "
                     f"collision={shrink_rate:.3f}, success={shrink_success:.3f})"
                 )
-        elif self.extras.get("avoid_stage3_shrink_event", 0.0) == 0.0:
+        elif self.extras.get("avoid_stage4_shrink_event", 0.0) == 0.0:
+            self.extras["avoid_stage4_shrink_from_width"] = float(self.s_avoid_corridor_width)
+            self.extras["avoid_stage4_shrink_to_width"] = float(self.s_avoid_corridor_width)
             self.extras["avoid_stage3_shrink_from_width"] = float(self.s_avoid_corridor_width)
             self.extras["avoid_stage3_shrink_to_width"] = float(self.s_avoid_corridor_width)
 

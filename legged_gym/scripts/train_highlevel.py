@@ -3686,9 +3686,9 @@ def train(args):
         avoid_stage_switch_exposure_value = 0.0
         avoid_stage_switch_progress_value = 0.0
         avoid_stage_switch_success_value = 0.0
-        avoid_stage3_shrink_event_value = 0.0
-        avoid_stage3_shrink_from_width_value = 0.0
-        avoid_stage3_shrink_to_width_value = 0.0
+        avoid_stage4_shrink_event_value = 0.0
+        avoid_stage4_shrink_from_width_value = 0.0
+        avoid_stage4_shrink_to_width_value = 0.0
         timeout_bootstrap_count = torch.zeros((), device=device)
         policy_nonfinite_action_count = 0
         expert_nonfinite_action_count = 0
@@ -4424,14 +4424,14 @@ def train(args):
                     avoid_stage_switch_success_value = float(
                         extras.get("avoid_stage_switch_success_rate", avoid_stage_switch_success_value)
                     )
-                    avoid_stage3_shrink_event_value = float(
-                        extras.get("avoid_stage3_shrink_event", avoid_stage3_shrink_event_value)
+                    avoid_stage4_shrink_event_value = float(
+                        extras.get("avoid_stage4_shrink_event", avoid_stage4_shrink_event_value)
                     )
-                    avoid_stage3_shrink_from_width_value = float(
-                        extras.get("avoid_stage3_shrink_from_width", avoid_stage3_shrink_from_width_value)
+                    avoid_stage4_shrink_from_width_value = float(
+                        extras.get("avoid_stage4_shrink_from_width", avoid_stage4_shrink_from_width_value)
                     )
-                    avoid_stage3_shrink_to_width_value = float(
-                        extras.get("avoid_stage3_shrink_to_width", avoid_stage3_shrink_to_width_value)
+                    avoid_stage4_shrink_to_width_value = float(
+                        extras.get("avoid_stage4_shrink_to_width", avoid_stage4_shrink_to_width_value)
                     )
             reset_mask_prev = dones.clone()
 
@@ -5113,9 +5113,9 @@ def train(args):
             writer.add_scalar('Avoid/StageSwitchExposureRate', avoid_stage_switch_exposure_value, iteration)
             writer.add_scalar('Avoid/StageSwitchProgressRate', avoid_stage_switch_progress_value, iteration)
             writer.add_scalar('Avoid/StageSwitchSuccessRate', avoid_stage_switch_success_value, iteration)
-            writer.add_scalar('Avoid/Stage3ShrinkEvent', avoid_stage3_shrink_event_value, iteration)
-            writer.add_scalar('Avoid/Stage3ShrinkFromWidth', avoid_stage3_shrink_from_width_value, iteration)
-            writer.add_scalar('Avoid/Stage3ShrinkToWidth', avoid_stage3_shrink_to_width_value, iteration)
+            writer.add_scalar('Avoid/Stage4ShrinkEvent', avoid_stage4_shrink_event_value, iteration)
+            writer.add_scalar('Avoid/Stage4ShrinkFromWidth', avoid_stage4_shrink_from_width_value, iteration)
+            writer.add_scalar('Avoid/Stage4ShrinkToWidth', avoid_stage4_shrink_to_width_value, iteration)
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
