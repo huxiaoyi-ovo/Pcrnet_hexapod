@@ -1324,3 +1324,8 @@
 
 - [x] Must: 将 `terminal fail penalty` 从 `reward_terms["collision"]` 中拆出，避免控制台把终止失败误读成真实碰撞项
 - [x] Must: 为 `avoid` 增加最小 obstacle 命中审计量，至少区分“靠近/命中 active obstacle actor”与一般身体接触
+
+## 2026-03-17 s_avoid 物理修复 - 对齐 e_L 的 actor 障碍更新语义
+
+- [ ] Must: 对照 Isaac Gym 官方状态更新文档，修正 `s_avoid` 障碍 reset 后的刚体状态回写方式
+- [ ] Must: 让 `s_avoid` 的单刚体障碍在 reset 后同时更新 actor root state 与 rigid body state，避免“显示/GT 图正常但物理接触不成立”

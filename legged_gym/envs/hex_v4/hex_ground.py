@@ -1918,6 +1918,7 @@ class HexGround(LeggedRobot):
                     gymtorch.unwrap_tensor(flat_indices),
                     int(flat_indices.numel()),
                 )
+            self._sync_s_avoid_actor_body_states(env_ids)
             return
 
         for env_id in env_ids.tolist():
@@ -2090,10 +2091,43 @@ class HexGround(LeggedRobot):
 
         self._sync_s_avoid_obstacles(env_ids)
 
+    def _sync_s_avoid_actor_body_states(self, env_ids: torch.Tensor):
+        if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_handles is None:
+            return
+        slot_n = int(self.s_avoid_total_slots)
+        scene_filter = self._scene_collision_filter()
+        for env_id in env_ids.tolist():
+            handles = self.s_avoid_actor_handles[env_id]
+            for slot in range(slot_n):
+                pos = self.s_avoid_pos_world[env_id, slot]
+                quat = self.s_avoid_quat_world[env_id, slot]
+                body_states = self.gym.get_actor_rigid_body_states(
+                    self.envs[env_id], handles[slot], gymapi.STATE_NONE
+                )
+                body_states["pose"]["p"].fill(
+                    (float(pos[0].item()), float(pos[1].item()), float(pos[2].item()))
+                )
+                body_states["pose"]["r"].fill(
+                    (
+                        float(quat[0].item()),
+                        float(quat[1].item()),
+                        float(quat[2].item()),
+                        float(quat[3].item()),
+                    )
+                )
+                body_states["vel"]["linear"].fill((0.0, 0.0, 0.0))
+                body_states["vel"]["angular"].fill((0.0, 0.0, 0.0))
+                # Also push per-actor rigid body states so fixed-base obstacle contacts
+                # are refreshed on resets, instead of relying only on root-state tensors.
+                self.gym.set_actor_rigid_body_states(
+                    self.envs[env_id], handles[slot], body_states, gymapi.STATE_ALL
+                )
+                self._apply_actor_collision_filter(
+                    self.envs[env_id], handles[slot], scene_filter, env_id, debug_tag=f"s_avoid_obs_{slot}"
+                )
+
     def _sync_s_avoid_obstacles(self, env_ids: torch.Tensor):
         if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
-            return
-        if self.s_avoid_direct_single_obstacle:
             return
         slot_n = int(self.s_avoid_total_slots)
         flat_indices = self.s_avoid_actor_indices[env_ids].reshape(-1).contiguous()
@@ -2113,6 +2147,7 @@ class HexGround(LeggedRobot):
             gymtorch.unwrap_tensor(flat_indices),
             int(flat_indices.numel()),
         )
+        self._sync_s_avoid_actor_body_states(env_ids)
 
         scene_filter = self._scene_collision_filter()
         for env_id in env_ids.tolist():
