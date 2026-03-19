@@ -1740,22 +1740,22 @@ class HexGround(LeggedRobot):
         if stage == 1:
             layouts.append(
                 {
-                    "capsules": [(-0.60, 0.55), (0.60, 0.55), (0.00, 1.20), (-0.60, 1.85), (0.60, 1.85)],
+                    "capsules": [(-0.90, 0.80), (0.90, 0.80), (0.00, 1.95)],
                     "boxes": [],
                 }
             )
         elif stage == 2:
             layouts.append(
                 {
-                    "capsules": [(-0.58, 0.45), (0.58, 0.45), (-0.05, 1.25), (-0.58, 2.05), (0.58, 2.05)],
+                    "capsules": [(-0.95, 0.80), (0.95, 0.80), (0.00, 1.95), (-0.95, 3.10), (0.95, 3.10)],
                     "boxes": [],
                 }
             )
         else:
             layouts.append(
                 {
-                    "capsules": [(-0.55, 0.40), (0.55, 0.40), (-0.55, 2.00), (0.55, 2.00)],
-                    "boxes": [(-0.10, 1.20, 0.0)],
+                    "capsules": [(-1.05, 0.90), (1.05, 0.90), (-1.05, 3.10), (1.05, 3.10)],
+                    "boxes": [(-0.45, 1.95, 0.0)],
                 }
             )
         if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)) and stage in (2, 3):
