@@ -1393,3 +1393,9 @@
 - [ ] Must: 将目标横向中心从“整带最大空隙中心”改成“目标 y 切片上的通路中心”，避免边界大空隙继续诱导侧绕
 - [ ] Must: 将 `GoalBehindRate / GoalSideRate / GoalFallbackRate` 至少拆成 `stage1-3` 与 `stage4` 两套统计，避免走廊阶段把前 3 段问题冲掉
 - [ ] Must: 将 `goal_range_y` 主口径与当前更远的后方目标采样行为对齐，避免配置和真实分布继续漂移
+
+## 2026-03-19 avoid 局部解修正 - 提前拉开微调
+
+- [x] Must: 在保持当前前进与朝向能力的前提下，优先增强 `passable_align`，让策略更愿意沿可通行方向通过
+- [x] Must: 略微上调 `risk_barrier_safe/free`，让障碍信号更早生效，减少贴边硬挤
+- [x] Must: 使用当前 best checkpoint 做 `--finetune_from` 微调，不从头重训

@@ -471,11 +471,11 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
         reward_cfg["heading_scale"] = 0.28
-        reward_cfg["passable_align_scale"] = 3.0
+        reward_cfg["passable_align_scale"] = 4.5
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = -1.2
-        reward_cfg["risk_barrier_safe"] = 0.30
-        reward_cfg["risk_barrier_free"] = 0.62
+        reward_cfg["risk_barrier_safe"] = 0.32
+        reward_cfg["risk_barrier_free"] = 0.65
         reward_cfg["risk_barrier_tau"] = 0.10
         reward_cfg["collision_penalty"] = -8.0
         reward_cfg["terminal_fail_penalty"] = -10.0
