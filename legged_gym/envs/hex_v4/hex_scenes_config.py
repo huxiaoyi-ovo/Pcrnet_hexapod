@@ -374,7 +374,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage4_shrink_step = 0.05
         avoid_stage4_shrink_cooldown_episodes = 200
         avoid_stage4_width_start = 1.20
-        avoid_stage4_width_min = 0.85
+        avoid_stage4_width_min = 0.75
 
         # Stage geometry (all units in meters).
         avoid_stage1_count_min = 3
@@ -382,10 +382,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_min_spacing = 1.2
         avoid_stage15_count_min = 5
         avoid_stage15_count_max = 6
-        avoid_stage15_min_spacing = 0.9
-        avoid_stage2_count_min = 6
-        avoid_stage2_count_max = 8
-        avoid_stage2_min_spacing = 0.7
+        avoid_stage15_min_spacing = 1.0
+        avoid_stage2_count_min = 5
+        avoid_stage2_count_max = 7
+        avoid_stage2_min_spacing = 0.8
 
         avoid_spawn_clearance = 0.85
         avoid_spawn_extra_margin = 0.2
@@ -393,19 +393,19 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage12_band_half_width = 1.05
         avoid_stage12_band_y_min = -0.5
         avoid_stage12_band_y_max = 2.4
-        avoid_stage12_core_half_width = 0.40
+        avoid_stage12_core_half_width = 0.50
         avoid_stage12_core_y_min = 0.0
         avoid_stage12_core_y_max = 1.6
         avoid_stage23_band_half_width = 0.95
         avoid_stage23_band_y_min = -0.35
         avoid_stage23_band_y_max = 2.35
-        avoid_stage23_core_half_width = 0.34
+        avoid_stage23_core_half_width = 0.40
         avoid_stage23_core_y_min = 0.05
         avoid_stage23_core_y_max = 1.70
-        avoid_stage34_band_half_width = 0.82
+        avoid_stage34_band_half_width = 0.90
         avoid_stage34_band_y_min = -0.20
         avoid_stage34_band_y_max = 2.25
-        avoid_stage34_core_half_width = 0.28
+        avoid_stage34_core_half_width = 0.36
         avoid_stage34_core_y_min = 0.10
         avoid_stage34_core_y_max = 1.65
         avoid_stage1_core_count = 1
@@ -416,10 +416,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
         avoid_stage2_preset_count = 56
-        avoid_stage12_passage_width_min = 0.72
-        avoid_stage23_passage_width_min = 0.64
-        avoid_stage34_passage_width_min = 0.56
-        avoid_preset_passage_width_min = 0.72
+        avoid_stage12_passage_width_min = 0.90
+        avoid_stage23_passage_width_min = 0.80
+        avoid_stage34_passage_width_min = 0.75
+        avoid_preset_passage_width_min = 0.75
         avoid_preset_passage_samples = 17
         avoid_preset_validation_attempts = 96
 
@@ -446,10 +446,15 @@ class HexAvoidBasicCfg(HexGroundCfg):
         spawn_edge_enable = False
         goal_mode = "random"
         goal_min_distance = 2.0
-        goal_range_x = [-1.6, 1.6]
-        goal_range_y = [1.2, 2.8]
+        goal_range_x = [-0.7, 0.7]
+        # High-difficulty presets may place behind-goals as far as 4.0 m by design.
+        goal_range_y = [1.5, 4.0]
         goal_sample_max_tries = 32
         goal_allow_fallback = True
+        goal_behind_obstacles = True
+        goal_behind_margin_y = 0.35
+        goal_behind_x_half_width = 0.45
+        goal_side_threshold = 0.55
         goal_force_blocking_line = False
         resample_on_reach = False
         heading_offset_rad = 0.0
@@ -469,12 +474,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["passable_align_scale"] = 3.0
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = -1.2
-        reward_cfg["risk_barrier_safe"] = 0.35
-        reward_cfg["risk_barrier_free"] = 0.80
+        reward_cfg["risk_barrier_safe"] = 0.30
+        reward_cfg["risk_barrier_free"] = 0.62
         reward_cfg["risk_barrier_tau"] = 0.10
         reward_cfg["collision_penalty"] = -25.0
         reward_cfg["time_penalty"] = -0.02
-        reward_cfg["velocity_scale"] = 0.05
+        reward_cfg["velocity_scale"] = 0.15
         reward_cfg["backward_scale"] = 0.0
         reward_cfg["body_backward_scale"] = 3.0
         reward_cfg["turn_penalty_scale"] = 0.0

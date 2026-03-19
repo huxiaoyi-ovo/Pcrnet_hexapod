@@ -3689,6 +3689,24 @@ def train(args):
         avoid_stage4_shrink_event_value = 0.0
         avoid_stage4_shrink_from_width_value = 0.0
         avoid_stage4_shrink_to_width_value = 0.0
+        avoid_goal_sample_retry_mean_value = 0.0
+        avoid_goal_sample_fallback_rate_value = 0.0
+        avoid_goal_behind_rate_value = 0.0
+        avoid_goal_side_rate_value = 0.0
+        avoid_goal_retry_total_base = float(getattr(env.env, "_avoid_goal_stats_retry_total", 0.0))
+        avoid_goal_retry_count_base = float(getattr(env.env, "_avoid_goal_stats_retry_count", 0.0))
+        avoid_goal_fallback_count_base = float(getattr(env.env, "_avoid_goal_stats_fallback_count", 0.0))
+        avoid_goal_behind_count_base = float(getattr(env.env, "_avoid_goal_stats_behind_count", 0.0))
+        avoid_goal_side_count_base = float(getattr(env.env, "_avoid_goal_stats_side_count", 0.0))
+        avoid_goal_count_base = float(getattr(env.env, "_avoid_goal_stats_goal_count", 0.0))
+        avoid_goal_count_s123_base = float(getattr(env.env, "_avoid_goal_stats_s123_goal_count", 0.0))
+        avoid_goal_behind_count_s123_base = float(getattr(env.env, "_avoid_goal_stats_s123_behind_count", 0.0))
+        avoid_goal_side_count_s123_base = float(getattr(env.env, "_avoid_goal_stats_s123_side_count", 0.0))
+        avoid_goal_fallback_count_s123_base = float(getattr(env.env, "_avoid_goal_stats_s123_fallback_count", 0.0))
+        avoid_goal_count_s4_base = float(getattr(env.env, "_avoid_goal_stats_s4_goal_count", 0.0))
+        avoid_goal_behind_count_s4_base = float(getattr(env.env, "_avoid_goal_stats_s4_behind_count", 0.0))
+        avoid_goal_side_count_s4_base = float(getattr(env.env, "_avoid_goal_stats_s4_side_count", 0.0))
+        avoid_goal_fallback_count_s4_base = float(getattr(env.env, "_avoid_goal_stats_s4_fallback_count", 0.0))
         timeout_bootstrap_count = torch.zeros((), device=device)
         policy_nonfinite_action_count = 0
         expert_nonfinite_action_count = 0
@@ -4465,6 +4483,46 @@ def train(args):
                     last_goal_obs[dones] = obs_dict['goal'][dones]
 
         rollout_time = time.time() - rollout_start
+        avoid_goal_retry_total_curr = float(getattr(env.env, "_avoid_goal_stats_retry_total", avoid_goal_retry_total_base))
+        avoid_goal_retry_count_curr = float(getattr(env.env, "_avoid_goal_stats_retry_count", avoid_goal_retry_count_base))
+        avoid_goal_fallback_count_curr = float(getattr(env.env, "_avoid_goal_stats_fallback_count", avoid_goal_fallback_count_base))
+        avoid_goal_behind_count_curr = float(getattr(env.env, "_avoid_goal_stats_behind_count", avoid_goal_behind_count_base))
+        avoid_goal_side_count_curr = float(getattr(env.env, "_avoid_goal_stats_side_count", avoid_goal_side_count_base))
+        avoid_goal_count_curr = float(getattr(env.env, "_avoid_goal_stats_goal_count", avoid_goal_count_base))
+        avoid_goal_count_s123_curr = float(getattr(env.env, "_avoid_goal_stats_s123_goal_count", avoid_goal_count_s123_base))
+        avoid_goal_behind_count_s123_curr = float(getattr(env.env, "_avoid_goal_stats_s123_behind_count", avoid_goal_behind_count_s123_base))
+        avoid_goal_side_count_s123_curr = float(getattr(env.env, "_avoid_goal_stats_s123_side_count", avoid_goal_side_count_s123_base))
+        avoid_goal_fallback_count_s123_curr = float(getattr(env.env, "_avoid_goal_stats_s123_fallback_count", avoid_goal_fallback_count_s123_base))
+        avoid_goal_count_s4_curr = float(getattr(env.env, "_avoid_goal_stats_s4_goal_count", avoid_goal_count_s4_base))
+        avoid_goal_behind_count_s4_curr = float(getattr(env.env, "_avoid_goal_stats_s4_behind_count", avoid_goal_behind_count_s4_base))
+        avoid_goal_side_count_s4_curr = float(getattr(env.env, "_avoid_goal_stats_s4_side_count", avoid_goal_side_count_s4_base))
+        avoid_goal_fallback_count_s4_curr = float(getattr(env.env, "_avoid_goal_stats_s4_fallback_count", avoid_goal_fallback_count_s4_base))
+        avoid_goal_retry_total_iter = max(0.0, avoid_goal_retry_total_curr - avoid_goal_retry_total_base)
+        avoid_goal_retry_count_iter = max(0.0, avoid_goal_retry_count_curr - avoid_goal_retry_count_base)
+        avoid_goal_fallback_count_iter = max(0.0, avoid_goal_fallback_count_curr - avoid_goal_fallback_count_base)
+        avoid_goal_behind_count_iter = max(0.0, avoid_goal_behind_count_curr - avoid_goal_behind_count_base)
+        avoid_goal_side_count_iter = max(0.0, avoid_goal_side_count_curr - avoid_goal_side_count_base)
+        avoid_goal_count_iter = max(0.0, avoid_goal_count_curr - avoid_goal_count_base)
+        avoid_goal_count_s123_iter = max(0.0, avoid_goal_count_s123_curr - avoid_goal_count_s123_base)
+        avoid_goal_behind_count_s123_iter = max(0.0, avoid_goal_behind_count_s123_curr - avoid_goal_behind_count_s123_base)
+        avoid_goal_side_count_s123_iter = max(0.0, avoid_goal_side_count_s123_curr - avoid_goal_side_count_s123_base)
+        avoid_goal_fallback_count_s123_iter = max(0.0, avoid_goal_fallback_count_s123_curr - avoid_goal_fallback_count_s123_base)
+        avoid_goal_count_s4_iter = max(0.0, avoid_goal_count_s4_curr - avoid_goal_count_s4_base)
+        avoid_goal_behind_count_s4_iter = max(0.0, avoid_goal_behind_count_s4_curr - avoid_goal_behind_count_s4_base)
+        avoid_goal_side_count_s4_iter = max(0.0, avoid_goal_side_count_s4_curr - avoid_goal_side_count_s4_base)
+        avoid_goal_fallback_count_s4_iter = max(0.0, avoid_goal_fallback_count_s4_curr - avoid_goal_fallback_count_s4_base)
+        if avoid_goal_retry_count_iter > 0.0:
+            avoid_goal_sample_retry_mean_value = avoid_goal_retry_total_iter / avoid_goal_retry_count_iter
+            avoid_goal_sample_fallback_rate_value = avoid_goal_fallback_count_iter / avoid_goal_retry_count_iter
+        else:
+            avoid_goal_sample_retry_mean_value = 0.0
+            avoid_goal_sample_fallback_rate_value = 0.0
+        if avoid_goal_count_iter > 0.0:
+            avoid_goal_behind_rate_value = avoid_goal_behind_count_iter / avoid_goal_count_iter
+            avoid_goal_side_rate_value = avoid_goal_side_count_iter / avoid_goal_count_iter
+        else:
+            avoid_goal_behind_rate_value = 0.0
+            avoid_goal_side_rate_value = 0.0
         if log_memory_this_iter and debug_memory_device_index is not None:
             print(
                 f"[MemDebug][iter={iteration}] after_rollout "
@@ -5098,7 +5156,7 @@ def train(args):
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
             writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
             writer.add_scalar('Avoid/StageWindow', avoid_stage_window_value, iteration)
-            writer.add_scalar('Avoid/ShrinkWindow', avoid_shrink_window_value, iteration)
+            writer.add_scalar('Avoid/Stage4ShrinkWindow', avoid_shrink_window_value, iteration)
             writer.add_scalar('Avoid/StageCompletedEpisodes', avoid_stage_completed_eps_value, iteration)
             writer.add_scalar('Avoid/StageCollisionRate', avoid_collision_rate100_value, iteration)
             writer.add_scalar('Avoid/ShrinkCollisionRate', avoid_collision_rate50_value, iteration)
@@ -5116,6 +5174,18 @@ def train(args):
             writer.add_scalar('Avoid/Stage4ShrinkEvent', avoid_stage4_shrink_event_value, iteration)
             writer.add_scalar('Avoid/Stage4ShrinkFromWidth', avoid_stage4_shrink_from_width_value, iteration)
             writer.add_scalar('Avoid/Stage4ShrinkToWidth', avoid_stage4_shrink_to_width_value, iteration)
+            writer.add_scalar('Avoid/GoalSampleRetryMean', avoid_goal_sample_retry_mean_value, iteration)
+            writer.add_scalar('Avoid/GoalSampleFallbackRate', avoid_goal_sample_fallback_rate_value, iteration)
+            writer.add_scalar('Avoid/GoalBehindRate', avoid_goal_behind_rate_value, iteration)
+            writer.add_scalar('Avoid/GoalSideRate', avoid_goal_side_rate_value, iteration)
+            if avoid_goal_count_s123_iter > 0.0:
+                writer.add_scalar('Avoid/GoalBehindRate_S123', avoid_goal_behind_count_s123_iter / avoid_goal_count_s123_iter, iteration)
+                writer.add_scalar('Avoid/GoalSideRate_S123', avoid_goal_side_count_s123_iter / avoid_goal_count_s123_iter, iteration)
+                writer.add_scalar('Avoid/GoalFallbackRate_S123', avoid_goal_fallback_count_s123_iter / avoid_goal_count_s123_iter, iteration)
+            if avoid_goal_count_s4_iter > 0.0:
+                writer.add_scalar('Avoid/GoalBehindRate_S4', avoid_goal_behind_count_s4_iter / avoid_goal_count_s4_iter, iteration)
+                writer.add_scalar('Avoid/GoalSideRate_S4', avoid_goal_side_count_s4_iter / avoid_goal_count_s4_iter, iteration)
+                writer.add_scalar('Avoid/GoalFallbackRate_S4', avoid_goal_fallback_count_s4_iter / avoid_goal_count_s4_iter, iteration)
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
@@ -5192,10 +5262,14 @@ def train(args):
             if use_avoid_local_map:
                 avoid_line = (
                     f"""{'Avoid stage/width/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
-                    f"""{'Avoid stage eps/shrink win:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
+                    f"""{'Avoid stage eps/stage4 win:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
                     f"""{'Avoid coll(stage/shrink)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
                     f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
+                    f"""{'Avoid goal retry/fallback:':>{pad}} {avoid_goal_sample_retry_mean_value:.3f} / {avoid_goal_sample_fallback_rate_value:.3f}\n"""
+                    f"""{'Avoid goal behind/side:':>{pad}} {avoid_goal_behind_rate_value:.3f} / {avoid_goal_side_rate_value:.3f}\n"""
+                    f"""{'Avoid goal S123 behind/side/fb:':>{pad}} {((avoid_goal_behind_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f} / {((avoid_goal_side_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f} / {((avoid_goal_fallback_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f}\n"""
+                    f"""{'Avoid goal S4 behind/side/fb:':>{pad}} {((avoid_goal_behind_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f} / {((avoid_goal_side_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f} / {((avoid_goal_fallback_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f}\n"""
                     f"""{'Avoid stuck/near-miss:':>{pad}} {stuck_ratio:.3f} / {near_miss_ratio:.3f}\n"""
                     f"""{'Avoid band out/active:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {avoid_band_active_rate_mean:.3f}\n"""
                     f"""{'Avoid obs-hit cand/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""

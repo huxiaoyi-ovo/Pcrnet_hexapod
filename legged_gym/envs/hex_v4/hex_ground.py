@@ -1190,6 +1190,108 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage4_shrink_event"] = 0.0
         self.extras["avoid_stage4_shrink_from_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_stage4_shrink_to_width"] = float(self.s_avoid_corridor_width)
+        self.extras["avoid_goal_sample_retry_mean"] = 0.0
+        self.extras["avoid_goal_sample_fallback_rate"] = 0.0
+        self.extras["avoid_goal_behind_rate"] = 0.0
+        self.extras["avoid_goal_side_rate"] = 0.0
+        self._avoid_goal_stats_retry_total = 0.0
+        self._avoid_goal_stats_retry_count = 0
+        self._avoid_goal_stats_fallback_count = 0
+        self._avoid_goal_stats_behind_count = 0
+        self._avoid_goal_stats_side_count = 0
+        self._avoid_goal_stats_goal_count = 0
+        self._avoid_goal_stats_s123_goal_count = 0
+        self._avoid_goal_stats_s123_behind_count = 0
+        self._avoid_goal_stats_s123_side_count = 0
+        self._avoid_goal_stats_s123_fallback_count = 0
+        self._avoid_goal_stats_s4_goal_count = 0
+        self._avoid_goal_stats_s4_behind_count = 0
+        self._avoid_goal_stats_s4_side_count = 0
+        self._avoid_goal_stats_s4_fallback_count = 0
+
+    def _get_s_avoid_goal_passage_center_x(
+        self,
+        *,
+        env_id: int,
+        active: torch.Tensor,
+        obstacle_pos: torch.Tensor,
+        obstacle_quat: torch.Tensor,
+        slot_radii: torch.Tensor,
+        target_y_world: float,
+        goal_x_min: float,
+        goal_x_max: float,
+        goal_clearance: float,
+    ) -> Tuple[float, float]:
+        slice_half = 0.20
+        boundary_margin = 0.10
+        cap_slots = int(self.s_avoid_capsule_slot_count)
+        box_slots = int(self.s_avoid_box_slot_count)
+        box_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_y", 0.4))
+        intervals = []
+        for slot in range(int(self.s_avoid_total_slots)):
+            if not bool(active[slot].item()):
+                continue
+            cx_local = float(obstacle_pos[slot, 0].item() - self.env_origins[env_id, 0].item())
+            cy_world = float(obstacle_pos[slot, 1].item())
+            if slot < cap_slots:
+                radius = float(slot_radii[slot].item() + goal_clearance)
+                if abs(cy_world - target_y_world) > slice_half + radius:
+                    continue
+                half_x = radius
+            elif slot < cap_slots + box_slots:
+                quat = obstacle_quat[slot]
+                yaw = 2.0 * math.atan2(float(quat[2].item()), float(quat[3].item()))
+                cos_yaw = abs(math.cos(yaw))
+                sin_yaw = abs(math.sin(yaw))
+                half_x = cos_yaw * box_hx + sin_yaw * box_hy + goal_clearance
+                half_y = sin_yaw * box_hx + cos_yaw * box_hy + goal_clearance
+                if abs(cy_world - target_y_world) > half_y + slice_half:
+                    continue
+            else:
+                continue
+            left = max(goal_x_min, cx_local - half_x)
+            right = min(goal_x_max, cx_local + half_x)
+            if left >= right:
+                continue
+            intervals.append((left, right))
+
+        if not intervals:
+            center = 0.5 * (goal_x_min + goal_x_max)
+            return center, goal_x_max - goal_x_min
+
+        intervals.sort(key=lambda item: item[0])
+        merged = []
+        cur_l, cur_r = intervals[0]
+        for left, right in intervals[1:]:
+            if left <= cur_r:
+                cur_r = max(cur_r, right)
+            else:
+                merged.append((cur_l, cur_r))
+                cur_l, cur_r = left, right
+        merged.append((cur_l, cur_r))
+
+        gaps = []
+        cursor = goal_x_min
+        for left, right in merged:
+            gaps.append((cursor, left))
+            cursor = max(cursor, right)
+        gaps.append((cursor, goal_x_max))
+
+        valid_gaps = [(lo, hi) for lo, hi in gaps if hi - lo > 1e-6]
+        interior_gaps = [
+            (lo, hi)
+            for lo, hi in valid_gaps
+            if lo > goal_x_min + boundary_margin and hi < goal_x_max - boundary_margin
+        ]
+        search_gaps = interior_gaps if interior_gaps else valid_gaps
+        if not search_gaps:
+            center = 0.5 * (goal_x_min + goal_x_max)
+            return center, 0.0
+        best = max(search_gaps, key=lambda item: item[1] - item[0])
+        best_center = 0.5 * (best[0] + best[1])
+        best_width = best[1] - best[0]
+        return best_center, max(best_width, 0.0)
 
     def _get_s_avoid_stage_template(self):
         total_slots = int(self.s_avoid_total_slots)
@@ -2225,6 +2327,10 @@ class HexGround(LeggedRobot):
         goal_y_min = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[0])
         goal_y_max = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[1])
         goal_max_tries = int(getattr(self.cfg.navigation, "goal_sample_max_tries", 32))
+        goal_behind_obstacles = bool(getattr(self.cfg.navigation, "goal_behind_obstacles", True))
+        goal_behind_margin_y = float(getattr(self.cfg.navigation, "goal_behind_margin_y", 0.35))
+        goal_behind_x_half_width = float(getattr(self.cfg.navigation, "goal_behind_x_half_width", 0.45))
+        goal_side_threshold = float(getattr(self.cfg.navigation, "goal_side_threshold", 0.55))
         goal_clearance = float(getattr(self.cfg.terrain, "avoid_spawn_clearance", 0.5))
         cap_slots = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 0))
         box_slots = int(getattr(self.cfg.terrain, "avoid_box_slots", 0))
@@ -2240,10 +2346,18 @@ class HexGround(LeggedRobot):
 
         goal_local = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
         stage_vals = self.s_avoid_stage_per_env[env_ids]
+        retry_total = 0.0
+        retry_count = 0
+        fallback_count = 0
+        behind_count = 0
+        side_count = 0
 
         stage3_mask = stage_vals == 4
         if stage3_mask.any():
             goal_local[stage3_mask, 1] = goal_stage3_y
+            behind_count += int(stage3_mask.sum().item())
+            self._avoid_goal_stats_s4_goal_count += int(stage3_mask.sum().item())
+            self._avoid_goal_stats_s4_behind_count += int(stage3_mask.sum().item())
 
         stage12_mask = ~stage3_mask
         if stage12_mask.any():
@@ -2253,18 +2367,49 @@ class HexGround(LeggedRobot):
                 origin_xy = self.env_origins[env_id, :2]
                 active = self.s_avoid_active[env_id]
                 obstacle_pos = self.s_avoid_pos_world[env_id, :, :2]
+                active_pos = obstacle_pos[active] if bool(active.any().item()) else None
+                passage_center_x = 0.0
+                passage_width_x = goal_x_max - goal_x_min
+                behind_y_floor = goal_y_min
+                if active_pos is not None and active_pos.shape[0] > 0:
+                    cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
+                    if goal_behind_obstacles:
+                        behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
                 valid_goal = None
-                fallback_goal = None
-                for _ in range(goal_max_tries):
+                tries_used = 0
+                for try_idx in range(goal_max_tries):
+                    tries_used = try_idx + 1
+                    cand_y_min = behind_y_floor if goal_behind_obstacles else goal_y_min
+                    cand_y_max = max(goal_y_max, cand_y_min + 0.35)
+                    goal_y_local = float(np.random.uniform(cand_y_min, cand_y_max))
+                    target_y_world = float(origin_xy[1].item()) + goal_y_local
+                    passage_center_x, passage_width_x = self._get_s_avoid_goal_passage_center_x(
+                        env_id=env_id,
+                        active=active,
+                        obstacle_pos=obstacle_pos,
+                        obstacle_quat=self.s_avoid_quat_world[env_id],
+                        slot_radii=slot_radii,
+                        target_y_world=target_y_world,
+                        goal_x_min=goal_x_min,
+                        goal_x_max=goal_x_max,
+                        goal_clearance=goal_clearance,
+                    )
+                    effective_half_width = min(
+                        goal_behind_x_half_width,
+                        max(0.20, 0.5 * passage_width_x),
+                    )
+                    cand_x_min = max(goal_x_min, passage_center_x - effective_half_width)
+                    cand_x_max = min(goal_x_max, passage_center_x + effective_half_width)
+                    if cand_x_min >= cand_x_max:
+                        continue
                     candidate_local = torch.tensor(
                         [
-                            float(np.random.uniform(goal_x_min, goal_x_max)),
-                            float(np.random.uniform(goal_y_min, goal_y_max)),
+                            float(np.random.uniform(cand_x_min, cand_x_max)),
+                            goal_y_local,
                         ],
                         device=self.device,
                         dtype=torch.float32,
                     )
-                    fallback_goal = candidate_local
                     candidate_world = origin_xy + candidate_local
                     if bool(active.any().item()):
                         active_pos = obstacle_pos[active]
@@ -2274,15 +2419,67 @@ class HexGround(LeggedRobot):
                             continue
                     valid_goal = candidate_local
                     break
+                retry_total += float(max(0, tries_used - 1))
+                retry_count += 1
+                used_fallback = False
                 if valid_goal is None:
-                    valid_goal = fallback_goal if fallback_goal is not None else torch.tensor(
-                        [0.0, max(goal_y_min, 1.6)],
+                    fallback_count += 1
+                    used_fallback = True
+                    valid_goal = torch.tensor(
+                        [
+                            float(np.clip(passage_center_x, goal_x_min, goal_x_max)),
+                            max(goal_y_min, behind_y_floor + 0.05, 1.6),
+                        ],
                         device=self.device,
                         dtype=torch.float32,
                     )
                 goal_local[row_idx] = valid_goal
+                if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
+                    behind_count += 1
+                if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
+                    side_count += 1
+                self._avoid_goal_stats_s123_goal_count += 1
+                if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
+                    self._avoid_goal_stats_s123_behind_count += 1
+                if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
+                    self._avoid_goal_stats_s123_side_count += 1
+                if used_fallback:
+                    self._avoid_goal_stats_s123_fallback_count += 1
 
         self.goal_world[env_ids] = self.env_origins[env_ids, :2] + goal_local
+        self._avoid_goal_stats_retry_total += float(retry_total)
+        self._avoid_goal_stats_retry_count += int(retry_count)
+        self._avoid_goal_stats_fallback_count += int(fallback_count)
+        self._avoid_goal_stats_behind_count += int(behind_count)
+        self._avoid_goal_stats_side_count += int(side_count)
+        self._avoid_goal_stats_goal_count += int(len(env_ids))
+        if retry_count > 0:
+            self.extras["avoid_goal_sample_retry_mean"] = float(retry_total / float(retry_count))
+            self.extras["avoid_goal_sample_fallback_rate"] = float(fallback_count / float(retry_count))
+        else:
+            self.extras["avoid_goal_sample_retry_mean"] = 0.0
+            self.extras["avoid_goal_sample_fallback_rate"] = 0.0
+        total_goal_count = int(len(env_ids))
+        if total_goal_count > 0:
+            self.extras["avoid_goal_behind_rate"] = float(behind_count / float(total_goal_count))
+            self.extras["avoid_goal_side_rate"] = float(side_count / float(total_goal_count))
+        else:
+            self.extras["avoid_goal_behind_rate"] = 0.0
+            self.extras["avoid_goal_side_rate"] = 0.0
+        self.extras["avoid_goal_retry_total_cum"] = float(self._avoid_goal_stats_retry_total)
+        self.extras["avoid_goal_retry_count_cum"] = float(self._avoid_goal_stats_retry_count)
+        self.extras["avoid_goal_fallback_count_cum"] = float(self._avoid_goal_stats_fallback_count)
+        self.extras["avoid_goal_behind_count_cum"] = float(self._avoid_goal_stats_behind_count)
+        self.extras["avoid_goal_side_count_cum"] = float(self._avoid_goal_stats_side_count)
+        self.extras["avoid_goal_count_cum"] = float(self._avoid_goal_stats_goal_count)
+        self.extras["avoid_goal_count_s123_cum"] = float(self._avoid_goal_stats_s123_goal_count)
+        self.extras["avoid_goal_behind_count_s123_cum"] = float(self._avoid_goal_stats_s123_behind_count)
+        self.extras["avoid_goal_side_count_s123_cum"] = float(self._avoid_goal_stats_s123_side_count)
+        self.extras["avoid_goal_fallback_count_s123_cum"] = float(self._avoid_goal_stats_s123_fallback_count)
+        self.extras["avoid_goal_count_s4_cum"] = float(self._avoid_goal_stats_s4_goal_count)
+        self.extras["avoid_goal_behind_count_s4_cum"] = float(self._avoid_goal_stats_s4_behind_count)
+        self.extras["avoid_goal_side_count_s4_cum"] = float(self._avoid_goal_stats_s4_side_count)
+        self.extras["avoid_goal_fallback_count_s4_cum"] = float(self._avoid_goal_stats_s4_fallback_count)
 
     def _sample_s_avoid_points(
         self,
