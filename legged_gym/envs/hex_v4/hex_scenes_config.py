@@ -461,7 +461,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_fov_soft_scale = 1.0
         target_fov_hard_scale = 1.0
         target_lost_k = 0
-        target_center_scale = 0.20
+        target_center_scale = 0.25
         target_visible_scale = 0.15
         avoid_band_activate_progress = 0.50
         avoid_band_penalty_scale = 0.75
@@ -470,16 +470,17 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["goal_approach_scale"] = 2.5
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
-        reward_cfg["heading_scale"] = 0.20
+        reward_cfg["heading_scale"] = 0.28
         reward_cfg["passable_align_scale"] = 3.0
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = -1.2
         reward_cfg["risk_barrier_safe"] = 0.30
         reward_cfg["risk_barrier_free"] = 0.62
         reward_cfg["risk_barrier_tau"] = 0.10
-        reward_cfg["collision_penalty"] = -25.0
+        reward_cfg["collision_penalty"] = -8.0
+        reward_cfg["terminal_fail_penalty"] = -10.0
         reward_cfg["time_penalty"] = -0.02
-        reward_cfg["velocity_scale"] = 0.15
+        reward_cfg["velocity_scale"] = 0.10
         reward_cfg["backward_scale"] = 0.0
         reward_cfg["body_backward_scale"] = 3.0
         reward_cfg["turn_penalty_scale"] = 0.0
@@ -487,6 +488,9 @@ class HexAvoidBasicCfg(HexGroundCfg):
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
+    class algorithm(HexGroundCfgPPO.algorithm):
+        entropy_coef = 0.015
+
     class runner(HexGroundCfgPPO.runner):
         experiment_name = "s_avoid_basic"
 

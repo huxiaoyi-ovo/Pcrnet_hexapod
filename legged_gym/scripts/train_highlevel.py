@@ -2598,7 +2598,13 @@ class HierarchicalHexapodEnv:
         if done_during.any():
             terminal_fail_penalty = 0.0
             if self.reward_cfg is not None:
-                terminal_fail_penalty = float(getattr(self.reward_cfg, "collision_penalty", -10.0))
+                terminal_fail_penalty = float(
+                    getattr(
+                        self.reward_cfg,
+                        "terminal_fail_penalty",
+                        getattr(self.reward_cfg, "collision_penalty", -10.0),
+                    )
+                )
             safe_reward = torch.full_like(total_reward, terminal_fail_penalty)
             total_reward = torch.where(done_during, safe_reward, total_reward)
             if reward_terms is not None:
@@ -2857,6 +2863,8 @@ def train(args):
         raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
     if args.mode == "student":
         args.camera_enable = True
+    if args.task == "s_avoid_basic" and abs(float(getattr(args, "entropy_coef", 0.01)) - 0.01) < 1e-12:
+        args.entropy_coef = 0.015
     
     # 导入模块
     import_modules()

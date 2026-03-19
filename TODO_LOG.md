@@ -80,6 +80,12 @@
 - [x] ~~[P0] 将 `s_avoid` 目标横向中心改为基于真实 `goal_y` 切片求通路中心，继续压低侧绕目标分布~~
 - [x] ~~[P1] 将 `goal_range_y` 上限显式改到 `4.0`，统一配置与真实后方目标采样口径~~
 
+## 2026-03-19 avoid 碰撞螺旋止损与朝向轻增强
+
+- [x] ~~[P0] 将 `collision_penalty` 与 `terminal_fail_penalty` 拆开，避免碰撞与提前终止共用同一大负值拖垮 value 学习~~
+- [x] ~~[P1] 小幅回收 `velocity_scale`、提高 `s_avoid_basic` 默认 `entropy_coef`，先稳住探索与 critic~~
+- [x] ~~[P1] 轻微增强朝向/目标居中约束，促进横移穿缝而不是原地旋转~~
+
 ## 2026-03-17 s_avoid 障碍碰撞根因排查收口
 
 - [x] ~~[P0] 增加 `s_avoid_basic` 的“单障碍直接创建”调试对照，验证穿透是否来自 pooled actor 地下创建后再搬运这条用法~~
