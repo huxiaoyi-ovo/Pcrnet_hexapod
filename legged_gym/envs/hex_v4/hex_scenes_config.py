@@ -337,32 +337,32 @@ class HexAvoidBasicCfg(HexGroundCfg):
         terrain_length = 6.0
         terrain_width = 6.0
 
-        # Stage 1 -> 1.5: wide path, require stable forward progress toward goal.
-        avoid_stage12_window = 200
-        avoid_stage12_min_episodes = 2800
-        avoid_stage12_collision_threshold = 0.05
+        # Fixed-layout curriculum: keep stage switch criteria minimal and fast.
+        avoid_stage12_window = 150
+        avoid_stage12_min_episodes = 400
+        avoid_stage12_collision_threshold = 0.03
         avoid_stage12_exposure_threshold = 0.70
-        avoid_stage12_progress_threshold = 0.55
+        avoid_stage12_progress_threshold = 0.80
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
         avoid_stage12_success_threshold = 0.45
 
-        # Stage 1.5 -> 2: denser capsule field, still no boxes.
-        avoid_stage23_window = 300
-        avoid_stage23_min_episodes = 3200
-        avoid_stage23_collision_threshold = 0.05
+        # Fixed-layout curriculum: later stages use the same short window.
+        avoid_stage23_window = 150
+        avoid_stage23_min_episodes = 400
+        avoid_stage23_collision_threshold = 0.03
         avoid_stage23_exposure_threshold = 0.80
-        avoid_stage23_progress_threshold = 0.65
+        avoid_stage23_progress_threshold = 0.85
         avoid_stage23_progress_delta = 0.35
         avoid_stage23_success_distance = 0.65
-        avoid_stage23_success_threshold = 0.55
+        avoid_stage23_success_threshold = 0.50
 
-        # Stage 2 -> 3: mixed capsule/box field before corridor walls.
-        avoid_stage34_window = 300
-        avoid_stage34_min_episodes = 3200
-        avoid_stage34_collision_threshold = 0.05
+        # Fixed-layout curriculum: later stages use the same short window.
+        avoid_stage34_window = 150
+        avoid_stage34_min_episodes = 400
+        avoid_stage34_collision_threshold = 0.03
         avoid_stage34_exposure_threshold = 0.85
-        avoid_stage34_progress_threshold = 0.70
+        avoid_stage34_progress_threshold = 0.90
         avoid_stage34_progress_delta = 0.35
         avoid_stage34_success_distance = 0.65
         avoid_stage34_success_threshold = 0.55
@@ -380,12 +380,19 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_count_min = 3
         avoid_stage1_count_max = 5
         avoid_stage1_min_spacing = 1.2
+        avoid_stage1_min_y_spacing = 0.90
         avoid_stage15_count_min = 5
         avoid_stage15_count_max = 6
         avoid_stage15_min_spacing = 1.0
+        avoid_stage15_min_y_spacing = 0.65
         avoid_stage2_count_min = 5
         avoid_stage2_count_max = 7
         avoid_stage2_min_spacing = 0.8
+        avoid_stage2_min_y_spacing = 0.60
+        avoid_y_spacing_x_window = 0.70
+        avoid_min_y_spacing_relax_ratio_min = 0.70
+        avoid_use_fixed_presets = True
+        avoid_fixed_presets_use_mirror = True
 
         avoid_spawn_clearance = 0.85
         avoid_spawn_extra_margin = 0.2
@@ -411,17 +418,21 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_core_count = 1
         avoid_stage15_core_count = 2
         avoid_stage2_core_count = 2
-        avoid_band_margin_x = 0.45
+        avoid_band_margin_x = 0.30
         avoid_band_margin_y = 0.30
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
         avoid_stage2_preset_count = 56
         avoid_stage12_passage_width_min = 0.90
+        avoid_stage12_passage_depth_min = 0.80
         avoid_stage23_passage_width_min = 0.80
+        avoid_stage23_passage_depth_min = 0.50
         avoid_stage34_passage_width_min = 0.75
+        avoid_stage34_passage_depth_min = 0.65
         avoid_preset_passage_width_min = 0.75
         avoid_preset_passage_samples = 17
         avoid_preset_validation_attempts = 96
+        avoid_preset_core_cover_ratio = 0.40
 
         # Primitive assets.
         avoid_capsule_radius = 0.15
@@ -464,27 +475,28 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_center_scale = 0.25
         target_visible_scale = 0.15
         avoid_band_activate_progress = 0.50
-        avoid_band_penalty_scale = 0.75
+        avoid_band_penalty_scale = 3.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 2.5
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
-        reward_cfg["heading_scale"] = 0.28
-        reward_cfg["passable_align_scale"] = 4.5
+        reward_cfg["heading_scale"] = 0.40
+        reward_cfg["passable_align_scale"] = 0.0
+        reward_cfg["passable_sector_deg"] = 60.0
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = -1.2
         reward_cfg["risk_barrier_safe"] = 0.32
         reward_cfg["risk_barrier_free"] = 0.65
         reward_cfg["risk_barrier_tau"] = 0.10
-        reward_cfg["collision_penalty"] = -8.0
+        reward_cfg["collision_penalty"] = -12.0
         reward_cfg["terminal_fail_penalty"] = -10.0
-        reward_cfg["time_penalty"] = -0.02
-        reward_cfg["velocity_scale"] = 0.10
+        reward_cfg["time_penalty"] = 0.0
+        reward_cfg["velocity_scale"] = 0.0
         reward_cfg["backward_scale"] = 0.0
-        reward_cfg["body_backward_scale"] = 3.0
+        reward_cfg["body_backward_scale"] = 0.0
         reward_cfg["turn_penalty_scale"] = 0.0
-        reward_cfg["yaw_rate_penalty"] = -0.05
+        reward_cfg["yaw_rate_penalty"] = 0.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

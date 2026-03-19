@@ -3712,6 +3712,12 @@ def train(args):
         avoid_goal_sample_fallback_rate_value = 0.0
         avoid_goal_behind_rate_value = 0.0
         avoid_goal_side_rate_value = 0.0
+        avoid_preset_retry_mean_value = 0.0
+        avoid_preset_sample_fail_mean_value = 0.0
+        avoid_preset_passage_fail_mean_value = 0.0
+        avoid_preset_min_y_gap_mean_value = 0.0
+        avoid_preset_passage_depth_mean_value = 0.0
+        avoid_preset_core_depth_mean_value = 0.0
         avoid_goal_retry_total_base = float(getattr(env.env, "_avoid_goal_stats_retry_total", 0.0))
         avoid_goal_retry_count_base = float(getattr(env.env, "_avoid_goal_stats_retry_count", 0.0))
         avoid_goal_fallback_count_base = float(getattr(env.env, "_avoid_goal_stats_fallback_count", 0.0))
@@ -4440,6 +4446,24 @@ def train(args):
                         extras.get("avoid_stage_success_rate", avoid_success_rate_value)
                     )
                     avoid_nearest_obstacle_dist_value = float(extras.get("avoid_nearest_obstacle_dist", avoid_nearest_obstacle_dist_value))
+                    avoid_preset_retry_mean_value = float(
+                        extras.get("avoid_preset_retry_mean", avoid_preset_retry_mean_value)
+                    )
+                    avoid_preset_sample_fail_mean_value = float(
+                        extras.get("avoid_preset_sample_fail_mean", avoid_preset_sample_fail_mean_value)
+                    )
+                    avoid_preset_passage_fail_mean_value = float(
+                        extras.get("avoid_preset_passage_fail_mean", avoid_preset_passage_fail_mean_value)
+                    )
+                    avoid_preset_min_y_gap_mean_value = float(
+                        extras.get("avoid_preset_min_y_gap_mean", avoid_preset_min_y_gap_mean_value)
+                    )
+                    avoid_preset_passage_depth_mean_value = float(
+                        extras.get("avoid_preset_passage_depth_mean", avoid_preset_passage_depth_mean_value)
+                    )
+                    avoid_preset_core_depth_mean_value = float(
+                        extras.get("avoid_preset_core_depth_mean", avoid_preset_core_depth_mean_value)
+                    )
                     avoid_stage_switch_event_value = float(
                         extras.get("avoid_stage_switch_event", avoid_stage_switch_event_value)
                     )
@@ -5183,6 +5207,12 @@ def train(args):
             writer.add_scalar('Avoid/StageProgressRate', avoid_progress_rate_value, iteration)
             writer.add_scalar('Avoid/StageSuccessRate', avoid_success_rate_value, iteration)
             writer.add_scalar('Avoid/NearestObstacleDist', avoid_nearest_obstacle_dist_value, iteration)
+            writer.add_scalar('Avoid/PresetRetryMean', avoid_preset_retry_mean_value, iteration)
+            writer.add_scalar('Avoid/PresetSampleFailMean', avoid_preset_sample_fail_mean_value, iteration)
+            writer.add_scalar('Avoid/PresetPassageFailMean', avoid_preset_passage_fail_mean_value, iteration)
+            writer.add_scalar('Avoid/PresetMinYGapMean', avoid_preset_min_y_gap_mean_value, iteration)
+            writer.add_scalar('Avoid/PresetPassageDepthMean', avoid_preset_passage_depth_mean_value, iteration)
+            writer.add_scalar('Avoid/PresetCoreDepthMean', avoid_preset_core_depth_mean_value, iteration)
             writer.add_scalar('Avoid/StageSwitchEvent', avoid_stage_switch_event_value, iteration)
             writer.add_scalar('Avoid/StageSwitchFrom', avoid_stage_switch_from_value, iteration)
             writer.add_scalar('Avoid/StageSwitchTo', avoid_stage_switch_to_value, iteration)
@@ -5285,6 +5315,8 @@ def train(args):
                     f"""{'Avoid coll(stage/shrink)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
                     f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
+                    f"""{'Avoid preset retry/sfail/pfail:':>{pad}} {avoid_preset_retry_mean_value:.3f} / {avoid_preset_sample_fail_mean_value:.3f} / {avoid_preset_passage_fail_mean_value:.3f}\n"""
+                    f"""{'Avoid preset ygap/depth/core:':>{pad}} {avoid_preset_min_y_gap_mean_value:.3f} / {avoid_preset_passage_depth_mean_value:.3f} / {avoid_preset_core_depth_mean_value:.3f}\n"""
                     f"""{'Avoid goal retry/fallback:':>{pad}} {avoid_goal_sample_retry_mean_value:.3f} / {avoid_goal_sample_fallback_rate_value:.3f}\n"""
                     f"""{'Avoid goal behind/side:':>{pad}} {avoid_goal_behind_rate_value:.3f} / {avoid_goal_side_rate_value:.3f}\n"""
                     f"""{'Avoid goal S123 behind/side/fb:':>{pad}} {((avoid_goal_behind_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f} / {((avoid_goal_side_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f} / {((avoid_goal_fallback_count_s123_iter / avoid_goal_count_s123_iter) if avoid_goal_count_s123_iter > 0.0 else 0.0):.3f}\n"""
