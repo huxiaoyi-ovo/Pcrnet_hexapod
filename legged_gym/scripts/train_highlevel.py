@@ -1135,8 +1135,18 @@ class HierarchicalHexapodEnv:
         if NavigationRewardConfig is not None:
             reward_defaults = NavigationRewardConfig()
             reward_kwargs = {k: getattr(reward_defaults, k) for k in reward_defaults.__dict__.keys()}
+            reward_cfg_dict = dict(getattr(nav_cfg, "reward_cfg")) if (nav_cfg is not None and hasattr(nav_cfg, "reward_cfg")) else {}
+            self.reward_cfg_raw = reward_cfg_dict
+            self.terminal_fail_penalty = float(
+                self.reward_cfg_raw.get(
+                    "terminal_fail_penalty",
+                    reward_kwargs.get("collision_penalty", -10.0),
+                )
+            )
             if nav_cfg is not None and hasattr(nav_cfg, "reward_cfg"):
-                for key, value in dict(getattr(nav_cfg, "reward_cfg")).items():
+                for key, value in self.reward_cfg_raw.items():
+                    if key not in reward_kwargs:
+                        continue
                     if value is not None:
                         reward_kwargs[key] = value
             if reward_kwargs.get("risk_barrier_safe") is None:
@@ -1147,6 +1157,8 @@ class HierarchicalHexapodEnv:
             self.reward_func = NavigationRewardFunction(self.reward_cfg)
         else:
             self.reward_func = None
+            self.reward_cfg_raw = {}
+            self.terminal_fail_penalty = -10.0
             print("[Warning] 使用环境原生奖励")
         
         # 状态缓冲区
@@ -2596,15 +2608,7 @@ class HierarchicalHexapodEnv:
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
-            terminal_fail_penalty = 0.0
-            if self.reward_cfg is not None:
-                terminal_fail_penalty = float(
-                    getattr(
-                        self.reward_cfg,
-                        "terminal_fail_penalty",
-                        getattr(self.reward_cfg, "collision_penalty", -10.0),
-                    )
-                )
+            terminal_fail_penalty = float(getattr(self, "terminal_fail_penalty", -10.0))
             safe_reward = torch.full_like(total_reward, terminal_fail_penalty)
             total_reward = torch.where(done_during, safe_reward, total_reward)
             if reward_terms is not None:
@@ -2863,8 +2867,6 @@ def train(args):
         raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
     if args.mode == "student":
         args.camera_enable = True
-    if args.task == "s_avoid_basic" and abs(float(getattr(args, "entropy_coef", 0.01)) - 0.01) < 1e-12:
-        args.entropy_coef = 0.015
     
     # 导入模块
     import_modules()
@@ -2876,8 +2878,17 @@ def train(args):
         raise ValueError("当前未实现 Gate 的 student 蒸馏训练链路，禁止使用 --mode student --skill moe。")
     use_avoid_local_map = skill in ("avoid", "moe")
 
+    env_cfg_override = None
+    train_cfg_override = None
+    if task_registry is not None and not bool(getattr(args, "_entropy_coef_explicit", False)):
+        env_cfg_override, train_cfg_override = task_registry.get_cfgs(name=args.task)
+        if train_cfg_override is not None:
+            algo_cfg = getattr(train_cfg_override, "algorithm", None)
+            if algo_cfg is not None and hasattr(algo_cfg, "entropy_coef"):
+                args.entropy_coef = float(getattr(algo_cfg, "entropy_coef"))
+
     # 创建环境
-    env = HierarchicalHexapodEnv(args, device)
+    env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
     
     # 初始 reset（用于确定观测维度）
@@ -5512,6 +5523,7 @@ if __name__ == "__main__":
     )
     
     args, unknown = parser.parse_known_args()
+    args._entropy_coef_explicit = ("--entropy_coef" in sys.argv)
     args.task = normalize_task_name(getattr(args, "task", ""))
     args._unknown_cli = list(unknown)
     

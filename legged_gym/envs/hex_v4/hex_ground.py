@@ -2327,6 +2327,7 @@ class HexGround(LeggedRobot):
         goal_y_min = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[0])
         goal_y_max = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[1])
         goal_max_tries = int(getattr(self.cfg.navigation, "goal_sample_max_tries", 32))
+        goal_allow_fallback = bool(getattr(self.cfg.navigation, "goal_allow_fallback", True))
         goal_behind_obstacles = bool(getattr(self.cfg.navigation, "goal_behind_obstacles", True))
         goal_behind_margin_y = float(getattr(self.cfg.navigation, "goal_behind_margin_y", 0.35))
         goal_behind_x_half_width = float(getattr(self.cfg.navigation, "goal_behind_x_half_width", 0.45))
@@ -2423,6 +2424,12 @@ class HexGround(LeggedRobot):
                 retry_count += 1
                 used_fallback = False
                 if valid_goal is None:
+                    if not goal_allow_fallback:
+                        raise RuntimeError(
+                            f"s_avoid goal sampling failed without fallback "
+                            f"(env={env_id}, stage={int(self.s_avoid_stage_per_env[env_id].item())}, "
+                            f"tries={goal_max_tries})"
+                        )
                     fallback_count += 1
                     used_fallback = True
                     valid_goal = torch.tensor(

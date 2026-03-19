@@ -86,6 +86,12 @@
 - [x] ~~[P1] 小幅回收 `velocity_scale`、提高 `s_avoid_basic` 默认 `entropy_coef`，先稳住探索与 critic~~
 - [x] ~~[P1] 轻微增强朝向/目标居中约束，促进横移穿缝而不是原地旋转~~
 
+## 2026-03-19 avoid 训练口径收口
+
+- [x] ~~[P0] 统一 `entropy_coef` 生效口径：命令行显式覆盖优先，否则回落到任务配置默认值~~
+- [x] ~~[P1] 明确 `terminal_fail_penalty` 走原始 `reward_cfg` 字典单独读取，不再隐式混入 `NavigationRewardConfig`~~
+- [x] ~~[P1] 让 `goal_allow_fallback` 在 `s_avoid` 目标采样主线真正生效，避免配置成为死参数~~
+
 ## 2026-03-17 s_avoid 障碍碰撞根因排查收口
 
 - [x] ~~[P0] 增加 `s_avoid_basic` 的“单障碍直接创建”调试对照，验证穿透是否来自 pooled actor 地下创建后再搬运这条用法~~
