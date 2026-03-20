@@ -441,13 +441,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
         avoid_stage2_preset_count = 56
-        avoid_stage12_passage_width_min = 1.20
+        avoid_stage12_passage_width_min = 0.45
         avoid_stage12_passage_depth_min = 1.40
-        avoid_stage23_passage_width_min = 1.20
+        avoid_stage23_passage_width_min = 0.45
         avoid_stage23_passage_depth_min = 1.80
-        avoid_stage34_passage_width_min = 1.00
+        avoid_stage34_passage_width_min = 0.45
         avoid_stage34_passage_depth_min = 2.20
-        avoid_preset_passage_width_min = 0.75
+        avoid_preset_passage_width_min = 0.45
         avoid_preset_passage_samples = 17
         avoid_preset_validation_attempts = 96
         avoid_preset_core_cover_ratio = 0.40

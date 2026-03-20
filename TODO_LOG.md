@@ -92,6 +92,10 @@
 
 - [x] ~~[P1] 将 `avoid_preset_*` 在线日志从“基础 preset 统计”改为“preset 选中并完成 jitter 后的最终样本统计”，避免训练过程被假零值/假坏值误导~~
 
+## 2026-03-20 avoid 固定模板 passage 验收放宽
+
+- [ ] [P0] 将 `avoid_stage12/23/34_passage_width_min` 与 `avoid_preset_passage_width_min` 统一下调到 `0.45`，减少当前固定模板在 `jitter` 后被过严横向通路阈值全部判死的情况
+
 ## 2026-03-17 actor 障碍碰撞口径纠正
 
 - [x] ~~[P0] 按 Isaac Gym 官方 group/filter 语义修正 actor 障碍碰撞设置：同 env 内 robot/obstacle 保持同组，scene filter 改回 0，先恢复真实物理碰撞~~
