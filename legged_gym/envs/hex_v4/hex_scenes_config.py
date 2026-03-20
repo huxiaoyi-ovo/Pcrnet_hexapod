@@ -415,7 +415,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_spawn_clearance = 0.85
         avoid_spawn_extra_margin = 0.2
         avoid_obstacle_exposure_distance = 1.8
-        avoid_stage12_band_half_width = 1.80
+        avoid_stage12_band_half_width = 1.60
         avoid_stage12_band_y_min = -0.80
         avoid_stage12_band_y_max = 3.20
         avoid_stage12_core_half_width = 0.90
@@ -436,7 +436,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_core_count = 1
         avoid_stage15_core_count = 2
         avoid_stage2_core_count = 2
-        avoid_band_margin_x = 0.30
+        avoid_band_margin_x = 0.10
         avoid_band_margin_y = 0.30
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48
@@ -488,12 +488,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         goal_mode = "random"
         goal_min_distance = 2.0
         goal_range_x = [-1.2, 1.2]
-        # Fixed-row presets place the goal at least 0.35 m behind the last row.
+        # Fixed-row presets place the goal at least 0.25 m behind the last row.
         goal_range_y = [2.0, 4.2]
         goal_sample_max_tries = 32
         goal_allow_fallback = True
         goal_behind_obstacles = True
-        goal_behind_margin_y = 0.35
+        goal_behind_margin_y = 0.25
         goal_behind_x_half_width = 0.45
         goal_side_threshold = 0.55
         goal_force_blocking_line = False
@@ -508,7 +508,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_band_penalty_scale = 3.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
-        reward_cfg["goal_approach_scale"] = 2.5
+        reward_cfg["goal_approach_scale"] = 4.0
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
         reward_cfg["heading_scale"] = 0.8

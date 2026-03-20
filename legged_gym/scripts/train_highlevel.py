@@ -2446,12 +2446,9 @@ class HierarchicalHexapodEnv:
             dx_out = torch.clamp(band_x_min - robot_pos[:, 0], min=0.0) + torch.clamp(
                 robot_pos[:, 0] - band_x_max, min=0.0
             )
-            dy_out = torch.clamp(band_y_min - robot_pos[:, 1], min=0.0) + torch.clamp(
-                robot_pos[:, 1] - band_y_max, min=0.0
-            )
             avoid_band_outside_dist = torch.where(
                 avoid_band_active_mask,
-                dx_out + dy_out,
+                dx_out,
                 torch.zeros_like(dx_out),
             )
             band_term = -avoid_band_scale * avoid_band_outside_dist
