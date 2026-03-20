@@ -2267,6 +2267,7 @@ class HierarchicalHexapodEnv:
         collision_threshold_src = None
         collision_indices_src = None
         contact_norm = None
+        collision_debug_indices = None
         obstacle_contact_candidate_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         strict_obstacle_contact_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         obstacle_contact_candidate_min_clearance = torch.full(
@@ -2286,9 +2287,19 @@ class HierarchicalHexapodEnv:
             indices = getattr(self.env, "penalised_contact_indices", None)
             collision_indices_src = "penalised_contact_indices"
             if indices is not None and indices.numel() > 0:
-                contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
+                penalized_contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
+                collision_mask = torch.any(penalized_contact_norm > collision_threshold, dim=1)
+                collision_debug_indices = indices
+                if hasattr(self.env, "termination_contact_indices"):
+                    term_indices = getattr(self.env, "termination_contact_indices", None)
+                    if term_indices is not None and term_indices.numel() > 0:
+                        collision_debug_indices = torch.unique(
+                            torch.cat([indices.to(torch.long), term_indices.to(torch.long)], dim=0),
+                            sorted=True,
+                        ).to(dtype=torch.long)
+                        collision_indices_src = "penalised+termination_contact_indices"
+                contact_norm = torch.norm(self.env.contact_forces[:, collision_debug_indices, :], dim=-1)
                 collision_force_max = contact_norm.max(dim=1).values
-                collision_mask = torch.any(contact_norm > collision_threshold, dim=1)
                 if (
                     hasattr(self.env, "s_avoid_enabled")
                     and bool(getattr(self.env, "s_avoid_enabled", False))
@@ -2297,7 +2308,7 @@ class HierarchicalHexapodEnv:
                     and hasattr(self.env, "s_avoid_pos_world")
                     and hasattr(self.env, "s_avoid_quat_world")
                 ):
-                    body_xy = self.env.rb_states[:, indices, :2]
+                    body_xy = self.env.rb_states[:, collision_debug_indices, :2]
                     inf_clearance = torch.full_like(body_xy[..., 0], 1.0e6)
                     min_clearance_per_body = inf_clearance.clone()
                     obstacle_contact_margin = float(
@@ -2647,7 +2658,7 @@ class HierarchicalHexapodEnv:
                             )
                         except Exception:
                             body_names_all = []
-                        indices_dbg = getattr(self.env, "penalised_contact_indices", None)
+                        indices_dbg = collision_debug_indices
                         body_name_cache = []
                         if indices_dbg is not None:
                             for idx_v in indices_dbg.detach().cpu().tolist():
@@ -2656,7 +2667,7 @@ class HierarchicalHexapodEnv:
                                     body_name_cache.append(str(body_names_all[idx_i]))
                                 else:
                                     body_name_cache.append(f"body_{idx_i}")
-                        self._penalised_contact_body_names = body_name_cache
+                        self._collision_debug_body_names = body_name_cache
                     body_hits = []
                     if contact_norm is not None:
                         env_contact = contact_norm[debug_env]
@@ -2664,8 +2675,8 @@ class HierarchicalHexapodEnv:
                             force_f = float(force_v)
                             if collision_threshold is not None and force_f > float(collision_threshold):
                                 body_name = (
-                                    self._penalised_contact_body_names[local_i]
-                                    if local_i < len(self._penalised_contact_body_names)
+                                    self._collision_debug_body_names[local_i]
+                                    if local_i < len(self._collision_debug_body_names)
                                     else f"body_{local_i}"
                                 )
                                 body_hits.append(f"{body_name}:{force_f:.3f}")

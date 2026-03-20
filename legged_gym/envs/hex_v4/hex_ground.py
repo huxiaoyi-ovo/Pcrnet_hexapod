@@ -467,14 +467,14 @@ class HexGround(LeggedRobot):
             fixed_asset_options.collapse_fixed_joints = True
 
             pooled_asset_options = gymapi.AssetOptions()
-            pooled_asset_options.fix_base_link = True
+            pooled_asset_options.fix_base_link = False
             pooled_asset_options.disable_gravity = True
             pooled_asset_options.collapse_fixed_joints = True
             pooled_asset_options.linear_damping = float(
-                getattr(self.cfg.terrain, "avoid_pooled_linear_damping", 50.0)
+                getattr(self.cfg.terrain, "avoid_pooled_linear_damping", 1000.0)
             )
             pooled_asset_options.angular_damping = float(
-                getattr(self.cfg.terrain, "avoid_pooled_angular_damping", 50.0)
+                getattr(self.cfg.terrain, "avoid_pooled_angular_damping", 1000.0)
             )
 
             cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
@@ -531,7 +531,7 @@ class HexGround(LeggedRobot):
                 pooled_wall_mass = float(getattr(self.cfg.terrain, "avoid_pooled_wall_mass", 50000.0))
                 print(
                     "[Scene] s_avoid_basic pooled obstacle body: "
-                    f"fix_base_link=True(capsule/box/wall), mass={pooled_mass:.1f}, wall_mass={pooled_wall_mass:.1f}, "
+                    f"fix_base_link=False(capsule/box), mass={pooled_mass:.1f}, wall_mass={pooled_wall_mass:.1f}, "
                     f"lin_damp={pooled_asset_options.linear_damping:.1f}, "
                     f"ang_damp={pooled_asset_options.angular_damping:.1f}"
                 )
@@ -1868,63 +1868,31 @@ class HexGround(LeggedRobot):
 
     def _get_s_avoid_fixed_stage_layouts(self, stage: int):
         stage = int(stage)
-        layouts = []
-        if stage == 1:
+        odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
+        even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
+        row_y = tuple(
+            float(y)
+            for y in getattr(
+                self.cfg.terrain,
+                f"avoid_stage{stage}_row_y",
+                getattr(self.cfg.terrain, "avoid_stage4_row_y", (0.60, 1.40, 2.20, 3.00, 3.80)),
+            )
+        )
+
+        capsule_points = []
+        for row_idx, local_y in enumerate(row_y):
+            row_x = odd_row_x if (row_idx % 2) == 0 else even_row_x
+            for local_x in row_x:
+                capsule_points.append((float(local_x), float(local_y)))
+
+        layouts = [{"capsules": capsule_points, "boxes": []}]
+        if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)):
             layouts.append(
                 {
-                    "capsules": [(-0.15, 1.00), (1.05, 1.00), (1.65, 1.00), (-0.45, 2.60), (1.05, 2.60), (1.65, 2.60)],
+                    "capsules": [(-float(x), float(y)) for x, y in capsule_points],
                     "boxes": [],
                 }
             )
-            layouts.append(
-                {
-                    "capsules": [(-0.15, 0.95), (0.75, 0.95), (1.65, 0.95), (-0.15, 2.55), (1.05, 2.55), (1.65, 2.55)],
-                    "boxes": [],
-                }
-            )
-            layouts.append(
-                {
-                    "capsules": [(0.15, 1.00), (-1.05, 1.00), (-1.65, 1.00), (0.45, 2.60), (-1.05, 2.60), (-1.65, 2.60)],
-                    "boxes": [],
-                }
-            )
-        elif stage == 2:
-            layouts.append(
-                {
-                    "capsules": [(-0.15, 0.80), (1.05, 0.80), (1.65, 0.80), (-0.45, 3.40), (1.05, 3.40), (1.65, 3.40)],
-                    "boxes": [],
-                }
-            )
-            layouts.append(
-                {
-                    "capsules": [(-0.15, 0.80), (0.75, 0.80), (1.65, 0.80), (-0.15, 3.40), (1.05, 3.40), (1.65, 3.40)],
-                    "boxes": [],
-                }
-            )
-        elif stage == 3:
-            layouts.append(
-                {
-                    "capsules": [(-0.15, 0.75), (1.05, 0.75), (1.65, 0.75), (-0.45, 2.15), (1.05, 2.15), (1.65, 2.15)],
-                    "boxes": [(0.25, 3.05, 0.0)],
-                }
-            )
-        else:
-            layouts.append(
-                {
-                    "capsules": [(-0.15, 0.70), (1.05, 0.70), (1.65, 0.70), (-0.45, 3.00), (1.05, 3.00), (1.65, 3.00)],
-                    "boxes": [(0.45, 1.80, 0.0), (-0.05, 4.30, 0.0)],
-                }
-            )
-        if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)) and stage in (2, 3, 4):
-            mirrored = []
-            for layout in layouts:
-                mirrored.append(
-                    {
-                        "capsules": [(-float(x), float(y)) for x, y in layout["capsules"]],
-                        "boxes": [(-float(x), float(y), -float(yaw_deg)) for x, y, yaw_deg in layout["boxes"]],
-                    }
-                )
-            layouts.extend(mirrored)
         return layouts
 
     def _build_s_avoid_fixed_stage_presets(
@@ -2914,10 +2882,15 @@ class HexGround(LeggedRobot):
             passage_center_x = 0.0
             passage_width_x = goal_x_max - goal_x_min
             behind_y_floor = goal_y_min
-            if active_pos is not None and active_pos.shape[0] > 0:
+            cluster_front_y = None
+            if bool(getattr(self.cfg.terrain, "avoid_use_fixed_presets", False)):
+                preset_last_row_y = getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", None)
+                if preset_last_row_y is not None:
+                    cluster_front_y = float(preset_last_row_y)
+            if cluster_front_y is None and active_pos is not None and active_pos.shape[0] > 0:
                 cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
-                if goal_behind_obstacles:
-                    behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
+            if cluster_front_y is not None and goal_behind_obstacles:
+                behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
             valid_goal = None
             tries_used = 0
             for try_idx in range(goal_max_tries):

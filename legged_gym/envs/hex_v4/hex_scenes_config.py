@@ -393,8 +393,18 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_min_y_spacing_relax_ratio_min = 0.70
         avoid_use_fixed_presets = True
         avoid_fixed_presets_use_mirror = True
-        avoid_fixed_preset_jitter_xy = 0.08
+        avoid_fixed_preset_jitter_xy = 0.06
         avoid_fixed_preset_jitter_retry_attempts = 8
+        avoid_fixed_row_x_odd = (-0.90, 0.00, 0.90)
+        avoid_fixed_row_x_even = (-0.45, 0.45)
+        avoid_stage1_row_y = (0.80, 2.00)
+        avoid_stage2_row_y = (0.70, 1.70, 2.70)
+        avoid_stage3_row_y = (0.65, 1.55, 2.45, 3.35)
+        avoid_stage4_row_y = (0.60, 1.40, 2.20, 3.00, 3.80)
+        avoid_stage1_last_row_y = 2.00
+        avoid_stage2_last_row_y = 2.70
+        avoid_stage3_last_row_y = 3.35
+        avoid_stage4_last_row_y = 3.80
         collision_force_threshold = 0.5
         avoid_strict_contact_margin = 0.01
 
@@ -452,11 +462,14 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_wall_height = 0.50
         avoid_wall_length = 6.0
 
-        # Actor pool layout: [capsules][boxes][walls].
-        avoid_capsule_slots = 6
-        avoid_box_slots = 2
-        avoid_wall_slots = 2
+        # Actor pool layout: fixed presets use capsule rows only.
+        avoid_capsule_slots = 13
+        avoid_box_slots = 0
+        avoid_wall_slots = 0
         avoid_seed = 7001
+        avoid_pooled_actor_mass = 100000.0
+        avoid_pooled_linear_damping = 1000.0
+        avoid_pooled_angular_damping = 1000.0
         avoid_pooled_wall_mass = 50000.0
 
     class sim(HexGroundCfg.sim):
@@ -471,8 +484,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         goal_mode = "random"
         goal_min_distance = 2.0
         goal_range_x = [-1.2, 1.2]
-        # High-difficulty presets may place behind-goals as far as 4.0 m by design.
-        goal_range_y = [2.0, 7.0]
+        # Fixed-row presets place the goal at least 0.35 m behind the last row.
+        goal_range_y = [2.0, 4.2]
         goal_sample_max_tries = 32
         goal_allow_fallback = True
         goal_behind_obstacles = True
