@@ -1870,7 +1870,7 @@ class HexGround(LeggedRobot):
         stage = int(stage)
         odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
         even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
-        row_y = tuple(
+        base_row_y = tuple(
             float(y)
             for y in getattr(
                 self.cfg.terrain,
@@ -1878,20 +1878,79 @@ class HexGround(LeggedRobot):
                 getattr(self.cfg.terrain, "avoid_stage4_row_y", (0.60, 1.40, 2.20, 3.00, 3.80)),
             )
         )
+        row_y_spacing_scale = float(getattr(self.cfg.terrain, "avoid_fixed_row_y_spacing_scale", 1.0))
+        if row_y_spacing_scale <= 0.0:
+            raise RuntimeError(f"avoid_fixed_row_y_spacing_scale must be positive, got {row_y_spacing_scale:.3f}")
+        if len(base_row_y) > 1 and abs(row_y_spacing_scale - 1.0) > 1e-6:
+            row_y_center = float(sum(base_row_y) / len(base_row_y))
+            row_y = tuple(
+                row_y_center + (float(local_y) - row_y_center) * row_y_spacing_scale
+                for local_y in base_row_y
+            )
+        else:
+            row_y = base_row_y
 
-        capsule_points = []
-        for row_idx, local_y in enumerate(row_y):
-            row_x = odd_row_x if (row_idx % 2) == 0 else even_row_x
-            for local_x in row_x:
-                capsule_points.append((float(local_x), float(local_y)))
+        min_row_y_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_row_y_gap", 0.85))
+        row_y_gaps = [float(row_y[i + 1] - row_y[i]) for i in range(len(row_y) - 1)]
+        if row_y_gaps and min(row_y_gaps) < min_row_y_gap - 1e-6:
+            raise RuntimeError(
+                f"Fixed s_avoid row-y spacing too small: stage={stage}, min_gap={min(row_y_gaps):.3f}, required={min_row_y_gap:.3f}"
+            )
 
-        layouts = [{"capsules": capsule_points, "boxes": []}]
-        if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)):
-            layouts.append(
-                {
-                    "capsules": [(-float(x), float(y)) for x, y in capsule_points],
-                    "boxes": [],
-                }
+        odd_row_bias = float(getattr(self.cfg.terrain, "avoid_fixed_row_bias", 0.22))
+        min_x_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_x_gap", 0.85))
+        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        terrain_half_width = 0.5 * float(self.cfg.terrain.terrain_width)
+        x_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
+        x_limit = max(terrain_half_width - cap_r - x_margin, 0.0)
+        use_mirror = bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True))
+
+        layout_specs = [
+            ("left_bias", -odd_row_bias),
+            ("right_bias", odd_row_bias),
+        ]
+        mirror_specs = (False, True) if use_mirror else (False,)
+        layouts = []
+        seen_layouts = set()
+        for layout_name, odd_bias in layout_specs:
+            for mirrored in mirror_specs:
+                capsule_points = []
+                for row_idx, local_y in enumerate(row_y):
+                    base_row_x = odd_row_x if (row_idx % 2) == 0 else even_row_x
+                    row_bias = odd_bias if (row_idx % 2) == 0 else 0.0
+                    shifted_row_x = sorted(float(local_x) + row_bias for local_x in base_row_x)
+                    row_x_gaps = [shifted_row_x[i + 1] - shifted_row_x[i] for i in range(len(shifted_row_x) - 1)]
+                    if row_x_gaps and min(row_x_gaps) < min_x_gap - 1e-6:
+                        raise RuntimeError(
+                            "Fixed s_avoid row-x gap too small: "
+                            f"stage={stage}, layout={layout_name}, row={row_idx}, "
+                            f"min_gap={min(row_x_gaps):.3f}, required={min_x_gap:.3f}"
+                        )
+                    row_x_values = [(-float(local_x) if mirrored else float(local_x)) for local_x in shifted_row_x]
+                    row_x_values = sorted(row_x_values)
+                    for x_value in row_x_values:
+                        if abs(x_value) > x_limit + 1e-6:
+                            raise RuntimeError(
+                                "Fixed s_avoid row-x exceeds boundary: "
+                                f"stage={stage}, layout={layout_name}, row={row_idx}, x={x_value:.3f}, limit={x_limit:.3f}"
+                            )
+                        capsule_points.append((x_value, float(local_y)))
+                layout_key = tuple((round(x, 4), round(y, 4)) for x, y in capsule_points)
+                if layout_key in seen_layouts:
+                    continue
+                seen_layouts.add(layout_key)
+                layouts.append(
+                    {
+                        "name": f"{layout_name}{'_mirror' if mirrored else ''}",
+                        "capsules": capsule_points,
+                        "boxes": [],
+                    }
+                )
+
+        expected_layout_count = 4 if use_mirror else 2
+        if len(layouts) != expected_layout_count:
+            raise RuntimeError(
+                f"Fixed s_avoid stage layouts collapsed to {len(layouts)} presets, expected {expected_layout_count}"
             )
         return layouts
 
@@ -2883,12 +2942,12 @@ class HexGround(LeggedRobot):
             passage_width_x = goal_x_max - goal_x_min
             behind_y_floor = goal_y_min
             cluster_front_y = None
-            if bool(getattr(self.cfg.terrain, "avoid_use_fixed_presets", False)):
+            if active_pos is not None and active_pos.shape[0] > 0:
+                cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
+            elif bool(getattr(self.cfg.terrain, "avoid_use_fixed_presets", False)):
                 preset_last_row_y = getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", None)
                 if preset_last_row_y is not None:
                     cluster_front_y = float(preset_last_row_y)
-            if cluster_front_y is None and active_pos is not None and active_pos.shape[0] > 0:
-                cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
             if cluster_front_y is not None and goal_behind_obstacles:
                 behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
             valid_goal = None

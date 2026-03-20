@@ -395,8 +395,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_fixed_presets_use_mirror = True
         avoid_fixed_preset_jitter_xy = 0.06
         avoid_fixed_preset_jitter_retry_attempts = 8
+        avoid_fixed_row_bias = 0.22
+        avoid_fixed_row_y_spacing_scale = 1.5
+        avoid_fixed_min_x_gap = 0.85
+        avoid_fixed_min_row_y_gap = 0.85
         avoid_fixed_row_x_odd = (-0.90, 0.00, 0.90)
-        avoid_fixed_row_x_even = (-0.45, 0.45)
+        avoid_fixed_row_x_even = (-0.45, 0.40)
         avoid_stage1_row_y = (0.80, 2.00)
         avoid_stage2_row_y = (0.70, 1.70, 2.70)
         avoid_stage3_row_y = (0.65, 1.55, 2.45, 3.35)
