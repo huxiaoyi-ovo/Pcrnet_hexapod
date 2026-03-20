@@ -437,6 +437,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_preset_passage_samples = 17
         avoid_preset_validation_attempts = 96
         avoid_preset_core_cover_ratio = 0.40
+        robot_shape_contact_offset = 0.03
+        robot_shape_rest_offset = 0.0
+        avoid_shape_contact_offset = 0.03
+        avoid_shape_rest_offset = 0.0
 
         # Primitive assets.
         avoid_capsule_radius = 0.15
@@ -454,6 +458,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_wall_slots = 2
         avoid_seed = 7001
         avoid_pooled_wall_mass = 50000.0
+
+    class sim(HexGroundCfg.sim):
+        class physx(HexGroundCfg.sim.physx):
+            max_depenetration_velocity = 3.0
 
     class navigation(HexGroundCfg.navigation):
         # Avoid expert stage: no moving target actor (keep target non-collision by design).

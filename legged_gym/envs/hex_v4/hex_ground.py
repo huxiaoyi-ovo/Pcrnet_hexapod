@@ -600,22 +600,53 @@ class HexGround(LeggedRobot):
             scene_filter = 0
         return scene_filter
 
+    def _scene_shape_contact_offsets(self, debug_tag: str = "") -> Tuple[Optional[float], Optional[float]]:
+        terrain_cfg = getattr(self.cfg, "terrain", None)
+        if terrain_cfg is None:
+            return None, None
+
+        contact_offset = getattr(terrain_cfg, "scene_actor_contact_offset", None)
+        rest_offset = getattr(terrain_cfg, "scene_actor_rest_offset", None)
+
+        if debug_tag == "robot":
+            contact_offset = getattr(terrain_cfg, "robot_shape_contact_offset", contact_offset)
+            rest_offset = getattr(terrain_cfg, "robot_shape_rest_offset", rest_offset)
+        elif debug_tag.startswith("s_avoid_obs_"):
+            contact_offset = getattr(terrain_cfg, "avoid_shape_contact_offset", contact_offset)
+            rest_offset = getattr(terrain_cfg, "avoid_shape_rest_offset", rest_offset)
+
+        if contact_offset is not None:
+            contact_offset = max(float(contact_offset), 0.0)
+        if rest_offset is not None:
+            rest_offset = float(rest_offset)
+        if contact_offset is not None and rest_offset is not None and rest_offset > contact_offset:
+            rest_offset = contact_offset
+        return contact_offset, rest_offset
+
     def _apply_actor_collision_filter(self, env_handle, actor_handle, target_filter: int, env_id: int, debug_tag: str = ""):
         try:
             shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+            contact_offset, rest_offset = self._scene_shape_contact_offsets(debug_tag)
             before_filters = [int(getattr(prop, "filter", 0)) for prop in shape_props]
             for prop in shape_props:
                 prop.filter = target_filter
+                if contact_offset is not None and hasattr(prop, "contact_offset"):
+                    prop.contact_offset = contact_offset
+                if rest_offset is not None and hasattr(prop, "rest_offset"):
+                    prop.rest_offset = rest_offset
             self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
             if getattr(self, "debug_viz", False) and env_id == 0 and debug_tag.startswith("s_avoid_obs_"):
                 debug_count = int(getattr(self, "_s_avoid_filter_debug_count", 0))
                 if debug_count < 40:
                     after_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
                     after_filters = [int(getattr(prop, "filter", 0)) for prop in after_props]
+                    after_contacts = [float(getattr(prop, "contact_offset", 0.0)) for prop in after_props]
+                    after_rests = [float(getattr(prop, "rest_offset", 0.0)) for prop in after_props]
                     actor_index = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
                     print(
                         f"[Debug][s_avoid_filter] tag={debug_tag} actor_index={actor_index} "
-                        f"target={int(target_filter)} before={before_filters} after={after_filters}"
+                        f"target={int(target_filter)} before={before_filters} after={after_filters} "
+                        f"contact={after_contacts} rest={after_rests}"
                     )
                     self._s_avoid_filter_debug_count = debug_count + 1
             if getattr(self, "debug_viz", False) and env_id == 0 and debug_tag:
