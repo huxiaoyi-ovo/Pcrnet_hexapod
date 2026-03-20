@@ -536,6 +536,24 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
     terrain_cfg.avoid_spawn_body_plus_y_deg = target_deg
 
 
+def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
+    if str(getattr(args, "task", "")) != "s_avoid_basic":
+        return
+    stage_override = getattr(args, "avoid_stage_override", None)
+    if stage_override is None:
+        return
+    if not hasattr(env, "env") or env.env is None:
+        return
+    if not hasattr(env.env, "s_avoid_stage") or not hasattr(env.env, "s_avoid_stage_per_env"):
+        return
+    stage_value = int(stage_override)
+    env.env.s_avoid_stage = stage_value
+    env.env.s_avoid_stage_per_env.fill_(stage_value)
+    if hasattr(env.env, "extras") and isinstance(env.env.extras, dict):
+        env.env.extras["avoid_stage"] = int(stage_value)
+    print(f"[PlayHigh] s_avoid stage override -> {stage_value}")
+
+
 def _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg) -> None:
     if env_cfg is None or str(getattr(args, "task", "")) != "e_L_conflict":
         return
@@ -962,6 +980,13 @@ def parse_args():
         help="s_avoid_basic 碰撞 sanity check：默认固定前方单障碍，直接创建在最终位置，不走池子和后续搬运",
     )
     parser.add_argument(
+        "--avoid_stage_override",
+        type=int,
+        default=None,
+        choices=[1, 2, 3, 4],
+        help="s_avoid_basic 回放阶段覆盖：固定查看指定课程阶段",
+    )
+    parser.add_argument(
         "--expert_k_yaw",
         type=float,
         default=None,
@@ -1216,6 +1241,7 @@ def main():
         if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types") and hasattr(env.env, "env_origins"):
             env.env.env_origins[:] = env.env.terrain_origins[env.env.terrain_levels, env.env.terrain_types]
         dprint("[PlayHigh] curriculum disabled; start at level 0")
+    _maybe_apply_s_avoid_stage_override_runtime(args, env)
     if hasattr(env, "env") and hasattr(env.env, "debug_viz"):
         env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug
     vision_model = None
@@ -1360,6 +1386,7 @@ def main():
             "gate_difficulty": avoid_difficulty,
         }
 
+    _maybe_apply_s_avoid_stage_override_runtime(args, env)
     obs = env.reset()
     aff_bundle = _get_aff_bundle(obs)
     raw_aff_map = aff_bundle["raw_aff"]
@@ -1565,6 +1592,7 @@ def main():
                             and hasattr(env.env, "env_origins")):
                         env.env.env_origins[env_idx] = env.env.terrain_origins[new_level, env.env.terrain_types[env_idx]]
                     print(f"[PlayHigh] curriculum level -> {new_level}")
+                _maybe_apply_s_avoid_stage_override_runtime(args, env)
                 obs = env.reset()
                 aff_bundle = _get_aff_bundle(obs)
                 raw_aff_map = aff_bundle["raw_aff"]
