@@ -409,7 +409,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage2_last_row_y = 2.70
         avoid_stage3_last_row_y = 3.35
         avoid_stage4_last_row_y = 3.80
-        collision_force_threshold = 0.05
+        collision_force_threshold = 1.0
         avoid_strict_contact_margin = 0.01
 
         avoid_spawn_clearance = 0.85
