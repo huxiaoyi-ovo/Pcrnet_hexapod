@@ -2300,75 +2300,30 @@ class HierarchicalHexapodEnv:
                         collision_indices_src = "penalised+termination_contact_indices"
                 contact_norm = torch.norm(self.env.contact_forces[:, collision_debug_indices, :], dim=-1)
                 collision_force_max = contact_norm.max(dim=1).values
-                if (
-                    hasattr(self.env, "s_avoid_enabled")
-                    and bool(getattr(self.env, "s_avoid_enabled", False))
-                    and hasattr(self.env, "rb_states")
-                    and hasattr(self.env, "s_avoid_active")
-                    and hasattr(self.env, "s_avoid_pos_world")
-                    and hasattr(self.env, "s_avoid_quat_world")
-                ):
-                    body_xy = self.env.rb_states[:, collision_debug_indices, :2]
-                    inf_clearance = torch.full_like(body_xy[..., 0], 1.0e6)
-                    min_clearance_per_body = inf_clearance.clone()
+                if bool(getattr(self.env, "s_avoid_enabled", False)):
                     obstacle_contact_margin = float(
                         getattr(self.env.cfg.terrain, "avoid_obstacle_contact_margin", 0.03)
-                    )
-                    cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
-                    box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
-                    total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
-                    cap_r = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
-                    box_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
-                    box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
-                    wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
-                    wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
-                    for slot in range(total_slots):
-                        active_slot = self.env.s_avoid_active[:, slot].unsqueeze(1)
-                        if not bool(active_slot.any().item()):
-                            continue
-                        delta = body_xy - self.env.s_avoid_pos_world[:, slot, :2].unsqueeze(1)
-                        if slot < cap_slots:
-                            clearance_slot = torch.norm(delta, dim=-1) - cap_r
-                        else:
-                            quat = self.env.s_avoid_quat_world[:, slot]
-                            yaw = 2.0 * torch.atan2(quat[:, 2], quat[:, 3])
-                            cos_yaw = torch.cos(yaw).unsqueeze(1)
-                            sin_yaw = torch.sin(yaw).unsqueeze(1)
-                            local_x = cos_yaw * delta[..., 0] + sin_yaw * delta[..., 1]
-                            local_y = -sin_yaw * delta[..., 0] + cos_yaw * delta[..., 1]
-                            if slot < cap_slots + box_slots:
-                                hx, hy = box_hx, box_hy
-                            else:
-                                hx, hy = wall_hx, wall_hy
-                            dx = torch.abs(local_x) - hx
-                            dy = torch.abs(local_y) - hy
-                            outside = torch.norm(
-                                torch.stack(
-                                    [torch.clamp(dx, min=0.0), torch.clamp(dy, min=0.0)],
-                                    dim=-1,
-                                ),
-                                dim=-1,
-                            )
-                            inside = torch.clamp(torch.maximum(dx, dy), max=0.0)
-                            clearance_slot = outside + inside
-                        clearance_slot = torch.where(active_slot, clearance_slot, inf_clearance)
-                        min_clearance_per_body = torch.minimum(min_clearance_per_body, clearance_slot)
-                    body_min_clearance = min_clearance_per_body.min(dim=1).values
-                    obstacle_contact_candidate_min_clearance = torch.where(
-                        body_min_clearance >= 1.0e5,
-                        torch.full_like(body_min_clearance, 5.0),
-                        body_min_clearance,
                     )
                     strict_contact_margin = float(
                         getattr(self.env.cfg.terrain, "avoid_strict_contact_margin", 0.01)
                     )
-                    strict_obstacle_contact_mask = (
-                        obstacle_contact_candidate_min_clearance <= strict_contact_margin
-                    )
-                    obstacle_contact_candidate_mask = (
-                        obstacle_contact_candidate_min_clearance <= obstacle_contact_margin
-                    )
-                    collision_mask = collision_mask | strict_obstacle_contact_mask
+                    nearest_obs_fn = getattr(self.env, "_compute_s_avoid_nearest_obstacle_distance", None)
+                    nearest_obs = nearest_obs_fn() if callable(nearest_obs_fn) else None
+                    if nearest_obs is not None:
+                        robot_hull_clearance = nearest_obs - float(getattr(self, "affordance_clearance", 0.27))
+                        obstacle_contact_candidate_min_clearance = torch.nan_to_num(
+                            robot_hull_clearance,
+                            nan=5.0,
+                            posinf=5.0,
+                            neginf=-5.0,
+                        )
+                        strict_obstacle_contact_mask = (
+                            obstacle_contact_candidate_min_clearance <= strict_contact_margin
+                        )
+                        obstacle_contact_candidate_mask = (
+                            obstacle_contact_candidate_min_clearance <= obstacle_contact_margin
+                        )
+                        collision_mask = collision_mask | strict_obstacle_contact_mask
         if self.clearance_override is not None:
             clearance = self.clearance_override
             self.clearance_override = None

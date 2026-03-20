@@ -258,6 +258,37 @@ class HexTerrain(LeggedRobot):
             torch.tensor(thigh, dtype=torch.long, device=self.device) if len(thigh) else None
         )
 
+        collision_debug_names = []
+        for name in getattr(self.cfg.asset, "penalize_contacts_on", []):
+            collision_debug_names.extend([rb_name for rb_name in rb_names if name in rb_name])
+        for name in getattr(self.cfg.asset, "terminate_after_contacts_on", []):
+            collision_debug_names.extend([rb_name for rb_name in rb_names if name in rb_name])
+        collision_debug_names = list(dict.fromkeys(collision_debug_names))
+        collision_debug_tensor_indices = []
+        for rb_name in collision_debug_names:
+            rb_index = None
+            if hasattr(self.gym, "find_actor_rigid_body_index"):
+                try:
+                    rb_index = int(
+                        self.gym.find_actor_rigid_body_index(
+                            self.envs[0], self.actor_handles[0], rb_name, gymapi.DOMAIN_ENV
+                        )
+                    )
+                except Exception:
+                    rb_index = None
+            if rb_index is None or rb_index < 0:
+                try:
+                    rb_index = int(rb_names.index(rb_name))
+                except ValueError:
+                    rb_index = -1
+            if rb_index >= 0:
+                collision_debug_tensor_indices.append(rb_index)
+        self._collision_debug_rb_tensor_indices = (
+            torch.tensor(collision_debug_tensor_indices, dtype=torch.long, device=self.device)
+            if len(collision_debug_tensor_indices)
+            else None
+        )
+
     def _init_navigation_buffers(self):
         """初始化导航和EGPO观测buffers
         

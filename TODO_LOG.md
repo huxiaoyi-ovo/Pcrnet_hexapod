@@ -94,7 +94,15 @@
 
 ## 2026-03-20 avoid 固定模板 passage 验收放宽
 
-- [ ] [P0] 将 `avoid_stage12/23/34_passage_width_min` 与 `avoid_preset_passage_width_min` 统一下调到 `0.45`，减少当前固定模板在 `jitter` 后被过严横向通路阈值全部判死的情况
+- [x] ~~[P0] 将 `avoid_stage12/23/34_passage_width_min` 与 `avoid_preset_passage_width_min` 统一下调到 `0.45`，减少当前固定模板在 `jitter` 后被过严横向通路阈值全部判死的情况~~
+
+## 2026-03-20 avoid 碰撞力阈值下调
+
+- [ ] [P0] 将 `collision_force_threshold` 从 `0.5` 下调到 `0.05`，让当前 actor 碰撞力日志能更早进入碰撞检测与惩罚链，先恢复训练期碰撞信号
+
+## 2026-03-20 avoid 几何碰撞诊断索引修复
+
+- [x] ~~[P0] 将 `obs-hit cand/strict/min` 的 `rb_states` 索引从 rigid-body handle 口径改成真正的 rigid-body tensor index，修复当前 `285` 量级异常值并恢复 strict geometric check 的可解释性~~
 
 ## 2026-03-17 actor 障碍碰撞口径纠正
 
