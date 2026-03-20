@@ -108,6 +108,10 @@
 
 - [x] ~~[P0] 将 `obs-hit cand/strict/min` 的 `rb_states` 索引从 rigid-body handle 口径改成真正的 rigid-body tensor index，修复当前 `285` 量级异常值并恢复 strict geometric check 的可解释性~~
 
+## 2026-03-20 avoid 回收轻量后退惩罚
+
+- [x] ~~[P1] 将 `body_backward_scale` 从 `0.0` 回收到 `0.5`，在不恢复旧强惩罚的前提下抑制明显后退拖时间行为~~
+
 ## 2026-03-17 actor 障碍碰撞口径纠正
 
 - [x] ~~[P0] 按 Isaac Gym 官方 group/filter 语义修正 actor 障碍碰撞设置：同 env 内 robot/obstacle 保持同组，scene filter 改回 0，先恢复真实物理碰撞~~
