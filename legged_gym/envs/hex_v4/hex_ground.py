@@ -1265,6 +1265,12 @@ class HexGround(LeggedRobot):
         )
         self.s_avoid_last_shrink_stage_episode = 0
         self.s_avoid_stage_presets = self._build_s_avoid_stage_presets()
+        self.s_avoid_runtime_preset_stats = {
+            1: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
+            2: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
+            3: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
+            4: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
+        }
         self.extras["avoid_stage"] = int(self.s_avoid_stage)
         self.extras["avoid_stage_collision_rate"] = 0.0
         self.extras["avoid_shrink_collision_rate"] = 0.0
@@ -1841,14 +1847,28 @@ class HexGround(LeggedRobot):
         rng: np.random.RandomState,
     ):
         jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
-        if jitter_xy <= 1e-6:
-            return active, pos, quat
-        retry_attempts = max(1, int(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_retry_attempts", 8)))
-        slot_limit = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
         base_active = np.array(active, copy=True)
         base_pos = np.array(pos, copy=True)
         base_quat = np.array(quat, copy=True)
-        for _ in range(retry_attempts):
+        if jitter_xy <= 1e-6:
+            analysis = self._analyze_s_avoid_preset_passage(
+                active=base_active,
+                pos=base_pos,
+                quat=base_quat,
+                stage=stage,
+            )
+            self._record_s_avoid_runtime_preset_diag(
+                stage=stage,
+                retry_count=0,
+                sample_fail_count=0.0,
+                passage_fail_count=0.0,
+                analysis=analysis,
+            )
+            return base_active, base_pos, base_quat
+        retry_attempts = max(1, int(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_retry_attempts", 8)))
+        slot_limit = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
+        reject_count = 0
+        for retry_idx in range(retry_attempts):
             cand_active = np.array(base_active, copy=True)
             cand_pos = np.array(base_pos, copy=True)
             cand_quat = np.array(base_quat, copy=True)
@@ -1857,19 +1877,50 @@ class HexGround(LeggedRobot):
                     continue
                 cand_pos[slot, 0] += rng.uniform(-jitter_xy, jitter_xy)
                 cand_pos[slot, 1] += rng.uniform(-jitter_xy, jitter_xy)
-            if self._s_avoid_preset_has_passage(
-                active=cand_active,
-                pos=cand_pos,
-                quat=cand_quat,
-                stage=stage,
-            ):
+            spacing_ok = self._s_avoid_fixed_row_spacing_ok(active=cand_active, pos=cand_pos, stage=stage)
+            passage_ok = False
+            if spacing_ok:
+                passage_ok = self._s_avoid_preset_has_passage(
+                    active=cand_active,
+                    pos=cand_pos,
+                    quat=cand_quat,
+                    stage=stage,
+                )
+            if spacing_ok and passage_ok:
+                analysis = self._analyze_s_avoid_preset_passage(
+                    active=cand_active,
+                    pos=cand_pos,
+                    quat=cand_quat,
+                    stage=stage,
+                )
+                self._record_s_avoid_runtime_preset_diag(
+                    stage=stage,
+                    retry_count=retry_idx,
+                    sample_fail_count=0.0,
+                    passage_fail_count=reject_count,
+                    analysis=analysis,
+                )
                 return cand_active, cand_pos, cand_quat
+            reject_count += 1
+        if not self._s_avoid_fixed_row_spacing_ok(active=base_active, pos=base_pos, stage=stage):
+            raise RuntimeError(f"Fixed s_avoid base preset violates post-jitter x-gap contract at stage={int(stage)}")
+        analysis = self._analyze_s_avoid_preset_passage(
+            active=base_active,
+            pos=base_pos,
+            quat=base_quat,
+            stage=stage,
+        )
+        self._record_s_avoid_runtime_preset_diag(
+            stage=stage,
+            retry_count=retry_attempts,
+            sample_fail_count=0.0,
+            passage_fail_count=reject_count,
+            analysis=analysis,
+        )
         return base_active, base_pos, base_quat
 
-    def _get_s_avoid_fixed_stage_layouts(self, stage: int):
+    def _get_s_avoid_fixed_stage_row_y(self, stage: int):
         stage = int(stage)
-        odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
-        even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
         base_row_y = tuple(
             float(y)
             for y in getattr(
@@ -1883,12 +1934,44 @@ class HexGround(LeggedRobot):
             raise RuntimeError(f"avoid_fixed_row_y_spacing_scale must be positive, got {row_y_spacing_scale:.3f}")
         if len(base_row_y) > 1 and abs(row_y_spacing_scale - 1.0) > 1e-6:
             row_y_center = float(sum(base_row_y) / len(base_row_y))
-            row_y = tuple(
+            return tuple(
                 row_y_center + (float(local_y) - row_y_center) * row_y_spacing_scale
                 for local_y in base_row_y
             )
-        else:
-            row_y = base_row_y
+        return base_row_y
+
+    def _s_avoid_fixed_row_spacing_ok(self, *, active: np.ndarray, pos: np.ndarray, stage: int) -> bool:
+        odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
+        even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
+        row_y = self._get_s_avoid_fixed_stage_row_y(stage)
+        min_x_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_x_gap", 0.85))
+        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        terrain_half_width = 0.5 * float(self.cfg.terrain.terrain_width)
+        x_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
+        x_limit = max(terrain_half_width - cap_r - x_margin, 0.0)
+        slot_limit = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
+        slot_cursor = 0
+        for row_idx, _ in enumerate(row_y):
+            row_count = len(odd_row_x) if (row_idx % 2) == 0 else len(even_row_x)
+            row_slots = []
+            for _ in range(row_count):
+                if slot_cursor >= slot_limit or not bool(active[slot_cursor]):
+                    return False
+                row_slots.append(slot_cursor)
+                slot_cursor += 1
+            row_x_values = sorted(float(pos[slot, 0]) for slot in row_slots)
+            if any(abs(x_value) > x_limit + 1e-6 for x_value in row_x_values):
+                return False
+            row_x_gaps = [row_x_values[i + 1] - row_x_values[i] for i in range(len(row_x_values) - 1)]
+            if row_x_gaps and min(row_x_gaps) < min_x_gap - 1e-6:
+                return False
+        return True
+
+    def _get_s_avoid_fixed_stage_layouts(self, stage: int):
+        stage = int(stage)
+        odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
+        even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
+        row_y = self._get_s_avoid_fixed_stage_row_y(stage)
 
         min_row_y_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_row_y_gap", 0.85))
         row_y_gaps = [float(row_y[i + 1] - row_y[i]) for i in range(len(row_y) - 1)]
@@ -1899,6 +1982,8 @@ class HexGround(LeggedRobot):
 
         odd_row_bias = float(getattr(self.cfg.terrain, "avoid_fixed_row_bias", 0.22))
         min_x_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_x_gap", 0.85))
+        jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
+        required_base_x_gap = min_x_gap + 2.0 * max(0.0, jitter_xy)
         cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
         terrain_half_width = 0.5 * float(self.cfg.terrain.terrain_width)
         x_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
@@ -1920,11 +2005,11 @@ class HexGround(LeggedRobot):
                     row_bias = odd_bias if (row_idx % 2) == 0 else 0.0
                     shifted_row_x = sorted(float(local_x) + row_bias for local_x in base_row_x)
                     row_x_gaps = [shifted_row_x[i + 1] - shifted_row_x[i] for i in range(len(shifted_row_x) - 1)]
-                    if row_x_gaps and min(row_x_gaps) < min_x_gap - 1e-6:
+                    if row_x_gaps and min(row_x_gaps) < required_base_x_gap - 1e-6:
                         raise RuntimeError(
-                            "Fixed s_avoid row-x gap too small: "
+                            "Fixed s_avoid row-x gap too small for post-jitter contract: "
                             f"stage={stage}, layout={layout_name}, row={row_idx}, "
-                            f"min_gap={min(row_x_gaps):.3f}, required={min_x_gap:.3f}"
+                            f"min_gap={min(row_x_gaps):.3f}, required={required_base_x_gap:.3f}"
                         )
                     row_x_values = [(-float(local_x) if mirrored else float(local_x)) for local_x in shifted_row_x]
                     row_x_values = sorted(row_x_values)
@@ -2232,15 +2317,38 @@ class HexGround(LeggedRobot):
             }
         return presets
 
+    def _record_s_avoid_runtime_preset_diag(
+        self,
+        *,
+        stage: int,
+        retry_count: float,
+        sample_fail_count: float,
+        passage_fail_count: float,
+        analysis: dict,
+    ) -> None:
+        stage_id = int(stage)
+        stats = getattr(self, "s_avoid_runtime_preset_stats", {}).get(stage_id, None)
+        if stats is None:
+            return
+        stats["retry_total"] += float(retry_count)
+        stats["sample_fail_total"] += float(sample_fail_count)
+        stats["passage_fail_total"] += float(passage_fail_count)
+        stats["min_y_gap_total"] += float(analysis.get("min_lane_y_gap", 0.0))
+        stats["passage_depth_total"] += float(analysis.get("best_depth", 0.0))
+        stats["core_depth_total"] += float(analysis.get("core_depth", 0.0))
+        stats["count"] += 1.0
+        self._update_s_avoid_preset_diag_extras()
+
     def _update_s_avoid_preset_diag_extras(self):
         stage_id = int(getattr(self, "s_avoid_stage", 1))
-        stats = getattr(self, "s_avoid_preset_build_stats", {}).get(stage_id, {})
-        self.extras["avoid_preset_retry_mean"] = float(stats.get("retry_mean", 0.0))
-        self.extras["avoid_preset_sample_fail_mean"] = float(stats.get("sample_fail_mean", 0.0))
-        self.extras["avoid_preset_passage_fail_mean"] = float(stats.get("passage_fail_mean", 0.0))
-        self.extras["avoid_preset_min_y_gap_mean"] = float(stats.get("min_y_gap_mean", 0.0))
-        self.extras["avoid_preset_passage_depth_mean"] = float(stats.get("passage_depth_mean", 0.0))
-        self.extras["avoid_preset_core_depth_mean"] = float(stats.get("core_depth_mean", 0.0))
+        stats = getattr(self, "s_avoid_runtime_preset_stats", {}).get(stage_id, {})
+        denom = max(float(stats.get("count", 0.0)), 1.0)
+        self.extras["avoid_preset_retry_mean"] = float(stats.get("retry_total", 0.0) / denom)
+        self.extras["avoid_preset_sample_fail_mean"] = float(stats.get("sample_fail_total", 0.0) / denom)
+        self.extras["avoid_preset_passage_fail_mean"] = float(stats.get("passage_fail_total", 0.0) / denom)
+        self.extras["avoid_preset_min_y_gap_mean"] = float(stats.get("min_y_gap_total", 0.0) / denom)
+        self.extras["avoid_preset_passage_depth_mean"] = float(stats.get("passage_depth_total", 0.0) / denom)
+        self.extras["avoid_preset_core_depth_mean"] = float(stats.get("core_depth_total", 0.0) / denom)
 
     def _get_s_avoid_spawn_local_y(self, stage: int) -> float:
         return -1.6

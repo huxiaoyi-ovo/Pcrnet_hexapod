@@ -399,8 +399,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_fixed_row_y_spacing_scale = 1.5
         avoid_fixed_min_x_gap = 0.85
         avoid_fixed_min_row_y_gap = 0.85
-        avoid_fixed_row_x_odd = (-0.90, 0.00, 0.90)
-        avoid_fixed_row_x_even = (-0.45, 0.40)
+        avoid_fixed_row_x_odd = (-1.12, 0.00, 1.12)
+        avoid_fixed_row_x_even = (-0.60, 0.52)
         avoid_stage1_row_y = (0.80, 2.00)
         avoid_stage2_row_y = (0.70, 1.70, 2.70)
         avoid_stage3_row_y = (0.65, 1.55, 2.45, 3.35)
@@ -524,7 +524,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["time_penalty"] = -0.01
         reward_cfg["velocity_scale"] = 0.05
         reward_cfg["backward_scale"] = 0.0
-        reward_cfg["body_backward_scale"] = 2.0
+        reward_cfg["body_backward_scale"] = 0.0
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = -0.15
 
