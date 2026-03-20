@@ -393,6 +393,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_min_y_spacing_relax_ratio_min = 0.70
         avoid_use_fixed_presets = True
         avoid_fixed_presets_use_mirror = True
+        avoid_fixed_preset_jitter_xy = 0.08
+        avoid_fixed_preset_jitter_retry_attempts = 8
+        collision_force_threshold = 0.5
+        avoid_strict_contact_margin = 0.01
 
         avoid_spawn_clearance = 0.85
         avoid_spawn_extra_margin = 0.2
@@ -455,6 +459,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Avoid expert stage: no moving target actor (keep target non-collision by design).
         moving_target_enable = False
         spawn_edge_enable = False
+        max_ang_vel_command = 0.0
         goal_mode = "random"
         goal_min_distance = 2.0
         goal_range_x = [-0.7, 0.7]
@@ -481,7 +486,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["goal_approach_scale"] = 2.5
         reward_cfg["goal_reach_bonus"] = 4.0
         reward_cfg["goal_reach_threshold"] = 0.25
-        reward_cfg["heading_scale"] = 0.40
+        reward_cfg["heading_scale"] = 0.8
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["passable_sector_deg"] = 60.0
         reward_cfg["crossable_align_scale"] = 0.0
@@ -496,12 +501,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["backward_scale"] = 0.0
         reward_cfg["body_backward_scale"] = 2.0
         reward_cfg["turn_penalty_scale"] = 0.0
-        reward_cfg["yaw_rate_penalty"] = 0.0
+        reward_cfg["yaw_rate_penalty"] = -0.15
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
     class algorithm(HexGroundCfgPPO.algorithm):
-        entropy_coef = 0.015
+        entropy_coef = 0.03
 
     class runner(HexGroundCfgPPO.runner):
         experiment_name = "s_avoid_basic"

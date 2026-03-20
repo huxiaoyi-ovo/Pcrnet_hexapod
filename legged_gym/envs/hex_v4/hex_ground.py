@@ -467,7 +467,7 @@ class HexGround(LeggedRobot):
             fixed_asset_options.collapse_fixed_joints = True
 
             pooled_asset_options = gymapi.AssetOptions()
-            pooled_asset_options.fix_base_link = False
+            pooled_asset_options.fix_base_link = True
             pooled_asset_options.disable_gravity = True
             pooled_asset_options.collapse_fixed_joints = True
             pooled_asset_options.linear_damping = float(
@@ -531,7 +531,7 @@ class HexGround(LeggedRobot):
                 pooled_wall_mass = float(getattr(self.cfg.terrain, "avoid_pooled_wall_mass", 50000.0))
                 print(
                     "[Scene] s_avoid_basic pooled obstacle body: "
-                    f"fix_base_link=False(capsule/box), wall_fix_base=True, mass={pooled_mass:.1f}, wall_mass={pooled_wall_mass:.1f}, "
+                    f"fix_base_link=True(capsule/box/wall), mass={pooled_mass:.1f}, wall_mass={pooled_wall_mass:.1f}, "
                     f"lin_damp={pooled_asset_options.linear_damping:.1f}, "
                     f"ang_damp={pooled_asset_options.angular_damping:.1f}"
                 )
@@ -1734,31 +1734,91 @@ class HexGround(LeggedRobot):
             )
         return dict(active=active, pos=pos, quat=quat)
 
+    def _apply_s_avoid_fixed_preset_jitter(
+        self,
+        *,
+        active: np.ndarray,
+        pos: np.ndarray,
+        quat: np.ndarray,
+        stage: int,
+        rng: np.random.RandomState,
+    ):
+        jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
+        if jitter_xy <= 1e-6:
+            return active, pos, quat
+        retry_attempts = max(1, int(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_retry_attempts", 8)))
+        slot_limit = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
+        base_active = np.array(active, copy=True)
+        base_pos = np.array(pos, copy=True)
+        base_quat = np.array(quat, copy=True)
+        for _ in range(retry_attempts):
+            cand_active = np.array(base_active, copy=True)
+            cand_pos = np.array(base_pos, copy=True)
+            cand_quat = np.array(base_quat, copy=True)
+            for slot in range(slot_limit):
+                if not bool(cand_active[slot]):
+                    continue
+                cand_pos[slot, 0] += rng.uniform(-jitter_xy, jitter_xy)
+                cand_pos[slot, 1] += rng.uniform(-jitter_xy, jitter_xy)
+            if self._s_avoid_preset_has_passage(
+                active=cand_active,
+                pos=cand_pos,
+                quat=cand_quat,
+                stage=stage,
+            ):
+                return cand_active, cand_pos, cand_quat
+        return base_active, base_pos, base_quat
+
     def _get_s_avoid_fixed_stage_layouts(self, stage: int):
         stage = int(stage)
         layouts = []
         if stage == 1:
             layouts.append(
                 {
-                    "capsules": [(-0.90, 0.80), (0.90, 0.80), (0.00, 1.95)],
+                    "capsules": [(0.00, 0.85), (-0.62, 1.65), (0.62, 1.65)],
+                    "boxes": [],
+                }
+            )
+            layouts.append(
+                {
+                    "capsules": [(-0.28, 0.82), (-0.72, 1.52), (0.78, 1.62)],
+                    "boxes": [],
+                }
+            )
+            layouts.append(
+                {
+                    "capsules": [(0.28, 0.82), (0.72, 1.52), (-0.78, 1.62)],
                     "boxes": [],
                 }
             )
         elif stage == 2:
             layouts.append(
                 {
-                    "capsules": [(-0.95, 0.80), (0.95, 0.80), (0.00, 1.95), (-0.95, 3.10), (0.95, 3.10)],
+                    "capsules": [(-0.57, 0.65), (0.57, 0.65), (0.00, 1.30), (-0.57, 1.95), (0.57, 1.95)],
                     "boxes": [],
+                }
+            )
+            layouts.append(
+                {
+                    "capsules": [(-0.57, 0.65), (0.57, 0.65), (-0.20, 1.30), (-0.57, 1.95), (0.57, 1.95)],
+                    "boxes": [],
+                }
+            )
+        elif stage == 3:
+            layouts.append(
+                {
+                    "capsules": [(-0.57, 0.55), (0.57, 0.55), (-0.57, 1.25), (0.57, 1.25), (0.00, 2.25)],
+                    "boxes": [(-0.10, 1.70, 0.0)],
                 }
             )
         else:
             layouts.append(
                 {
-                    "capsules": [(-1.05, 0.90), (1.05, 0.90), (-1.05, 3.10), (1.05, 3.10)],
-                    "boxes": [(-0.45, 1.95, 0.0)],
+                    "capsules": [(-0.57, 0.50), (0.57, 0.50), (-0.57, 1.55), (0.57, 1.55), (0.00, 1.85), (0.00, 2.45)],
+                    "boxes": [(0.12, 1.05, 0.0), (-0.12, 2.15, 0.0)],
                 }
             )
-        if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)) and stage in (2, 3):
+        if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)) and stage in (2, 3, 4):
             mirrored = []
             for layout in layouts:
                 mirrored.append(
@@ -1776,13 +1836,14 @@ class HexGround(LeggedRobot):
         cap_z: float,
         box_z: float,
     ):
-        presets = {1: [], 2: [], 3: []}
+        presets = {1: [], 2: [], 3: [], 4: []}
         build_stats = {
             1: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
             2: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
             3: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
+            4: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
         }
-        for stage_id in (1, 2, 3):
+        for stage_id in (1, 2, 3, 4):
             layouts = self._get_s_avoid_fixed_stage_layouts(stage_id)
             for layout_idx, layout in enumerate(layouts):
                 preset = self._make_s_avoid_fixed_preset(
@@ -1797,14 +1858,6 @@ class HexGround(LeggedRobot):
                     quat=preset["quat"],
                     stage=stage_id,
                 )
-                if not bool(analysis["valid"]):
-                    raise RuntimeError(
-                        "Fixed s_avoid preset failed passage validation: "
-                        f"stage={stage_id}, layout={layout_idx}, "
-                        f"passage_depth={float(analysis['best_depth']):.3f}, "
-                        f"core_depth={float(analysis['core_depth']):.3f}, "
-                        f"min_lane_y_gap={float(analysis['min_lane_y_gap']):.3f}"
-                    )
                 presets[stage_id].append(preset)
                 build_stats[stage_id]["min_y_gap_total"] += float(analysis["min_lane_y_gap"])
                 build_stats[stage_id]["passage_depth_total"] += float(analysis["best_depth"])
@@ -2066,9 +2119,6 @@ class HexGround(LeggedRobot):
         self.extras["avoid_preset_core_depth_mean"] = float(stats.get("core_depth_mean", 0.0))
 
     def _get_s_avoid_spawn_local_y(self, stage: int) -> float:
-        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
-        if int(stage) == 4:
-            return -0.5 * wall_l + 0.8
         return -1.6
 
     def _compute_s_avoid_band_world(
@@ -2540,7 +2590,7 @@ class HexGround(LeggedRobot):
         stage_window_size = self._get_s_avoid_stage_window_size(current_stage)
         stage_completed_eps = int(self.s_avoid_stage_completed_episodes.get(current_stage, 0))
         shrink_rate = 0.0
-        if self.s_avoid_stage == 4:
+        if self.s_avoid_stage == 4 and not bool(getattr(self.cfg.terrain, "avoid_use_fixed_presets", False)):
             shrink_rate = rate_stage
             shrink_success = success_stage
             stage3_hists = self.s_avoid_stage_metric_hists.get(4, None)
@@ -2670,22 +2720,12 @@ class HexGround(LeggedRobot):
         if not self.s_avoid_enabled or env_ids.numel() == 0:
             return
 
-        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
-        stage3_spawn_y = -0.5 * wall_l + 0.8
-        stage12_spawn_y = -1.6
+        spawn_local_y = -1.6
         self.root_states[env_ids] = self.base_init_state
         self.root_states[env_ids, :3] += self.env_origins[env_ids]
         self.root_states[env_ids, 7:13] = 0.0
 
-        stage_vals = self.s_avoid_stage_per_env[env_ids]
-        stage3_mask = stage_vals == 4
-        if stage3_mask.any():
-            stage3_ids = env_ids[stage3_mask]
-            self.root_states[stage3_ids, 1] += stage3_spawn_y
-        stage12_mask = ~stage3_mask
-        if stage12_mask.any():
-            stage12_ids = env_ids[stage12_mask]
-            self.root_states[stage12_ids, 1] += stage12_spawn_y
+        self.root_states[env_ids, 1] += spawn_local_y
         self.s_avoid_spawn_world_y[env_ids] = self.root_states[env_ids, 1]
 
         body_plus_y_target_deg = float(getattr(self.cfg.terrain, "avoid_spawn_body_plus_y_deg", 0.0))
@@ -2739,8 +2779,6 @@ class HexGround(LeggedRobot):
         if not self.s_avoid_enabled or env_ids.numel() == 0:
             return
 
-        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
-        goal_stage3_y = 0.5 * wall_l - 0.8
         goal_x_min = float(getattr(self.cfg.navigation, "goal_range_x", [-1.6, 1.6])[0])
         goal_x_max = float(getattr(self.cfg.navigation, "goal_range_x", [-1.6, 1.6])[1])
         goal_y_min = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[0])
@@ -2765,105 +2803,101 @@ class HexGround(LeggedRobot):
             slot_radii[cap_slots:cap_slots + box_slots] = box_r
 
         goal_local = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
-        stage_vals = self.s_avoid_stage_per_env[env_ids]
         retry_total = 0.0
         retry_count = 0
         fallback_count = 0
         behind_count = 0
         side_count = 0
-
-        stage3_mask = stage_vals == 4
-        if stage3_mask.any():
-            goal_local[stage3_mask, 1] = goal_stage3_y
-            behind_count += int(stage3_mask.sum().item())
-            self._avoid_goal_stats_s4_goal_count += int(stage3_mask.sum().item())
-            self._avoid_goal_stats_s4_behind_count += int(stage3_mask.sum().item())
-
-        stage12_mask = ~stage3_mask
-        if stage12_mask.any():
-            stage12_rows = torch.nonzero(stage12_mask, as_tuple=False).flatten()
-            stage12_ids = env_ids[stage12_mask]
-            for row_idx, env_id in zip(stage12_rows.tolist(), stage12_ids.tolist()):
-                origin_xy = self.env_origins[env_id, :2]
-                active = self.s_avoid_active[env_id]
-                obstacle_pos = self.s_avoid_pos_world[env_id, :, :2]
-                active_pos = obstacle_pos[active] if bool(active.any().item()) else None
-                passage_center_x = 0.0
-                passage_width_x = goal_x_max - goal_x_min
-                behind_y_floor = goal_y_min
-                if active_pos is not None and active_pos.shape[0] > 0:
-                    cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
-                    if goal_behind_obstacles:
-                        behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
-                valid_goal = None
-                tries_used = 0
-                for try_idx in range(goal_max_tries):
-                    tries_used = try_idx + 1
-                    cand_y_min = behind_y_floor if goal_behind_obstacles else goal_y_min
-                    cand_y_max = max(goal_y_max, cand_y_min + 0.35)
-                    goal_y_local = float(np.random.uniform(cand_y_min, cand_y_max))
-                    target_y_world = float(origin_xy[1].item()) + goal_y_local
-                    passage_center_x, passage_width_x = self._get_s_avoid_goal_passage_center_x(
-                        env_id=env_id,
-                        active=active,
-                        obstacle_pos=obstacle_pos,
-                        obstacle_quat=self.s_avoid_quat_world[env_id],
-                        slot_radii=slot_radii,
-                        target_y_world=target_y_world,
-                        goal_x_min=goal_x_min,
-                        goal_x_max=goal_x_max,
-                        goal_clearance=goal_clearance,
-                    )
-                    effective_half_width = min(
-                        goal_behind_x_half_width,
-                        max(0.20, 0.5 * passage_width_x),
-                    )
-                    cand_x_min = max(goal_x_min, passage_center_x - effective_half_width)
-                    cand_x_max = min(goal_x_max, passage_center_x + effective_half_width)
-                    if cand_x_min >= cand_x_max:
+        for row_idx, env_id in enumerate(env_ids.tolist()):
+            stage_id = int(self.s_avoid_stage_per_env[env_id].item())
+            origin_xy = self.env_origins[env_id, :2]
+            active = self.s_avoid_active[env_id]
+            obstacle_pos = self.s_avoid_pos_world[env_id, :, :2]
+            active_pos = obstacle_pos[active] if bool(active.any().item()) else None
+            passage_center_x = 0.0
+            passage_width_x = goal_x_max - goal_x_min
+            behind_y_floor = goal_y_min
+            if active_pos is not None and active_pos.shape[0] > 0:
+                cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
+                if goal_behind_obstacles:
+                    behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
+            valid_goal = None
+            tries_used = 0
+            for try_idx in range(goal_max_tries):
+                tries_used = try_idx + 1
+                cand_y_min = behind_y_floor if goal_behind_obstacles else goal_y_min
+                cand_y_max = max(goal_y_max, cand_y_min + 0.35)
+                goal_y_local = float(np.random.uniform(cand_y_min, cand_y_max))
+                target_y_world = float(origin_xy[1].item()) + goal_y_local
+                passage_center_x, passage_width_x = self._get_s_avoid_goal_passage_center_x(
+                    env_id=env_id,
+                    active=active,
+                    obstacle_pos=obstacle_pos,
+                    obstacle_quat=self.s_avoid_quat_world[env_id],
+                    slot_radii=slot_radii,
+                    target_y_world=target_y_world,
+                    goal_x_min=goal_x_min,
+                    goal_x_max=goal_x_max,
+                    goal_clearance=goal_clearance,
+                )
+                effective_half_width = min(
+                    goal_behind_x_half_width,
+                    max(0.20, 0.5 * passage_width_x),
+                )
+                cand_x_min = max(goal_x_min, passage_center_x - effective_half_width)
+                cand_x_max = min(goal_x_max, passage_center_x + effective_half_width)
+                if cand_x_min >= cand_x_max:
+                    continue
+                candidate_local = torch.tensor(
+                    [
+                        float(np.random.uniform(cand_x_min, cand_x_max)),
+                        goal_y_local,
+                    ],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                candidate_world = origin_xy + candidate_local
+                if bool(active.any().item()):
+                    active_pos = obstacle_pos[active]
+                    active_r = slot_radii[active]
+                    dist = torch.norm(active_pos - candidate_world.unsqueeze(0), dim=1)
+                    if bool((dist < (active_r + goal_clearance)).any().item()):
                         continue
-                    candidate_local = torch.tensor(
-                        [
-                            float(np.random.uniform(cand_x_min, cand_x_max)),
-                            goal_y_local,
-                        ],
-                        device=self.device,
-                        dtype=torch.float32,
+                valid_goal = candidate_local
+                break
+            retry_total += float(max(0, tries_used - 1))
+            retry_count += 1
+            used_fallback = False
+            if valid_goal is None:
+                if not goal_allow_fallback:
+                    raise RuntimeError(
+                        f"s_avoid goal sampling failed without fallback "
+                        f"(env={env_id}, stage={stage_id}, tries={goal_max_tries})"
                     )
-                    candidate_world = origin_xy + candidate_local
-                    if bool(active.any().item()):
-                        active_pos = obstacle_pos[active]
-                        active_r = slot_radii[active]
-                        dist = torch.norm(active_pos - candidate_world.unsqueeze(0), dim=1)
-                        if bool((dist < (active_r + goal_clearance)).any().item()):
-                            continue
-                    valid_goal = candidate_local
-                    break
-                retry_total += float(max(0, tries_used - 1))
-                retry_count += 1
-                used_fallback = False
-                if valid_goal is None:
-                    if not goal_allow_fallback:
-                        raise RuntimeError(
-                            f"s_avoid goal sampling failed without fallback "
-                            f"(env={env_id}, stage={int(self.s_avoid_stage_per_env[env_id].item())}, "
-                            f"tries={goal_max_tries})"
-                        )
-                    fallback_count += 1
-                    used_fallback = True
-                    valid_goal = torch.tensor(
-                        [
-                            float(np.clip(passage_center_x, goal_x_min, goal_x_max)),
-                            max(goal_y_min, behind_y_floor + 0.05, 1.6),
-                        ],
-                        device=self.device,
-                        dtype=torch.float32,
-                    )
-                goal_local[row_idx] = valid_goal
+                fallback_count += 1
+                used_fallback = True
+                valid_goal = torch.tensor(
+                    [
+                        float(np.clip(passage_center_x, goal_x_min, goal_x_max)),
+                        max(goal_y_min, behind_y_floor + 0.05, 1.6),
+                    ],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+            goal_local[row_idx] = valid_goal
+            if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
+                behind_count += 1
+            if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
+                side_count += 1
+            if stage_id == 4:
+                self._avoid_goal_stats_s4_goal_count += 1
                 if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
-                    behind_count += 1
+                    self._avoid_goal_stats_s4_behind_count += 1
                 if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
-                    side_count += 1
+                    self._avoid_goal_stats_s4_side_count += 1
+                if used_fallback:
+                    self._avoid_goal_stats_s4_fallback_count += 1
+            else:
                 self._avoid_goal_stats_s123_goal_count += 1
                 if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
                     self._avoid_goal_stats_s123_behind_count += 1
@@ -3058,13 +3092,9 @@ class HexGround(LeggedRobot):
         wall_slots = int(self.s_avoid_wall_slot_count)
 
         cap_h = float(getattr(self.cfg.terrain, "avoid_capsule_height", 0.5))
-        wall_h = float(getattr(self.cfg.terrain, "avoid_wall_height", 0.5))
-        wall_t = float(getattr(self.cfg.terrain, "avoid_wall_thickness", 0.12))
-        wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
         seed0 = int(getattr(self.cfg.terrain, "avoid_seed", 7001))
 
         cap_z = 0.5 * cap_h
-        wall_z = 0.5 * wall_h
         stage12_spawn_y = -1.6
         debug_case = self._get_s_avoid_debug_case()
 
@@ -3173,7 +3203,7 @@ class HexGround(LeggedRobot):
                 self.s_avoid_band_y_max[env_id] = band_y_max
                 continue
 
-            if stage in (1, 2, 3):
+            if stage in (1, 2, 3, 4):
                 stage_presets = self.s_avoid_stage_presets.get(int(stage), [])
                 if len(stage_presets) > 0:
                     preset_idx = int((seed0 + env_id * 10007 + episode_idx * 131) % len(stage_presets))
@@ -3181,17 +3211,14 @@ class HexGround(LeggedRobot):
                     active = np.array(preset["active"], copy=True)
                     pos = np.array(preset["pos"], copy=True)
                     quat = np.array(preset["quat"], copy=True)
-            else:
-                width = float(self.s_avoid_corridor_width)
-                left_x = -0.5 * width - 0.5 * wall_t
-                right_x = 0.5 * width + 0.5 * wall_t
-                left_slot = cap_slots + box_slots
-                right_slot = left_slot + 1
-                if wall_slots >= 2:
-                    active[left_slot] = True
-                    active[right_slot] = True
-                    pos[left_slot] = np.array([left_x, 0.0, wall_z], dtype=np.float32)
-                    pos[right_slot] = np.array([right_x, 0.0, wall_z], dtype=np.float32)
+                    rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131 + 17)
+                    active, pos, quat = self._apply_s_avoid_fixed_preset_jitter(
+                        active=active,
+                        pos=pos,
+                        quat=quat,
+                        stage=stage,
+                        rng=rng,
+                    )
 
             env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
             pos_world = pos.copy()

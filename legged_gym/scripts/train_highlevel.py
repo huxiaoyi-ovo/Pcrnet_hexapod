@@ -2268,6 +2268,7 @@ class HierarchicalHexapodEnv:
         collision_indices_src = None
         contact_norm = None
         obstacle_contact_candidate_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        strict_obstacle_contact_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         obstacle_contact_candidate_min_clearance = torch.full(
             (self.num_envs,), 5.0, dtype=torch.float32, device=self.device
         )
@@ -2347,9 +2348,16 @@ class HierarchicalHexapodEnv:
                         torch.full_like(body_min_clearance, 5.0),
                         body_min_clearance,
                     )
+                    strict_contact_margin = float(
+                        getattr(self.env.cfg.terrain, "avoid_strict_contact_margin", 0.01)
+                    )
+                    strict_obstacle_contact_mask = (
+                        obstacle_contact_candidate_min_clearance <= strict_contact_margin
+                    )
                     obstacle_contact_candidate_mask = (
                         obstacle_contact_candidate_min_clearance <= obstacle_contact_margin
-                    ) & collision_mask
+                    )
+                    collision_mask = collision_mask | strict_obstacle_contact_mask
         if self.clearance_override is not None:
             clearance = self.clearance_override
             self.clearance_override = None
@@ -2770,6 +2778,7 @@ class HierarchicalHexapodEnv:
             'collision_threshold_src': collision_threshold_src,
             'collision_indices_src': collision_indices_src,
             'obstacle_contact_candidate_mask': obstacle_contact_candidate_mask,
+            'strict_obstacle_contact_mask': strict_obstacle_contact_mask,
             'obstacle_contact_candidate_min_clearance': obstacle_contact_candidate_min_clearance,
             'avoid_band_active_mask': avoid_band_active_mask,
             'avoid_band_outside_dist': avoid_band_outside_dist,
@@ -3645,6 +3654,7 @@ def train(args):
         goal_dist_sum = torch.zeros((), device=device)
         collision_rate_sum = torch.zeros((), device=device)
         obstacle_contact_candidate_rate_sum = torch.zeros((), device=device)
+        strict_obstacle_contact_rate_sum = torch.zeros((), device=device)
         obstacle_contact_candidate_min_clearance_sum = torch.zeros((), device=device)
         avoid_band_active_rate_sum = torch.zeros((), device=device)
         avoid_band_outside_dist_sum = torch.zeros((), device=device)
@@ -4345,6 +4355,9 @@ def train(args):
             obstacle_contact_candidate_mask = env_info.get('obstacle_contact_candidate_mask', None) if env_info is not None else None
             if obstacle_contact_candidate_mask is not None:
                 obstacle_contact_candidate_rate_sum += obstacle_contact_candidate_mask.float().sum()
+            strict_obstacle_contact_mask = env_info.get('strict_obstacle_contact_mask', None) if env_info is not None else None
+            if strict_obstacle_contact_mask is not None:
+                strict_obstacle_contact_rate_sum += strict_obstacle_contact_mask.float().sum()
             obstacle_contact_candidate_min_clearance = env_info.get('obstacle_contact_candidate_min_clearance', None) if env_info is not None else None
             if obstacle_contact_candidate_min_clearance is not None:
                 obstacle_contact_candidate_min_clearance_sum += obstacle_contact_candidate_min_clearance.sum()
@@ -5097,6 +5110,7 @@ def train(args):
         resid_rollout = rollout_mean_step_reward - breakdown_total_mean
         collision_rate_mean = (collision_rate_sum / total_samples).item()
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
+        strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
         obstacle_contact_candidate_min_clearance_mean = (
             obstacle_contact_candidate_min_clearance_sum / total_samples
         ).item()
@@ -5167,6 +5181,7 @@ def train(args):
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateRate', obstacle_contact_candidate_rate_mean, iteration)
+        writer.add_scalar('Diag/StrictObstacleContactRate', strict_obstacle_contact_rate_mean, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateMinClearance', obstacle_contact_candidate_min_clearance_mean, iteration)
         writer.add_scalar('Diag/AvoidBandActiveRate', avoid_band_active_rate_mean, iteration)
         writer.add_scalar('Diag/AvoidBandOutsideDist', avoid_band_outside_dist_mean, iteration)
@@ -5323,7 +5338,7 @@ def train(args):
                     f"""{'Avoid goal S4 behind/side/fb:':>{pad}} {((avoid_goal_behind_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f} / {((avoid_goal_side_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f} / {((avoid_goal_fallback_count_s4_iter / avoid_goal_count_s4_iter) if avoid_goal_count_s4_iter > 0.0 else 0.0):.3f}\n"""
                     f"""{'Avoid stuck/near-miss:':>{pad}} {stuck_ratio:.3f} / {near_miss_ratio:.3f}\n"""
                     f"""{'Avoid band out/active:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {avoid_band_active_rate_mean:.3f}\n"""
-                    f"""{'Avoid obs-hit cand/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
+                          f"""{'Avoid obs-hit cand/strict/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {strict_obstacle_contact_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
                 )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
