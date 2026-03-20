@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-20 avoid 四阶段横向收紧与穿障止损
+
+- [x] ~~[P0] 收紧 `s_avoid` 四阶段固定模板的离散障碍横向间距，同时补基于障碍真实几何的严格穿入判定，避免策略继续利用穿障样本污染训练结论~~
+
 ## 2026-03-17 actor 障碍碰撞口径纠正
 
 - [x] ~~[P0] 按 Isaac Gym 官方 group/filter 语义修正 actor 障碍碰撞设置：同 env 内 robot/obstacle 保持同组，scene filter 改回 0，先恢复真实物理碰撞~~
@@ -1535,3 +1539,15 @@
 - [x] Must: 将 `stage1/2/3/4` 的固定障碍模板在 `x/y` 两个方向的相对间距整体拉大，优先解决“根本过不去”的几何问题
 - [x] Must: 将 `band/core/goal` 的范围同步放大，避免新模板仍然被旧的小范围采样与诊断口径截断
 - [x] Must: 先排除“模板过紧 + reset 初始重叠”导致 viewer 看起来像穿过障碍的基础问题，再继续判断策略本身
+
+## 2026-03-20 avoid 命令数值止损 - 零缩放维 NaN 修复
+
+- [x] Must: 修复 `CmdVelExpert.evaluate_actions` 在禁用动作维（如 `omega scale=0`）上的反变换 NaN
+- [x] Must: 禁用动作维不再参与 `log_prob/entropy`，避免继续污染 `avoid` 训练统计
+- [x] Must: 重新跑最小 `s_avoid_basic` smoke，确认训练不再在 `cmd_raw[...,2]` 处中断
+
+## 2026-03-20 avoid 固定模板改成三列交错布局
+
+- [x] Must: 将固定模板中原本每行 2 个主障碍的布局收成每行 3 个主障碍，保证行间横向错位
+- [x] Must: 在保持 `x/y` 双方向可通过的前提下重排 `stage1~4` 坐标，不去改奖励与课程逻辑
+- [x] Must: 回跑最小 `s_avoid_basic` smoke，确认新三列模板仍能通过当前几何验收并正常训练

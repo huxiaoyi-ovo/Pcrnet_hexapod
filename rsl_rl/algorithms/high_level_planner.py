@@ -676,17 +676,29 @@ class CmdVelExpert(nn.Module):
             critic_terrain_difficulty=critic_terrain_difficulty,
         )
 
-        cmd_norm = cmd_action / self.cmd_scale
+        zero_scale_mask = self.cmd_scale.abs() <= 1e-6
+        safe_cmd_scale = torch.where(zero_scale_mask, torch.ones_like(self.cmd_scale), self.cmd_scale)
+        cmd_norm = cmd_action / safe_cmd_scale
+        if zero_scale_mask.any():
+            cmd_norm = torch.where(zero_scale_mask.view(1, -1), torch.zeros_like(cmd_norm), cmd_norm)
         cmd_norm = torch.clamp(cmd_norm, -0.999999, 0.999999)
         cmd_raw = torch.atanh(cmd_norm)
 
         cmd_dist = Normal(out.cmd_mean, out.cmd_std)
         log_prob_raw = cmd_dist.log_prob(cmd_raw)
         log_det_jacobian = 2.0 * (np.log(2.0) - cmd_raw - F.softplus(-2.0 * cmd_raw))
+        if zero_scale_mask.any():
+            active_dim_mask = (~zero_scale_mask).to(device=cmd_raw.device, dtype=cmd_raw.dtype).view(1, -1)
+            log_prob_raw = log_prob_raw * active_dim_mask
+            log_det_jacobian = log_det_jacobian * active_dim_mask
         cmd_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
         cmd_entropy_raw = cmd_dist.rsample()
         cmd_entropy_log_prob_raw = cmd_dist.log_prob(cmd_entropy_raw)
         cmd_entropy_log_det = 2.0 * (np.log(2.0) - cmd_entropy_raw - F.softplus(-2.0 * cmd_entropy_raw))
+        if zero_scale_mask.any():
+            active_dim_mask = (~zero_scale_mask).to(device=cmd_entropy_raw.device, dtype=cmd_entropy_raw.dtype).view(1, -1)
+            cmd_entropy_log_prob_raw = cmd_entropy_log_prob_raw * active_dim_mask
+            cmd_entropy_log_det = cmd_entropy_log_det * active_dim_mask
         cmd_entropy = -(cmd_entropy_log_prob_raw - cmd_entropy_log_det).sum(dim=-1)
 
         return cmd_log_prob, out.value, cmd_entropy, None

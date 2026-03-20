@@ -712,6 +712,72 @@ class HexGround(LeggedRobot):
         lane_z = 0.25
         return lane_x, lane_y, lane_z
 
+    def _compute_s_avoid_strict_penetration_mask(self) -> torch.Tensor:
+        if (not self.s_avoid_enabled) or (self.s_avoid_total_slots <= 0):
+            return torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+
+        robot_xy = self.root_states[:, :2]
+        active = self.s_avoid_active
+        obstacle_xy = self.s_avoid_pos_world[:, :, :2]
+        obstacle_quat = self.s_avoid_quat_world
+
+        robot_radius = float(
+            max(
+                getattr(self.cfg.terrain, "scene_clearance", 0.27),
+                getattr(self.cfg.terrain, "fixed_layout_robot_clearance", 0.27),
+            )
+        )
+        margin = float(getattr(self.cfg.terrain, "avoid_strict_contact_margin", 0.01))
+        inflate = robot_radius + margin
+
+        cap_slots = int(self.s_avoid_capsule_slot_count)
+        box_end = cap_slots + int(self.s_avoid_box_slot_count)
+        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        box_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_y", 0.4))
+        wall_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
+
+        penetration_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        rel_xy = robot_xy.unsqueeze(1) - obstacle_xy
+
+        if cap_slots > 0:
+            cap_dist = torch.norm(rel_xy[:, :cap_slots, :], dim=-1)
+            cap_hit = cap_dist <= (cap_r + inflate)
+            penetration_mask |= torch.any(active[:, :cap_slots] & cap_hit, dim=1)
+
+        for slot in range(cap_slots, int(self.s_avoid_total_slots)):
+            slot_active = active[:, slot]
+            if not bool(slot_active.any().item()):
+                continue
+            if slot < box_end:
+                half_x = box_hx + inflate
+                half_y = box_hy + inflate
+            else:
+                half_x = wall_hx + inflate
+                half_y = wall_hy + inflate
+            dx = rel_xy[:, slot, 0]
+            dy = rel_xy[:, slot, 1]
+            qz = obstacle_quat[:, slot, 2]
+            qw = obstacle_quat[:, slot, 3]
+            yaw = 2.0 * torch.atan2(qz, qw)
+            cos_yaw = torch.cos(yaw)
+            sin_yaw = torch.sin(yaw)
+            local_x = cos_yaw * dx + sin_yaw * dy
+            local_y = -sin_yaw * dx + cos_yaw * dy
+            slot_hit = (torch.abs(local_x) <= half_x) & (torch.abs(local_y) <= half_y)
+            penetration_mask |= slot_active & slot_hit
+
+        return penetration_mask
+
+    def check_termination(self):
+        super().check_termination()
+        if not self.s_avoid_enabled:
+            return
+        strict_penetration = self._compute_s_avoid_strict_penetration_mask()
+        self.reset_buf |= strict_penetration
+        self.extras["avoid_strict_penetration_rate"] = float(strict_penetration.float().mean().item())
+
     def _on_create_robot(self, env_id, env_handle, actor_handle):
         if hasattr(self, "robot_actor_indices"):
             self.robot_actor_indices[env_id] = self.gym.get_actor_index(
@@ -1775,47 +1841,47 @@ class HexGround(LeggedRobot):
         if stage == 1:
             layouts.append(
                 {
-                    "capsules": [(0.00, 1.00), (-1.24, 2.60), (1.24, 2.60)],
+                    "capsules": [(-0.15, 1.00), (1.05, 1.00), (1.65, 1.00), (-0.45, 2.60), (1.05, 2.60), (1.65, 2.60)],
                     "boxes": [],
                 }
             )
             layouts.append(
                 {
-                    "capsules": [(-0.56, 0.95), (-1.44, 2.55), (1.56, 2.70)],
+                    "capsules": [(-0.15, 0.95), (0.75, 0.95), (1.65, 0.95), (-0.15, 2.55), (1.05, 2.55), (1.65, 2.55)],
                     "boxes": [],
                 }
             )
             layouts.append(
                 {
-                    "capsules": [(0.56, 0.95), (1.44, 2.55), (-1.56, 2.70)],
+                    "capsules": [(0.15, 1.00), (-1.05, 1.00), (-1.65, 1.00), (0.45, 2.60), (-1.05, 2.60), (-1.65, 2.60)],
                     "boxes": [],
                 }
             )
         elif stage == 2:
             layouts.append(
                 {
-                    "capsules": [(-1.14, 0.80), (1.14, 0.80), (0.00, 2.10), (-1.14, 3.40), (1.14, 3.40)],
+                    "capsules": [(-0.15, 0.80), (1.05, 0.80), (1.65, 0.80), (-0.45, 3.40), (1.05, 3.40), (1.65, 3.40)],
                     "boxes": [],
                 }
             )
             layouts.append(
                 {
-                    "capsules": [(-1.14, 0.80), (1.14, 0.80), (-0.40, 2.10), (-1.14, 3.40), (1.14, 3.40)],
+                    "capsules": [(-0.15, 0.80), (0.75, 0.80), (1.65, 0.80), (-0.15, 3.40), (1.05, 3.40), (1.65, 3.40)],
                     "boxes": [],
                 }
             )
         elif stage == 3:
             layouts.append(
                 {
-                    "capsules": [(-1.14, 0.75), (1.14, 0.75), (-1.14, 2.15), (1.14, 2.15), (0.00, 4.15)],
-                    "boxes": [(-0.20, 3.05, 0.0)],
+                    "capsules": [(-0.15, 0.75), (1.05, 0.75), (1.65, 0.75), (-0.45, 2.15), (1.05, 2.15), (1.65, 2.15)],
+                    "boxes": [(0.25, 3.05, 0.0)],
                 }
             )
         else:
             layouts.append(
                 {
-                    "capsules": [(-1.14, 0.70), (1.14, 0.70), (-1.14, 3.00), (1.14, 3.00), (0.00, 3.60), (0.00, 5.00)],
-                    "boxes": [(0.24, 1.80, 0.0), (-0.24, 4.30, 0.0)],
+                    "capsules": [(-0.15, 0.70), (1.05, 0.70), (1.65, 0.70), (-0.45, 3.00), (1.05, 3.00), (1.65, 3.00)],
+                    "boxes": [(0.45, 1.80, 0.0), (-0.05, 4.30, 0.0)],
                 }
             )
         if bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True)) and stage in (2, 3, 4):
