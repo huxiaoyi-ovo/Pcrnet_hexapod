@@ -2874,12 +2874,35 @@ class HexGround(LeggedRobot):
         )
         self._update_s_avoid_preset_diag_extras()
 
+    def _get_s_avoid_cross_line_dist(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.float32)
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
+        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        cross_line_y = torch.full_like(
+            robot_local_y,
+            float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)) + 0.3,
+        )
+        for stage_v in (1, 2, 3, 4):
+            stage_last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_v}_last_row_y", 2.0))
+            cross_line_y = torch.where(
+                stage_ids.to(device=self.device) == stage_v,
+                torch.full_like(robot_local_y, stage_last_row_y + 0.3),
+                cross_line_y,
+            )
+        return torch.clamp(cross_line_y - robot_local_y, min=0.0)
+
     def _reset_s_avoid_episode_progress(self, env_ids: torch.Tensor) -> None:
-        if (not self.s_avoid_enabled) or env_ids.numel() == 0 or (not hasattr(self, "goal_world")):
+        if (not self.s_avoid_enabled) or env_ids.numel() == 0:
             return
-        goal_dist = torch.norm(self.goal_world[env_ids] - self.root_states[env_ids, :2], dim=1)
-        self.s_avoid_episode_goal_init_dist[env_ids] = goal_dist
-        self.s_avoid_episode_goal_best_dist[env_ids] = goal_dist
+        cross_line_dist = self._get_s_avoid_cross_line_dist(env_ids)
+        self.s_avoid_episode_goal_init_dist[env_ids] = cross_line_dist
+        self.s_avoid_episode_goal_best_dist[env_ids] = cross_line_dist
 
     def _get_s_avoid_episode_progress_flags(
         self,
@@ -2918,22 +2941,10 @@ class HexGround(LeggedRobot):
             return torch.zeros(0, device=self.device, dtype=torch.bool)
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
-        best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
-        success_dist12 = float(getattr(self.cfg.terrain, "avoid_stage12_success_distance", 0.80))
-        success_dist23 = float(getattr(self.cfg.terrain, "avoid_stage23_success_distance", success_dist12))
-        success_dist34 = float(getattr(self.cfg.terrain, "avoid_stage34_success_distance", success_dist23))
-        thresholds = torch.full_like(best_dist, success_dist34)
-        thresholds = torch.where(
-            stage_ids.to(device=self.device) == 1,
-            torch.full_like(best_dist, success_dist12),
-            thresholds,
-        )
-        thresholds = torch.where(
-            stage_ids.to(device=self.device) == 2,
-            torch.full_like(best_dist, success_dist23),
-            thresholds,
-        )
-        return best_dist <= thresholds
+        cross_line_dist = self._get_s_avoid_cross_line_dist(env_ids, stage_ids=stage_ids)
+        crossed = cross_line_dist <= 0.0
+        collision_free = ~self.s_avoid_episode_collision[env_ids]
+        return crossed & collision_free
 
     def _resolve_s_avoid_stage(self, env_id: int, episode_idx: Optional[int] = None) -> int:
         debug_case = str(getattr(self.cfg.terrain, "avoid_map_debug_case", "")).strip().lower()
@@ -3011,151 +3022,35 @@ class HexGround(LeggedRobot):
         if not self.s_avoid_enabled or env_ids.numel() == 0:
             return
 
-        goal_x_min = float(getattr(self.cfg.navigation, "goal_range_x", [-1.6, 1.6])[0])
-        goal_x_max = float(getattr(self.cfg.navigation, "goal_range_x", [-1.6, 1.6])[1])
-        goal_y_min = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[0])
-        goal_y_max = float(getattr(self.cfg.navigation, "goal_range_y", [1.2, 2.8])[1])
-        goal_max_tries = int(getattr(self.cfg.navigation, "goal_sample_max_tries", 32))
-        goal_allow_fallback = bool(getattr(self.cfg.navigation, "goal_allow_fallback", True))
-        goal_behind_obstacles = bool(getattr(self.cfg.navigation, "goal_behind_obstacles", True))
-        goal_behind_margin_y = float(getattr(self.cfg.navigation, "goal_behind_margin_y", 0.35))
-        goal_behind_x_half_width = float(getattr(self.cfg.navigation, "goal_behind_x_half_width", 0.45))
-        goal_side_threshold = float(getattr(self.cfg.navigation, "goal_side_threshold", 0.55))
-        goal_clearance = float(getattr(self.cfg.terrain, "avoid_spawn_clearance", 0.5))
-        cap_slots = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 0))
-        box_slots = int(getattr(self.cfg.terrain, "avoid_box_slots", 0))
-        cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
-        box_hx = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_x", 0.4))
-        box_hy = 0.5 * float(getattr(self.cfg.terrain, "avoid_box_size_y", 0.4))
-        box_r = math.sqrt(box_hx * box_hx + box_hy * box_hy)
-        slot_radii = torch.zeros(self.s_avoid_total_slots, device=self.device, dtype=torch.float32)
-        if cap_slots > 0:
-            slot_radii[:cap_slots] = cap_r
-        if box_slots > 0:
-            slot_radii[cap_slots:cap_slots + box_slots] = box_r
-
         goal_local = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
-        retry_total = 0.0
-        retry_count = 0
-        fallback_count = 0
         behind_count = 0
         side_count = 0
         for row_idx, env_id in enumerate(env_ids.tolist()):
             stage_id = int(self.s_avoid_stage_per_env[env_id].item())
-            origin_xy = self.env_origins[env_id, :2]
-            active = self.s_avoid_active[env_id]
-            obstacle_pos = self.s_avoid_pos_world[env_id, :, :2]
-            active_pos = obstacle_pos[active] if bool(active.any().item()) else None
-            passage_center_x = 0.0
-            passage_width_x = goal_x_max - goal_x_min
-            behind_y_floor = goal_y_min
-            cluster_front_y = None
-            if active_pos is not None and active_pos.shape[0] > 0:
-                cluster_front_y = float(active_pos[:, 1].max().item() - origin_xy[1].item())
-            elif bool(getattr(self.cfg.terrain, "avoid_use_fixed_presets", False)):
-                preset_last_row_y = getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", None)
-                if preset_last_row_y is not None:
-                    cluster_front_y = float(preset_last_row_y)
-            if cluster_front_y is not None and goal_behind_obstacles:
-                behind_y_floor = max(goal_y_min, cluster_front_y + goal_behind_margin_y)
-            valid_goal = None
-            tries_used = 0
-            for try_idx in range(goal_max_tries):
-                tries_used = try_idx + 1
-                cand_y_min = behind_y_floor if goal_behind_obstacles else goal_y_min
-                cand_y_max = max(goal_y_max, cand_y_min + 0.35)
-                goal_y_local = float(np.random.uniform(cand_y_min, cand_y_max))
-                target_y_world = float(origin_xy[1].item()) + goal_y_local
-                passage_center_x, passage_width_x = self._get_s_avoid_goal_passage_center_x(
-                    env_id=env_id,
-                    active=active,
-                    obstacle_pos=obstacle_pos,
-                    obstacle_quat=self.s_avoid_quat_world[env_id],
-                    slot_radii=slot_radii,
-                    target_y_world=target_y_world,
-                    goal_x_min=goal_x_min,
-                    goal_x_max=goal_x_max,
-                    goal_clearance=goal_clearance,
-                )
-                effective_half_width = min(
-                    goal_behind_x_half_width,
-                    max(0.20, 0.5 * passage_width_x),
-                )
-                cand_x_min = max(goal_x_min, passage_center_x - effective_half_width)
-                cand_x_max = min(goal_x_max, passage_center_x + effective_half_width)
-                if cand_x_min >= cand_x_max:
-                    continue
-                candidate_local = torch.tensor(
-                    [
-                        float(np.random.uniform(cand_x_min, cand_x_max)),
-                        goal_y_local,
-                    ],
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                candidate_world = origin_xy + candidate_local
-                if bool(active.any().item()):
-                    active_pos = obstacle_pos[active]
-                    active_r = slot_radii[active]
-                    dist = torch.norm(active_pos - candidate_world.unsqueeze(0), dim=1)
-                    if bool((dist < (active_r + goal_clearance)).any().item()):
-                        continue
-                valid_goal = candidate_local
-                break
-            retry_total += float(max(0, tries_used - 1))
-            retry_count += 1
-            used_fallback = False
-            if valid_goal is None:
-                if not goal_allow_fallback:
-                    raise RuntimeError(
-                        f"s_avoid goal sampling failed without fallback "
-                        f"(env={env_id}, stage={stage_id}, tries={goal_max_tries})"
-                    )
-                fallback_count += 1
-                used_fallback = True
-                valid_goal = torch.tensor(
-                    [
-                        float(np.clip(passage_center_x, goal_x_min, goal_x_max)),
-                        max(goal_y_min, behind_y_floor + 0.05, 1.6),
-                    ],
-                    device=self.device,
-                    dtype=torch.float32,
-                )
+            last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0))
+            valid_goal = torch.tensor(
+                [0.0, last_row_y + 0.5],
+                device=self.device,
+                dtype=torch.float32,
+            )
             goal_local[row_idx] = valid_goal
-            if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
-                behind_count += 1
-            if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
-                side_count += 1
+            behind_count += 1
             if stage_id == 4:
                 self._avoid_goal_stats_s4_goal_count += 1
-                if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
-                    self._avoid_goal_stats_s4_behind_count += 1
-                if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
-                    self._avoid_goal_stats_s4_side_count += 1
-                if used_fallback:
-                    self._avoid_goal_stats_s4_fallback_count += 1
+                self._avoid_goal_stats_s4_behind_count += 1
             else:
                 self._avoid_goal_stats_s123_goal_count += 1
-                if bool(valid_goal[1].item() >= behind_y_floor - 1e-5):
-                    self._avoid_goal_stats_s123_behind_count += 1
-                if abs(float(valid_goal[0].item()) - passage_center_x) > goal_side_threshold:
-                    self._avoid_goal_stats_s123_side_count += 1
-                if used_fallback:
-                    self._avoid_goal_stats_s123_fallback_count += 1
+                self._avoid_goal_stats_s123_behind_count += 1
 
         self.goal_world[env_ids] = self.env_origins[env_ids, :2] + goal_local
-        self._avoid_goal_stats_retry_total += float(retry_total)
-        self._avoid_goal_stats_retry_count += int(retry_count)
-        self._avoid_goal_stats_fallback_count += int(fallback_count)
+        self._avoid_goal_stats_retry_total += 0.0
+        self._avoid_goal_stats_retry_count += int(len(env_ids))
+        self._avoid_goal_stats_fallback_count += 0
         self._avoid_goal_stats_behind_count += int(behind_count)
         self._avoid_goal_stats_side_count += int(side_count)
         self._avoid_goal_stats_goal_count += int(len(env_ids))
-        if retry_count > 0:
-            self.extras["avoid_goal_sample_retry_mean"] = float(retry_total / float(retry_count))
-            self.extras["avoid_goal_sample_fallback_rate"] = float(fallback_count / float(retry_count))
-        else:
-            self.extras["avoid_goal_sample_retry_mean"] = 0.0
-            self.extras["avoid_goal_sample_fallback_rate"] = 0.0
+        self.extras["avoid_goal_sample_retry_mean"] = 0.0
+        self.extras["avoid_goal_sample_fallback_rate"] = 0.0
         total_goal_count = int(len(env_ids))
         if total_goal_count > 0:
             self.extras["avoid_goal_behind_rate"] = float(behind_count / float(total_goal_count))
@@ -5142,15 +5037,25 @@ class HexGround(LeggedRobot):
         )
         self.reset_buf = collision_now.clone()
         if self.s_avoid_enabled and hasattr(self, "s_avoid_episode_collision"):
-            self.s_avoid_episode_collision |= collision_now
+            episode_collision_now = collision_now.clone()
+            penalised_indices = getattr(self, "penalised_contact_indices", None)
+            if penalised_indices is not None and penalised_indices.numel() > 0:
+                penalised_collision_now = torch.any(
+                    torch.norm(self.contact_forces[:, penalised_indices, :], dim=-1) > contact_threshold,
+                    dim=1,
+                )
+                episode_collision_now |= penalised_collision_now
+            self.s_avoid_episode_collision |= episode_collision_now
             nearest_obs = self._compute_s_avoid_nearest_obstacle_distance()
             if nearest_obs is not None:
                 exposure_dist = float(getattr(self.cfg.terrain, "avoid_obstacle_exposure_distance", 1.8))
                 self.s_avoid_episode_exposed |= nearest_obs < exposure_dist
                 self.extras["avoid_nearest_obstacle_dist"] = float(nearest_obs.min().item())
-            if hasattr(self, "goal_world") and hasattr(self, "s_avoid_episode_goal_best_dist"):
-                goal_dist = torch.norm(self.goal_world - self.root_states[:, :2], dim=1)
-                self.s_avoid_episode_goal_best_dist = torch.minimum(self.s_avoid_episode_goal_best_dist, goal_dist)
+            if hasattr(self, "s_avoid_episode_goal_best_dist"):
+                cross_line_dist = self._get_s_avoid_cross_line_dist(
+                    torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+                )
+                self.s_avoid_episode_goal_best_dist = torch.minimum(self.s_avoid_episode_goal_best_dist, cross_line_dist)
 
         height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
         if height_threshold is not None:
@@ -5733,6 +5638,11 @@ class HexGround(LeggedRobot):
         # heading=0 => forward=(0,+1), right=(+1,0).
         x_right = cos_h * delta_world[:, 0] + sin_h * delta_world[:, 1]
         y_forward = -sin_h * delta_world[:, 0] + cos_h * delta_world[:, 1]
+        if self.s_avoid_enabled and hasattr(self, "s_avoid_stage_per_env"):
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            cross_line_dist = self._get_s_avoid_cross_line_dist(env_ids, stage_ids=self.s_avoid_stage_per_env)
+            x_right = torch.zeros_like(cross_line_dist)
+            y_forward = cross_line_dist
         self.goal_buf[:] = torch.stack([x_right, y_forward], dim=1)
 
         if getattr(self.nav_cfg, "resample_on_reach", False):

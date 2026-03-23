@@ -585,11 +585,15 @@ class EvalRunner:
                 reward_terms = info.get("reward_terms", {}) if isinstance(info, dict) else {}
                 if reward_terms is None:
                     reward_terms = {}
-                success_bonus = reward_terms.get("success_bonus", None)
-                if success_bonus is None:
-                    success_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                if bool(getattr(self.env.env, "s_avoid_enabled", False)) and hasattr(self.env.env, "_get_s_avoid_episode_success_flags"):
+                    env_ids = torch.arange(self.env.num_envs, device=self.device, dtype=torch.long)
+                    success_step = self.env.env._get_s_avoid_episode_success_flags(env_ids)
                 else:
-                    success_step = success_bonus > 0.0
+                    success_bonus = reward_terms.get("success_bonus", None)
+                    if success_bonus is None:
+                        success_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                    else:
+                        success_step = success_bonus > 0.0
 
                 # Update ongoing episode accumulators.
                 for i in range(self.env.num_envs):

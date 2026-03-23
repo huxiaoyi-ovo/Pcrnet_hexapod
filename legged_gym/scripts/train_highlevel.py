@@ -1176,6 +1176,7 @@ class HierarchicalHexapodEnv:
         self.clearance_affordance_override = None
         self.reward_affordance_override = None
         self.last_obs = None
+        self.forced_forward_speed = torch.zeros(self.num_envs, device=device)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -1284,6 +1285,7 @@ class HierarchicalHexapodEnv:
         self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
+        self._resample_forced_forward_speed(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
 
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
@@ -1293,6 +1295,31 @@ class HierarchicalHexapodEnv:
         
         self.last_obs = obs_dict
         return obs_dict
+
+    def _resample_forced_forward_speed(self, env_ids: torch.Tensor) -> None:
+        if env_ids is None or env_ids.numel() == 0:
+            return
+        if not bool(getattr(self.env, "s_avoid_enabled", False)):
+            return
+        stage_speed = {
+            1: (0.2, 0.8),
+            2: (0.2, 0.6),
+            3: (0.2, 0.45),
+            4: (0.2, 0.35),
+        }
+        stage_id = int(getattr(self.env, "s_avoid_stage", 1))
+        stage_start_iter = int(getattr(self, "forced_forward_stage_start_iter", 0))
+        current_iter = int(getattr(self, "forced_forward_current_iter", stage_start_iter))
+        stage_iter = max(0, current_iter - stage_start_iter)
+        stage_warmup_ratio = min(float(stage_iter) / 50.0, 1.0)
+        train_warmup_ratio = float(getattr(self, "forced_forward_train_warmup_ratio", 0.0))
+        train_warmup_ratio = min(max(train_warmup_ratio, 0.0), 1.0)
+        warmup_ratio = min(stage_warmup_ratio, train_warmup_ratio)
+        v_min_base, v_max_base = stage_speed.get(stage_id, (0.2, 0.4))
+        v_max = v_min_base + (v_max_base - v_min_base) * warmup_ratio
+        self.forced_forward_speed[env_ids] = (
+            torch.rand(len(env_ids), device=self.device) * max(v_max - v_min_base, 0.0) + v_min_base
+        )
 
     def set_scene_difficulty_target(self, difficulty: float) -> None:
         """Set curriculum target; it becomes active only for envs after reset."""
@@ -2155,15 +2182,22 @@ class HierarchicalHexapodEnv:
         velocity_cmd, post_info = self.post_processor.process(
             cmd_vel, clearance_pp, beta=self.beta_override
         )
+        if bool(getattr(self.env, "s_avoid_enabled", False)):
+            velocity_cmd = velocity_cmd.clone()
+            velocity_cmd[:, 1] = torch.clamp(velocity_cmd[:, 1], min=self.forced_forward_speed)
+        if clearance_aff_map is not None:
+            cmd_preview = velocity_cmd.detach()
+            clearance_pp = self._compute_clearance_along_cmd(clearance_aff_map, cmd_preview[:, :2])
         post_info_payload = {}
         if isinstance(post_info, dict):
             post_info_payload.update(post_info)
         if cmd_preview is not None:
             post_info_payload["cmd_preview_for_clearance"] = cmd_preview.detach().clone()
         post_info_payload.setdefault("cmd_raw", cmd_vel)
-        post_info_payload.setdefault("cmd_slew", velocity_cmd)
-        if "cmd_clamped" not in post_info_payload:
-            post_info_payload["cmd_clamped"] = velocity_cmd
+        post_info_payload["cmd_slew"] = velocity_cmd.detach().clone()
+        post_info_payload["cmd_clamped"] = velocity_cmd.detach().clone()
+        if bool(getattr(self.env, "s_avoid_enabled", False)):
+            post_info_payload["forced_forward_speed"] = self.forced_forward_speed.detach().clone()
         post_info_payload["clearance_pp"] = clearance_pp
         # Prefer per-call effective params (beta-adjusted) when available.
         safe_distance = post_info_payload.get("safe_distance", getattr(self.post_processor, "safe_distance", None))
@@ -2406,10 +2440,65 @@ class HierarchicalHexapodEnv:
                 reward_dict['passable_occ_ratio'] = passable_occ_ratio
             if crossable_width is not None:
                 reward_dict['crossable_width'] = crossable_width
+            if bool(getattr(self.env, "s_avoid_enabled", False)):
+                stage_ids = getattr(self.env, "s_avoid_stage_per_env", None)
+                if stage_ids is None:
+                    stage_ids = torch.full(
+                        (self.num_envs,),
+                        int(getattr(self.env, "s_avoid_stage", 1)),
+                        device=self.device,
+                        dtype=torch.long,
+                    )
+                else:
+                    stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
+                cross_line_local_y = torch.zeros(self.num_envs, device=self.device)
+                for stage_value in torch.unique(stage_ids).tolist():
+                    stage_id = int(stage_value)
+                    last_row_y = float(
+                        getattr(self.env.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0)
+                    )
+                    cross_line_local_y[stage_ids == stage_id] = last_row_y + 0.3
+                cross_line_world_y = self.env.env_origins[:, 1] + cross_line_local_y
+                curr_dist = torch.clamp(cross_line_world_y - robot_pos[:, 1], min=0.0)
+                prev_dist = torch.clamp(cross_line_world_y - self.prev_robot_pos[:, 1], min=0.0)
+                approach_progress = (prev_dist - curr_dist) * float(self.reward_cfg.goal_approach_scale)
+                prev_total = reward_dict['total']
+                prev_approach = reward_dict.get('approach', torch.zeros_like(approach_progress))
+                reward_dict['cross_line_dist'] = curr_dist
+                reward_dict['approach'] = approach_progress
+                reward_dict['total'] = prev_total - prev_approach + approach_progress
+
+                heading_error = reward_obs['state'][:, 2]
+                heading_weight = 1.0
+                if self.reward_cfg.heading_use_difficulty_gate:
+                    heading_weight = torch.clamp(
+                        1.0 - reward_difficulty,
+                        min=self.reward_cfg.heading_min_weight,
+                        max=1.0,
+                    )
+                heading_reward = (
+                    (torch.cos(heading_error) - 0.15)
+                    * self.reward_cfg.heading_scale
+                    * heading_weight
+                )
+                if self.reward_cfg.heading_gate_use:
+                    progress = prev_dist - curr_dist
+                    gate = progress > self.reward_cfg.heading_gate_min_approach
+                    if self.reward_cfg.heading_gate_min_speed > 0:
+                        speed = torch.norm(robot_vel[:, :2], dim=-1)
+                        gate = gate & (speed > self.reward_cfg.heading_gate_min_speed)
+                    heading_reward = heading_reward * gate.float()
+                prev_heading = reward_dict.get('heading', torch.zeros_like(heading_reward))
+                reward_dict['heading'] = heading_reward
+                reward_dict['total'] = reward_dict['total'] - prev_heading + heading_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
-            if self.reward_cfg is not None:
+            if (
+                self.reward_cfg is not None
+                and self.reward_cfg.goal_reach_bonus != 0.0
+                and self.reward_cfg.goal_reach_threshold > 0.0
+            ):
                 dist_to_goal = torch.norm(robot_pos[:, :2] - goal_pos, dim=-1)
                 reach_now = dist_to_goal < self.reward_cfg.goal_reach_threshold
                 if reach_now.any():
@@ -2707,6 +2796,7 @@ class HierarchicalHexapodEnv:
         goal_change_count_snapshot = self.goal_change_count.clone()
         episode_info = None
         if done_any.any():
+            self._resample_forced_forward_speed(done_any.nonzero(as_tuple=False).flatten())
             episode_info = {
                 'r': self.episode_return_buf.clone(),
                 'l': self.episode_len_buf.clone(),
@@ -3566,8 +3656,20 @@ def train(args):
     last_dones = None
     aff_stack_fill = None
     egpo_alpha_half_logged = False
+    env.forced_forward_train_warmup_ratio = 0.0
+    env.forced_forward_stage_start_iter = 0
+    env.forced_forward_current_iter = 0
+    env.forced_forward_stage_last = int(getattr(env.env, "s_avoid_stage", 1)) if bool(getattr(env.env, "s_avoid_enabled", False)) else -1
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
+        local_iteration = max(0, iteration - start_iteration)
+        env.forced_forward_train_warmup_ratio = min(float(local_iteration) / 100.0, 1.0)
+        if bool(getattr(env.env, "s_avoid_enabled", False)):
+            current_stage = int(getattr(env.env, "s_avoid_stage", 1))
+            if current_stage != int(getattr(env, "forced_forward_stage_last", current_stage)):
+                env.forced_forward_stage_start_iter = local_iteration
+                env.forced_forward_stage_last = current_stage
+            env.forced_forward_current_iter = local_iteration
         schedule_iteration = iteration
         if env.is_s0_follow_task:
             denom = max(1, int(args.num_iterations) - 1)
@@ -5222,6 +5324,7 @@ def train(args):
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
         writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
+        writer.add_scalar('Stats/CrossLineDist', reward_term_means.get('cross_line_dist', 0.0), iteration)
         writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
         writer.add_scalar('Stats/TargetTurnEventRate', target_turn_event_rate, iteration)
         writer.add_scalar('Stats/TargetPreTurnEventRate', target_preturn_event_rate, iteration)
@@ -5323,6 +5426,7 @@ def train(args):
                           f"""{'Nonfinite act(pol/exp/tch):':>{pad}} {policy_nonfinite_action_count} / {expert_nonfinite_action_count} / {teacher_nonfinite_action_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
+                          f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""

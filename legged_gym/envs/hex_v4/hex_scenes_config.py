@@ -485,7 +485,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         moving_target_enable = False
         spawn_edge_enable = False
         max_ang_vel_command = 0.0
-        goal_mode = "random"
+        goal_mode = "fixed"
         goal_min_distance = 2.0
         goal_range_x = [-1.2, 1.2]
         # Fixed-row presets place the goal at least 0.25 m behind the last row.
@@ -509,13 +509,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 4.0
-        reward_cfg["goal_reach_bonus"] = 4.0
-        reward_cfg["goal_reach_threshold"] = 0.25
+        reward_cfg["goal_reach_bonus"] = 0.0
+        reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["heading_scale"] = 0.8
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["passable_sector_deg"] = 60.0
         reward_cfg["crossable_align_scale"] = 0.0
-        reward_cfg["risk_barrier_scale"] = -1.2
+        reward_cfg["risk_barrier_scale"] = 0.0
         reward_cfg["risk_barrier_safe"] = 0.32
         reward_cfg["risk_barrier_free"] = 0.65
         reward_cfg["risk_barrier_tau"] = 0.10
