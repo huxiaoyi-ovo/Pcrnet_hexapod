@@ -1796,7 +1796,11 @@ def main():
             else:
                 manual_reset_mask = manual_reset_mask.to(device=dones.device, dtype=torch.bool)
             success_mask = torch.zeros_like(dones, dtype=torch.bool)
-            if isinstance(reward_terms, dict) and ("success_bonus" in reward_terms):
+            if isinstance(info, dict):
+                success_from_info = info.get("success_mask", None)
+                if torch.is_tensor(success_from_info):
+                    success_mask = success_from_info.to(device=dones.device, dtype=torch.bool)
+            if (not success_mask.any()) and isinstance(reward_terms, dict) and ("success_bonus" in reward_terms):
                 success_bonus = reward_terms["success_bonus"]
                 if torch.is_tensor(success_bonus):
                     success_mask = success_bonus.to(device=dones.device) > 0.0

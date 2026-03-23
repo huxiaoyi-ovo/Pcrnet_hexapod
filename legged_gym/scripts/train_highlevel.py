@@ -2063,6 +2063,11 @@ class HierarchicalHexapodEnv:
         # 1.6 添加上一时刻实际执行命令（解决后处理变化率记忆的非马尔可夫性）
         if hasattr(self, "post_processor") and getattr(self.post_processor, "last_cmd", None) is not None:
             obs_dict['state'] = torch.cat([obs_dict['state'], self.post_processor.last_cmd.detach().clone()], dim=1)
+        if bool(getattr(self.env, "s_avoid_enabled", False)) and hasattr(self, "forced_forward_speed"):
+            obs_dict['state'] = torch.cat(
+                [obs_dict['state'], self.forced_forward_speed.detach().clone().unsqueeze(1)],
+                dim=1,
+            )
 
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
@@ -2185,6 +2190,8 @@ class HierarchicalHexapodEnv:
         if bool(getattr(self.env, "s_avoid_enabled", False)):
             velocity_cmd = velocity_cmd.clone()
             velocity_cmd[:, 1] = torch.clamp(velocity_cmd[:, 1], min=self.forced_forward_speed)
+            if getattr(self.post_processor, "last_cmd", None) is not None:
+                self.post_processor.last_cmd = velocity_cmd.detach().clone()
         if clearance_aff_map is not None:
             cmd_preview = velocity_cmd.detach()
             clearance_pp = self._compute_clearance_along_cmd(clearance_aff_map, cmd_preview[:, :2])
@@ -2468,6 +2475,15 @@ class HierarchicalHexapodEnv:
                 reward_dict['approach'] = approach_progress
                 reward_dict['total'] = prev_total - prev_approach + approach_progress
 
+                forward_progress_speed = torch.clamp(
+                    (prev_dist - curr_dist) / max(float(self.high_level_dt), 1e-6),
+                    min=0.0,
+                )
+                velocity_reward = forward_progress_speed * float(self.reward_cfg.velocity_scale)
+                prev_velocity = reward_dict.get('velocity', torch.zeros_like(velocity_reward))
+                reward_dict['velocity'] = velocity_reward
+                reward_dict['total'] = reward_dict['total'] - prev_velocity + velocity_reward
+
                 heading_error = reward_obs['state'][:, 2]
                 heading_weight = 1.0
                 if self.reward_cfg.heading_use_difficulty_gate:
@@ -2661,6 +2677,24 @@ class HierarchicalHexapodEnv:
                         total_reward = total_reward + success_bonus
                         reward_terms["success_bonus"] = success_bonus
                         reward_terms["total"] = total_reward
+
+        success_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        cross_line_dist_snapshot = None
+        s_avoid_episode_collision_snapshot = None
+        if bool(getattr(self.env, "s_avoid_enabled", False)):
+            if hasattr(self.env, "s_avoid_episode_collision"):
+                self.env.s_avoid_episode_collision |= strict_obstacle_contact_mask
+                s_avoid_episode_collision_snapshot = self.env.s_avoid_episode_collision.clone()
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            if hasattr(self.env, "_get_s_avoid_episode_progress_flags"):
+                s_avoid_progress_mask = self.env._get_s_avoid_episode_progress_flags(env_ids)
+            if hasattr(self.env, "_get_s_avoid_cross_line_dist"):
+                cross_line_dist_snapshot = self.env._get_s_avoid_cross_line_dist(env_ids)
+            if hasattr(self.env, "_get_s_avoid_episode_success_flags"):
+                success_mask = self.env._get_s_avoid_episode_success_flags(env_ids)
+                done_any |= success_mask
+                manual_reset_mask |= success_mask
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
@@ -2839,6 +2873,10 @@ class HierarchicalHexapodEnv:
             'clearance_global': clearance_global,
             'done_during': done_during,
             'manual_reset_mask': manual_reset_mask,
+            'success_mask': success_mask,
+            's_avoid_progress_mask': s_avoid_progress_mask,
+            'cross_line_dist': cross_line_dist_snapshot,
+            's_avoid_episode_collision': s_avoid_episode_collision_snapshot,
             'timeout': timeout,
             'timeout_bootstrap_obs': timeout_bootstrap_obs,
             'target_turn_events': getattr(self.env, "target_turn_events", None),
@@ -3228,6 +3266,28 @@ def train(args):
         meta["online_best_metric"] = "online_mean_reward_monitor_only"
         meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
         meta["unknown_cli_args"] = list(getattr(args, "_unknown_cli", []))
+        if bool(getattr(env.env, "s_avoid_enabled", False)):
+            meta["s_avoid_protocol"] = {
+                "goal_mode": "fixed_last_row_plus_margin",
+                "goal_y_offset_after_last_row_m": 0.5,
+                "goal_buf_mode": "[0.0, cross_line_dist]",
+                "success_mode": "cross_line_and_no_collision",
+                "success_cross_line_offset_m": 0.3,
+                "band_axes": "x_only",
+                "band_margin_x_m": float(getattr(env.env.cfg.terrain, "avoid_band_margin_x", 0.0)),
+                "forced_forward": {
+                    "enabled": True,
+                    "stage_speed": {
+                        "1": [0.2, 0.8],
+                        "2": [0.2, 0.6],
+                        "3": [0.2, 0.45],
+                        "4": [0.2, 0.35],
+                    },
+                    "stage_warmup_iters": 50,
+                    "train_warmup_iters": 100,
+                },
+                "risk_barrier_scale": float(getattr(env.reward_cfg, "risk_barrier_scale", 0.0)),
+            }
         return meta
 
     def _check_checkpoint_meta(
@@ -3464,6 +3524,9 @@ def train(args):
 
     start_iteration = 0
     best_reward = float("-inf")
+    best_success = float("-inf")
+    best_progress = float("-inf")
+    best_selection_metric_name = "online_mean_reward_monitor_only"
     if resume_path:
         if not bool(getattr(args, "allow_inexact_resume", False)):
             raise ValueError(
@@ -3494,6 +3557,12 @@ def train(args):
         best_reward = float(
             ckpt.get("best_online_reward", ckpt.get("best_reward", ckpt.get("mean_reward", -float("inf"))))
         ) if isinstance(ckpt, dict) else best_reward
+        if isinstance(ckpt, dict):
+            best_success = float(ckpt.get("best_online_success", -float("inf")))
+            best_progress = float(ckpt.get("best_online_progress", -float("inf")))
+            best_selection_metric_name = str(
+                ckpt.get("best_online_selection_metric", ckpt.get("selection_metric", best_selection_metric_name))
+            )
         if isinstance(ckpt, dict) and "torch_rng_state" in ckpt:
             torch.set_rng_state(ckpt["torch_rng_state"])
         if isinstance(ckpt, dict) and "numpy_rng_state" in ckpt:
@@ -5173,6 +5242,21 @@ def train(args):
         breakdown_total_mean = reward_term_means.get('total', 0.0)
         reward_residual = mean_step_reward - breakdown_total_mean
         resid_rollout = rollout_mean_step_reward - breakdown_total_mean
+        goal_dist_display_mean = goal_dist_mean
+        goal_dist_tb_name = 'Stats/GoalDist'
+        goal_dist_console_label = 'Goal dist / Cmd / Tgt speed:'
+        online_selection_metric = (float(mean_reward),)
+        online_selection_metric_name = 'online_mean_reward_monitor_only'
+        if use_avoid_local_map:
+            goal_dist_display_mean = reward_term_means.get('cross_line_dist', goal_dist_mean)
+            goal_dist_tb_name = 'Stats/CrossLineTargetDist'
+            goal_dist_console_label = 'Cross-line target dist / Cmd / Tgt speed:'
+            online_selection_metric = (
+                float(avoid_success_rate_value),
+                float(avoid_progress_rate_value),
+                float(mean_reward),
+            )
+            online_selection_metric_name = 'avoid_success_progress_reward_lexicographic'
         collision_rate_mean = (collision_rate_sum / total_samples).item()
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
         strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
@@ -5323,7 +5407,7 @@ def train(args):
         writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
-        writer.add_scalar('Stats/GoalDist', goal_dist_mean, iteration)
+        writer.add_scalar(goal_dist_tb_name, goal_dist_display_mean, iteration)
         writer.add_scalar('Stats/CrossLineDist', reward_term_means.get('cross_line_dist', 0.0), iteration)
         writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
         writer.add_scalar('Stats/TargetTurnEventRate', target_turn_event_rate, iteration)
@@ -5425,7 +5509,7 @@ def train(args):
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
                           f"""{'Nonfinite act(pol/exp/tch):':>{pad}} {policy_nonfinite_action_count} / {expert_nonfinite_action_count} / {teacher_nonfinite_action_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
-                          f"""{'Goal dist / Cmd / Tgt speed:':>{pad}} {goal_dist_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
+                          f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
@@ -5465,6 +5549,9 @@ def train(args):
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
                 'best_online_reward': best_reward,
+                'best_online_success': best_success,
+                'best_online_progress': best_progress,
+                'best_online_selection_metric': best_selection_metric_name,
                 'selection_metric': 'periodic_checkpoint',
                 'experiment_meta': run_meta,
                 'torch_rng_state': torch.get_rng_state(),
@@ -5474,8 +5561,13 @@ def train(args):
             dprint(f"  Saved: {ckpt_path}")
         
         # Save best online-monitor checkpoint.
-        if mean_reward > best_reward and len(episode_rewards) >= 10:
-            best_reward = mean_reward
+        current_best_tuple = (best_success, best_progress, best_reward) if use_avoid_local_map else (best_reward,)
+        if online_selection_metric > current_best_tuple and len(episode_rewards) >= 10:
+            if use_avoid_local_map:
+                best_success, best_progress, best_reward = online_selection_metric
+            else:
+                best_reward = online_selection_metric[0]
+            best_selection_metric_name = online_selection_metric_name
             best_path = os.path.join(log_dir, 'best_online_reward.pt')
             torch.save({
                 'iteration': iteration,
@@ -5483,15 +5575,30 @@ def train(args):
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
                 'best_online_reward': best_reward,
-                'selection_metric': 'online_mean_reward_monitor_only',
+                'best_online_success': best_success,
+                'best_online_progress': best_progress,
+                'best_online_selection_metric': best_selection_metric_name,
+                'selection_metric': best_selection_metric_name,
                 'experiment_meta': run_meta,
             }, best_path)
-            dprint(f"  ★ New online best: {mean_reward:.2f}")
+            if use_avoid_local_map:
+                dprint(
+                    f"  ★ New online best (succ/prog/reward): "
+                    f"{best_success:.3f} / {best_progress:.3f} / {best_reward:.2f}"
+                )
+            else:
+                dprint(f"  ★ New online best: {mean_reward:.2f}")
     
     # 训练结束
     print(f"\n{'='*60}")
     print(f"Training Complete!")
-    print(f"Best Online Reward: {best_reward:.2f}")
+    if use_avoid_local_map:
+        print(
+            f"Best Online Monitor (succ/prog/reward): "
+            f"{best_success:.3f} / {best_progress:.3f} / {best_reward:.2f}"
+        )
+    else:
+        print(f"Best Online Reward: {best_reward:.2f}")
     print(f"Output: {log_dir}")
     print(f"{'='*60}")
     

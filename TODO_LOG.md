@@ -62,6 +62,8 @@
 
 ## 2026-03-23 avoid 专家改为外生前进+穿越判成功
 
+- [x] ~~[P1] 收口 `s_avoid` 的在线监控口径：默认最好模型按 `success/progress/reward` 选点，训练日志里的旧 `goal_dist` 字段改名为穿越线目标距离，避免继续误导 eval/play 选模与曲线判断~~
+- [x] ~~[P0] 收口 `forced_forward` 后的训练/评测一致性：真实执行命令回写到命令历史观测，`success` 直接终止高层 episode，`eval/play` 与导出结果统一切到穿越成功与 `cross_line` 口径，并补实验元信息留痕~~
 - [x] ~~[P0] 将 `s_avoid_basic` 收口为“每个 episode 固定强制前进 + 固定正前方过障 goal + 穿越最后一行且无碰撞判成功”，让 avoid expert 专注学局部横移避障~~
 - [x] ~~[P0] 将 `s_avoid_basic` 的 `approach/heading` 奖励改为服务“朝穿越线持续前进 + 朝世界 +Y 对齐”，不再奖励朝固定 goal 点中心收缩~~
 - [x] ~~[P0] 将外生前进速度改成按 `stage` 与已完成 episode 数逐步放开上限：`stage1` 允许最高 `0.8m/s`，后续阶段随难度递减，避免简单场景前进探索过早被保守上限限制~~

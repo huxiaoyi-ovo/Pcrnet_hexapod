@@ -99,6 +99,10 @@ class EpisodeAccumulator:
     follow_err_count: int = 0
     energy_j: float = 0.0
     distance_m: float = 0.0
+    cross_line_dist_end: float = float("nan")
+    cross_line_dist_min: float = float("inf")
+    episode_collision: bool = False
+    progress_reached: bool = False
 
 
 class EvalRunner:
@@ -585,15 +589,28 @@ class EvalRunner:
                 reward_terms = info.get("reward_terms", {}) if isinstance(info, dict) else {}
                 if reward_terms is None:
                     reward_terms = {}
-                if bool(getattr(self.env.env, "s_avoid_enabled", False)) and hasattr(self.env.env, "_get_s_avoid_episode_success_flags"):
-                    env_ids = torch.arange(self.env.num_envs, device=self.device, dtype=torch.long)
-                    success_step = self.env.env._get_s_avoid_episode_success_flags(env_ids)
-                else:
-                    success_bonus = reward_terms.get("success_bonus", None)
-                    if success_bonus is None:
-                        success_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                success_step = info.get("success_mask", None) if isinstance(info, dict) else None
+                if success_step is None:
+                    if bool(getattr(self.env.env, "s_avoid_enabled", False)) and hasattr(self.env.env, "_get_s_avoid_episode_success_flags"):
+                        env_ids = torch.arange(self.env.num_envs, device=self.device, dtype=torch.long)
+                        success_step = self.env.env._get_s_avoid_episode_success_flags(env_ids)
                     else:
-                        success_step = success_bonus > 0.0
+                        success_bonus = reward_terms.get("success_bonus", None)
+                        if success_bonus is None:
+                            success_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                        else:
+                            success_step = success_bonus > 0.0
+                progress_step = info.get("s_avoid_progress_mask", None) if isinstance(info, dict) else None
+                if progress_step is None:
+                    progress_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                cross_line_dist = info.get("cross_line_dist", None) if isinstance(info, dict) else None
+                if cross_line_dist is None:
+                    cross_line_dist = torch.full((self.env.num_envs,), float("nan"), device=self.device)
+                episode_collision = info.get("s_avoid_episode_collision", None) if isinstance(info, dict) else None
+                if episode_collision is None:
+                    episode_collision = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                else:
+                    episode_collision = episode_collision.to(device=self.device, dtype=torch.bool)
 
                 # Update ongoing episode accumulators.
                 for i in range(self.env.num_envs):
@@ -608,6 +625,12 @@ class EvalRunner:
 
                     ai.energy_j += _safe_float((pwr[i] * float(self.env.high_level_dt)).item(), default=0.0)
                     ai.distance_m += _safe_float(ds[i].item(), default=0.0)
+                    ai.progress_reached = ai.progress_reached or bool(progress_step[i].item())
+                    ai.episode_collision = ai.episode_collision or bool(episode_collision[i].item())
+                    cross_line_val = _safe_float(cross_line_dist[i].item(), default=float("nan"))
+                    ai.cross_line_dist_end = cross_line_val
+                    if math.isfinite(cross_line_val):
+                        ai.cross_line_dist_min = min(ai.cross_line_dist_min, cross_line_val)
 
                     if (not ai.success) and bool(success_step[i].item()):
                         ai.success = True
@@ -628,19 +651,24 @@ class EvalRunner:
                     cot = float("nan")
                     if ai.distance_m > 1e-6:
                         cot = ai.energy_j / (self.mass_kg * self.g * ai.distance_m)
+                    final_success = bool(success_step[i].item())
 
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
                             "difficulty": float(d),
-                            "success": int(ai.success),
-                            "time_to_success_s": float(ai.t_success_s) if ai.success else float("nan"),
+                            "success": int(final_success),
+                            "time_to_success_s": float(ai.t_success_s) if final_success else float("nan"),
                             "follow_mae_m": follow_mae,
                             "follow_rmse_m": follow_rmse,
                             "cot": cot,
                             "energy_j": ai.energy_j,
                             "distance_m": ai.distance_m,
                             "steps_hl": ai.step_hl,
+                            "cross_line_dist_end": ai.cross_line_dist_end,
+                            "cross_line_dist_min": ai.cross_line_dist_min if math.isfinite(ai.cross_line_dist_min) else float("nan"),
+                            "episode_collision": int(ai.episode_collision),
+                            "progress_reached": int(ai.progress_reached),
                         }
                     )
                     global_episode_idx += 1
@@ -673,6 +701,10 @@ class EvalRunner:
         follow_rmse = _clean([r["follow_rmse_m"] for r in rows])
         cot_vals = _clean([r["cot"] for r in rows])
         tts = _clean([r["time_to_success_s"] for r in rows if int(r["success"]) == 1])
+        cross_line_end = _clean([r.get("cross_line_dist_end", float("nan")) for r in rows])
+        cross_line_min = _clean([r.get("cross_line_dist_min", float("nan")) for r in rows])
+        episode_collision = [int(r.get("episode_collision", 0)) for r in rows]
+        progress_flags = [int(r.get("progress_reached", 0)) for r in rows]
 
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
@@ -691,6 +723,10 @@ class EvalRunner:
             "cot_mean": float(np.mean(cot_vals)) if cot_vals else float("nan"),
             "cot_median": float(np.median(cot_vals)) if cot_vals else float("nan"),
             "cot_p95": _quantile(cot_vals, 0.95),
+            "cross_line_dist_end_mean": float(np.mean(cross_line_end)) if cross_line_end else float("nan"),
+            "cross_line_dist_min_mean": float(np.mean(cross_line_min)) if cross_line_min else float("nan"),
+            "episode_collision_rate": float(sum(episode_collision) / max(1, total_eps)),
+            "progress_rate": float(sum(progress_flags) / max(1, total_eps)),
             "inference_latency_ms_p50": _quantile(latency_ms_samples, 0.50),
             "inference_latency_ms_p95": _quantile(latency_ms_samples, 0.95),
         }
@@ -704,6 +740,10 @@ class EvalRunner:
             rmse = _clean([r["follow_rmse_m"] for r in sub])
             cot = _clean([r["cot"] for r in sub])
             tts_d = _clean([r["time_to_success_s"] for r in sub if int(r["success"]) == 1])
+            cross_line_end_d = _clean([r.get("cross_line_dist_end", float("nan")) for r in sub])
+            cross_line_min_d = _clean([r.get("cross_line_dist_min", float("nan")) for r in sub])
+            collision_d = [int(r.get("episode_collision", 0)) for r in sub]
+            progress_d = [int(r.get("progress_reached", 0)) for r in sub]
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
@@ -718,6 +758,10 @@ class EvalRunner:
                 "cot_mean": float(np.mean(cot)) if cot else float("nan"),
                 "cot_median": float(np.median(cot)) if cot else float("nan"),
                 "cot_p95": _quantile(cot, 0.95),
+                "cross_line_dist_end_mean": float(np.mean(cross_line_end_d)) if cross_line_end_d else float("nan"),
+                "cross_line_dist_min_mean": float(np.mean(cross_line_min_d)) if cross_line_min_d else float("nan"),
+                "episode_collision_rate": float(sum(collision_d) / max(1, n)),
+                "progress_rate": float(sum(progress_d) / max(1, n)),
             }
 
         result = {
@@ -782,6 +826,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "energy_j",
         "distance_m",
         "steps_hl",
+        "cross_line_dist_end",
+        "cross_line_dist_min",
+        "episode_collision",
+        "progress_reached",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
