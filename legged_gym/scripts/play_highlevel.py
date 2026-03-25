@@ -22,6 +22,7 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
 from legged_gym.scripts import train_highlevel as th
 
 
@@ -61,6 +62,36 @@ def _validate_expected_ckpt_meta(
         meta_mode = ckpt_meta.get("mode", None)
         if meta_mode is not None and meta_mode != expected_mode:
             raise ValueError(f"{source_name} 的 mode 与当前回放预期不一致: checkpoint={meta_mode}, expected={expected_mode}")
+
+
+def _compute_moe_follow_cmd_from_goal(
+    state_tensor: torch.Tensor,
+    goal_tensor: torch.Tensor,
+    reset_mask: Optional[torch.Tensor],
+    cmd_scale,
+) -> torch.Tensor:
+    if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
+        raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
+    if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
+        raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
+    robot_pos_world_xy = state_tensor[:, :2]
+    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
+    goal_x = goal_tensor[:, 0]
+    goal_y = goal_tensor[:, 1]
+    cos_heading = torch.cos(robot_heading)
+    sin_heading = torch.sin(robot_heading)
+    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
+    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
+    target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+    return s0_follow_expert_fn(
+        robot_pos_world_xy=robot_pos_world_xy,
+        robot_heading=robot_heading,
+        target_world_xy=target_world_xy,
+        target_vel_world_xy=None,
+        target_heading=None,
+        cmd_scale=cmd_scale,
+        reset_mask=reset_mask,
+    )
 
 
 def _prepare_metrics_dir(args) -> str:
@@ -912,7 +943,7 @@ def parse_args():
         choices=["follow", "avoid", "moe"],
         help="Expert skill: follow / avoid / moe (gate)",
     )
-    parser.add_argument("--follow_ckpt", type=str, default=None, help="(moe) Follow expert checkpoint")
+    parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
     parser.add_argument("--avoid_ckpt", type=str, default=None, help="(moe) Avoid expert checkpoint")
     parser.add_argument("--gate_use_difficulty", action="store_true", help="Gate 使用 difficulty 作为输入（特权信息）")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="Student vision checkpoint path")
@@ -1252,15 +1283,9 @@ def main():
         env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug
     vision_model = None
     resolved_protocol_aux: Dict[str, Dict] = {}
-    s0_expert_fn = None
+    s0_expert_fn = s0_follow_expert_fn
     if bool(getattr(args, "show_expert_cmd", False)):
-        try:
-            from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as _s0_expert_fn
-            s0_expert_fn = _s0_expert_fn
-            dprint("[PlayHigh] expert cmd debug enabled")
-        except Exception as exc:
-            print(f"[PlayHigh] ⚠ failed to import S0 expert function: {exc}; disabling --show_expert_cmd.")
-            args.show_expert_cmd = False
+        dprint("[PlayHigh] expert cmd debug enabled")
     if args.mode == "student":
         vision_model = th.AffordanceEstimator(
             depth_channels=1,
@@ -1404,7 +1429,6 @@ def main():
     is_gate = skill == "moe"
     expert_only_mode = use_follow_expert or static_avoid_debug or (force_cmd_tensor is not None)
     policy = None
-    follow_policy = None
     avoid_policy = None
     follow_aff_stack_buf = None
     avoid_aff_stack_buf = None
@@ -1419,21 +1443,14 @@ def main():
         if not args.teacher_ckpt:
             raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
         if is_gate:
-            if not args.follow_ckpt or not args.avoid_ckpt:
-                raise ValueError("moe 需要 --follow_ckpt 和 --avoid_ckpt")
+            if not args.avoid_ckpt:
+                raise ValueError("moe 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
             policy = th.GatePolicy(
                 affordance_channels=aff_channels,
                 state_dim=obs["state"].shape[1],
                 goal_dim=obs["goal"].shape[1],
             ).to(device)
-            follow_aff_channels = int(aff_bundle["follow_aff"].shape[1] * aff_stack)
             avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
-            follow_policy = th.CmdVelExpert(
-                affordance_channels=follow_aff_channels,
-                state_dim=obs["state"].shape[1],
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
-            ).to(device)
             avoid_policy = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
                 state_dim=obs["state"].shape[1],
@@ -1461,34 +1478,32 @@ def main():
                 "path": os.path.abspath(args.teacher_ckpt),
                 "experiment_meta": gate_meta,
             }
-            for model, ckpt_path in [(follow_policy, args.follow_ckpt), (avoid_policy, args.avoid_ckpt)]:
-                ckpt = torch.load(ckpt_path, map_location=device)
-                ckpt_meta = _ckpt_meta_from_obj(ckpt)
-                expected_skill = "follow" if model is follow_policy else "avoid"
-                _validate_expected_ckpt_meta(
-                    ckpt_meta,
-                    source_name=f"{expected_skill} ckpt",
-                    expected_skill=expected_skill,
-                    expected_mode=args.mode,
-                )
-                th.validate_checkpoint_contract_compatibility(
-                    gate_meta,
-                    ckpt_meta,
-                    reference_name="gate ckpt",
-                    candidate_name=f"{expected_skill} ckpt",
-                    strict=True,
-                )
-                state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-                th.load_high_level_state_dict_compat(
-                    model,
-                    state_dict,
-                    label=f"play_expert:{os.path.basename(ckpt_path)}",
-                )
-                model.eval()
-                resolved_protocol_aux[f"{expected_skill}_ckpt"] = {
-                    "path": os.path.abspath(ckpt_path),
-                    "experiment_meta": ckpt_meta,
-                }
+            ckpt = torch.load(args.avoid_ckpt, map_location=device)
+            ckpt_meta = _ckpt_meta_from_obj(ckpt)
+            _validate_expected_ckpt_meta(
+                ckpt_meta,
+                source_name="avoid ckpt",
+                expected_skill="avoid",
+                expected_mode=args.mode,
+            )
+            th.validate_checkpoint_contract_compatibility(
+                gate_meta,
+                ckpt_meta,
+                reference_name="gate ckpt",
+                candidate_name="avoid ckpt",
+                strict=True,
+            )
+            state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+            th.load_high_level_state_dict_compat(
+                avoid_policy,
+                state_dict,
+                label=f"play_expert:{os.path.basename(args.avoid_ckpt)}",
+            )
+            avoid_policy.eval()
+            resolved_protocol_aux["avoid_ckpt"] = {
+                "path": os.path.abspath(args.avoid_ckpt),
+                "experiment_meta": ckpt_meta,
+            }
             policy.eval()
         else:
             policy = th.CmdVelExpert(
@@ -1656,11 +1671,6 @@ def main():
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
             goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
-            follow_aff_input = (
-                torch.zeros_like(follow_aff_stack_buf)
-                if is_gate and bool(getattr(args, "zero_local_map", False))
-                else follow_aff_stack_buf
-            )
             avoid_aff_input = (
                 torch.zeros_like(avoid_aff_stack_buf)
                 if is_gate and bool(getattr(args, "zero_local_map", False))
@@ -1677,23 +1687,17 @@ def main():
                         gate_difficulty = aff_bundle["gate_difficulty"] if args.gate_use_difficulty else torch.zeros_like(aff_bundle["gate_difficulty"])
                         if bool(getattr(args, "zero_local_map", False)):
                             gate_difficulty = torch.zeros_like(gate_difficulty)
-                        follow_difficulty_input = (
-                            torch.zeros_like(aff_bundle["follow_difficulty"])
-                            if bool(getattr(args, "zero_local_map", False))
-                            else aff_bundle["follow_difficulty"]
-                        )
                         avoid_difficulty_input = (
                             torch.zeros_like(aff_bundle["avoid_difficulty"])
                             if bool(getattr(args, "zero_local_map", False))
                             else aff_bundle["avoid_difficulty"]
                         )
                         expert_state = th.get_moe_expert_state_inputs(obs["state"])
-                        cmd_f, _ = follow_policy.get_action(
-                            follow_aff_input,
+                        cmd_f = _compute_moe_follow_cmd_from_goal(
                             expert_state,
                             goal_input,
-                            follow_difficulty_input,
-                            deterministic=True,
+                            reset_mask,
+                            cmd_scale,
                         )
                         cmd_a, _ = avoid_policy.get_action(
                             avoid_aff_input,

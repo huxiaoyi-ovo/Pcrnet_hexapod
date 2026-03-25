@@ -18,7 +18,6 @@ scripts/train_highlevel.py - V5 Command-Space MoE 训练脚本
     Gate:
         python scripts/train_highlevel.py --mode teacher --skill moe --task s_avoid_basic \\
             --low_level_ckpt agents/fast_2000.pt \\
-            --follow_ckpt <FOLLOW_CKPT> \\
             --avoid_ckpt <AVOID_CKPT>
 """
 
@@ -1346,6 +1345,8 @@ class HierarchicalHexapodEnv:
         self.reward_affordance_override = None
         self.last_obs = None
         self.forced_forward_speed = torch.zeros(self.num_envs, device=device)
+        self.prev_nearest_obs_dist = torch.zeros(self.num_envs, device=device)
+        self.prev_nearest_obs_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -2490,6 +2491,7 @@ class HierarchicalHexapodEnv:
             (self.num_envs,), 5.0, dtype=torch.float32, device=self.device
         )
         avoid_band_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        nearest_obs = None
         avoid_band_outside_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         clearance = None
         clearance_global = None
@@ -2683,6 +2685,29 @@ class HierarchicalHexapodEnv:
                 prev_heading = reward_dict.get('heading', torch.zeros_like(heading_reward))
                 reward_dict['heading'] = heading_reward
                 reward_dict['total'] = reward_dict['total'] - prev_heading + heading_reward
+                if nearest_obs is not None:
+                    curr_nearest_obs_dist = torch.nan_to_num(
+                        nearest_obs,
+                        nan=0.0,
+                        posinf=0.0,
+                        neginf=0.0,
+                    )
+                    clearance_improvement = curr_nearest_obs_dist - self.prev_nearest_obs_dist
+                    activate_progress = 0.50
+                    if getattr(self.env, "nav_cfg", None) is not None:
+                        activate_progress = float(
+                            getattr(self.env.nav_cfg, "avoid_band_activate_progress", activate_progress)
+                        )
+                    y_progress_local = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
+                    clearance_active_mask = y_progress_local > activate_progress
+                    clearance_improve_reward = (
+                        torch.clamp(clearance_improvement, min=0.0)
+                        * 2.0
+                        * clearance_active_mask.float()
+                        * self.prev_nearest_obs_valid.float()
+                    )
+                    reward_dict['clearance_improve'] = clearance_improve_reward
+                    reward_dict['total'] = reward_dict['total'] + clearance_improve_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -2875,6 +2900,14 @@ class HierarchicalHexapodEnv:
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
         self.prev_gate_y = gate_y_raw_curr.clone()
+        if nearest_obs is not None:
+            self.prev_nearest_obs_dist = torch.nan_to_num(
+                nearest_obs,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            self.prev_nearest_obs_valid.fill_(True)
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
@@ -3002,6 +3035,8 @@ class HierarchicalHexapodEnv:
             self.prev_robot_pos[reset_ids] = self.env.root_states[reset_ids, :3]
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[reset_ids] = self.env.goal_world[reset_ids]
+            self.prev_nearest_obs_dist[reset_ids] = 0.0
+            self.prev_nearest_obs_valid[reset_ids] = False
         
         goal_change_count_snapshot = self.goal_change_count.clone()
         episode_info = None
@@ -3020,6 +3055,8 @@ class HierarchicalHexapodEnv:
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
+            self.prev_nearest_obs_dist[done_any] = 0.0
+            self.prev_nearest_obs_valid[done_any] = False
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[done_any] = self.env.goal_world[done_any]
             # 重置 Post-Processor 的变化率限制记忆
@@ -3354,10 +3391,11 @@ def train(args):
         and (args.task == S0_FOLLOW_TASK_NAME)
     )
     use_expert_guidance = use_egpo or use_follow_expert
+    use_gate_analytic_follow = is_gate
     compute_s0_follow_expert_cmd = None
     if bool(getattr(args, "egpo", False)) and not use_egpo:
         print("[Warn] --egpo 仅在 --skill follow --task s_follow_basic 且 non-gate 路径生效；当前配置下将忽略。")
-    if use_expert_guidance:
+    if use_expert_guidance or use_gate_analytic_follow:
         from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
         compute_s0_follow_expert_cmd = s0_follow_expert_fn
         if use_egpo:
@@ -3367,8 +3405,40 @@ def train(args):
             )
         if use_follow_expert:
             print("[Train] cmd_source=follow_expert (--use_follow_expert)")
+        if use_gate_analytic_follow:
+            print("[Gate] follow_source=analytic_s0_follow")
 
     run_mode_tag = args.mode + ("_studentaff" if (is_gate and moe_use_student_aff) else "")
+
+    def _compute_moe_follow_cmd_from_goal(
+        state_tensor: torch.Tensor,
+        goal_tensor: torch.Tensor,
+        reset_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if compute_s0_follow_expert_cmd is None:
+            raise RuntimeError("Gate 模式下解析式 follow expert 不可用。")
+        if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
+            raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
+        if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
+            raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
+        robot_pos_world_xy = state_tensor[:, :2]
+        robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
+        goal_x = goal_tensor[:, 0]
+        goal_y = goal_tensor[:, 1]
+        cos_heading = torch.cos(robot_heading)
+        sin_heading = torch.sin(robot_heading)
+        delta_world_x = cos_heading * goal_x - sin_heading * goal_y
+        delta_world_y = sin_heading * goal_x + cos_heading * goal_y
+        target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+        return compute_s0_follow_expert_cmd(
+            robot_pos_world_xy=robot_pos_world_xy,
+            robot_heading=robot_heading,
+            target_world_xy=target_world_xy,
+            target_vel_world_xy=None,
+            target_heading=None,
+            cmd_scale=cmd_scale,
+            reset_mask=reset_mask,
+        )
 
     def _normalize_meta_value(value):
         if isinstance(value, (str, int, float, bool)) or value is None:
@@ -3638,56 +3708,48 @@ def train(args):
         dprint(f"[Gate] ✓ Vision 加载成功: {args.vision_ckpt}")
 
     if is_gate:
-        if not getattr(args, "follow_ckpt", None) or not getattr(args, "avoid_ckpt", None):
-            raise ValueError("Gate 模式需要提供 --follow_ckpt 和 --avoid_ckpt。")
-        follow_aff_channels = AFFORDANCE_CHANNELS * aff_stack
+        if not getattr(args, "avoid_ckpt", None):
+            raise ValueError("Gate 模式需要提供 --avoid_ckpt；follow 侧默认使用解析式 expert。")
+        if compute_s0_follow_expert_cmd is None:
+            raise RuntimeError("Gate 模式下解析式 follow expert 不可用。")
+        follow_model = None
         avoid_aff_channels = AVOID_LOCAL_MAP_CHANNELS * aff_stack
-        follow_model = CmdVelExpert(
-            affordance_channels=follow_aff_channels,
-            state_dim=state_dim,
-            goal_dim=goal_dim,
-            cmd_scale=cmd_scale,
-        ).to(device)
         avoid_model = CmdVelExpert(
             affordance_channels=avoid_aff_channels,
             state_dim=state_dim,
             goal_dim=goal_dim,
             cmd_scale=cmd_scale,
         ).to(device)
-        for model, ckpt_path in [(follow_model, args.follow_ckpt), (avoid_model, args.avoid_ckpt)]:
-            ckpt = torch.load(ckpt_path, map_location=device)
-            expected_skill = "follow" if model is follow_model else "avoid"
-            ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
-            _check_aux_model_meta(
-                ckpt_meta,
-                source_name=f"Expert checkpoint ({expected_skill})",
-                expected_skill=expected_skill,
+        ckpt = torch.load(args.avoid_ckpt, map_location=device)
+        ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
+        _check_aux_model_meta(
+            ckpt_meta,
+            source_name="Expert checkpoint (avoid)",
+            expected_skill="avoid",
+        )
+        validate_checkpoint_contract_compatibility(
+            _build_experiment_meta(),
+            ckpt_meta,
+            reference_name="current gate run",
+            candidate_name="Expert checkpoint (avoid)",
+            strict=True,
+        )
+        if 'model_state_dict' in ckpt:
+            load_high_level_state_dict_compat(
+                avoid_model,
+                ckpt['model_state_dict'],
+                label=f"expert:{os.path.basename(args.avoid_ckpt)}",
             )
-            validate_checkpoint_contract_compatibility(
-                _build_experiment_meta(),
-                ckpt_meta,
-                reference_name="current gate run",
-                candidate_name=f"Expert checkpoint ({expected_skill})",
-                strict=True,
+        else:
+            load_high_level_state_dict_compat(
+                avoid_model,
+                ckpt,
+                label=f"expert:{os.path.basename(args.avoid_ckpt)}",
             )
-            if 'model_state_dict' in ckpt:
-                load_high_level_state_dict_compat(
-                    model,
-                    ckpt['model_state_dict'],
-                    label=f"expert:{os.path.basename(ckpt_path)}",
-                )
-            else:
-                load_high_level_state_dict_compat(
-                    model,
-                    ckpt,
-                    label=f"expert:{os.path.basename(ckpt_path)}",
-                )
-            model.eval()
-            for param in model.parameters():
-                param.requires_grad = False
-        dprint(f"[Gate] ✓ Follow/Avoid 加载完成: {args.follow_ckpt}, {args.avoid_ckpt}")
-        if any(param.requires_grad for param in follow_model.parameters()):
-            raise RuntimeError("Gate 模式下 Follow expert 仍存在可训练参数。")
+        avoid_model.eval()
+        for param in avoid_model.parameters():
+            param.requires_grad = False
+        dprint(f"[Gate] ✓ Follow=analytic expert, Avoid 加载完成: {args.avoid_ckpt}")
         if any(param.requires_grad for param in avoid_model.parameters()):
             raise RuntimeError("Gate 模式下 Avoid expert 仍存在可训练参数。")
 
@@ -3947,6 +4009,7 @@ def train(args):
             'velocity',
             'backward',
             'body_backward',
+            'clearance_improve',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -4273,9 +4336,10 @@ def train(args):
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
                 moe_expert_state = _get_moe_expert_state_inputs(state)
                 with torch.no_grad():
-                    cmd_f, _ = follow_model.get_action(
-                        moe_follow_aff_stack_buf, moe_expert_state, goal, follow_difficulty,
-                        deterministic=bool(getattr(args, "moe_expert_deterministic", True))
+                    cmd_f = _compute_moe_follow_cmd_from_goal(
+                        moe_expert_state,
+                        goal,
+                        reset_mask_prev,
                     )
                     cmd_a, _ = avoid_model.get_action(
                         moe_avoid_aff_stack_buf, moe_expert_state, goal, avoid_difficulty,
@@ -5713,7 +5777,7 @@ def train(args):
                           f"""{'-' * width}\n"""
                           f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
                           f"""{'Reward(gate/risk/col/term):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
-                          f"""{'Reward(avoid_band):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(avoid_band/clear):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('clearance_improve', 0.0):.3f}\n"""
                           f"""{'Reward(vel/back/body/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('body_backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
                           f"""{'Reward(turn/yaw/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('yaw_rate_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
@@ -5828,7 +5892,7 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_ckpt', type=str, default=None,
                         help='(Student) Teacher 模型路径')
     parser.add_argument('--follow_ckpt', type=str, default=None,
-                        help='(Gate) Follow expert 模型路径')
+                        help='旧参数保留；当前 moe 默认使用解析式 follow expert，不再需要该项')
     parser.add_argument('--avoid_ckpt', type=str, default=None,
                         help='(Gate) Avoid expert 模型路径')
     parser.add_argument('--vision_ckpt', type=str, default=None,

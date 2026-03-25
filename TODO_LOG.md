@@ -76,6 +76,10 @@
 
 - [x] ~~[P1] 将 PCR 训练日志里的 `GateYGap` 从混合量拆成 `gap_clamp / gap_w / gap_total`，分别对应 `y_raw->y_safe`、`y_safe->y_eff`、`y_raw->y_eff`，避免继续把 safe clamp 与 `w` 贡献混在一起~~
 
+## 2026-03-25 PCR moe 跟随侧改为解析式 expert
+
+- [x] ~~[P0] 将 `train_highlevel.py` 的 `moe` 主线从“加载 follow policy ckpt”改成“直接调用 `expert_s0_follow.py` 的解析式 follow expert”，只保留 `--avoid_ckpt` 为必需输入，先打通 gate/PCR 的最小训练链路~~
+
 ## 2026-03-25 avoid 固定模板纵向拉长与时长同步
 
 - [x] ~~[P0] 将 `s_avoid` 固定模板各 stage 的相邻行 `y` 间距统一增加 `0.15m`，并同步更新 `last_row_y`，保持穿越线/固定 goal/success 判据一致~~
@@ -86,6 +90,10 @@
 - [x] ~~[P0] 将 `s_avoid` 外生前进速度上限收紧为 `stage1=0.5, stage2=0.4`，并把 `stage/train warmup` 分别放慢到 `100/200 iter`，避免当前固定模板下前进过猛导致高碰撞~~
 - [x] ~~[P0] 同步放宽 `stage1->2->3->4` 的 `progress/success/collision` 升级门槛，减少当前强教学几何下课程长期卡死~~
 - [x] ~~[P1] 复查后补齐实际代码：修正 `train_highlevel.py` 中仍残留的旧速度表（`0.8/0.6`）与旧 warmup（`50/100 iter`），确保与上面训练口径一致~~
+
+## 2026-03-25 avoid 横移安全正信号补齐
+
+- [x] ~~[P0] 在 `s_avoid` 高层奖励中加入 `clearance_improve`：只在进入障碍区后奖励 `nearest_obs_dist` 的正向改善，给“提前横移后更安全”一个明确正信号，其他几何/band/成功口径保持不动~~
 
 ## 2026-03-25 并行训练显卡口径固定
 

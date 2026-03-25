@@ -25,6 +25,7 @@ import torch
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
 from legged_gym.scripts import train_highlevel as th
 
 
@@ -80,6 +81,36 @@ def _difficulty_list(s: str) -> List[float]:
     if not out:
         out = [0.0, 0.25, 0.5, 0.75, 1.0]
     return out
+
+
+def _compute_moe_follow_cmd_from_goal(
+    state_tensor: torch.Tensor,
+    goal_tensor: torch.Tensor,
+    reset_mask: Optional[torch.Tensor],
+    cmd_scale: Tuple[float, float, float],
+) -> torch.Tensor:
+    if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
+        raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
+    if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
+        raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
+    robot_pos_world_xy = state_tensor[:, :2]
+    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
+    goal_x = goal_tensor[:, 0]
+    goal_y = goal_tensor[:, 1]
+    cos_heading = torch.cos(robot_heading)
+    sin_heading = torch.sin(robot_heading)
+    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
+    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
+    target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+    return s0_follow_expert_fn(
+        robot_pos_world_xy=robot_pos_world_xy,
+        robot_heading=robot_heading,
+        target_world_xy=target_world_xy,
+        target_vel_world_xy=None,
+        target_heading=None,
+        cmd_scale=cmd_scale,
+        reset_mask=reset_mask,
+    )
 
 
 def _setup_seed(seed: int) -> None:
@@ -149,7 +180,6 @@ class EvalRunner:
         self.g = 9.81
 
         self.policy = None
-        self.follow_model = None
         self.avoid_model = None
         self.vision_model = None
         self.policy_meta = None
@@ -238,8 +268,8 @@ class EvalRunner:
         if skill == "moe":
             if not self.args.ckpt:
                 raise ValueError("MoE mode requires --ckpt for gate policy")
-            if not self.args.follow_ckpt or not self.args.avoid_ckpt:
-                raise ValueError("MoE mode requires --follow_ckpt and --avoid_ckpt")
+            if not self.args.avoid_ckpt:
+                raise ValueError("MoE mode requires --avoid_ckpt; follow side uses analytic expert")
 
             self.policy = th.GatePolicy(
                 affordance_channels=aff_channels,
@@ -258,34 +288,6 @@ class EvalRunner:
             )
             th.load_high_level_state_dict_compat(self.policy, _to_state_dict(gate_ckpt), label="eval_gate")
             self.policy.eval()
-
-            follow_aff_channels = int(obs["gt_affordance"].shape[1] * self.aff_stack)
-            self.follow_model = th.CmdVelExpert(
-                affordance_channels=follow_aff_channels,
-                state_dim=state_dim,
-                goal_dim=goal_dim,
-                cmd_scale=cmd_scale,
-            ).to(self.device)
-            follow_ckpt = torch.load(self.args.follow_ckpt, map_location=self.device)
-            follow_meta = self._ckpt_meta(follow_ckpt)
-            self._validate_ckpt_meta(follow_meta, expected_skill="follow", source_name="follow expert ckpt")
-            th.validate_checkpoint_contract_compatibility(
-                self.policy_meta,
-                follow_meta,
-                reference_name="gate ckpt",
-                candidate_name="follow expert ckpt",
-                strict=True,
-            )
-            th.load_high_level_state_dict_compat(
-                self.follow_model,
-                _to_state_dict(follow_ckpt),
-                label="eval_follow",
-            )
-            self.follow_model.eval()
-            self.aux_checkpoint_meta["follow_ckpt"] = {
-                "path": os.path.abspath(self.args.follow_ckpt),
-                "experiment_meta": follow_meta,
-            }
 
             avoid_aff_channels = int(obs["local_map_2ch"].shape[1] * self.aff_stack)
             self.avoid_model = th.CmdVelExpert(
@@ -342,11 +344,6 @@ class EvalRunner:
             total, trainable = _count_params(self.policy)
             info["policy_total"] = total
             info["policy_trainable"] = trainable
-
-        if self.follow_model is not None:
-            total, trainable = _count_params(self.follow_model)
-            info["follow_total"] = total
-            info["follow_trainable"] = trainable
 
         if self.avoid_model is not None:
             total, trainable = _count_params(self.avoid_model)
@@ -453,12 +450,11 @@ class EvalRunner:
                 raise ValueError("MoE eval requires separate follow/avoid/gate affordance inputs and difficulties.")
             expert_state = th.get_moe_expert_state_inputs(state)
             with torch.no_grad():
-                cmd_f, _ = self.follow_model.get_action(
-                    follow_aff_stack,
+                cmd_f = _compute_moe_follow_cmd_from_goal(
                     expert_state,
                     goal,
-                    follow_difficulty,
-                    deterministic=not self.args.stochastic,
+                    self.done_prev,
+                    tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()),
                 )
                 cmd_a, _ = self.avoid_model.get_action(
                     avoid_aff_stack,
@@ -1018,7 +1014,7 @@ def parse_args():
     parser.add_argument("--skill", type=str, default="follow", choices=["follow", "avoid", "moe"])
 
     parser.add_argument("--ckpt", type=str, required=True, help="policy checkpoint (follow/avoid or gate for moe)")
-    parser.add_argument("--follow_ckpt", type=str, default=None, help="follow checkpoint for moe")
+    parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
     parser.add_argument("--avoid_ckpt", type=str, default=None, help="avoid checkpoint for moe")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="vision checkpoint for student mode")
     parser.add_argument("--low_level_ckpt", type=str, required=True)
