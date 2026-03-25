@@ -2693,13 +2693,11 @@ class HierarchicalHexapodEnv:
                         neginf=0.0,
                     )
                     clearance_improvement = curr_nearest_obs_dist - self.prev_nearest_obs_dist
-                    activate_progress = 0.50
-                    if getattr(self.env, "nav_cfg", None) is not None:
-                        activate_progress = float(
-                            getattr(self.env.nav_cfg, "avoid_band_activate_progress", activate_progress)
-                        )
-                    y_progress_local = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
-                    clearance_active_mask = y_progress_local > activate_progress
+                    clearance_active_mask = torch.ones(
+                        self.num_envs,
+                        device=self.device,
+                        dtype=torch.bool,
+                    )
                     inside_band_mask = torch.ones_like(clearance_active_mask)
                     if hasattr(self.env, "s_avoid_band_x_min") and hasattr(self.env, "s_avoid_band_x_max"):
                         inside_band_mask = (
@@ -2708,7 +2706,7 @@ class HierarchicalHexapodEnv:
                         )
                     clearance_improve_reward = (
                         torch.clamp(clearance_improvement, min=0.0)
-                        * 2.0
+                        * 6.0
                         * clearance_active_mask.float()
                         * inside_band_mask.float()
                         * self.prev_nearest_obs_valid.float()
@@ -2749,13 +2747,11 @@ class HierarchicalHexapodEnv:
             and hasattr(self.env, "s_avoid_band_x_min")
             and hasattr(self.env, "s_avoid_spawn_world_y")
         ):
-            activate_progress = float(getattr(self.env.nav_cfg, "avoid_band_activate_progress", 0.50))
             band_x_min = self.env.s_avoid_band_x_min
             band_x_max = self.env.s_avoid_band_x_max
             band_y_min = self.env.s_avoid_band_y_min
             band_y_max = self.env.s_avoid_band_y_max
-            y_progress = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
-            avoid_band_active_mask = y_progress > activate_progress
+            avoid_band_active_mask = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
             dx_out = torch.clamp(band_x_min - robot_pos[:, 0], min=0.0) + torch.clamp(
                 robot_pos[:, 0] - band_x_max, min=0.0
             )

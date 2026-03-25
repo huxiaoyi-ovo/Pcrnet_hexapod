@@ -526,11 +526,11 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["collision_penalty"] = -12.0
         reward_cfg["terminal_fail_penalty"] = -10.0
         reward_cfg["time_penalty"] = -0.01
-        reward_cfg["velocity_scale"] = 0.05
+        reward_cfg["velocity_scale"] = 0.0
         reward_cfg["backward_scale"] = 0.0
-        reward_cfg["body_backward_scale"] = 0.5
+        reward_cfg["body_backward_scale"] = 0.0
         reward_cfg["turn_penalty_scale"] = 0.0
-        reward_cfg["yaw_rate_penalty"] = -0.15
+        reward_cfg["yaw_rate_penalty"] = 0.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
