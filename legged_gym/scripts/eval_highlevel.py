@@ -131,6 +131,7 @@ class EvalRunner:
         primary_meta = _load_experiment_meta_from_ckpt(getattr(args, "ckpt", None), self.device)
         self.primary_meta = primary_meta
         th.apply_experiment_meta_to_args(self.args, primary_meta, context="EvalHigh")
+        th.apply_runtime_ablation_cli_overrides(self.args, primary_meta, context="EvalHigh")
         self.args.camera_enable = bool(getattr(self.args, "camera_enable", False)) or (self.args.mode == "student")
 
         env_cfg, train_cfg = th.task_registry.get_cfgs(name=args.task)
@@ -436,24 +437,32 @@ class EvalRunner:
         follow_difficulty: Optional[torch.Tensor] = None,
         avoid_aff_stack: Optional[torch.Tensor] = None,
         avoid_difficulty: Optional[torch.Tensor] = None,
+        gate_aff_map: Optional[torch.Tensor] = None,
     ):
         state = obs_dict["state"]
         goal = obs_dict["goal"]
 
         if self.args.skill == "moe":
-            if follow_aff_stack is None or avoid_aff_stack is None or follow_difficulty is None or avoid_difficulty is None:
-                raise ValueError("MoE eval requires separate follow/avoid affordance stacks and difficulties.")
+            if (
+                follow_aff_stack is None
+                or avoid_aff_stack is None
+                or follow_difficulty is None
+                or avoid_difficulty is None
+                or gate_aff_map is None
+            ):
+                raise ValueError("MoE eval requires separate follow/avoid/gate affordance inputs and difficulties.")
+            expert_state = th.get_moe_expert_state_inputs(state)
             with torch.no_grad():
                 cmd_f, _ = self.follow_model.get_action(
                     follow_aff_stack,
-                    state,
+                    expert_state,
                     goal,
                     follow_difficulty,
                     deterministic=not self.args.stochastic,
                 )
                 cmd_a, _ = self.avoid_model.get_action(
                     avoid_aff_stack,
-                    state,
+                    expert_state,
                     goal,
                     avoid_difficulty,
                     deterministic=not self.args.stochastic,
@@ -466,7 +475,7 @@ class EvalRunner:
                     gate_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, aff_stack, gate_y_raw, cmd_f, cmd_a)
+                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, gate_aff_map, gate_y_raw, cmd_f, cmd_a)
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
@@ -572,6 +581,7 @@ class EvalRunner:
                     follow_difficulty=aff_bundle["follow_difficulty"],
                     avoid_aff_stack=self.avoid_aff_stack_buf,
                     avoid_difficulty=aff_bundle["avoid_difficulty"],
+                    gate_aff_map=aff_bundle["gate_aff"],
                 )
                 t_pol1 = time.perf_counter()
                 lat_ms = self._measure_inference_latency_ms(
@@ -585,7 +595,8 @@ class EvalRunner:
                 self.env.clearance_affordance_override = aff_for_post
                 self.env.clearance_override = None
                 self.env.reward_affordance_override = None
-                next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y)
+                gate_y_raw = gate_diag["gate_y_raw"] if isinstance(gate_diag, dict) else None
+                next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y, gate_y_raw=gate_y_raw)
                 post_info = info.get("post_info", None) if isinstance(info, dict) else None
                 if isinstance(post_info, dict) and isinstance(gate_diag, dict):
                     post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
@@ -1037,6 +1048,7 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    th.capture_cli_explicit_arg_values(args, parser)
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
     args._unknown_cli = list(unknown)

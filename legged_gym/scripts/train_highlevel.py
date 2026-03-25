@@ -299,6 +299,16 @@ def _get_effective_safe_free_dist(
     return float(safe_t[0].detach().cpu().item()), float(free_t[0].detach().cpu().item())
 
 
+def get_moe_expert_state_inputs(state_tensor: torch.Tensor) -> torch.Tensor:
+    # Standalone follow/avoid experts were trained with prev_gate_y fixed to 0.
+    # Keep the same state contract when they are reused under MoE gating.
+    if state_tensor.dim() != 2 or state_tensor.shape[1] <= 9:
+        return state_tensor
+    expert_state = state_tensor.clone()
+    expert_state[:, 9] = 0.0
+    return expert_state
+
+
 def resolve_moe_gate_pcr(
     env,
     args: argparse.Namespace,
@@ -452,6 +462,13 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "camera_interval",
     "decimation",
 )
+RUNTIME_ABLATION_ARG_KEYS = (
+    "beta",
+    "w_mode",
+    "w_tau",
+    "w_blend_mode",
+    "w_disable_gate_safe_clamp",
+)
 CHECKPOINT_CONTRACT_KEY_PATHS = (
     "aff_stack",
     "decimation",
@@ -537,6 +554,62 @@ def apply_experiment_meta_to_args(
             applied.append(f"{key}={new_value}")
     if applied:
         print(f"[{context}] replay checkpoint contract: " + ", ".join(applied))
+
+
+def capture_cli_explicit_arg_values(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    argv: Optional[Any] = None,
+) -> Dict[str, Any]:
+    if argv is None:
+        argv = sys.argv[1:]
+    option_to_action: Dict[str, argparse.Action] = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_to_action[option] = action
+    explicit_values: Dict[str, Any] = {}
+    for token in argv:
+        if not isinstance(token, str) or not token.startswith("--"):
+            continue
+        option = token.split("=", 1)[0]
+        action = option_to_action.get(option, None)
+        if action is None:
+            continue
+        explicit_values[action.dest] = getattr(args, action.dest, None)
+    setattr(args, "_cli_explicit_arg_values", dict(explicit_values))
+    runtime_overrides = {
+        key: explicit_values[key]
+        for key in RUNTIME_ABLATION_ARG_KEYS
+        if key in explicit_values
+    }
+    setattr(args, "_runtime_ablation_cli_overrides", runtime_overrides)
+    return explicit_values
+
+
+def apply_runtime_ablation_cli_overrides(
+    args: argparse.Namespace,
+    ckpt_meta: Optional[Dict[str, Any]],
+    *,
+    context: str,
+) -> None:
+    explicit_overrides = dict(getattr(args, "_runtime_ablation_cli_overrides", {}) or {})
+    resolved_lines = []
+    for key in RUNTIME_ABLATION_ARG_KEYS:
+        ckpt_value = ckpt_meta.get(key, None) if isinstance(ckpt_meta, dict) else None
+        cli_explicit = key in explicit_overrides
+        if cli_explicit:
+            setattr(args, key, explicit_overrides[key])
+        final_value = getattr(args, key, None)
+        if cli_explicit or ckpt_value is not None:
+            cli_value = explicit_overrides[key] if cli_explicit else "<unset>"
+            resolved_lines.append(
+                f"{key}: ckpt={ckpt_value}, cli={cli_value}, final={final_value}"
+            )
+    if resolved_lines:
+        print(f"[{context}] resolved runtime ablation config:")
+        for line in resolved_lines:
+            print(f"[{context}]   {line}")
 
 
 def apply_observation_contract_to_env_cfg(
@@ -1397,8 +1470,8 @@ class HierarchicalHexapodEnv:
         if not bool(getattr(self.env, "s_avoid_enabled", False)):
             return
         stage_speed = {
-            1: (0.2, 0.8),
-            2: (0.2, 0.6),
+            1: (0.2, 0.5),
+            2: (0.2, 0.4),
             3: (0.2, 0.45),
             4: (0.2, 0.35),
         }
@@ -1406,7 +1479,7 @@ class HierarchicalHexapodEnv:
         stage_start_iter = int(getattr(self, "forced_forward_stage_start_iter", 0))
         current_iter = int(getattr(self, "forced_forward_current_iter", stage_start_iter))
         stage_iter = max(0, current_iter - stage_start_iter)
-        stage_warmup_ratio = min(float(stage_iter) / 50.0, 1.0)
+        stage_warmup_ratio = min(float(stage_iter) / 100.0, 1.0)
         train_warmup_ratio = float(getattr(self, "forced_forward_train_warmup_ratio", 0.0))
         train_warmup_ratio = min(max(train_warmup_ratio, 0.0), 1.0)
         warmup_ratio = min(stage_warmup_ratio, train_warmup_ratio)
@@ -2242,13 +2315,16 @@ class HierarchicalHexapodEnv:
         self,
         cmd_vel: torch.Tensor,
         gate_y: Optional[torch.Tensor] = None,
+        *,
+        gate_y_raw: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict]:
         """
         高层步进 (10Hz)
 
         Args:
             cmd_vel: (N, 3) [vx, vy, omega] 高层命令
-            gate_y: (N,) 门控权重（仅 Gate 训练使用）
+            gate_y: (N,) 当前时刻执行门控权重（仅 Gate 训练使用）
+            gate_y_raw: (N,) 当前时刻原始 gate 输出；用于 history 和 gate_smooth
 
         Returns:
             obs_dict, rewards, dones, info
@@ -2262,6 +2338,9 @@ class HierarchicalHexapodEnv:
                 cmd_vel = cmd_vel.detach()
             cmd_vel = torch.zeros_like(cmd_vel)
             cmd_vel[:, 1] = float(v)
+        gate_y_exec = None if gate_y is None else gate_y.to(self.device)
+        gate_y_raw_curr = gate_y_exec if gate_y_raw is None else gate_y_raw.to(self.device)
+
         # 1. Command Post-Processor
         clearance_pp = None
         clearance_aff_map = None
@@ -2492,9 +2571,10 @@ class HierarchicalHexapodEnv:
             )
 
         reward_terms = None
-        if gate_y is None:
-            gate_y = torch.zeros(self.num_envs, device=self.device)
-        gate_y = gate_y.to(self.device)
+        if gate_y_exec is None:
+            gate_y_exec = torch.zeros(self.num_envs, device=self.device)
+        if gate_y_raw_curr is None:
+            gate_y_raw_curr = gate_y_exec
         if self.reward_func is not None:
             # Use world-frame linear velocity to match world-frame goal direction in reward terms.
             robot_vel = self.env.root_states[:, 7:10]
@@ -2520,7 +2600,7 @@ class HierarchicalHexapodEnv:
                 robot_vel=robot_vel,
                 robot_vel_body=self.env.base_lin_vel,
                 robot_quat=robot_quat,
-                gate_y=gate_y,
+                gate_y=gate_y_raw_curr,
                 prev_gate_y=self.prev_gate_y,
                 terrain_difficulty=reward_difficulty,
                 collision_mask=collision_mask,
@@ -2793,7 +2873,7 @@ class HierarchicalHexapodEnv:
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
-        self.prev_gate_y = gate_y.clone()
+        self.prev_gate_y = gate_y_raw_curr.clone()
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
@@ -3211,13 +3291,7 @@ def train(args):
         return current_obs['local_map_2ch'], current_obs['actor_difficulty']
 
     def _get_moe_expert_state_inputs(state_tensor: torch.Tensor) -> torch.Tensor:
-        # Standalone follow/avoid experts were trained with prev_gate_y fixed to 0.
-        # Keep the same state contract when they are reused under MoE gating.
-        if state_tensor.dim() != 2 or state_tensor.shape[1] <= 9:
-            return state_tensor
-        expert_state = state_tensor.clone()
-        expert_state[:, 9] = 0.0
-        return expert_state
+        return get_moe_expert_state_inputs(state_tensor)
 
     def _predict_affordance_triplet(
         current_obs: Dict[str, torch.Tensor],
@@ -3831,7 +3905,7 @@ def train(args):
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
         local_iteration = max(0, iteration - start_iteration)
-        env.forced_forward_train_warmup_ratio = min(float(local_iteration) / 100.0, 1.0)
+        env.forced_forward_train_warmup_ratio = min(float(local_iteration) / 200.0, 1.0)
         if bool(getattr(env.env, "s_avoid_enabled", False)):
             current_stage = int(getattr(env.env, "s_avoid_stage", 1))
             if current_stage != int(getattr(env, "forced_forward_stage_last", current_stage)):
@@ -4252,7 +4326,7 @@ def train(args):
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
                     cmd = gate_diag["cmd"]
-                    next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
+                    next_obs, rewards, dones, env_info = env.step(cmd, y_eff, gate_y_raw=gate_y_raw)
                     timeout_mask = env_info.get("timeout", None) if env_info is not None else None
                     timeout_bootstrap_obs = env_info.get("timeout_bootstrap_obs", None) if env_info is not None else None
                     if (
@@ -5446,7 +5520,7 @@ def train(args):
         writer.add_scalar('Stats/CmdJerkAng', cmd_jerk_ang_mean, iteration)
         writer.add_scalar('Stats/NearMissExcess', near_miss_excess_mean, iteration)
         writer.add_scalar('Stats/NearMissRatio', near_miss_ratio, iteration)
-        writer.add_scalar('Stats/GateSwitchRate', gate_switch_rate_mean, iteration)
+        writer.add_scalar('Stats/GateEffSwitchRate', gate_switch_rate_mean, iteration)
         writer.add_scalar('Stats/SceneDifficulty', d_scene, iteration)
         if use_avoid_local_map:
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
@@ -5490,13 +5564,13 @@ def train(args):
                 writer.add_scalar('Avoid/GoalFallbackRate_S4', avoid_goal_fallback_count_s4_iter / avoid_goal_count_s4_iter, iteration)
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
-            writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
+            writer.add_scalar('Stats/GateYEff', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
             writer.add_scalar('Stats/GateW', gate_w_mean, iteration)
             writer.add_scalar('Stats/GateYGap', gate_y_gap_mean, iteration)
             writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
-            writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
+            writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
         writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)

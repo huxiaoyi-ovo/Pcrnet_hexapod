@@ -64,6 +64,25 @@
 
 - [x] ~~[P0] 以现有 `CmdVelExpert + GatePolicy + CommandPostProcessor` 为唯一 PCR 主入口，先补 `y-only` 基线日志与评测字段，再在 gate rollout 中加入最小 `w_geom` 与 `y_eff` 融合，固定 `switch_rate / near-miss / cmd_jerk / y_raw_vs_y_eff` 证据链~~
 
+## 2026-03-25 PCR 评测/回放口径修复
+
+- [x] ~~[P0] 修复 `eval/play` 的 PCR 口径漂移：`w_geom` 必须基于当前单帧 `gate_aff` 计算，`cmd_F/cmd_A` 必须继续使用与 gate 训练一致的 expert state（`prev_gate_y=0`）~~
+
+## 2026-03-25 PCR raw/eff 时间语义与 CLI 显式参数优先
+
+- [x] ~~[P0] 收口 PCR 主实验语义：`raw` 负责 history 和 `gate_smooth`，`eff` 只负责执行；同时让 `eval/play` 中仅 CLI 显式传入的 `beta/w_*` 运行期消融参数覆盖 ckpt meta，并打印 resolved config~~
+
+## 2026-03-25 avoid 固定模板纵向拉长与时长同步
+
+- [x] ~~[P0] 将 `s_avoid` 固定模板各 stage 的相邻行 `y` 间距统一增加 `0.15m`，并同步更新 `last_row_y`，保持穿越线/固定 goal/success 判据一致~~
+- [x] ~~[P0] 将 `s_avoid_basic` 的回合总时长从 `15s` 合理增加到 `20s`，避免新几何下被旧时长过早截断~~
+
+## 2026-03-25 avoid 降速与课程放宽
+
+- [x] ~~[P0] 将 `s_avoid` 外生前进速度上限收紧为 `stage1=0.5, stage2=0.4`，并把 `stage/train warmup` 分别放慢到 `100/200 iter`，避免当前固定模板下前进过猛导致高碰撞~~
+- [x] ~~[P0] 同步放宽 `stage1->2->3->4` 的 `progress/success/collision` 升级门槛，减少当前强教学几何下课程长期卡死~~
+- [x] ~~[P1] 复查后补齐实际代码：修正 `train_highlevel.py` 中仍残留的旧速度表（`0.8/0.6`）与旧 warmup（`50/100 iter`），确保与上面训练口径一致~~
+
 ## 2026-03-25 并行训练显卡口径固定
 
 - [x] ~~[P1] 固定并行窗口资源约定：`PCR` 训练默认使用 `GPU 0`，`avoid expert` 训练默认使用 `GPU 1`，并在长期协作规则中补充日志/ckpt 默认避免重名覆盖~~

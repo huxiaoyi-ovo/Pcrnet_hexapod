@@ -1077,6 +1077,7 @@ def parse_args():
         help="Flip heading_offset_rad sign for debug alignment",
     )
     args, unknown = parser.parse_known_args()
+    th.capture_cli_explicit_arg_values(args, parser)
 
     sys.argv = [sys.argv[0]] + unknown
     if not hasattr(args, "physics_engine"):
@@ -1147,6 +1148,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     primary_meta = _load_experiment_meta_from_ckpt(primary_contract_ckpt, device)
     th.apply_experiment_meta_to_args(args, primary_meta, context="PlayHigh")
+    th.apply_runtime_ablation_cli_overrides(args, primary_meta, context="PlayHigh")
     if static_avoid_debug and args.num_envs != 1:
         print(f"[PlayHigh] avoid_map_debug_case={avoid_map_debug_case}: forcing num_envs=1 (was {args.num_envs})")
         args.num_envs = 1
@@ -1664,6 +1666,11 @@ def main():
                 if is_gate and bool(getattr(args, "zero_local_map", False))
                 else avoid_aff_stack_buf
             )
+            gate_aff_input = (
+                torch.zeros_like(aff_bundle["gate_aff"])
+                if is_gate and bool(getattr(args, "zero_local_map", False))
+                else aff_bundle["gate_aff"]
+            )
             if not expert_only_mode:
                 with torch.no_grad():
                     if is_gate:
@@ -1680,16 +1687,17 @@ def main():
                             if bool(getattr(args, "zero_local_map", False))
                             else aff_bundle["avoid_difficulty"]
                         )
+                        expert_state = th.get_moe_expert_state_inputs(obs["state"])
                         cmd_f, _ = follow_policy.get_action(
                             follow_aff_input,
-                            obs["state"],
+                            expert_state,
                             goal_input,
                             follow_difficulty_input,
                             deterministic=True,
                         )
                         cmd_a, _ = avoid_policy.get_action(
                             avoid_aff_input,
-                            obs["state"],
+                            expert_state,
                             goal_input,
                             avoid_difficulty_input,
                             deterministic=True,
@@ -1701,7 +1709,7 @@ def main():
                             gate_difficulty,
                             deterministic=deterministic,
                         )
-                        gate_diag = th.resolve_moe_gate_pcr(env, args, aff_input, gate_y_raw, cmd_f, cmd_a)
+                        gate_diag = th.resolve_moe_gate_pcr(env, args, gate_aff_input, gate_y_raw, cmd_f, cmd_a)
                         gate_y = gate_diag["y_eff"]
                         cmd = gate_diag["cmd"]
                     else:
@@ -1782,7 +1790,8 @@ def main():
                 cmd = force_cmd_tensor.expand(env.num_envs, -1)
             env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             env.reward_affordance_override = aff_map
-            obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
+            gate_y_raw_step = gate_diag["gate_y_raw"] if (is_gate and isinstance(gate_diag, dict)) else None
+            obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None, gate_y_raw=gate_y_raw_step)
             post_info = info.get("post_info", None) if isinstance(info, dict) else None
             if isinstance(post_info, dict) and isinstance(gate_diag, dict):
                 post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()

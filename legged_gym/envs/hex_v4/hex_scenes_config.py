@@ -324,6 +324,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
     """
     class env(HexGroundCfg.env):
         env_spacing = 12.0
+        episode_length_s = 20
 
     class terrain(HexGroundCfg.terrain):
         mesh_type = "plane"
@@ -340,32 +341,32 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Fixed-layout curriculum: keep stage switch criteria minimal and fast.
         avoid_stage12_window = 150
         avoid_stage12_min_episodes = 400
-        avoid_stage12_collision_threshold = 0.03
+        avoid_stage12_collision_threshold = 0.06
         avoid_stage12_exposure_threshold = 0.70
-        avoid_stage12_progress_threshold = 0.80
+        avoid_stage12_progress_threshold = 0.70
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
-        avoid_stage12_success_threshold = 0.45
+        avoid_stage12_success_threshold = 0.20
 
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage23_window = 150
         avoid_stage23_min_episodes = 400
-        avoid_stage23_collision_threshold = 0.03
+        avoid_stage23_collision_threshold = 0.06
         avoid_stage23_exposure_threshold = 0.80
-        avoid_stage23_progress_threshold = 0.85
+        avoid_stage23_progress_threshold = 0.75
         avoid_stage23_progress_delta = 0.35
         avoid_stage23_success_distance = 0.65
-        avoid_stage23_success_threshold = 0.50
+        avoid_stage23_success_threshold = 0.25
 
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage34_window = 150
         avoid_stage34_min_episodes = 400
-        avoid_stage34_collision_threshold = 0.03
+        avoid_stage34_collision_threshold = 0.06
         avoid_stage34_exposure_threshold = 0.85
-        avoid_stage34_progress_threshold = 0.90
+        avoid_stage34_progress_threshold = 0.80
         avoid_stage34_progress_delta = 0.35
         avoid_stage34_success_distance = 0.65
-        avoid_stage34_success_threshold = 0.55
+        avoid_stage34_success_threshold = 0.30
 
         # Stage-4 corridor shrink curriculum.
         avoid_stage4_shrink_window = 100
@@ -404,14 +405,14 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_fixed_row_x_open_right_even = (-0.85, -0.25)
         avoid_fixed_row_x_open_left_even = (0.25, 0.85)
         avoid_fixed_row_x_even = (-0.50, 0.50)
-        avoid_stage1_row_y = (0.80, 2.00)
-        avoid_stage2_row_y = (0.70, 1.70, 2.70)
-        avoid_stage3_row_y = (0.65, 1.55, 2.45, 3.35)
-        avoid_stage4_row_y = (0.60, 1.40, 2.20, 3.00, 3.80)
-        avoid_stage1_last_row_y = 2.00
-        avoid_stage2_last_row_y = 2.70
-        avoid_stage3_last_row_y = 3.35
-        avoid_stage4_last_row_y = 3.80
+        avoid_stage1_row_y = (0.80, 2.15)
+        avoid_stage2_row_y = (0.70, 1.85, 3.00)
+        avoid_stage3_row_y = (0.65, 1.70, 2.75, 3.80)
+        avoid_stage4_row_y = (0.60, 1.55, 2.50, 3.45, 4.40)
+        avoid_stage1_last_row_y = 2.15
+        avoid_stage2_last_row_y = 3.00
+        avoid_stage3_last_row_y = 3.80
+        avoid_stage4_last_row_y = 4.40
         collision_force_threshold = 0.1
         avoid_strict_contact_margin = 0.01
 
