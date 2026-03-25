@@ -440,14 +440,8 @@ class EvalRunner:
         goal = obs_dict["goal"]
 
         if self.args.skill == "moe":
-            if (
-                follow_aff_stack is None
-                or avoid_aff_stack is None
-                or follow_difficulty is None
-                or avoid_difficulty is None
-                or gate_aff_map is None
-            ):
-                raise ValueError("MoE eval requires separate follow/avoid/gate affordance inputs and difficulties.")
+            if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:
+                raise ValueError("MoE eval requires avoid affordance inputs and gate affordance map.")
             expert_state = th.get_moe_expert_state_inputs(state)
             with torch.no_grad():
                 cmd_f = _compute_moe_follow_cmd_from_goal(

@@ -1430,7 +1430,6 @@ def main():
     expert_only_mode = use_follow_expert or static_avoid_debug or (force_cmd_tensor is not None)
     policy = None
     avoid_policy = None
-    follow_aff_stack_buf = None
     avoid_aff_stack_buf = None
     if use_follow_expert:
         print("[PlayHigh] cmd_source=follow_expert (--use_follow_expert)")
@@ -1574,7 +1573,6 @@ def main():
     prev_dist = None
     aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
     if is_gate:
-        follow_aff_stack_buf = aff_bundle["follow_aff"].repeat(1, aff_stack, 1, 1)
         avoid_aff_stack_buf = aff_bundle["avoid_aff"].repeat(1, aff_stack, 1, 1)
     aff_stack_fill = torch.ones(env.num_envs, device=device)
     stack_reset_mask = None
@@ -1620,7 +1618,6 @@ def main():
                 aff_map = aff_bundle["policy_aff"]
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
                 if is_gate:
-                    follow_aff_stack_buf = aff_bundle["follow_aff"].repeat(1, aff_stack, 1, 1)
                     avoid_aff_stack_buf = aff_bundle["avoid_aff"].repeat(1, aff_stack, 1, 1)
                 aff_stack_fill.fill_(1)
                 stack_reset_mask = None
@@ -1635,7 +1632,6 @@ def main():
                 reset_aff = reset_bundle["policy_aff"]
                 aff_stack_buf[stack_reset_mask] = reset_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
                 if is_gate:
-                    follow_aff_stack_buf[stack_reset_mask] = reset_bundle["follow_aff"][stack_reset_mask].repeat(1, aff_stack, 1, 1)
                     avoid_aff_stack_buf[stack_reset_mask] = reset_bundle["avoid_aff"][stack_reset_mask].repeat(1, aff_stack, 1, 1)
                 aff_stack_fill[stack_reset_mask] = 1
                 stack_reset_mask = None
@@ -1645,10 +1641,7 @@ def main():
             aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
             aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
             if is_gate:
-                follow_aff = aff_bundle["follow_aff"]
                 avoid_aff = aff_bundle["avoid_aff"]
-                follow_aff_stack_buf = torch.roll(follow_aff_stack_buf, shifts=-follow_aff.shape[1], dims=1)
-                follow_aff_stack_buf[:, -follow_aff.shape[1]:, :, :] = follow_aff
                 avoid_aff_stack_buf = torch.roll(avoid_aff_stack_buf, shifts=-avoid_aff.shape[1], dims=1)
                 avoid_aff_stack_buf[:, -avoid_aff.shape[1]:, :, :] = avoid_aff
             if aff_stack > 1:
