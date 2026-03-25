@@ -15,7 +15,7 @@ import json
 import math
 import time
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
@@ -103,6 +103,22 @@ class EpisodeAccumulator:
     cross_line_dist_min: float = float("inf")
     episode_collision: bool = False
     progress_reached: bool = False
+    gate_y_raw_sum: float = 0.0
+    y_eff_sum: float = 0.0
+    w_sum: float = 0.0
+    clearance_f_sum: float = 0.0
+    clearance_a_sum: float = 0.0
+    risk_f_sum: float = 0.0
+    risk_a_sum: float = 0.0
+    near_miss_steps: int = 0
+    gate_switch_count: int = 0
+    cmd_jerk_lin_sum: float = 0.0
+    cmd_jerk_ang_sum: float = 0.0
+    prev_y_eff: Optional[float] = None
+    prev_cmd_final: Optional[list] = None
+    cmd_f_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    cmd_a_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    cmd_final_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
 
 
 class EvalRunner:
@@ -442,17 +458,16 @@ class EvalRunner:
                     avoid_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-
                 gate_difficulty = difficulty if self.args.gate_use_difficulty else torch.zeros_like(difficulty)
-                gate_y, _ = self.policy.get_action(
+                gate_y_raw, _ = self.policy.get_action(
                     aff_stack,
                     state,
                     goal,
                     gate_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-                cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
-            return cmd, gate_y
+                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, aff_stack, gate_y_raw, cmd_f, cmd_a)
+            return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
             cmd, _ = self.policy.get_action(
@@ -462,7 +477,7 @@ class EvalRunner:
                 difficulty,
                 deterministic=not self.args.stochastic,
             )
-        return cmd, None
+        return cmd, None, None
 
     def _measure_inference_latency_ms(
         self,
@@ -549,7 +564,7 @@ class EvalRunner:
                     valid_follow = freeze_timer <= 1e-6
 
                 t_pol0 = time.perf_counter()
-                cmd_raw, gate_y = self._policy_step(
+                cmd_raw, gate_y, gate_diag = self._policy_step(
                     obs,
                     aff_stack,
                     difficulty_now,
@@ -571,6 +586,19 @@ class EvalRunner:
                 self.env.clearance_override = None
                 self.env.reward_affordance_override = None
                 next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y)
+                post_info = info.get("post_info", None) if isinstance(info, dict) else None
+                if isinstance(post_info, dict) and isinstance(gate_diag, dict):
+                    post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
+                    post_info["gate_y"] = gate_diag["gate_y"].detach().clone()
+                    post_info["y_eff"] = gate_diag["y_eff"].detach().clone()
+                    post_info["w"] = gate_diag["w"].detach().clone()
+                    post_info["cmd_F"] = gate_diag["cmd_f"].detach().clone()
+                    post_info["cmd_A"] = gate_diag["cmd_a"].detach().clone()
+                    post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
+                    post_info["clearance_F"] = gate_diag["clearance_F"].detach().clone()
+                    post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
+                    post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
+                    post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
 
                 # Step-level energy and distance proxies.
                 torques = getattr(self.env.env, "torques", None)
@@ -632,6 +660,66 @@ class EvalRunner:
                     if math.isfinite(cross_line_val):
                         ai.cross_line_dist_min = min(ai.cross_line_dist_min, cross_line_val)
 
+                    if self.args.skill == "moe" and isinstance(post_info, dict):
+                        gate_raw_t = post_info.get("gate_y_raw", None)
+                        y_eff_t = post_info.get("y_eff", None)
+                        w_t = post_info.get("w", None)
+                        clr_f_t = post_info.get("clearance_F", None)
+                        clr_a_t = post_info.get("clearance_A", None)
+                        risk_f_t = post_info.get("risk_F", None)
+                        risk_a_t = post_info.get("risk_A", None)
+                        cmd_f_t = post_info.get("cmd_F", None)
+                        cmd_a_t = post_info.get("cmd_A", None)
+                        cmd_final_t = post_info.get("cmd_exec_mean", post_info.get("cmd_slew", cmd_raw))
+                        clearance_pp_t = post_info.get("clearance_pp", None)
+                        safe_thr_t = post_info.get("post_safe_distance", None)
+
+                        gate_raw_v = _safe_float(gate_raw_t[i].item(), default=0.0) if torch.is_tensor(gate_raw_t) else 0.0
+                        y_eff_v = _safe_float(y_eff_t[i].item(), default=gate_raw_v) if torch.is_tensor(y_eff_t) else gate_raw_v
+                        w_v = _safe_float(w_t[i].item(), default=0.0) if torch.is_tensor(w_t) else 0.0
+                        clr_f_v = _safe_float(clr_f_t[i].item(), default=0.0) if torch.is_tensor(clr_f_t) else 0.0
+                        clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
+                        risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
+                        risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
+                        ai.gate_y_raw_sum += gate_raw_v
+                        ai.y_eff_sum += y_eff_v
+                        ai.w_sum += w_v
+                        ai.clearance_f_sum += clr_f_v
+                        ai.clearance_a_sum += clr_a_v
+                        ai.risk_f_sum += risk_f_v
+                        ai.risk_a_sum += risk_a_v
+                        if ai.prev_y_eff is not None and abs(y_eff_v - ai.prev_y_eff) > th.GATE_SWITCH_DY_DEFAULT:
+                            ai.gate_switch_count += 1
+                        ai.prev_y_eff = y_eff_v
+
+                        if torch.is_tensor(cmd_f_t):
+                            cmd_f_v = [float(x) for x in cmd_f_t[i].detach().cpu().tolist()[:3]]
+                            for j in range(3):
+                                ai.cmd_f_sum[j] += cmd_f_v[j]
+                        if torch.is_tensor(cmd_a_t):
+                            cmd_a_v = [float(x) for x in cmd_a_t[i].detach().cpu().tolist()[:3]]
+                            for j in range(3):
+                                ai.cmd_a_sum[j] += cmd_a_v[j]
+                        if torch.is_tensor(cmd_final_t):
+                            cmd_final_v = [float(x) for x in cmd_final_t[i].detach().cpu().tolist()[:3]]
+                            for j in range(3):
+                                ai.cmd_final_sum[j] += cmd_final_v[j]
+                            if ai.prev_cmd_final is not None:
+                                dx = cmd_final_v[0] - ai.prev_cmd_final[0]
+                                dy = cmd_final_v[1] - ai.prev_cmd_final[1]
+                                dw = cmd_final_v[2] - ai.prev_cmd_final[2]
+                                ai.cmd_jerk_lin_sum += math.hypot(dx, dy)
+                                ai.cmd_jerk_ang_sum += abs(dw)
+                            ai.prev_cmd_final = cmd_final_v
+                        if torch.is_tensor(clearance_pp_t) and safe_thr_t is not None:
+                            safe_thr_v = _safe_float(
+                                safe_thr_t[i].item() if torch.is_tensor(safe_thr_t) and safe_thr_t.ndim > 0 else float(safe_thr_t),
+                                default=0.0,
+                            )
+                            clr_pp_v = _safe_float(clearance_pp_t[i].item(), default=float("inf"))
+                            if clr_pp_v < safe_thr_v:
+                                ai.near_miss_steps += 1
+
                     if (not ai.success) and bool(success_step[i].item()):
                         ai.success = True
                         ai.t_success_s = float(ai.step_hl) * float(self.env.high_level_dt)
@@ -653,6 +741,7 @@ class EvalRunner:
                         cot = ai.energy_j / (self.mass_kg * self.g * ai.distance_m)
                     final_success = bool(success_step[i].item())
 
+                    denom_steps = float(max(ai.step_hl, 1))
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
@@ -669,6 +758,26 @@ class EvalRunner:
                             "cross_line_dist_min": ai.cross_line_dist_min if math.isfinite(ai.cross_line_dist_min) else float("nan"),
                             "episode_collision": int(ai.episode_collision),
                             "progress_reached": int(ai.progress_reached),
+                            "gate_y_raw_mean": ai.gate_y_raw_sum / denom_steps,
+                            "y_eff_mean": ai.y_eff_sum / denom_steps,
+                            "w_mean": ai.w_sum / denom_steps,
+                            "clearance_f_mean": ai.clearance_f_sum / denom_steps,
+                            "clearance_a_mean": ai.clearance_a_sum / denom_steps,
+                            "risk_f_mean": ai.risk_f_sum / denom_steps,
+                            "risk_a_mean": ai.risk_a_sum / denom_steps,
+                            "switch_rate": ai.gate_switch_count / denom_steps,
+                            "near_miss_rate": ai.near_miss_steps / denom_steps,
+                            "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
+                            "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
+                            "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
+                            "cmd_f_mean_y": ai.cmd_f_sum[1] / denom_steps,
+                            "cmd_f_mean_w": ai.cmd_f_sum[2] / denom_steps,
+                            "cmd_a_mean_x": ai.cmd_a_sum[0] / denom_steps,
+                            "cmd_a_mean_y": ai.cmd_a_sum[1] / denom_steps,
+                            "cmd_a_mean_w": ai.cmd_a_sum[2] / denom_steps,
+                            "cmd_final_mean_x": ai.cmd_final_sum[0] / denom_steps,
+                            "cmd_final_mean_y": ai.cmd_final_sum[1] / denom_steps,
+                            "cmd_final_mean_w": ai.cmd_final_sum[2] / denom_steps,
                         }
                     )
                     global_episode_idx += 1
@@ -705,6 +814,15 @@ class EvalRunner:
         cross_line_min = _clean([r.get("cross_line_dist_min", float("nan")) for r in rows])
         episode_collision = [int(r.get("episode_collision", 0)) for r in rows]
         progress_flags = [int(r.get("progress_reached", 0)) for r in rows]
+        gate_y_raw_vals = _clean([r.get("gate_y_raw_mean", float("nan")) for r in rows])
+        y_eff_vals = _clean([r.get("y_eff_mean", float("nan")) for r in rows])
+        w_vals = _clean([r.get("w_mean", float("nan")) for r in rows])
+        clearance_f_vals = _clean([r.get("clearance_f_mean", float("nan")) for r in rows])
+        risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
+        switch_vals = _clean([r.get("switch_rate", float("nan")) for r in rows])
+        near_miss_vals = _clean([r.get("near_miss_rate", float("nan")) for r in rows])
+        cmd_jerk_lin_vals = _clean([r.get("cmd_jerk_lin_mean", float("nan")) for r in rows])
+        cmd_jerk_ang_vals = _clean([r.get("cmd_jerk_ang_mean", float("nan")) for r in rows])
 
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
@@ -727,6 +845,15 @@ class EvalRunner:
             "cross_line_dist_min_mean": float(np.mean(cross_line_min)) if cross_line_min else float("nan"),
             "episode_collision_rate": float(sum(episode_collision) / max(1, total_eps)),
             "progress_rate": float(sum(progress_flags) / max(1, total_eps)),
+            "gate_y_raw_mean": float(np.mean(gate_y_raw_vals)) if gate_y_raw_vals else float("nan"),
+            "y_eff_mean": float(np.mean(y_eff_vals)) if y_eff_vals else float("nan"),
+            "w_mean": float(np.mean(w_vals)) if w_vals else float("nan"),
+            "clearance_f_mean": float(np.mean(clearance_f_vals)) if clearance_f_vals else float("nan"),
+            "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
+            "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
+            "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
+            "cmd_jerk_lin_mean": float(np.mean(cmd_jerk_lin_vals)) if cmd_jerk_lin_vals else float("nan"),
+            "cmd_jerk_ang_mean": float(np.mean(cmd_jerk_ang_vals)) if cmd_jerk_ang_vals else float("nan"),
             "inference_latency_ms_p50": _quantile(latency_ms_samples, 0.50),
             "inference_latency_ms_p95": _quantile(latency_ms_samples, 0.95),
         }
@@ -744,6 +871,13 @@ class EvalRunner:
             cross_line_min_d = _clean([r.get("cross_line_dist_min", float("nan")) for r in sub])
             collision_d = [int(r.get("episode_collision", 0)) for r in sub]
             progress_d = [int(r.get("progress_reached", 0)) for r in sub]
+            gate_y_raw_d = _clean([r.get("gate_y_raw_mean", float("nan")) for r in sub])
+            y_eff_d = _clean([r.get("y_eff_mean", float("nan")) for r in sub])
+            w_d = _clean([r.get("w_mean", float("nan")) for r in sub])
+            clearance_f_d = _clean([r.get("clearance_f_mean", float("nan")) for r in sub])
+            risk_f_d = _clean([r.get("risk_f_mean", float("nan")) for r in sub])
+            switch_d = _clean([r.get("switch_rate", float("nan")) for r in sub])
+            near_miss_d = _clean([r.get("near_miss_rate", float("nan")) for r in sub])
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
@@ -762,6 +896,13 @@ class EvalRunner:
                 "cross_line_dist_min_mean": float(np.mean(cross_line_min_d)) if cross_line_min_d else float("nan"),
                 "episode_collision_rate": float(sum(collision_d) / max(1, n)),
                 "progress_rate": float(sum(progress_d) / max(1, n)),
+                "gate_y_raw_mean": float(np.mean(gate_y_raw_d)) if gate_y_raw_d else float("nan"),
+                "y_eff_mean": float(np.mean(y_eff_d)) if y_eff_d else float("nan"),
+                "w_mean": float(np.mean(w_d)) if w_d else float("nan"),
+                "clearance_f_mean": float(np.mean(clearance_f_d)) if clearance_f_d else float("nan"),
+                "risk_f_mean": float(np.mean(risk_f_d)) if risk_f_d else float("nan"),
+                "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
+                "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
             }
 
         result = {
@@ -830,6 +971,26 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "cross_line_dist_min",
         "episode_collision",
         "progress_reached",
+        "gate_y_raw_mean",
+        "y_eff_mean",
+        "w_mean",
+        "clearance_f_mean",
+        "clearance_a_mean",
+        "risk_f_mean",
+        "risk_a_mean",
+        "switch_rate",
+        "near_miss_rate",
+        "cmd_jerk_lin_mean",
+        "cmd_jerk_ang_mean",
+        "cmd_f_mean_x",
+        "cmd_f_mean_y",
+        "cmd_f_mean_w",
+        "cmd_a_mean_x",
+        "cmd_a_mean_y",
+        "cmd_a_mean_w",
+        "cmd_final_mean_x",
+        "cmd_final_mean_y",
+        "cmd_final_mean_w",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -862,6 +1023,10 @@ def parse_args():
 
     parser.add_argument("--gate_use_difficulty", action="store_true")
     parser.add_argument("--beta", type=float, default=None)
+    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom"])
+    parser.add_argument("--w_tau", type=float, default=0.25)
+    parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
+    parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--cmd_slew_lin", type=float, default=0.2)
     parser.add_argument("--cmd_slew_ang", type=float, default=0.4)
     parser.add_argument("--cmd_safe_dist", type=float, default=None)

@@ -281,6 +281,93 @@ def apply_goal_occlusion(
     return masked_goal, masked_goal.detach()
 
 
+def _get_effective_safe_free_dist(
+    env,
+    beta: Optional[float],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[float, float]:
+    post = getattr(env, "post_processor", None)
+    safe_default = float(getattr(post, "safe_distance", 0.25))
+    free_default = float(getattr(post, "free_distance", 0.6))
+    if beta is None or post is None or not hasattr(post, "get_effective_params"):
+        return safe_default, free_default
+    params = post.get_effective_params(torch.tensor(float(beta), device=device, dtype=dtype))
+    safe_t = torch.as_tensor(params.get("safe_distance", safe_default), device=device, dtype=dtype).reshape(-1)
+    free_t = torch.as_tensor(params.get("free_distance", free_default), device=device, dtype=dtype).reshape(-1)
+    return float(safe_t[0].detach().cpu().item()), float(free_t[0].detach().cpu().item())
+
+
+def resolve_moe_gate_pcr(
+    env,
+    args: argparse.Namespace,
+    aff_map: torch.Tensor,
+    gate_y_raw: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    gate_y = gate_y_raw.clone()
+    safe_d, free_d = _get_effective_safe_free_dist(
+        env,
+        getattr(args, "beta", None),
+        device=gate_y_raw.device,
+        dtype=gate_y_raw.dtype,
+    )
+    clearance_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
+    clearance_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
+    risk_f = env._risk_from_clearance(clearance_f, safe_d, free_d)
+    risk_a = env._risk_from_clearance(clearance_a, safe_d, free_d)
+
+    w_mode = str(getattr(args, "w_mode", "none")).lower()
+    w_tau = max(float(getattr(args, "w_tau", 0.25)), 1e-6)
+    if w_mode == "geom":
+        w = torch.exp(-torch.clamp(clearance_f, min=0.0) / w_tau)
+        w = torch.clamp(w, 0.0, 1.0)
+    else:
+        w = torch.zeros_like(gate_y_raw)
+
+    clamp_enabled = bool(getattr(args, "gate_safe_clamp", False))
+    if w_mode != "none" and bool(getattr(args, "w_disable_gate_safe_clamp", False)):
+        clamp_enabled = False
+    clamp_mask = torch.zeros_like(gate_y_raw, dtype=torch.bool)
+    if clamp_enabled:
+        safe_max = float(getattr(args, "gate_safe_max", 0.3))
+        follow_is_riskier = clearance_f <= clearance_a
+        clamp_mask = follow_is_riskier & (clearance_f < safe_d)
+        gate_y = torch.where(
+            clamp_mask,
+            torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
+            gate_y,
+        )
+
+    blend_mode = str(getattr(args, "w_blend_mode", "multiply")).lower()
+    if w_mode == "none":
+        y_eff = gate_y
+    elif blend_mode == "mix":
+        y_eff = torch.clamp(0.5 * gate_y + 0.5 * (1.0 - w), 0.0, 1.0)
+    else:
+        y_eff = torch.clamp(gate_y * (1.0 - w), 0.0, 1.0)
+
+    cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
+    return {
+        "gate_y_raw": gate_y_raw,
+        "gate_y": gate_y,
+        "y_eff": y_eff,
+        "w": w,
+        "cmd": cmd,
+        "cmd_f": cmd_f,
+        "cmd_a": cmd_a,
+        "clearance_F": clearance_f,
+        "clearance_A": clearance_a,
+        "risk_F": risk_f,
+        "risk_A": risk_a,
+        "post_safe_distance": torch.full_like(gate_y_raw, safe_d),
+        "post_free_distance": torch.full_like(gate_y_raw, free_d),
+        "gate_safe_clamp_mask": clamp_mask,
+    }
+
+
 def _get_expert_alpha(local_iteration: int, interface_iters: int) -> float:
     if interface_iters <= 0:
         return 0.0
@@ -357,6 +444,10 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "gate_use_difficulty",
     "gate_safe_clamp",
     "gate_safe_max",
+    "w_mode",
+    "w_tau",
+    "w_blend_mode",
+    "w_disable_gate_safe_clamp",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -396,6 +487,10 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "cmd_safe_dist",
     "cmd_free_dist",
     "disable_risk_scale",
+    "w_mode",
+    "w_tau",
+    "w_blend_mode",
+    "w_disable_gate_safe_clamp",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -3250,6 +3345,10 @@ def train(args):
             "cmd_free_dist",
             "gate_safe_clamp",
             "gate_safe_max",
+            "w_mode",
+            "w_tau",
+            "w_blend_mode",
+            "w_disable_gate_safe_clamp",
             "moe_expert_deterministic",
             "disable_risk_scale",
             "camera_enable",
@@ -3782,6 +3881,11 @@ def train(args):
         ]
         reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
         gate_y_sum = torch.zeros((), device=device)
+        gate_y_raw_sum = torch.zeros((), device=device)
+        gate_w_sum = torch.zeros((), device=device)
+        gate_y_gap_sum = torch.zeros((), device=device)
+        gate_clearance_f_sum = torch.zeros((), device=device)
+        gate_risk_f_sum = torch.zeros((), device=device)
         gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
         body_forward_speed_sum = torch.zeros((), device=device)
@@ -4130,30 +4234,11 @@ def train(args):
                     policy_nonfinite_action_count += int(gate_y_bad.sum().item())
                     action_valid = action_valid & (~gate_y_bad)
                     gate_y_raw = gate_y.clone()
-                    # Stage 0.5 ABI: y_eff is the effective gate used for command fusion.
-                    # For now, y_eff = y (raw). Later (PCR-Net++), y_eff blends (y, w) and can be smoothed/hysteretic.
-                    y_eff = gate_y_raw
                     gate_y_prev = env.prev_gate_y.clone()
-                    if getattr(args, "gate_safe_clamp", False):
-                        safe_max = float(getattr(args, "gate_safe_max", 0.3))
-                        clearance_follow = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
-                        clearance_avoid = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
-                        # Keep clamp threshold consistent with the active post-processor (beta-adjusted).
-                        safe_thr = getattr(env.post_processor, "safe_distance", 0.25)
-                        if getattr(args, "beta", None) is not None:
-                            beta_v = float(getattr(args, "beta"))
-                            beta_v = float(np.clip(beta_v, 0.0, 1.0))
-                            if hasattr(env.post_processor, "get_effective_safe_distance"):
-                                safe_thr_t = env.post_processor.get_effective_safe_distance(beta_v)
-                                safe_thr = float(safe_thr_t.squeeze().detach().cpu().item())
-                        follow_is_riskier = clearance_follow <= clearance_avoid
-                        clamp_mask = follow_is_riskier & (clearance_follow < safe_thr)
-                        gate_y = torch.where(
-                            clamp_mask,
-                            torch.minimum(gate_y, torch.full_like(gate_y, safe_max)),
-                            gate_y,
-                        )
-                        y_eff = gate_y
+                    gate_diag = resolve_moe_gate_pcr(env, args, aff_map, gate_y_raw, cmd_f, cmd_a)
+                    gate_y = gate_diag["gate_y"]
+                    y_eff = gate_diag["y_eff"]
+                    if bool(gate_diag["gate_safe_clamp_mask"].any().item()):
                         action_valid = action_valid & torch.isclose(gate_y, gate_y_raw, atol=1e-6, rtol=0.0)
                     log_prob, value, _, _ = policy.evaluate_actions(
                         aff_stack_buf,
@@ -4166,7 +4251,7 @@ def train(args):
                         critic_goal=goal,
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
-                    cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
+                    cmd = gate_diag["cmd"]
                     next_obs, rewards, dones, env_info = env.step(cmd, y_eff)
                     timeout_mask = env_info.get("timeout", None) if env_info is not None else None
                     timeout_bootstrap_obs = env_info.get("timeout_bootstrap_obs", None) if env_info is not None else None
@@ -4188,27 +4273,19 @@ def train(args):
                     if env_info is not None and isinstance(env_info, dict):
                         post_info = env_info.get("post_info", None)
                         if post_info is not None and isinstance(post_info, dict):
-                            post_info["gate_y_raw"] = gate_y_raw.detach().clone()
-                            post_info["y_eff"] = y_eff.detach().clone()
-                            # Command-conditioned clearance/risk proxies (cone-min over occupancy).
-                            safe_d = float(
-                                post_info.get(
-                                    "post_safe_distance",
-                                    getattr(env.post_processor, "safe_distance", 0.25),
-                                )
-                            )
-                            free_d = float(
-                                post_info.get(
-                                    "post_free_distance",
-                                    getattr(env.post_processor, "free_distance", 0.6),
-                                )
-                            )
-                            clr_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
-                            clr_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
-                            post_info["clearance_F"] = clr_f.detach().clone()
-                            post_info["clearance_A"] = clr_a.detach().clone()
-                            post_info["risk_F"] = env._risk_from_clearance(clr_f, safe_d, free_d).detach().clone()
-                            post_info["risk_A"] = env._risk_from_clearance(clr_a, safe_d, free_d).detach().clone()
+                            post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
+                            post_info["gate_y"] = gate_diag["gate_y"].detach().clone()
+                            post_info["y_eff"] = gate_diag["y_eff"].detach().clone()
+                            post_info["w"] = gate_diag["w"].detach().clone()
+                            post_info["cmd_F"] = gate_diag["cmd_f"].detach().clone()
+                            post_info["cmd_A"] = gate_diag["cmd_a"].detach().clone()
+                            post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
+                            post_info["clearance_F"] = gate_diag["clearance_F"].detach().clone()
+                            post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
+                            post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
+                            post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                            post_info["post_safe_distance"] = gate_diag["post_safe_distance"].detach().clone()
+                            post_info["post_free_distance"] = gate_diag["post_free_distance"].detach().clone()
                 action = gate_y.unsqueeze(-1)
                 cmd_used = cmd
             else:
@@ -4405,9 +4482,15 @@ def train(args):
             # 统计分量与行为
             goal_dist_sum += torch.norm(goal, dim=1).sum()
             if is_gate:
-                gate_y_sum += gate_y.sum()
+                gate_y_sum += y_eff.sum()
+                gate_y_raw_sum += gate_y_raw.sum()
+                if 'gate_diag' in locals() and isinstance(gate_diag, dict):
+                    gate_w_sum += gate_diag["w"].sum()
+                    gate_y_gap_sum += torch.abs(gate_diag["y_eff"] - gate_diag["gate_y_raw"]).sum()
+                    gate_clearance_f_sum += gate_diag["clearance_F"].sum()
+                    gate_risk_f_sum += gate_diag["risk_F"].sum()
                 if gate_y_prev is not None:
-                    delta_gate = gate_y - gate_y_prev
+                    delta_gate = y_eff - gate_y_prev
                     if reset_mask_prev.any():
                         # 使用上一轮 reset_mask_prev，屏蔽跨 episode 的 Δy
                         delta_gate[reset_mask_prev] = 0.0
@@ -5195,6 +5278,11 @@ def train(args):
         body_forward_speed_mean = (body_forward_speed_sum / total_samples).item()
         body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
         gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
+        gate_y_raw_mean = (gate_y_raw_sum / total_samples).item() if is_gate else 0.0
+        gate_w_mean = (gate_w_sum / total_samples).item() if is_gate else 0.0
+        gate_y_gap_mean = (gate_y_gap_sum / total_samples).item() if is_gate else 0.0
+        gate_clearance_f_mean = (gate_clearance_f_sum / total_samples).item() if is_gate else 0.0
+        gate_risk_f_mean = (gate_risk_f_sum / total_samples).item() if is_gate else 0.0
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
@@ -5403,6 +5491,11 @@ def train(args):
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_gate:
             writer.add_scalar('Stats/GateY', gate_y_mean, iteration)
+            writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
+            writer.add_scalar('Stats/GateW', gate_w_mean, iteration)
+            writer.add_scalar('Stats/GateYGap', gate_y_gap_mean, iteration)
+            writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
+            writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateYChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
         writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
@@ -5457,7 +5550,8 @@ def train(args):
                 terrain_level_str = f"{terrain_level_mean:.2f}"
             gate_line = ""
             if is_gate:
-                gate_line = f"""{'Gate y / Δy:':>{pad}} {gate_y_mean:.3f} / {gate_y_change_mean:.3f}\n"""
+                gate_line = f"""{'Gate raw/eff/w/Δeff:':>{pad}} {gate_y_raw_mean:.3f} / {gate_y_mean:.3f} / {gate_w_mean:.3f} / {gate_y_change_mean:.3f}\n"""
+                gate_line += f"""{'Gate gap/clrF/riskF:':>{pad}} {gate_y_gap_mean:.3f} / {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
             egpo_line = ""
             if use_egpo:
                 egpo_line = (
@@ -5697,6 +5791,14 @@ if __name__ == "__main__":
                         help='Gate 训练早期启用安全 clamp')
     parser.add_argument('--gate_safe_max', type=float, default=0.3,
                         help='安全 clamp 的最大 y 值')
+    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom'],
+                        help='PCR 冲突先验模式：none=y-only，geom=基于 follow 方向 clearance 的解析 w')
+    parser.add_argument('--w_tau', type=float, default=0.25,
+                        help='w_geom 衰减尺度（米）；越小表示更早把近障碍判为高冲突')
+    parser.add_argument('--w_blend_mode', type=str, default='multiply', choices=['multiply', 'mix'],
+                        help='w 与 gate_y 的融合方式：multiply=y*(1-w)，mix=0.5*y+0.5*(1-w)')
+    parser.add_argument('--w_disable_gate_safe_clamp', action='store_true',
+                        help='当 w_mode!=none 时关闭旧 gate_safe_clamp，避免双重安全干预')
     parser.add_argument('--moe_expert_deterministic', action='store_true',
                         help='Gate 训练时专家使用确定性输出')
     parser.add_argument('--gate_use_difficulty', action='store_true',

@@ -938,6 +938,10 @@ def parse_args():
         default=None,
         help="(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）",
     )
+    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom"], help="PCR 冲突先验模式")
+    parser.add_argument("--w_tau", type=float, default=0.25, help="w_geom 衰减尺度（米）")
+    parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"], help="w 与 gate_y 的融合方式")
+    parser.add_argument("--w_disable_gate_safe_clamp", action="store_true", help="当 w_mode!=none 时关闭旧 gate_safe_clamp")
     parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
         "--debug_cmd",
@@ -1646,6 +1650,7 @@ def main():
                 else difficulty
             )
             gate_y = None
+            gate_diag = None
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
             goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
@@ -1689,14 +1694,16 @@ def main():
                             avoid_difficulty_input,
                             deterministic=True,
                         )
-                        gate_y, _ = policy.get_action(
+                        gate_y_raw, _ = policy.get_action(
                             aff_input,
                             obs["state"],
                             goal_input,
                             gate_difficulty,
                             deterministic=deterministic,
                         )
-                        cmd = gate_y.unsqueeze(-1) * cmd_f + (1.0 - gate_y.unsqueeze(-1)) * cmd_a
+                        gate_diag = th.resolve_moe_gate_pcr(env, args, aff_input, gate_y_raw, cmd_f, cmd_a)
+                        gate_y = gate_diag["y_eff"]
+                        cmd = gate_diag["cmd"]
                     else:
                         cmd, _ = policy.get_action(
                             aff_input,
@@ -1776,6 +1783,15 @@ def main():
             env.clearance_override = env._compute_clearance_from_affordance(aff_map)
             env.reward_affordance_override = aff_map
             obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None)
+            post_info = info.get("post_info", None) if isinstance(info, dict) else None
+            if isinstance(post_info, dict) and isinstance(gate_diag, dict):
+                post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
+                post_info["gate_y"] = gate_diag["gate_y"].detach().clone()
+                post_info["y_eff"] = gate_diag["y_eff"].detach().clone()
+                post_info["w"] = gate_diag["w"].detach().clone()
+                post_info["cmd_F"] = gate_diag["cmd_f"].detach().clone()
+                post_info["cmd_A"] = gate_diag["cmd_a"].detach().clone()
+                post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
             _update_e_s_metrics(e_s_metrics, env, obs_before_step, info, dones, step_idx, cmd)
             if e_s_metrics.get("enabled", False) and ((step_idx + 1) % e_s_metrics["autosave_steps"] == 0):
                 _export_e_s_metrics(e_s_metrics, final=False, stop_reason="autosave")
@@ -1910,6 +1926,8 @@ def main():
                 clearance = 0.0
                 risk_scale = 0.0
                 gate_val = 0.0
+                gate_raw_val = 0.0
+                gate_w_val = 0.0
                 passable_gate = 0.0
                 passable_align = 0.0
                 passable_occ_ratio = 0.0
@@ -1932,6 +1950,9 @@ def main():
                     crossable_width = float(reward_terms.get("crossable_width", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                 if is_gate and gate_y is not None:
                     gate_val = float(gate_y[env_idx].detach().cpu())
+                    if isinstance(gate_diag, dict):
+                        gate_raw_val = float(gate_diag["gate_y_raw"][env_idx].detach().cpu())
+                        gate_w_val = float(gate_diag["w"][env_idx].detach().cpu())
                 yaw_raw = 0.0
                 yaw_policy = 0.0
                 heading_err_pos = 0.0
@@ -2067,11 +2088,13 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate_y={:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
+                        gate_raw_val,
                         gate_val,
+                        gate_w_val,
                         reward_total,
                         reward_approach,
                         reward_heading,
