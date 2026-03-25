@@ -2700,10 +2700,17 @@ class HierarchicalHexapodEnv:
                         )
                     y_progress_local = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
                     clearance_active_mask = y_progress_local > activate_progress
+                    inside_band_mask = torch.ones_like(clearance_active_mask)
+                    if hasattr(self.env, "s_avoid_band_x_min") and hasattr(self.env, "s_avoid_band_x_max"):
+                        inside_band_mask = (
+                            (robot_pos[:, 0] >= self.env.s_avoid_band_x_min)
+                            & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
+                        )
                     clearance_improve_reward = (
                         torch.clamp(clearance_improvement, min=0.0)
-                        * 6.0
+                        * 2.0
                         * clearance_active_mask.float()
+                        * inside_band_mask.float()
                         * self.prev_nearest_obs_valid.float()
                     )
                     reward_dict['clearance_improve'] = clearance_improve_reward
