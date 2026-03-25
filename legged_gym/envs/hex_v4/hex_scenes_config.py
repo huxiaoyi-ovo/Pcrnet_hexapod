@@ -399,8 +399,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_fixed_row_y_spacing_scale = 1.5
         avoid_fixed_min_x_gap = 0.85
         avoid_fixed_min_row_y_gap = 0.85
-        avoid_fixed_row_x_open_right = (-0.85, -0.25, 0.85)
-        avoid_fixed_row_x_open_left = (-0.85, 0.25, 0.85)
+        avoid_fixed_row_x_open_right = (-0.85, -0.25, 0.95)
+        avoid_fixed_row_x_open_left = (-0.95, 0.25, 0.85)
         avoid_fixed_row_x_open_right_even = (-0.85, -0.25)
         avoid_fixed_row_x_open_left_even = (0.25, 0.85)
         avoid_fixed_row_x_even = (-0.50, 0.50)
@@ -439,7 +439,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage1_core_count = 1
         avoid_stage15_core_count = 2
         avoid_stage2_core_count = 2
-        avoid_band_margin_x = 0.10
+        avoid_band_margin_x = 0.05
         avoid_band_margin_y = 0.30
         avoid_stage1_preset_count = 48
         avoid_stage15_preset_count = 48

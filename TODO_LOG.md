@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-25 PCR 第一版主线落地（y-only基线 + w_geom + eval口径）
+
+- [ ] [P0] 以现有 `CmdVelExpert + GatePolicy + CommandPostProcessor` 为唯一 PCR 主入口，先补 `y-only` 基线日志与评测字段，再在 gate rollout 中加入最小 `w_geom` 与 `y_eff` 融合，固定 `switch_rate / near-miss / cmd_jerk / y_raw_vs_y_eff` 证据链
+
 ## 2026-03-25 并行训练显卡口径固定
 
 - [x] ~~[P1] 固定并行窗口资源约定：`PCR` 训练默认使用 `GPU 0`，`avoid expert` 训练默认使用 `GPU 1`，并在长期协作规则中补充日志/ckpt 默认避免重名覆盖~~
