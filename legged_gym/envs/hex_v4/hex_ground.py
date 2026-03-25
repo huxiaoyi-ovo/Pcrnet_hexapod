@@ -1941,18 +1941,28 @@ class HexGround(LeggedRobot):
         return base_row_y
 
     def _s_avoid_fixed_row_spacing_ok(self, *, active: np.ndarray, pos: np.ndarray, stage: int) -> bool:
+        open_right_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_right", None)
+        open_left_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_left", None)
         odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
+        open_right_x = tuple(float(x) for x in open_right_cfg) if open_right_cfg is not None else None
+        open_left_x = tuple(float(x) for x in open_left_cfg) if open_left_cfg is not None else None
         even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
         min_x_gap = float(getattr(self.cfg.terrain, "avoid_fixed_min_x_gap", 0.85))
+        jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
         cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
         terrain_half_width = 0.5 * float(self.cfg.terrain.terrain_width)
         x_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
         x_limit = max(terrain_half_width - cap_r - x_margin, 0.0)
         slot_limit = int(self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count)
         slot_cursor = 0
+        explicit_directional_layout = open_right_x is not None and open_left_x is not None
+        directional_min_x_gap = 2.0 * cap_r + 2.0 * max(0.0, jitter_xy)
+        row_min_x_gap = directional_min_x_gap if explicit_directional_layout else min_x_gap
         for row_idx, _ in enumerate(row_y):
-            row_count = len(odd_row_x) if (row_idx % 2) == 0 else len(even_row_x)
+            row_count = len(open_right_x) if (explicit_directional_layout and (row_idx % 2) == 0) else (
+                len(odd_row_x) if (row_idx % 2) == 0 else len(even_row_x)
+            )
             row_slots = []
             for _ in range(row_count):
                 if slot_cursor >= slot_limit or not bool(active[slot_cursor]):
@@ -1963,13 +1973,17 @@ class HexGround(LeggedRobot):
             if any(abs(x_value) > x_limit + 1e-6 for x_value in row_x_values):
                 return False
             row_x_gaps = [row_x_values[i + 1] - row_x_values[i] for i in range(len(row_x_values) - 1)]
-            if row_x_gaps and min(row_x_gaps) < min_x_gap - 1e-6:
+            if row_x_gaps and min(row_x_gaps) < row_min_x_gap - 1e-6:
                 return False
         return True
 
     def _get_s_avoid_fixed_stage_layouts(self, stage: int):
         stage = int(stage)
+        open_right_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_right", None)
+        open_left_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_left", None)
         odd_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_odd", (-0.90, 0.00, 0.90)))
+        open_right_x = tuple(float(x) for x in open_right_cfg) if open_right_cfg is not None else None
+        open_left_x = tuple(float(x) for x in open_left_cfg) if open_left_cfg is not None else None
         even_row_x = tuple(float(x) for x in getattr(self.cfg.terrain, "avoid_fixed_row_x_even", (-0.45, 0.45)))
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
 
@@ -1985,31 +1999,49 @@ class HexGround(LeggedRobot):
         jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
         required_base_x_gap = min_x_gap + 2.0 * max(0.0, jitter_xy)
         cap_r = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+        directional_required_x_gap = 2.0 * cap_r + 2.0 * max(0.0, jitter_xy)
         terrain_half_width = 0.5 * float(self.cfg.terrain.terrain_width)
         x_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
         x_limit = max(terrain_half_width - cap_r - x_margin, 0.0)
         use_mirror = bool(getattr(self.cfg.terrain, "avoid_fixed_presets_use_mirror", True))
 
-        layout_specs = [
-            ("left_bias", -odd_row_bias),
-            ("right_bias", odd_row_bias),
-        ]
-        mirror_specs = (False, True) if use_mirror else (False,)
+        explicit_directional_layout = open_right_x is not None and open_left_x is not None
+        if explicit_directional_layout:
+            layout_specs = [
+                ("zigzag_right_first", True),
+                ("zigzag_left_first", False),
+            ]
+            mirror_specs = (False,)
+        else:
+            layout_specs = [
+                ("left_bias", -odd_row_bias),
+                ("right_bias", odd_row_bias),
+            ]
+            mirror_specs = (False, True) if use_mirror else (False,)
         layouts = []
         seen_layouts = set()
-        for layout_name, odd_bias in layout_specs:
+        for layout_name, odd_layout in layout_specs:
             for mirrored in mirror_specs:
                 capsule_points = []
                 for row_idx, local_y in enumerate(row_y):
-                    base_row_x = odd_row_x if (row_idx % 2) == 0 else even_row_x
-                    row_bias = odd_bias if (row_idx % 2) == 0 else 0.0
-                    shifted_row_x = sorted(float(local_x) + row_bias for local_x in base_row_x)
+                    if explicit_directional_layout:
+                        if (row_idx % 2) == 0:
+                            directional_row_idx = row_idx // 2
+                            open_right = bool(odd_layout) if (directional_row_idx % 2) == 0 else (not bool(odd_layout))
+                            shifted_row_x = tuple(open_right_x if open_right else open_left_x)
+                        else:
+                            shifted_row_x = tuple(even_row_x)
+                    else:
+                        base_row_x = odd_row_x if (row_idx % 2) == 0 else even_row_x
+                        row_bias = odd_layout if (row_idx % 2) == 0 else 0.0
+                        shifted_row_x = tuple(sorted(float(local_x) + row_bias for local_x in base_row_x))
                     row_x_gaps = [shifted_row_x[i + 1] - shifted_row_x[i] for i in range(len(shifted_row_x) - 1)]
-                    if row_x_gaps and min(row_x_gaps) < required_base_x_gap - 1e-6:
+                    row_required_x_gap = directional_required_x_gap if explicit_directional_layout else required_base_x_gap
+                    if row_x_gaps and min(row_x_gaps) < row_required_x_gap - 1e-6:
                         raise RuntimeError(
                             "Fixed s_avoid row-x gap too small for post-jitter contract: "
                             f"stage={stage}, layout={layout_name}, row={row_idx}, "
-                            f"min_gap={min(row_x_gaps):.3f}, required={required_base_x_gap:.3f}"
+                            f"min_gap={min(row_x_gaps):.3f}, required={row_required_x_gap:.3f}"
                         )
                     row_x_values = [(-float(local_x) if mirrored else float(local_x)) for local_x in shifted_row_x]
                     row_x_values = sorted(row_x_values)
@@ -2032,7 +2064,7 @@ class HexGround(LeggedRobot):
                     }
                 )
 
-        expected_layout_count = 4 if use_mirror else 2
+        expected_layout_count = len(layout_specs) * len(mirror_specs)
         if len(layouts) != expected_layout_count:
             raise RuntimeError(
                 f"Fixed s_avoid stage layouts collapsed to {len(layouts)} presets, expected {expected_layout_count}"

@@ -3755,6 +3755,7 @@ def train(args):
 
         reward_term_keys = [
             'approach',
+            'cross_line_dist',
             'reach',
             'heading',
             'passable_align',
