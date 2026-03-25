@@ -72,10 +72,14 @@
 
 - [x] ~~[P0] 收口 PCR 主实验语义：`raw` 负责 history 和 `gate_smooth`，`eff` 只负责执行；同时让 `eval/play` 中仅 CLI 显式传入的 `beta/w_*` 运行期消融参数覆盖 ckpt meta，并打印 resolved config~~
 
+## 2026-03-25 PCR gap 日志语义拆分
+
+- [x] ~~[P1] 将 PCR 训练日志里的 `GateYGap` 从混合量拆成 `gap_clamp / gap_w / gap_total`，分别对应 `y_raw->y_safe`、`y_safe->y_eff`、`y_raw->y_eff`，避免继续把 safe clamp 与 `w` 贡献混在一起~~
+
 ## 2026-03-25 avoid 固定模板纵向拉长与时长同步
 
 - [x] ~~[P0] 将 `s_avoid` 固定模板各 stage 的相邻行 `y` 间距统一增加 `0.15m`，并同步更新 `last_row_y`，保持穿越线/固定 goal/success 判据一致~~
-- [x] ~~[P0] 将 `s_avoid_basic` 的回合总时长从 `15s` 合理增加到 `20s`，避免新几何下被旧时长过早截断~~
+- [x] ~~[P0] 将 `s_avoid_basic` 的回合总时长从 `15s` 先增加到 `20s`，随后再按最慢速度与最远穿越线重算到 `30s`，避免新几何下被旧时长过早截断~~
 
 ## 2026-03-25 avoid 降速与课程放宽
 

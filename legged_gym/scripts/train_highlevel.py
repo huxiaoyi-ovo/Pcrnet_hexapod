@@ -363,6 +363,7 @@ def resolve_moe_gate_pcr(
     return {
         "gate_y_raw": gate_y_raw,
         "gate_y": gate_y,
+        "gate_y_safe": gate_y,
         "y_eff": y_eff,
         "w": w,
         "cmd": cmd,
@@ -3956,7 +3957,10 @@ def train(args):
         reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
         gate_y_sum = torch.zeros((), device=device)
         gate_y_raw_sum = torch.zeros((), device=device)
+        gate_y_safe_sum = torch.zeros((), device=device)
         gate_w_sum = torch.zeros((), device=device)
+        gate_y_clamp_gap_sum = torch.zeros((), device=device)
+        gate_y_w_gap_sum = torch.zeros((), device=device)
         gate_y_gap_sum = torch.zeros((), device=device)
         gate_clearance_f_sum = torch.zeros((), device=device)
         gate_risk_f_sum = torch.zeros((), device=device)
@@ -4560,6 +4564,10 @@ def train(args):
                 gate_y_raw_sum += gate_y_raw.sum()
                 if 'gate_diag' in locals() and isinstance(gate_diag, dict):
                     gate_w_sum += gate_diag["w"].sum()
+                    gate_y_safe = gate_diag.get("gate_y_safe", gate_diag["gate_y"])
+                    gate_y_safe_sum += gate_y_safe.sum()
+                    gate_y_clamp_gap_sum += torch.abs(gate_y_safe - gate_diag["gate_y_raw"]).sum()
+                    gate_y_w_gap_sum += torch.abs(gate_diag["y_eff"] - gate_y_safe).sum()
                     gate_y_gap_sum += torch.abs(gate_diag["y_eff"] - gate_diag["gate_y_raw"]).sum()
                     gate_clearance_f_sum += gate_diag["clearance_F"].sum()
                     gate_risk_f_sum += gate_diag["risk_F"].sum()
@@ -5353,7 +5361,10 @@ def train(args):
         body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
         gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
         gate_y_raw_mean = (gate_y_raw_sum / total_samples).item() if is_gate else 0.0
+        gate_y_safe_mean = (gate_y_safe_sum / total_samples).item() if is_gate else 0.0
         gate_w_mean = (gate_w_sum / total_samples).item() if is_gate else 0.0
+        gate_y_clamp_gap_mean = (gate_y_clamp_gap_sum / total_samples).item() if is_gate else 0.0
+        gate_y_w_gap_mean = (gate_y_w_gap_sum / total_samples).item() if is_gate else 0.0
         gate_y_gap_mean = (gate_y_gap_sum / total_samples).item() if is_gate else 0.0
         gate_clearance_f_mean = (gate_clearance_f_sum / total_samples).item() if is_gate else 0.0
         gate_risk_f_mean = (gate_risk_f_sum / total_samples).item() if is_gate else 0.0
@@ -5455,6 +5466,10 @@ def train(args):
         writer.add_scalar('Loss/Value', value_loss_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/Entropy', entropy_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Loss/EntropyEffective', effective_entropy_loss_sum / max(num_updates, 1), iteration)
+        if is_gate:
+            writer.add_scalar('Stats/GateYClampGap', gate_y_clamp_gap_mean, iteration)
+            writer.add_scalar('Stats/GateYWGap', gate_y_w_gap_mean, iteration)
+            writer.add_scalar('Stats/GateYTotalGap', gate_y_gap_mean, iteration)
         if args.mode == 'student':
             writer.add_scalar('Loss/Distill', distill_loss_sum / max(num_updates, 1), iteration)
         if use_egpo:
@@ -5566,8 +5581,8 @@ def train(args):
         if is_gate:
             writer.add_scalar('Stats/GateYEff', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
+            writer.add_scalar('Stats/GateYSafe', gate_y_safe_mean, iteration)
             writer.add_scalar('Stats/GateW', gate_w_mean, iteration)
-            writer.add_scalar('Stats/GateYGap', gate_y_gap_mean, iteration)
             writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
@@ -5625,7 +5640,8 @@ def train(args):
             gate_line = ""
             if is_gate:
                 gate_line = f"""{'Gate raw/eff/w/Δeff:':>{pad}} {gate_y_raw_mean:.3f} / {gate_y_mean:.3f} / {gate_w_mean:.3f} / {gate_y_change_mean:.3f}\n"""
-                gate_line += f"""{'Gate gap/clrF/riskF:':>{pad}} {gate_y_gap_mean:.3f} / {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
+                gate_line += f"""{'Gate gap(clamp/w/total):':>{pad}} {gate_y_clamp_gap_mean:.3f} / {gate_y_w_gap_mean:.3f} / {gate_y_gap_mean:.3f}\n"""
+                gate_line += f"""{'Gate clrF/riskF:':>{pad}} {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
             egpo_line = ""
             if use_egpo:
                 egpo_line = (

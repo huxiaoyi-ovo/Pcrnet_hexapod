@@ -324,7 +324,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
     """
     class env(HexGroundCfg.env):
         env_spacing = 12.0
-        episode_length_s = 20
+        episode_length_s = 30
 
     class terrain(HexGroundCfg.terrain):
         mesh_type = "plane"
