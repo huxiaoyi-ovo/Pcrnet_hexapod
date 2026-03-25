@@ -3990,6 +3990,7 @@ def train(args):
         stuck_step_sum = torch.zeros((), device=device)
         cmd_active_step_sum = torch.zeros((), device=device)
         gate_switch_count = torch.zeros((), device=device)
+        prev_y_eff = torch.zeros((env.num_envs,), device=device)
         goal_world_delta_sum = torch.zeros((), device=device)
         target_speed_sum = torch.zeros((), device=device)
         target_turn_event_sum = torch.zeros((), device=device)
@@ -4312,7 +4313,7 @@ def train(args):
                     policy_nonfinite_action_count += int(gate_y_bad.sum().item())
                     action_valid = action_valid & (~gate_y_bad)
                     gate_y_raw = gate_y.clone()
-                    gate_y_prev = env.prev_gate_y.clone()
+                    gate_y_prev = prev_y_eff.clone()
                     gate_diag = resolve_moe_gate_pcr(env, args, aff_map, gate_y_raw, cmd_f, cmd_a)
                     gate_y = gate_diag["gate_y"]
                     y_eff = gate_diag["y_eff"]
@@ -4574,10 +4575,11 @@ def train(args):
                 if gate_y_prev is not None:
                     delta_gate = y_eff - gate_y_prev
                     if reset_mask_prev.any():
-                        # 使用上一轮 reset_mask_prev，屏蔽跨 episode 的 Δy
+                        # 使用上一轮 reset_mask_prev，屏蔽跨 episode 的 Δy_eff
                         delta_gate[reset_mask_prev] = 0.0
                     gate_y_change_sum += torch.abs(delta_gate).sum()
                     gate_switch_count += (torch.abs(delta_gate) > GATE_SWITCH_DY_DEFAULT).float().sum()
+                    prev_y_eff = y_eff.detach().clone()
             cmd_diag_exec = None
             post_info = env_info.get('post_info', None) if env_info is not None else None
             if post_info is not None and isinstance(post_info, dict):
