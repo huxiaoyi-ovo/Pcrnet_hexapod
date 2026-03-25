@@ -2702,7 +2702,7 @@ class HierarchicalHexapodEnv:
                     clearance_active_mask = y_progress_local > activate_progress
                     clearance_improve_reward = (
                         torch.clamp(clearance_improvement, min=0.0)
-                        * 2.0
+                        * 6.0
                         * clearance_active_mask.float()
                         * self.prev_nearest_obs_valid.float()
                     )
