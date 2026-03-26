@@ -74,6 +74,11 @@ class NavigationRewardConfig:
     turn_penalty_scale: float = 0.0
     yaw_rate_penalty: float = 0.0
 
+    # Avoid expert local lateral shaping
+    avoid_near_threshold: float = 0.8
+    avoid_clear_scale: float = 6.0
+    align_center_scale: float = 2.0
+
 
 class NavigationRewardFunction:
     """导航任务奖励函数 V5 ★核心设计★

@@ -1347,6 +1347,8 @@ class HierarchicalHexapodEnv:
         self.forced_forward_speed = torch.zeros(self.num_envs, device=device)
         self.prev_nearest_obs_dist = torch.zeros(self.num_envs, device=device)
         self.prev_nearest_obs_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.prev_goal_x_abs = torch.zeros(self.num_envs, device=device)
+        self.prev_goal_x_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -2693,12 +2695,16 @@ class HierarchicalHexapodEnv:
                         neginf=0.0,
                     )
                     clearance_improvement = curr_nearest_obs_dist - self.prev_nearest_obs_dist
-                    clearance_active_mask = torch.ones(
+                    near_threshold = float(getattr(self.reward_cfg, "avoid_near_threshold", 0.8))
+                    avoid_clear_scale = float(getattr(self.reward_cfg, "avoid_clear_scale", 6.0))
+                    align_center_scale = float(getattr(self.reward_cfg, "align_center_scale", 2.0))
+                    near_obstacle_mask = curr_nearest_obs_dist < near_threshold
+                    far_obstacle_mask = ~near_obstacle_mask
+                    inside_band_mask = torch.ones(
                         self.num_envs,
                         device=self.device,
                         dtype=torch.bool,
                     )
-                    inside_band_mask = torch.ones_like(clearance_active_mask)
                     if hasattr(self.env, "s_avoid_band_x_min") and hasattr(self.env, "s_avoid_band_x_max"):
                         inside_band_mask = (
                             (robot_pos[:, 0] >= self.env.s_avoid_band_x_min)
@@ -2706,13 +2712,25 @@ class HierarchicalHexapodEnv:
                         )
                     clearance_improve_reward = (
                         torch.clamp(clearance_improvement, min=0.0)
-                        * 6.0
-                        * clearance_active_mask.float()
+                        * avoid_clear_scale
+                        * near_obstacle_mask.float()
                         * inside_band_mask.float()
                         * self.prev_nearest_obs_valid.float()
                     )
+                    curr_goal_x_abs = torch.abs(reward_obs['goal'][:, 0])
+                    align_center_improvement = torch.clamp(
+                        self.prev_goal_x_abs - curr_goal_x_abs,
+                        min=0.0,
+                    )
+                    align_center_reward = (
+                        align_center_improvement
+                        * align_center_scale
+                        * far_obstacle_mask.float()
+                        * self.prev_goal_x_valid.float()
+                    )
                     reward_dict['clearance_improve'] = clearance_improve_reward
-                    reward_dict['total'] = reward_dict['total'] + clearance_improve_reward
+                    reward_dict['align_center'] = align_center_reward
+                    reward_dict['total'] = reward_dict['total'] + clearance_improve_reward + align_center_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -2751,7 +2769,12 @@ class HierarchicalHexapodEnv:
             band_x_max = self.env.s_avoid_band_x_max
             band_y_min = self.env.s_avoid_band_y_min
             band_y_max = self.env.s_avoid_band_y_max
-            avoid_band_active_mask = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+            activate_progress = float(getattr(self.env.nav_cfg, "avoid_band_activate_progress", 0.0))
+            if activate_progress <= 0.0:
+                avoid_band_active_mask = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+            else:
+                y_progress = robot_pos[:, 1] - self.env.s_avoid_spawn_world_y
+                avoid_band_active_mask = y_progress >= activate_progress
             dx_out = torch.clamp(band_x_min - robot_pos[:, 0], min=0.0) + torch.clamp(
                 robot_pos[:, 0] - band_x_max, min=0.0
             )
@@ -2883,7 +2906,7 @@ class HierarchicalHexapodEnv:
                         reward_terms["total"] = total_reward
 
         success_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         cross_line_dist_snapshot = None
         s_avoid_episode_collision_snapshot = None
         if bool(getattr(self.env, "s_avoid_enabled", False)):
@@ -2911,6 +2934,8 @@ class HierarchicalHexapodEnv:
                 neginf=0.0,
             )
             self.prev_nearest_obs_valid.fill_(True)
+            self.prev_goal_x_abs = torch.abs(reward_obs['goal'][:, 0])
+            self.prev_goal_x_valid.fill_(True)
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         if done_during.any():
@@ -3040,6 +3065,8 @@ class HierarchicalHexapodEnv:
                 self.prev_goal_world[reset_ids] = self.env.goal_world[reset_ids]
             self.prev_nearest_obs_dist[reset_ids] = 0.0
             self.prev_nearest_obs_valid[reset_ids] = False
+            self.prev_goal_x_abs[reset_ids] = 0.0
+            self.prev_goal_x_valid[reset_ids] = False
         
         goal_change_count_snapshot = self.goal_change_count.clone()
         episode_info = None
@@ -3060,6 +3087,8 @@ class HierarchicalHexapodEnv:
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
             self.prev_nearest_obs_dist[done_any] = 0.0
             self.prev_nearest_obs_valid[done_any] = False
+            self.prev_goal_x_abs[done_any] = 0.0
+            self.prev_goal_x_valid[done_any] = False
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[done_any] = self.env.goal_world[done_any]
             # 重置 Post-Processor 的变化率限制记忆
@@ -4013,6 +4042,7 @@ def train(args):
             'backward',
             'body_backward',
             'clearance_improve',
+            'align_center',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -5670,8 +5700,26 @@ def train(args):
         writer.add_scalar('Stats/TargetReflectCountMean', target_reflect_count_mean, iteration)
         writer.add_scalar('Stats/TargetResetDistError', target_reset_dist_error_mean, iteration)
         writer.add_scalar('Stats/TargetResetBearingErrorDeg', target_reset_bearing_error_deg_mean, iteration)
-        for key, value in reward_term_means.items():
-            writer.add_scalar(f'Reward/{key}', value, iteration)
+        reward_log_keys = list(reward_term_means.keys())
+        if use_avoid_local_map:
+            reward_log_keys = [
+                key
+                for key in (
+                    'approach',
+                    'target_visible',
+                    'clearance_improve',
+                    'align_center',
+                    'avoid_band_penalty',
+                    'collision',
+                    'stability',
+                    'terminal_penalty',
+                    'time',
+                    'total',
+                )
+                if key in reward_term_means
+            ]
+        for key in reward_log_keys:
+            writer.add_scalar(f'Reward/{key}', reward_term_means[key], iteration)
         
         # Console
         if (
@@ -5778,11 +5826,9 @@ def train(args):
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(approach/reach/heading):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('reach', 0.0):.3f} / {reward_term_means.get('heading', 0.0):.3f}\n"""
-                          f"""{'Reward(gate/risk/col/term):':>{pad}} {reward_term_means.get('gate_smooth', 0.0):.3f} / {reward_term_means.get('risk_barrier', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
-                          f"""{'Reward(avoid_band/clear):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('clearance_improve', 0.0):.3f}\n"""
-                          f"""{'Reward(vel/back/body/lost):':>{pad}} {reward_term_means.get('velocity', 0.0):.3f} / {reward_term_means.get('backward', 0.0):.3f} / {reward_term_means.get('body_backward', 0.0):.3f} / {reward_term_means.get('target_lost', 0.0):.3f}\n"""
-                          f"""{'Reward(turn/yaw/time/total):':>{pad}} {reward_term_means.get('turn_penalty', 0.0):.3f} / {reward_term_means.get('yaw_rate_penalty', 0.0):.3f} / {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/vis/clear/align):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('target_visible', 0.0):.3f} / {reward_term_means.get('clearance_improve', 0.0):.3f} / {reward_term_means.get('align_center', 0.0):.3f}\n"""
+                          f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
             print(log_string)
         

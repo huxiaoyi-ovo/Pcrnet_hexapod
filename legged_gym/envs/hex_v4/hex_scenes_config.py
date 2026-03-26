@@ -324,7 +324,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
     """
     class env(HexGroundCfg.env):
         env_spacing = 12.0
-        episode_length_s = 30
+        episode_length_s = 50
 
     class terrain(HexGroundCfg.terrain):
         mesh_type = "plane"
@@ -339,34 +339,34 @@ class HexAvoidBasicCfg(HexGroundCfg):
         terrain_width = 9.0
 
         # Fixed-layout curriculum: keep stage switch criteria minimal and fast.
-        avoid_stage12_window = 150
-        avoid_stage12_min_episodes = 400
-        avoid_stage12_collision_threshold = 0.06
+        avoid_stage12_window = 200
+        avoid_stage12_min_episodes = 300
+        avoid_stage12_collision_threshold = 0.05
         avoid_stage12_exposure_threshold = 0.70
-        avoid_stage12_progress_threshold = 0.70
+        avoid_stage12_progress_threshold = 0.80
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
-        avoid_stage12_success_threshold = 0.20
+        avoid_stage12_success_threshold = 0.50
 
         # Fixed-layout curriculum: later stages use the same short window.
-        avoid_stage23_window = 150
+        avoid_stage23_window = 200
         avoid_stage23_min_episodes = 400
-        avoid_stage23_collision_threshold = 0.06
+        avoid_stage23_collision_threshold = 0.05
         avoid_stage23_exposure_threshold = 0.80
-        avoid_stage23_progress_threshold = 0.75
+        avoid_stage23_progress_threshold = 0.85
         avoid_stage23_progress_delta = 0.35
         avoid_stage23_success_distance = 0.65
-        avoid_stage23_success_threshold = 0.25
+        avoid_stage23_success_threshold = 0.55
 
         # Fixed-layout curriculum: later stages use the same short window.
-        avoid_stage34_window = 150
-        avoid_stage34_min_episodes = 400
-        avoid_stage34_collision_threshold = 0.06
+        avoid_stage34_window = 200
+        avoid_stage34_min_episodes = 500
+        avoid_stage34_collision_threshold = 0.04
         avoid_stage34_exposure_threshold = 0.85
-        avoid_stage34_progress_threshold = 0.80
+        avoid_stage34_progress_threshold = 0.88
         avoid_stage34_progress_delta = 0.35
         avoid_stage34_success_distance = 0.65
-        avoid_stage34_success_threshold = 0.30
+        avoid_stage34_success_threshold = 0.60
 
         # Stage-4 corridor shrink curriculum.
         avoid_stage4_shrink_window = 100
@@ -400,19 +400,19 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_fixed_row_y_spacing_scale = 1.5
         avoid_fixed_min_x_gap = 0.85
         avoid_fixed_min_row_y_gap = 0.85
-        avoid_fixed_row_x_open_right = (-0.85, -0.25, 0.95)
-        avoid_fixed_row_x_open_left = (-0.95, 0.25, 0.85)
-        avoid_fixed_row_x_open_right_even = (-0.85, -0.25)
-        avoid_fixed_row_x_open_left_even = (0.25, 0.85)
+        avoid_fixed_row_x_open_right = (-0.85, -0.25, 1.05)
+        avoid_fixed_row_x_open_left = (-1.05, 0.25, 0.85)
+        avoid_fixed_row_x_open_right_even = (-0.85, -0.35)
+        avoid_fixed_row_x_open_left_even = (0.35, 0.85)
         avoid_fixed_row_x_even = (-0.50, 0.50)
-        avoid_stage1_row_y = (0.80, 2.15)
-        avoid_stage2_row_y = (0.70, 1.85, 3.00)
-        avoid_stage3_row_y = (0.65, 1.70, 2.75, 3.80)
-        avoid_stage4_row_y = (0.60, 1.55, 2.50, 3.45, 4.40)
-        avoid_stage1_last_row_y = 2.15
-        avoid_stage2_last_row_y = 3.00
-        avoid_stage3_last_row_y = 3.80
-        avoid_stage4_last_row_y = 4.40
+        avoid_stage1_row_y = (0.80, 2.45)
+        avoid_stage2_row_y = (0.70, 2.15, 3.60)
+        avoid_stage3_row_y = (0.65, 2.00, 3.35, 4.70)
+        avoid_stage4_row_y = (0.60, 1.85, 3.10, 4.35, 5.60)
+        avoid_stage1_last_row_y = 2.45
+        avoid_stage2_last_row_y = 3.60
+        avoid_stage3_last_row_y = 4.70
+        avoid_stage4_last_row_y = 5.60
         collision_force_threshold = 0.1
         avoid_strict_contact_margin = 0.01
 
@@ -506,16 +506,16 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_fov_soft_scale = 1.0
         target_fov_hard_scale = 1.0
         target_lost_k = 0
-        target_center_scale = 0.25
-        target_visible_scale = 0.15
-        avoid_band_activate_progress = 0.50
+        target_center_scale = 0.0
+        target_visible_scale = 0.05
+        avoid_band_activate_progress = 0.0
         avoid_band_penalty_scale = 3.0
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 4.0
         reward_cfg["goal_reach_bonus"] = 0.0
         reward_cfg["goal_reach_threshold"] = 0.0
-        reward_cfg["heading_scale"] = 0.8
+        reward_cfg["heading_scale"] = 0.0
         reward_cfg["passable_align_scale"] = 0.0
         reward_cfg["passable_sector_deg"] = 60.0
         reward_cfg["crossable_align_scale"] = 0.0
@@ -523,7 +523,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["risk_barrier_safe"] = 0.32
         reward_cfg["risk_barrier_free"] = 0.65
         reward_cfg["risk_barrier_tau"] = 0.10
-        reward_cfg["collision_penalty"] = -12.0
+        reward_cfg["collision_penalty"] = -20.0
         reward_cfg["terminal_fail_penalty"] = -10.0
         reward_cfg["time_penalty"] = -0.01
         reward_cfg["velocity_scale"] = 0.0
@@ -531,6 +531,9 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["body_backward_scale"] = 0.0
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = 0.0
+        reward_cfg["avoid_near_threshold"] = 0.8
+        reward_cfg["avoid_clear_scale"] = 6.0
+        reward_cfg["align_center_scale"] = 4.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

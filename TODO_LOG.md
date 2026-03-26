@@ -60,6 +60,16 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
+
+- [x] ~~[P0] 将 `s_avoid` 的 `heading` 与 `target_center` 从有效奖励里去掉，只保留 `target_visible` 作为最小视野约束，减少朝前/居中信号对横移避障的干扰~~
+- [x] ~~[P0] 将训练控制台输出收口为“只打印真正还在生效的奖励项”，并补齐 `target_visible/stability/align_center` 等当前实际在起作用的项，避免继续被零项和隐藏项误导~~
+
+## 2026-03-26 avoid 横移奖励改为近障碍避障 / 远障碍归位门控
+
+- [x] ~~[P0] 将 `s_avoid` 的单一 `clearance_improve` 收口为双模式门控：近障碍继续奖励横移后更安全，远障碍改为奖励朝目标横向位置归位；当前固定模板下等价于朝中线准备下一排行~~
+- [x] ~~[P0] 保留 `approach/heading/target_center/target_visible/avoid_band/collision` 主线不动，只替换横移辅助信号，避免继续只学会第一排前的局部横移~~
+
 ## 2026-03-25 PCR 第一版主线落地（y-only基线 + w_geom + eval口径）
 
 - [x] ~~[P0] 以现有 `CmdVelExpert + GatePolicy + CommandPostProcessor` 为唯一 PCR 主入口，先补 `y-only` 基线日志与评测字段，再在 gate rollout 中加入最小 `w_geom` 与 `y_eff` 融合，固定 `switch_rate / near-miss / cmd_jerk / y_raw_vs_y_eff` 证据链~~
@@ -1661,3 +1671,13 @@
 - [x] Must: 将 `stage1` 改成两行都放 3 个障碍物，宽侧逐行交错，不再沿用旧的 `3/2` 行结构
 - [x] Must: 将 `stage2/3/4` 保持为 `3/2/3...` 行结构，但连 2 障碍物行也做成单侧宽通路，形成真正逐行之字形
 - [x] Must: 只改 `x` 向布局，不改任何 `row_y/last_row_y/y_spacing` 参数，并用最小 smoke 验证 `retry/pfail` 与 passage 诊断
+
+## 2026-03-26 avoid 固定模板纵向拉长 - 行距+30cm、宽侧+10cm、行级成功进度
+
+- [x] Must: 在严格保持各 stage 分布形态不变的前提下，将相邻障碍行间距统一再拉长 `0.30m`
+- [x] Must: 每行内部仅增宽宽侧通路 `0.10m`，窄侧障碍位置保持不变
+- [x] Must: 将成功/进度口径改成“每无碰撞通过一行就累计一次”，并按最慢速度与最远场景同步增加回合时间
+- [x] Must: 将 `align_center` 从“奖励侧向命令方向”改成“奖励真实横向归位结果”，避免假动作吃奖励
+- [x] Must: 收口 `band` 激活口径，让配置、训练与调试都统一为出生即激活
+- [x] Must: 将课程升级阈值改成逐行比例口径，避免只会过前一两行就过早升级
+- [x] Must: 下调 `target_visible`、上调 `align_center`，减少视野约束对横移的抑制并增强远处归位信号

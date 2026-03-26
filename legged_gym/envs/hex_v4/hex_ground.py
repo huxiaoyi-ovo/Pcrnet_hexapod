@@ -1224,6 +1224,8 @@ class HexGround(LeggedRobot):
         self.s_avoid_episode_exposed = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.s_avoid_episode_goal_init_dist = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_episode_goal_best_dist = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_episode_rows_passed_best = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.s_avoid_episode_rows_success_best = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage_per_env = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage = 1
@@ -2754,11 +2756,11 @@ class HexGround(LeggedRobot):
             episode_exposure_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
         exposure_flags = episode_exposure_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
         if episode_progress_flags is None:
-            episode_progress_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
-        progress_flags = episode_progress_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
+            episode_progress_flags = torch.ones_like(episode_collision_flags, dtype=torch.float32)
+        progress_flags = episode_progress_flags.detach().to(device="cpu", dtype=torch.float32).tolist()
         if episode_success_flags is None:
-            episode_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.bool)
-        success_flags = episode_success_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
+            episode_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.float32)
+        success_flags = episode_success_flags.detach().to(device="cpu", dtype=torch.float32).tolist()
         for stage_id, flag, exposed, progressed, succeeded in zip(
             stage_ids,
             flags,
@@ -2771,8 +2773,8 @@ class HexGround(LeggedRobot):
                 continue
             stage_hists["collision"].append(1.0 if bool(flag) else 0.0)
             stage_hists["exposure"].append(1.0 if bool(exposed) else 0.0)
-            stage_hists["progress"].append(1.0 if bool(progressed) else 0.0)
-            stage_hists["success"].append(1.0 if bool(succeeded) else 0.0)
+            stage_hists["progress"].append(float(progressed))
+            stage_hists["success"].append(float(succeeded))
             self.s_avoid_stage_completed_episodes[int(stage_id)] = (
                 int(self.s_avoid_stage_completed_episodes.get(int(stage_id), 0)) + 1
             )
@@ -2957,34 +2959,82 @@ class HexGround(LeggedRobot):
         cross_line_dist = self._get_s_avoid_cross_line_dist(env_ids)
         self.s_avoid_episode_goal_init_dist[env_ids] = cross_line_dist
         self.s_avoid_episode_goal_best_dist[env_ids] = cross_line_dist
+        self.s_avoid_episode_rows_passed_best[env_ids] = 0
+        self.s_avoid_episode_rows_success_best[env_ids] = 0
+
+    def _get_s_avoid_episode_row_pass_counts(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.long)
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
+        stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
+        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        pass_counts = torch.zeros_like(stage_ids, dtype=torch.long)
+        row_pass_offset = 0.30
+        for stage_v in (1, 2, 3, 4):
+            stage_mask = stage_ids == stage_v
+            if not bool(stage_mask.any().item()):
+                continue
+            row_y = self._get_s_avoid_fixed_stage_row_y(int(stage_v))
+            if len(row_y) == 0:
+                continue
+            thresholds = torch.tensor(
+                [float(y) + row_pass_offset for y in row_y],
+                device=self.device,
+                dtype=robot_local_y.dtype,
+            )
+            local_y = robot_local_y[stage_mask].unsqueeze(1)
+            pass_counts[stage_mask] = (local_y >= thresholds.unsqueeze(0)).sum(dim=1).to(torch.long)
+        return pass_counts
+
+    def _get_s_avoid_episode_row_progress_ratios(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.float32)
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
+        stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
+        row_totals = torch.ones_like(stage_ids, dtype=torch.float32)
+        for stage_v in (1, 2, 3, 4):
+            stage_mask = stage_ids == stage_v
+            if not bool(stage_mask.any().item()):
+                continue
+            row_totals[stage_mask] = float(len(self._get_s_avoid_fixed_stage_row_y(int(stage_v))))
+        best_counts = self.s_avoid_episode_rows_passed_best[env_ids].to(dtype=torch.float32)
+        return torch.clamp(best_counts / torch.clamp(row_totals, min=1.0), min=0.0, max=1.0)
+
+    def _get_s_avoid_episode_row_success_ratios(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.float32)
+        if stage_ids is None:
+            stage_ids = self.s_avoid_stage_per_env[env_ids]
+        stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
+        row_totals = torch.ones_like(stage_ids, dtype=torch.float32)
+        for stage_v in (1, 2, 3, 4):
+            stage_mask = stage_ids == stage_v
+            if not bool(stage_mask.any().item()):
+                continue
+            row_totals[stage_mask] = float(len(self._get_s_avoid_fixed_stage_row_y(int(stage_v))))
+        best_counts = self.s_avoid_episode_rows_success_best[env_ids].to(dtype=torch.float32)
+        return torch.clamp(best_counts / torch.clamp(row_totals, min=1.0), min=0.0, max=1.0)
 
     def _get_s_avoid_episode_progress_flags(
         self,
         env_ids: torch.Tensor,
         stage_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if env_ids.numel() == 0:
-            return torch.zeros(0, device=self.device, dtype=torch.bool)
-        if stage_ids is None:
-            stage_ids = self.s_avoid_stage_per_env[env_ids]
-        init_dist = self.s_avoid_episode_goal_init_dist[env_ids]
-        best_dist = self.s_avoid_episode_goal_best_dist[env_ids]
-        progress = torch.clamp(init_dist - best_dist, min=0.0)
-        progress_delta12 = float(getattr(self.cfg.terrain, "avoid_stage12_progress_delta", 0.25))
-        progress_delta23 = float(getattr(self.cfg.terrain, "avoid_stage23_progress_delta", progress_delta12))
-        progress_delta34 = float(getattr(self.cfg.terrain, "avoid_stage34_progress_delta", progress_delta23))
-        thresholds = torch.full_like(progress, progress_delta34)
-        thresholds = torch.where(
-            stage_ids.to(device=self.device) == 1,
-            torch.full_like(progress, progress_delta12),
-            thresholds,
-        )
-        thresholds = torch.where(
-            stage_ids.to(device=self.device) == 2,
-            torch.full_like(progress, progress_delta23),
-            thresholds,
-        )
-        return progress >= thresholds
+        return self._get_s_avoid_episode_row_progress_ratios(env_ids, stage_ids=stage_ids)
 
     def _get_s_avoid_episode_success_flags(
         self,
@@ -5110,6 +5160,19 @@ class HexGround(LeggedRobot):
                     torch.arange(self.num_envs, device=self.device, dtype=torch.long)
                 )
                 self.s_avoid_episode_goal_best_dist = torch.minimum(self.s_avoid_episode_goal_best_dist, cross_line_dist)
+                current_row_pass_counts = self._get_s_avoid_episode_row_pass_counts(
+                    torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+                )
+                self.s_avoid_episode_rows_passed_best = torch.maximum(
+                    self.s_avoid_episode_rows_passed_best,
+                    current_row_pass_counts,
+                )
+                collision_free_mask = ~self.s_avoid_episode_collision
+                self.s_avoid_episode_rows_success_best = torch.where(
+                    collision_free_mask,
+                    torch.maximum(self.s_avoid_episode_rows_success_best, current_row_pass_counts),
+                    self.s_avoid_episode_rows_success_best,
+                )
 
         height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
         if height_threshold is not None:
@@ -5146,11 +5209,11 @@ class HexGround(LeggedRobot):
                 completed_stage_ids = self.s_avoid_stage_per_env[completed_env_ids].clone()
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
-                completed_progress = self._get_s_avoid_episode_progress_flags(
+                completed_progress = self._get_s_avoid_episode_row_progress_ratios(
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
-                completed_success = self._get_s_avoid_episode_success_flags(
+                completed_success = self._get_s_avoid_episode_row_success_ratios(
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
