@@ -507,9 +507,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         target_fov_hard_scale = 1.0
         target_lost_k = 0
         target_center_scale = 0.0
-        target_visible_scale = 0.05
+        target_visible_scale = 0.0
         avoid_band_activate_progress = 0.0
         avoid_band_penalty_scale = 3.0
+        avoid_band_fail_margin = 0.30
         reward_cfg = dict(HexGroundCfg.navigation.reward_cfg)
         reward_cfg["heading_offset_rad"] = 0.0
         reward_cfg["goal_approach_scale"] = 4.0

@@ -134,6 +134,7 @@ class EpisodeAccumulator:
     cross_line_dist_min: float = float("inf")
     episode_collision: bool = False
     progress_reached: bool = False
+    progress_ratio_best: float = 0.0
     gate_y_raw_sum: float = 0.0
     y_eff_sum: float = 0.0
     w_sum: float = 0.0
@@ -631,7 +632,7 @@ class EvalRunner:
                             success_step = success_bonus > 0.0
                 progress_step = info.get("s_avoid_progress_mask", None) if isinstance(info, dict) else None
                 if progress_step is None:
-                    progress_step = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                    progress_step = torch.zeros(self.env.num_envs, dtype=torch.float32, device=self.device)
                 cross_line_dist = info.get("cross_line_dist", None) if isinstance(info, dict) else None
                 if cross_line_dist is None:
                     cross_line_dist = torch.full((self.env.num_envs,), float("nan"), device=self.device)
@@ -654,7 +655,10 @@ class EvalRunner:
 
                     ai.energy_j += _safe_float((pwr[i] * float(self.env.high_level_dt)).item(), default=0.0)
                     ai.distance_m += _safe_float(ds[i].item(), default=0.0)
-                    ai.progress_reached = ai.progress_reached or bool(progress_step[i].item())
+                    progress_val = _safe_float(progress_step[i].item(), default=0.0)
+                    progress_val = float(np.clip(progress_val, 0.0, 1.0))
+                    ai.progress_ratio_best = max(ai.progress_ratio_best, progress_val)
+                    ai.progress_reached = ai.progress_reached or (progress_val > 0.0)
                     ai.episode_collision = ai.episode_collision or bool(episode_collision[i].item())
                     cross_line_val = _safe_float(cross_line_dist[i].item(), default=float("nan"))
                     ai.cross_line_dist_end = cross_line_val
@@ -759,6 +763,7 @@ class EvalRunner:
                             "cross_line_dist_min": ai.cross_line_dist_min if math.isfinite(ai.cross_line_dist_min) else float("nan"),
                             "episode_collision": int(ai.episode_collision),
                             "progress_reached": int(ai.progress_reached),
+                            "progress_ratio_best": ai.progress_ratio_best,
                             "gate_y_raw_mean": ai.gate_y_raw_sum / denom_steps,
                             "y_eff_mean": ai.y_eff_sum / denom_steps,
                             "w_mean": ai.w_sum / denom_steps,
@@ -815,6 +820,7 @@ class EvalRunner:
         cross_line_min = _clean([r.get("cross_line_dist_min", float("nan")) for r in rows])
         episode_collision = [int(r.get("episode_collision", 0)) for r in rows]
         progress_flags = [int(r.get("progress_reached", 0)) for r in rows]
+        progress_ratio = _clean([r.get("progress_ratio_best", float("nan")) for r in rows])
         gate_y_raw_vals = _clean([r.get("gate_y_raw_mean", float("nan")) for r in rows])
         y_eff_vals = _clean([r.get("y_eff_mean", float("nan")) for r in rows])
         w_vals = _clean([r.get("w_mean", float("nan")) for r in rows])
@@ -845,7 +851,9 @@ class EvalRunner:
             "cross_line_dist_end_mean": float(np.mean(cross_line_end)) if cross_line_end else float("nan"),
             "cross_line_dist_min_mean": float(np.mean(cross_line_min)) if cross_line_min else float("nan"),
             "episode_collision_rate": float(sum(episode_collision) / max(1, total_eps)),
-            "progress_rate": float(sum(progress_flags) / max(1, total_eps)),
+            "progress_rate": float(np.mean(progress_ratio)) if progress_ratio else 0.0,
+            "progress_ratio_mean": float(np.mean(progress_ratio)) if progress_ratio else 0.0,
+            "progress_any_rate": float(sum(progress_flags) / max(1, total_eps)),
             "gate_y_raw_mean": float(np.mean(gate_y_raw_vals)) if gate_y_raw_vals else float("nan"),
             "y_eff_mean": float(np.mean(y_eff_vals)) if y_eff_vals else float("nan"),
             "w_mean": float(np.mean(w_vals)) if w_vals else float("nan"),
@@ -872,6 +880,7 @@ class EvalRunner:
             cross_line_min_d = _clean([r.get("cross_line_dist_min", float("nan")) for r in sub])
             collision_d = [int(r.get("episode_collision", 0)) for r in sub]
             progress_d = [int(r.get("progress_reached", 0)) for r in sub]
+            progress_ratio_d = _clean([r.get("progress_ratio_best", float("nan")) for r in sub])
             gate_y_raw_d = _clean([r.get("gate_y_raw_mean", float("nan")) for r in sub])
             y_eff_d = _clean([r.get("y_eff_mean", float("nan")) for r in sub])
             w_d = _clean([r.get("w_mean", float("nan")) for r in sub])
@@ -896,7 +905,9 @@ class EvalRunner:
                 "cross_line_dist_end_mean": float(np.mean(cross_line_end_d)) if cross_line_end_d else float("nan"),
                 "cross_line_dist_min_mean": float(np.mean(cross_line_min_d)) if cross_line_min_d else float("nan"),
                 "episode_collision_rate": float(sum(collision_d) / max(1, n)),
-                "progress_rate": float(sum(progress_d) / max(1, n)),
+                "progress_rate": float(np.mean(progress_ratio_d)) if progress_ratio_d else 0.0,
+                "progress_ratio_mean": float(np.mean(progress_ratio_d)) if progress_ratio_d else 0.0,
+                "progress_any_rate": float(sum(progress_d) / max(1, n)),
                 "gate_y_raw_mean": float(np.mean(gate_y_raw_d)) if gate_y_raw_d else float("nan"),
                 "y_eff_mean": float(np.mean(y_eff_d)) if y_eff_d else float("nan"),
                 "w_mean": float(np.mean(w_d)) if w_d else float("nan"),
@@ -972,6 +983,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "cross_line_dist_min",
         "episode_collision",
         "progress_reached",
+        "progress_ratio_best",
         "gate_y_raw_mean",
         "y_eff_mean",
         "w_mean",

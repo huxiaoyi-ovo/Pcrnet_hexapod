@@ -60,10 +60,48 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-26 CONTEXT 文档刷新
+
+- [x] ~~[P1] 用当前最终生效的 avoid 专家奖励、课程升级、固定模板几何、调试口径与训练命令，覆盖刷新 `CONTEXT.md`，避免后续新会话继续沿用旧的显存排查主线与过期奖励配置~~
+
+## 2026-03-26 训练一致性审计规则补强
+
+- [x] ~~[P1] 将“奖励生命周期 / 门控参考量 / 死信号 / done-reset 污染”补入 `AGENTS.md` 长期审计规则，后续默认先查这类静默污染问题~~
+
+## 2026-03-26 avoid 奖励参考量收口与死信号清理
+
+- [x] ~~Must: 将 `clearance_improve` 的增量参考量收口到前向阻塞 `forward_clearance`，避免与 near/far 门控语义分叉~~
+- [x] ~~Must: 将 `s_avoid` 下的 `target_visible` 死信号明确关闭，避免日志继续把它当成有效奖励~~
+
+## 2026-03-26 avoid progress 统计口径收口
+
+- [x] ~~Must: 将 `eval` 里的 `progress` 从“任意非零即算到达”收口为与训练一致的逐行比例均值，并单独保留 `progress_any_rate`~~
+- [x] ~~Must: 将 `s_avoid` 下已关闭的 `target_visible` 从 TensorBoard 奖励项输出里去掉，避免继续把零项当成有效奖励~~
+
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 
 - [x] ~~[P0] 将 `s_avoid` 的 `heading` 与 `target_center` 从有效奖励里去掉，只保留 `target_visible` 作为最小视野约束，减少朝前/居中信号对横移避障的干扰~~
 - [x] ~~[P0] 将训练控制台输出收口为“只打印真正还在生效的奖励项”，并补齐 `target_visible/stability/align_center` 等当前实际在起作用的项，避免继续被零项和隐藏项误导~~
+
+## 2026-03-26 avoid 横向归位语义修正 - align_center 改看 robot_x
+
+- [x] ~~Must: 将 `align_center` 从读取 `goal_buf.x` 改为读取机器人相对 `band` 中线的横向偏差改善量，修复当前恒为零的死奖励~~
+- [ ] Must: 保持 `collision / band / terminal` 口径不动，只做单因素短训验证 `align / band_out / progress / success`
+
+## 2026-03-26 avoid 近障碍横移接入 passable_x 软门控
+
+- [x] ~~Must: 将 `passable_dir.x` 接入近障碍 `clearance_improve`，只在“朝可通行侧横移且确实更安全”时放大奖励~~
+- [x] ~~Must: 放宽 `passable_dir` 计算条件，让 `s_avoid` 即使不开 `passable_align` 也能拿到方向与门控统计~~
+
+## 2026-03-26 avoid passable_x 软门控口径修正
+
+- [x] ~~Must: 将近障碍 `clearance_improve` 的方向门控接回 `passable_gate`，避免前方遮挡不足时过早注入选边信号~~
+- [x] ~~Must: 将方向系数改成基于执行方向横向分量的对齐度，减少对原始横移幅值的敏感性~~
+
+## 2026-03-26 avoid 失败语义与 near-far 切换口径修正
+
+- [x] ~~Must: 保留 done 步防污染清零逻辑，但让碰撞终止的最终惩罚不再比普通碰撞更轻~~
+- [x] ~~Must: 将 near/far 切换从“全局最近障碍”改成“朝穿越线前方的阻塞 clearance”，让通过后归位更及时~~
 
 ## 2026-03-26 avoid 横移奖励改为近障碍避障 / 远障碍归位门控
 
@@ -1681,3 +1719,9 @@
 - [x] Must: 收口 `band` 激活口径，让配置、训练与调试都统一为出生即激活
 - [x] Must: 将课程升级阈值改成逐行比例口径，避免只会过前一两行就过早升级
 - [x] Must: 下调 `target_visible`、上调 `align_center`，减少视野约束对横移的抑制并增强远处归位信号
+
+## 2026-03-26 avoid 外逃止损 - band 软惩罚升级为硬失败
+
+- [x] Must: 将 `s_avoid` 的 `band` 外逃从连续软惩罚升级为高层 episode 硬终止，堵住“出带绕障”退化解
+- [x] Must: 为 `band` 硬终止保留小余量，避免边界附近的正常摆动被误杀
+- [ ] Must: 先保持其余奖励系数不动，只做单因素短训验证 `band_out / episode_len / progress / success`

@@ -110,6 +110,13 @@
   - 观测语义不一致：`actor / critic` 输入口径漂移，或 `goal_buf / local_map / difficulty / risk` 的定义在训练、后处理、评测之间不一致。
   - 统计口径不一致：`train / eval / play` 的 `success / progress / collision / stage` 定义不一致，或窗口混入旧样本。
   - 梯度与生命周期问题：`detach / no_grad` 位置错误、rollout 保留不必要计算图、缓存跨 iteration 积累、更新阶段显存异常增长。
+- 对 reward / termination / reset / logging 相关审计，默认额外执行下面这条专项检查：
+  - `## 奖励生命周期与门控语义审计`
+  - `- 适用范围：` 所有高层训练，尤其是 `avoid / follow / moe / pcr` 中新增或修改奖励、终止、门控、成功判据之后。
+  - `- 风险描述：` 代码能跑、日志也看似正常，但奖励项被覆盖、门控参考量用错、观测已变死信号、或 done/reset 前后混入跨回合语义，最终会静默污染训练结论。
+  - `- 强制规则：` 必查 reward 是“加法 / 覆盖 / 清零 / 终止改写”中的哪一种；必查每个 gate/mask 用的参考量是否和任务语义一致；必查日志里宣称生效的项是否真的进入 `total`；必查 success/fail 是否与奖励最终值一致。
+  - `- 最小检查项：` `collision/terminal` 是否语义反转；`near/far` 是否用错参考量；`goal_buf/local_map/passable_dir` 是否仍承载被奖励使用的真实信息；done 步是否清零 shaped reward 且不污染下一回合缓存；`train/play/eval/best` 是否在同一语义下解释同一指标。
+  - `- 禁止事项：` 未核对覆盖/清零关系前直接调 reward 系数；未核对 gate 参考量前就用行为现象解释训练趋势；把长期为零或恒定的量继续当成有效奖励信号。
 - 审计结果固定使用四部分输出：`Findings`、`Patterns`、`AGENTS Update Proposal`、`TODO Suggestion`。
 - `TODO Suggestion` 只给最小后续动作：先修什么、先加什么断言、先补什么检查、哪些必须在继续训练前解决。
 
