@@ -275,6 +275,70 @@ def _extract_s_avoid_debug_meta(env) -> dict:
     }
 
 
+def _extract_s_avoid_band_debug(env, env_id: int = 0) -> dict:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or not hasattr(env_impl, "root_states"):
+        return {}
+    if not hasattr(env_impl, "s_avoid_band_x_min") or not hasattr(env_impl, "s_avoid_band_x_max"):
+        return {}
+    robot_pos = env_impl.root_states[env_id, :3]
+    band_x_min = float(env_impl.s_avoid_band_x_min[env_id].item())
+    band_x_max = float(env_impl.s_avoid_band_x_max[env_id].item())
+    band_y_min = float(env_impl.s_avoid_band_y_min[env_id].item()) if hasattr(env_impl, "s_avoid_band_y_min") else 0.0
+    band_y_max = float(env_impl.s_avoid_band_y_max[env_id].item()) if hasattr(env_impl, "s_avoid_band_y_max") else 0.0
+    robot_x = float(robot_pos[0].item())
+    robot_y = float(robot_pos[1].item())
+    robot_z = float(robot_pos[2].item())
+    dx_out = max(band_x_min - robot_x, 0.0) + max(robot_x - band_x_max, 0.0)
+    return {
+        "robot_x": robot_x,
+        "robot_y": robot_y,
+        "robot_z": robot_z,
+        "band_x_min": band_x_min,
+        "band_x_max": band_x_max,
+        "band_y_min": band_y_min,
+        "band_y_max": band_y_max,
+        "dx_out": dx_out,
+        "inside_band_x": bool((robot_x >= band_x_min) and (robot_x <= band_x_max)),
+    }
+
+
+def _draw_s_avoid_band_debug_lines(env, viewer, env_id: int = 0) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs"):
+        return
+    band_dbg = _extract_s_avoid_band_debug(env, env_id=env_id)
+    if not band_dbg:
+        return
+    z = float(band_dbg["robot_z"]) + 0.05
+    x0 = float(band_dbg["band_x_min"])
+    x1 = float(band_dbg["band_x_max"])
+    y0 = float(band_dbg["band_y_min"])
+    y1 = float(band_dbg["band_y_max"])
+    vertices = np.array(
+        [
+            x0, y0, z, x1, y0, z,
+            x1, y0, z, x1, y1, z,
+            x1, y1, z, x0, y1, z,
+            x0, y1, z, x0, y0, z,
+        ],
+        dtype=np.float32,
+    )
+    colors = np.array(
+        [
+            0.2, 1.0, 0.2,
+            1.0, 0.2, 0.2,
+            0.2, 1.0, 0.2,
+            1.0, 0.2, 0.2,
+        ],
+        dtype=np.float32,
+    )
+    env_impl.gym.clear_lines(viewer)
+    env_impl.gym.add_lines(viewer, env_impl.envs[env_id], 4, vertices, colors)
+
+
 def _occupancy_center_from_map(raw_occ: np.ndarray, map_extent: float) -> dict:
     occ_idx = np.argwhere(raw_occ > 0.5)
     pixel_count = int(occ_idx.shape[0])
@@ -1881,6 +1945,9 @@ def main():
             step_body_y = 0.0
             step_yaw = 0.0
             cmd_omega_track = 0.0
+            band_debug = _extract_s_avoid_band_debug(env, env_id=track_env_idx)
+            if input_enabled and debug and getattr(args, "task", "") == "s_avoid_basic":
+                _draw_s_avoid_band_debug_lines(env, viewer, env_id=track_env_idx)
             if hasattr(env.env, "root_states"):
                 root = env.env.root_states[track_env_idx]
                 pos_xy = root[:2].detach().cpu().numpy()
@@ -1954,6 +2021,12 @@ def main():
                     crossable_gate = float(reward_terms.get("crossable_gate", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                     crossable_align = float(reward_terms.get("crossable_align", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                     crossable_width = float(reward_terms.get("crossable_width", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                band_robot_x = float(band_debug.get("robot_x", 0.0)) if band_debug else 0.0
+                band_robot_y = float(band_debug.get("robot_y", 0.0)) if band_debug else 0.0
+                band_x_min_dbg = float(band_debug.get("band_x_min", 0.0)) if band_debug else 0.0
+                band_x_max_dbg = float(band_debug.get("band_x_max", 0.0)) if band_debug else 0.0
+                band_dx_out_dbg = float(band_debug.get("dx_out", 0.0)) if band_debug else 0.0
+                band_inside_dbg = int(bool(band_debug.get("inside_band_x", False))) if band_debug else 0
                 if is_gate and gate_y is not None:
                     gate_val = float(gate_y[env_idx].detach().cpu())
                     if isinstance(gate_diag, dict):
@@ -2171,6 +2244,17 @@ def main():
                         heading_offset,
                     )
                 )
+                if band_debug:
+                    print(
+                        "[PlayHigh][band] robot_xy=({:.3f},{:.3f}) band_x=[{:.3f},{:.3f}] dx_out={:.4f} inside_x={}".format(
+                            band_robot_x,
+                            band_robot_y,
+                            band_x_min_dbg,
+                            band_x_max_dbg,
+                            band_dx_out_dbg,
+                            band_inside_dbg,
+                        )
+                    )
                 if expert_cmd is not None:
                     expert_cmd_np = expert_cmd[env_idx].detach().cpu().numpy()
                     print(
