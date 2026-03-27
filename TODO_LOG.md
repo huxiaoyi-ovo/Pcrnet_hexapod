@@ -83,6 +83,7 @@
 - [x] ~~Must: 保留 `approach / collision / band / terminal / time` 主线不动，只替换当前 `clearance_improve + align_center` 的横移塑形逻辑~~
 - [x] ~~Must: 将横移奖励改成“前方通畅时惩罚横移、前方受阻时奖励正确选边、前方受阻时奖励前向通路改善”~~
 - [x] ~~Must: 下调 `passable_gate` 阈值，让当前固定模板里选边信号真正能进场~~
+- [x] ~~Must: 将 `lat_choice` 改成有符号方向奖励：对边为正、错边为负，避免长期死零~~
 
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 

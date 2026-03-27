@@ -335,8 +335,150 @@ def _draw_s_avoid_band_debug_lines(env, viewer, env_id: int = 0) -> None:
         ],
         dtype=np.float32,
     )
-    env_impl.gym.clear_lines(viewer)
     env_impl.gym.add_lines(viewer, env_impl.envs[env_id], 4, vertices, colors)
+
+
+def _local_xy_to_world_xy(yaw_world: float, x_right: float, y_forward: float) -> np.ndarray:
+    return np.array(
+        [
+            math.cos(yaw_world) * x_right - math.sin(yaw_world) * y_forward,
+            math.sin(yaw_world) * x_right + math.cos(yaw_world) * y_forward,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _bearing_to_world_dir(yaw_world: float, bearing_rad: float) -> np.ndarray:
+    local_x = math.sin(bearing_rad)
+    local_y = math.cos(bearing_rad)
+    return _local_xy_to_world_xy(yaw_world, local_x, local_y)
+
+
+def _ground_range_from_camera_ray(
+    camera_height_m: float,
+    down_angle_rad: float,
+    near_clip_m: float,
+    far_clip_m: float,
+) -> float:
+    if camera_height_m <= 1e-6:
+        return max(0.0, far_clip_m)
+    if down_angle_rad <= 1e-4:
+        return max(0.0, far_clip_m)
+    slant_hit = camera_height_m / max(math.sin(down_angle_rad), 1e-6)
+    slant_use = slant_hit
+    if near_clip_m > 0.0:
+        slant_use = max(slant_use, near_clip_m)
+    if far_clip_m > 0.0:
+        slant_use = min(slant_use, far_clip_m)
+    return max(0.0, slant_use * math.cos(down_angle_rad))
+
+
+def _extract_local_map_fov_debug(env, env_id: int = 0) -> dict:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or not hasattr(env_impl, "root_states"):
+        return {}
+    if getattr(env, "camera_fov_rad", None) is None or getattr(env, "camera_vertical_fov_rad", None) is None:
+        return {}
+    if env.camera_fov_rad <= 0.0 or env.camera_vertical_fov_rad <= 0.0:
+        return {}
+    root = env_impl.root_states[env_id]
+    root_xy = root[:2].detach().cpu().numpy().astype(np.float32, copy=False)
+    root_z = float(root[2].item())
+    quat = root[3:7].detach().cpu().numpy()
+    x_q, y_q, z_q, w_q = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+    yaw_world = math.atan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q))
+
+    base_height_nominal = float(getattr(getattr(env_impl.cfg, "init_state", None), "pos", [0.0, 0.0, root_z])[2])
+    cam_height_abs = float(getattr(env, "camera_height_m", max(root_z, 1e-3)))
+    cam_height_offset = cam_height_abs - base_height_nominal
+    cam_world_z = root_z + cam_height_offset
+
+    cam_local_xy = getattr(env, "affordance_origin_local_xy", None)
+    if torch.is_tensor(cam_local_xy) and cam_local_xy.numel() >= 2:
+        cam_local_x = float(cam_local_xy[0].item())
+        cam_local_y = float(cam_local_xy[1].item())
+    else:
+        cam_local_x = 0.0
+        cam_local_y = 0.0
+    cam_world_xy = root_xy + _local_xy_to_world_xy(yaw_world, cam_local_x, cam_local_y)
+
+    half_hfov = 0.5 * float(env.camera_fov_rad)
+    half_vfov = 0.5 * float(env.camera_vertical_fov_rad)
+    tilt_down = float(getattr(env, "camera_tilt_down_rad", 0.0))
+    near_clip = float(getattr(env, "camera_near", 0.0))
+    far_clip = float(getattr(env, "camera_far", 0.0))
+
+    near_down = max(1e-4, tilt_down + half_vfov)
+    far_down = max(1e-4, tilt_down - half_vfov)
+    near_ground = _ground_range_from_camera_ray(cam_world_z, near_down, near_clip, far_clip)
+    far_ground = _ground_range_from_camera_ray(cam_world_z, far_down, near_clip, far_clip)
+    if far_ground < near_ground:
+        near_ground, far_ground = far_ground, near_ground
+
+    bearing_center = float(getattr(env, "camera_bearing_rad", 0.0))
+    bearing_left = bearing_center + half_hfov
+    bearing_right = bearing_center - half_hfov
+    dir_left = _bearing_to_world_dir(yaw_world, bearing_left)
+    dir_right = _bearing_to_world_dir(yaw_world, bearing_right)
+    dir_center = _bearing_to_world_dir(yaw_world, bearing_center)
+
+    z_ground = 0.05
+    cam_world = np.array([cam_world_xy[0], cam_world_xy[1], cam_world_z], dtype=np.float32)
+
+    def _ground_point(direction_xy: np.ndarray, distance_m: float) -> np.ndarray:
+        return np.array(
+            [
+                cam_world_xy[0] + direction_xy[0] * distance_m,
+                cam_world_xy[1] + direction_xy[1] * distance_m,
+                z_ground,
+            ],
+            dtype=np.float32,
+        )
+
+    left_near = _ground_point(dir_left, near_ground)
+    right_near = _ground_point(dir_right, near_ground)
+    left_far = _ground_point(dir_left, far_ground)
+    right_far = _ground_point(dir_right, far_ground)
+    center_far = _ground_point(dir_center, far_ground)
+    return {
+        "camera_world": cam_world,
+        "left_near": left_near,
+        "right_near": right_near,
+        "left_far": left_far,
+        "right_far": right_far,
+        "center_far": center_far,
+    }
+
+
+def _draw_local_map_fov_debug_lines(env, viewer, env_id: int = 0) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs"):
+        return
+    fov_dbg = _extract_local_map_fov_debug(env, env_id=env_id)
+    if not fov_dbg:
+        return
+
+    camera_world = np.asarray(fov_dbg["camera_world"], dtype=np.float32)
+    left_near = np.asarray(fov_dbg["left_near"], dtype=np.float32)
+    right_near = np.asarray(fov_dbg["right_near"], dtype=np.float32)
+    left_far = np.asarray(fov_dbg["left_far"], dtype=np.float32)
+    right_far = np.asarray(fov_dbg["right_far"], dtype=np.float32)
+    center_far = np.asarray(fov_dbg["center_far"], dtype=np.float32)
+
+    segments = [
+        (left_near, right_near, (0.2, 0.9, 1.0)),
+        (left_far, right_far, (1.0, 0.6, 0.1)),
+        (left_near, left_far, (1.0, 0.9, 0.2)),
+        (right_near, right_far, (1.0, 0.9, 0.2)),
+        (camera_world, left_far, (0.5, 0.8, 1.0)),
+        (camera_world, right_far, (0.5, 0.8, 1.0)),
+        (camera_world, center_far, (1.0, 1.0, 1.0)),
+    ]
+    vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
+    colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
+    env_impl.gym.add_lines(viewer, env_impl.envs[env_id], len(segments), vertices, colors)
 
 
 def _occupancy_center_from_map(raw_occ: np.ndarray, map_extent: float) -> dict:
@@ -1947,7 +2089,11 @@ def main():
             cmd_omega_track = 0.0
             band_debug = _extract_s_avoid_band_debug(env, env_id=track_env_idx)
             if input_enabled and debug and getattr(args, "task", "") == "s_avoid_basic":
+                env_impl = getattr(env, "env", None)
+                if env_impl is not None and hasattr(env_impl, "gym"):
+                    env_impl.gym.clear_lines(viewer)
                 _draw_s_avoid_band_debug_lines(env, viewer, env_id=track_env_idx)
+                _draw_local_map_fov_debug_lines(env, viewer, env_id=track_env_idx)
             if hasattr(env.env, "root_states"):
                 root = env.env.root_states[track_env_idx]
                 pos_xy = root[:2].detach().cpu().numpy()

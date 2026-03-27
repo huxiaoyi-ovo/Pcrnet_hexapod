@@ -2743,10 +2743,12 @@ class HierarchicalHexapodEnv:
                     )
                     lat_choice_reward = (
                         lat_choice_scale
+                        * torch.clamp(passable_gate, min=0.0, max=1.0)
                         * block
-                        * torch.clamp(
-                            passable_x * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
-                            min=0.0,
+                        * torch.tanh(
+                            3.0
+                            * passable_x
+                            * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
                         )
                         * inside_band_mask.float()
                     )
