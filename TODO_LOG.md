@@ -93,6 +93,10 @@
 - [x] ~~Must: 将训练日志和 play 调试输出对齐到当前真实方向老师，并拆分 `lat_dir / lat_mag / lat_over` 三个子项，避免继续边猜边调~~
 - [x] ~~Must: 去掉当前 teacher 图主线奖励，直接用 `s_avoid_active / s_avoid_pos_world` 对“最近一行最宽通道中心”的横移进展给奖励，避免继续奖励小幅同号命令而不奖励真正进通道~~
 - [x] ~~Must: 将 `row_lat` 的训练/回放/快照诊断统一切到“最近一行最宽通道”口径，并修掉跨行切换时的监督静音空窗~~
+- [x] ~~Must: 补一个只看“前方最近一行”的近障软惩罚 `row_near_penalty`，抑制“先直走撞近了再横移”的晚躲坏解~~
+- [x] ~~Must: 将最近一行奖励从“追 gap 中心点”改成“进入当前最近一行的有效 gap 区间”，并让 `row_near_penalty` 只在尚未进入该行有效 gap 时生效，避免安全贴边通过继续被罚~~
+- [x] ~~Must: 修补 effective gap 主线的一致性缺口：补齐 `_compute_nearest_row_gap_target()` 的返回值分支，给 `row_near_penalty` 增加 `gap_eff_valid` 门控，并将 `play` 主输出收口到 row-gap 主线~~
+- [x] ~~Must: 将 row-gap 主线彻底从 `nearest_obs` 外层门控中解开，并给 `row_near_penalty` 增加 effective-gap 边界过渡带，同时进一步清掉 `play`/snapshot 中残留的旧 `block/passable` 主解释~~
 
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 

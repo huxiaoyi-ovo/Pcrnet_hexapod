@@ -2146,12 +2146,24 @@ class HierarchicalHexapodEnv:
     def _compute_nearest_row_gap_target(
         self,
         robot_pos: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         gap_center = torch.zeros(self.num_envs, device=self.device)
         row_y = torch.zeros(self.num_envs, device=self.device)
         valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         gap_left = torch.zeros(self.num_envs, device=self.device)
         gap_right = torch.zeros(self.num_envs, device=self.device)
+        gap_left_eff = torch.zeros(self.num_envs, device=self.device)
+        gap_right_eff = torch.zeros(self.num_envs, device=self.device)
+        eff_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if (
             not hasattr(self.env, "s_avoid_active")
             or self.env.s_avoid_active is None
@@ -2159,14 +2171,14 @@ class HierarchicalHexapodEnv:
             or not hasattr(self.env, "s_avoid_band_x_min")
             or not hasattr(self.env, "s_avoid_band_x_max")
         ):
-            return gap_center, row_y, valid, gap_left, gap_right
+            return gap_center, row_y, valid, gap_left, gap_right, gap_left_eff, gap_right_eff, eff_valid
 
         cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
         box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
         wall_slots = int(getattr(self.env, "s_avoid_wall_slot_count", 0))
         total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
         if total_slots <= 0:
-            return gap_center, row_y, valid, gap_left, gap_right
+            return gap_center, row_y, valid, gap_left, gap_right, gap_left_eff, gap_right_eff, eff_valid
 
         cap_half = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
         box_half = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
@@ -2176,6 +2188,9 @@ class HierarchicalHexapodEnv:
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
         forward_margin = 0.05
+        robot_half_width = 0.5 * float(getattr(self, "body_width", 0.44))
+        eff_margin = float(getattr(self.reward_cfg, "avoid_row_effective_margin", 0.0))
+        gap_shrink = max(robot_half_width + eff_margin, 0.0)
 
         def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
             if slot_id < cap_slots:
@@ -2266,12 +2281,112 @@ class HierarchicalHexapodEnv:
 
             if best_width <= 1e-6:
                 continue
+            eff_left = best_left + gap_shrink
+            eff_right = best_right - gap_shrink
             gap_center[env_id] = best_center
             row_y[env_id] = nearest_row_y
             gap_left[env_id] = best_left
             gap_right[env_id] = best_right
+            gap_left_eff[env_id] = eff_left
+            gap_right_eff[env_id] = eff_right
             valid[env_id] = True
-        return gap_center, row_y, valid, gap_left, gap_right
+            eff_valid[env_id] = eff_right > eff_left
+        return gap_center, row_y, valid, gap_left, gap_right, gap_left_eff, gap_right_eff, eff_valid
+
+    @staticmethod
+    def _distance_to_interval(
+        x: torch.Tensor,
+        left: torch.Tensor,
+        right: torch.Tensor,
+    ) -> torch.Tensor:
+        left_err = torch.clamp(left - x, min=0.0)
+        right_err = torch.clamp(x - right, min=0.0)
+        return left_err + right_err
+
+    def _compute_nearest_row_surface_distance(
+        self,
+        robot_pos: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        dist_out = torch.full((self.num_envs,), self.affordance_map_extent, device=self.device)
+        valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if (
+            not hasattr(self.env, "s_avoid_active")
+            or self.env.s_avoid_active is None
+            or not hasattr(self.env, "s_avoid_pos_world")
+        ):
+            return dist_out, valid
+
+        cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
+        box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
+        wall_slots = int(getattr(self.env, "s_avoid_wall_slot_count", 0))
+        total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
+        if total_slots <= 0:
+            return dist_out, valid
+
+        cap_half = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
+        box_half = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
+        wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+        row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
+        row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
+        forward_margin = 0.05
+
+        def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
+            if slot_id < cap_slots:
+                return cap_half + row_margin, cap_half + row_margin
+            quat = self.env.s_avoid_quat_world[env_id, slot_id]
+            yaw = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
+            cos_yaw = abs(math.cos(yaw))
+            sin_yaw = abs(math.sin(yaw))
+            if slot_id < cap_slots + box_slots:
+                half_x = cos_yaw * box_half + sin_yaw * box_hy
+                half_y = sin_yaw * box_half + cos_yaw * box_hy
+                return half_x + row_margin, half_y + row_margin
+            if slot_id < cap_slots + box_slots + wall_slots:
+                half_x = cos_yaw * wall_hx + sin_yaw * wall_hy
+                half_y = sin_yaw * wall_hx + cos_yaw * wall_hy
+                return half_x + row_margin, half_y + row_margin
+            return row_margin, row_margin
+
+        for env_id in range(self.num_envs):
+            active_slots = self.env.s_avoid_active[env_id].nonzero(as_tuple=False).flatten()
+            if active_slots.numel() == 0:
+                continue
+            obs_xy = self.env.s_avoid_pos_world[env_id, active_slots, :2]
+            row_candidates = []
+            for idx, slot in enumerate(active_slots.tolist()):
+                cy = float(obs_xy[idx, 1].item())
+                _, half_y = slot_half_extents(env_id, int(slot))
+                if (cy + half_y - float(robot_pos[env_id, 1].item())) <= forward_margin:
+                    continue
+                row_candidates.append((slot, cy))
+            if len(row_candidates) == 0:
+                continue
+            nearest_row_y = min(item[1] for item in row_candidates)
+            row_slots = [
+                int(slot)
+                for slot, cy in row_candidates
+                if abs(cy - nearest_row_y) <= row_tol
+            ]
+            if len(row_slots) == 0:
+                continue
+
+            min_dist = self.affordance_map_extent
+            rx = float(robot_pos[env_id, 0].item())
+            ry = float(robot_pos[env_id, 1].item())
+            for slot in row_slots:
+                cx = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
+                cy = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
+                half_x, half_y = slot_half_extents(env_id, int(slot))
+                dx = max(abs(rx - cx) - half_x, 0.0)
+                dy = max(abs(ry - cy) - half_y, 0.0)
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist < min_dist:
+                    min_dist = dist
+            dist_out[env_id] = min_dist
+            valid[env_id] = True
+        return dist_out, valid
 
     @staticmethod
     def _risk_from_clearance(
@@ -2953,25 +3068,45 @@ class HierarchicalHexapodEnv:
                 prev_heading = reward_dict.get('heading', torch.zeros_like(heading_reward))
                 reward_dict['heading'] = heading_reward
                 reward_dict['total'] = reward_dict['total'] - prev_heading + heading_reward
-                if nearest_obs is not None:
-                    curr_nearest_obs_dist = torch.nan_to_num(
-                        nearest_obs,
-                        nan=0.0,
-                        posinf=0.0,
-                        neginf=0.0,
-                    )
-                    near_threshold = float(getattr(self.reward_cfg, "avoid_near_threshold", 0.8))
-                    row_lat_scale = float(getattr(self.reward_cfg, "avoid_row_lat_scale", 6.0))
-                    gap_center, _, gap_valid, _, _ = self._compute_nearest_row_gap_target(robot_pos)
-                    row_err_abs = torch.abs(robot_pos[:, 0] - gap_center)
-                    prev_row_err_abs = torch.abs(self.prev_robot_pos[:, 0] - gap_center)
-                    row_lat_reward = (
-                        row_lat_scale
-                        * (prev_row_err_abs - row_err_abs)
-                        * gap_valid.float()
-                    )
-                    reward_dict['row_lat'] = row_lat_reward
-                    reward_dict['total'] = reward_dict['total'] + row_lat_reward
+                row_lat_scale = float(getattr(self.reward_cfg, "avoid_row_lat_scale", 6.0))
+                (
+                    _gap_center,
+                    _row_y,
+                    _gap_valid,
+                    _gap_left,
+                    _gap_right,
+                    gap_left_eff,
+                    gap_right_eff,
+                    gap_eff_valid,
+                ) = self._compute_nearest_row_gap_target(robot_pos)
+                row_err_abs = self._distance_to_interval(robot_pos[:, 0], gap_left_eff, gap_right_eff)
+                prev_row_err_abs = self._distance_to_interval(self.prev_robot_pos[:, 0], gap_left_eff, gap_right_eff)
+                row_lat_reward = (
+                    row_lat_scale
+                    * (prev_row_err_abs - row_err_abs)
+                    * gap_eff_valid.float()
+                )
+                row_near_scale = float(getattr(self.reward_cfg, "avoid_row_near_scale", 0.5))
+                row_near_sigma = float(getattr(self.reward_cfg, "avoid_row_near_sigma", 0.30))
+                row_near_release_margin = float(
+                    getattr(self.reward_cfg, "avoid_row_near_release_margin", 0.08)
+                )
+                row_surface_dist, row_surface_valid = self._compute_nearest_row_surface_distance(robot_pos)
+                near_release_gate = torch.clamp(
+                    row_err_abs / max(row_near_release_margin, 1e-6),
+                    min=0.0,
+                    max=1.0,
+                )
+                row_near_penalty = (
+                    -row_near_scale
+                    * torch.exp(-row_surface_dist / max(row_near_sigma, 1e-6))
+                    * row_surface_valid.float()
+                    * gap_eff_valid.float()
+                    * near_release_gate
+                )
+                reward_dict['row_lat'] = row_lat_reward
+                reward_dict['row_near_penalty'] = row_near_penalty
+                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_near_penalty
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -4312,6 +4447,7 @@ def train(args):
             'backward',
             'body_backward',
             'row_lat',
+            'row_near_penalty',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -5976,6 +6112,7 @@ def train(args):
                 for key in (
                     'approach',
                     'row_lat',
+                    'row_near_penalty',
                     'avoid_band_penalty',
                     'collision',
                     'stability',
@@ -6091,7 +6228,7 @@ def train(args):
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/rowLat):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/rowLat/rowNear):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_near_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
