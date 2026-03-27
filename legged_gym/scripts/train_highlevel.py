@@ -2066,6 +2066,58 @@ class HierarchicalHexapodEnv:
             min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
         return min_dist
 
+    def _compute_front_side_obstacle_distance(
+        self,
+        aff_map: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Min occupied distance on the left/right side of the front half-plane.
+        This is used to build a simple near-obstacle side-risk teacher for avoid mode.
+        """
+        if aff_map.ndim != 4 or aff_map.size(1) < 1:
+            fill = torch.full((aff_map.shape[0],), self.affordance_map_extent, device=aff_map.device)
+            return fill, fill
+
+        occ = aff_map[:, 0] > 0.5
+        dist_map = self.affordance_dist_map
+        x_map = self.affordance_x_map
+        y_map = self.affordance_y_map
+        visible = self.affordance_visible_mask
+        if dist_map.device != aff_map.device:
+            dist_map = dist_map.to(aff_map.device)
+        if x_map.device != aff_map.device:
+            x_map = x_map.to(aff_map.device)
+            y_map = y_map.to(aff_map.device)
+        if visible is None:
+            visible = torch.ones_like(dist_map, dtype=torch.bool)
+        elif visible.device != aff_map.device:
+            visible = visible.to(aff_map.device)
+
+        front_half = (y_map > 0.0) & visible
+        left_half = front_half & (x_map < 0.0)
+        right_half = front_half & (x_map > 0.0)
+        fill_map = torch.full_like(dist_map, self.affordance_map_extent)
+
+        left_dist = torch.where(
+            left_half.view(1, *left_half.shape) & occ,
+            dist_map.view(1, *dist_map.shape),
+            fill_map.view(1, *dist_map.shape),
+        )
+        right_dist = torch.where(
+            right_half.view(1, *right_half.shape) & occ,
+            dist_map.view(1, *dist_map.shape),
+            fill_map.view(1, *dist_map.shape),
+        )
+        left_min = left_dist.amin(dim=(1, 2))
+        right_min = right_dist.amin(dim=(1, 2))
+        no_left = ~(left_half.view(1, *left_half.shape) & occ).flatten(1).any(dim=1)
+        no_right = ~(right_half.view(1, *right_half.shape) & occ).flatten(1).any(dim=1)
+        if no_left.any():
+            left_min = torch.where(no_left, torch.full_like(left_min, self.affordance_map_extent), left_min)
+        if no_right.any():
+            right_min = torch.where(no_right, torch.full_like(right_min, self.affordance_map_extent), right_min)
+        return left_min, right_min
+
     @staticmethod
     def _risk_from_clearance(
         clearance: torch.Tensor,
@@ -2540,6 +2592,8 @@ class HierarchicalHexapodEnv:
         band_fail_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         nearest_obs = None
         front_half_nearest_obs = None
+        front_left_nearest_obs = None
+        front_right_nearest_obs = None
         avoid_band_outside_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         clearance = None
         clearance_global = None
@@ -2602,6 +2656,9 @@ class HierarchicalHexapodEnv:
                 forward_cmd_xy[:, 1] = 1.0
                 forward_clearance = self._compute_clearance_along_cmd(reward_aff_map, forward_cmd_xy)
                 front_half_nearest_obs = self._compute_front_half_obstacle_distance(reward_aff_map)
+                front_left_nearest_obs, front_right_nearest_obs = self._compute_front_side_obstacle_distance(
+                    reward_aff_map
+                )
         self.clearance_affordance_override = None
         passable_dir = None
         passable_gate = None
@@ -2791,12 +2848,28 @@ class HierarchicalHexapodEnv:
                             & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
                         )
                     cmd_x = cmd_exec_mean[:, 0]
-                    if passable_side is not None:
-                        passable_x = passable_side
+                    if front_left_nearest_obs is not None and front_right_nearest_obs is not None:
+                        left_ref = torch.nan_to_num(
+                            front_left_nearest_obs,
+                            nan=near_threshold,
+                            posinf=near_threshold,
+                            neginf=0.0,
+                        )
+                        right_ref = torch.nan_to_num(
+                            front_right_nearest_obs,
+                            nan=near_threshold,
+                            posinf=near_threshold,
+                            neginf=0.0,
+                        )
+                        left_risk = 1.0 - torch.clamp(left_ref / max(near_threshold, 1e-6), 0.0, 1.0)
+                        right_risk = 1.0 - torch.clamp(right_ref / max(near_threshold, 1e-6), 0.0, 1.0)
+                        side_risk = left_risk - right_risk
+                    elif passable_side is not None:
+                        side_risk = -passable_side
                     elif passable_dir is not None:
-                        passable_x = passable_dir[:, 0]
+                        side_risk = -passable_dir[:, 0]
                     else:
-                        passable_x = torch.zeros_like(cmd_x)
+                        side_risk = torch.zeros_like(cmd_x)
                     lat_penalty_reward = (
                         -lat_pen_scale
                         * free
@@ -2807,7 +2880,7 @@ class HierarchicalHexapodEnv:
                         * block
                         * torch.tanh(
                             4.0
-                            * passable_x
+                            * side_risk
                             * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
                         )
                         * inside_band_mask.float()

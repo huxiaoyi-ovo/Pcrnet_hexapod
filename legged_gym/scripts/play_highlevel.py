@@ -2220,6 +2220,12 @@ def main():
                 cross_goal_err = 0.0
                 pass_dir_norm = 0.0
                 cross_dir_norm = 0.0
+                pass_side_dbg = 0.0
+                cmd_x_dbg = 0.0
+                cmd_x_dir_dbg = 0.0
+                choice_sign_dbg = 0.0
+                right_pass_dbg = 0.0
+                left_pass_dbg = 0.0
                 pass_vis_mean = 0.0
                 pass_sector_mean = 0.0
                 low_vis_mean = 0.0
@@ -2242,13 +2248,14 @@ def main():
                         debug_aff
                     )
                     debug_goal = obs["goal"]
-                    pass_dir, pass_gate_dbg, pass_occ_dbg = env._compute_passable_guidance(
+                    pass_dir, pass_gate_dbg, pass_occ_dbg, pass_side = env._compute_passable_guidance(
                         debug_aff,
                         debug_goal,
                         block_mask=low_block_mask,
                     )
                     pass_gate_dbg = float(pass_gate_dbg[env_idx].detach().cpu())
                     pass_occ_dbg = float(pass_occ_dbg[env_idx].detach().cpu())
+                    pass_side_dbg = float(pass_side[env_idx].detach().cpu())
                     cross_gate_dbg = float(cross_gate_dbg[env_idx].detach().cpu())
                     cross_width_dbg = float(cross_width_dbg[env_idx].detach().cpu())
                     pass_dir_dbg = pass_dir[env_idx].detach().cpu().numpy()
@@ -2278,6 +2285,17 @@ def main():
                     visible_f = visible.float()
                     pass_vis_mean = float((passable * visible_f).sum().div(vis_count).detach().cpu())
                     low_vis_mean = float((low_obs * visible_f).sum().div(vis_count).detach().cpu())
+                    x_map = env.affordance_x_map
+                    if x_map.device != passable.device:
+                        x_map = x_map.to(passable.device)
+                    right_mask = ((x_map > 0.0) & visible).float()
+                    left_mask = ((x_map < 0.0) & visible).float()
+                    right_pass_dbg = float((passable * right_mask).sum().detach().cpu())
+                    left_pass_dbg = float((passable * left_mask).sum().detach().cpu())
+                    if cmd_show is not None:
+                        cmd_x_dbg = float(cmd_show[0])
+                        cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
+                        choice_sign_dbg = pass_side_dbg * cmd_x_dir_dbg
 
                     sector_deg = 0.0
                     if env.reward_cfg is not None:
@@ -2313,7 +2331,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side={:.3f} choice_sign={:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2329,6 +2347,10 @@ def main():
                         passable_gate,
                         passable_align,
                         passable_occ_ratio,
+                        pass_side_dbg,
+                        choice_sign_dbg,
+                        left_pass_dbg,
+                        right_pass_dbg,
                         crossable_gate,
                         crossable_align,
                         crossable_width,
@@ -2341,6 +2363,8 @@ def main():
                         np.array2string(goal, precision=3, floatmode="fixed"),
                         goal_dist,
                         cmd_str,
+                        cmd_x_dbg,
+                        cmd_x_dir_dbg,
                         yaw_raw,
                         yaw_policy,
                         bearing_y,
