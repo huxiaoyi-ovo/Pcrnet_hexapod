@@ -753,12 +753,15 @@ def _save_s_avoid_teacher_snapshot(
     raw_aff_map: torch.Tensor,
     local_map_2ch: torch.Tensor,
     *,
-    left_clear: float,
-    right_clear: float,
-    side_risk: float,
+    row_y_world: float,
+    gap_left_world: float,
+    gap_right_world: float,
+    gap_center_world: float,
+    row_lat_reward: float,
+    x_err_now: float,
+    x_err_prev: float,
     block: float,
     cmd_exec: np.ndarray,
-    probe_x: float,
     band_dbg: Optional[dict] = None,
 ) -> None:
     try:
@@ -784,8 +787,28 @@ def _save_s_avoid_teacher_snapshot(
     cmd_len_scale = 2.5
     cmd_dx = float(cmd_exec[0]) * cmd_len_scale
     cmd_dy = float(cmd_exec[1]) * cmd_len_scale
-    left_end = np.array([robot_x - abs(probe_x), robot_y + 1.0], dtype=np.float32)
-    right_end = np.array([robot_x + abs(probe_x), robot_y + 1.0], dtype=np.float32)
+    yaw = 0.0
+    if hasattr(env.env, "root_states"):
+        quat = env.env.root_states[0, 3:7].detach().cpu().numpy()
+        x, y, z, w = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+        yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        root_xy = env.env.root_states[0, :2].detach().cpu().numpy()
+        world_robot_x = float(root_xy[0])
+        world_robot_y = float(root_xy[1])
+    else:
+        world_robot_x = 0.0
+        world_robot_y = 0.0
+
+    def _world_to_body(px: float, py: float) -> Tuple[float, float]:
+        dx = px - world_robot_x
+        dy = py - world_robot_y
+        bx = math.cos(yaw) * dx + math.sin(yaw) * dy
+        by = -math.sin(yaw) * dx + math.cos(yaw) * dy
+        return bx, by
+
+    gap_left_body = _world_to_body(gap_left_world, row_y_world)
+    gap_right_body = _world_to_body(gap_right_world, row_y_world)
+    gap_center_body = _world_to_body(gap_center_world, row_y_world)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.0), squeeze=False)
     axes = axes[0]
@@ -813,8 +836,19 @@ def _save_s_avoid_teacher_snapshot(
         ax.scatter([robot_x], [robot_y], c="white", s=20, marker="o")
         ax.add_patch(Circle((robot_x, robot_y), float(env.affordance_clearance), fill=False, color="cyan", linestyle="--", linewidth=1.1))
         ax.plot([robot_x, robot_x], [robot_y, robot_y + heading_len], color="dodgerblue", linewidth=2.0)
-        ax.plot([robot_x, left_end[0]], [robot_y, left_end[1]], color="lime", linewidth=2.0, linestyle="--")
-        ax.plot([robot_x, right_end[0]], [robot_y, right_end[1]], color="yellow", linewidth=2.0, linestyle="--")
+        ax.plot(
+            [gap_left_body[0], gap_right_body[0]],
+            [gap_left_body[1], gap_right_body[1]],
+            color="lime",
+            linewidth=3.0,
+        )
+        ax.plot(
+            [gap_center_body[0], gap_center_body[0]],
+            [gap_center_body[1] - 0.10, gap_center_body[1] + 0.10],
+            color="yellow",
+            linewidth=2.0,
+            linestyle="--",
+        )
         ax.arrow(
             robot_x,
             robot_y,
@@ -837,10 +871,12 @@ def _save_s_avoid_teacher_snapshot(
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     info = (
-        f"L/R clear={left_clear:.3f}/{right_clear:.3f}\n"
-        f"side_risk={side_risk:.3f} block={block:.3f}\n"
+        f"gap_l/r={gap_left_world:.3f}/{gap_right_world:.3f}\n"
+        f"gap_c={gap_center_world:.3f} row_y={row_y_world:.3f}\n"
+        f"x_err prev/now={x_err_prev:.3f}/{x_err_now:.3f}\n"
+        f"row_lat={row_lat_reward:.3f} block={block:.3f}\n"
         f"cmd_exec=({float(cmd_exec[0]):.3f},{float(cmd_exec[1]):.3f})\n"
-        f"probe_x={probe_x:.3f}"
+        f"robot_world=({world_robot_x:.3f},{world_robot_y:.3f})"
     )
     axes[1].text(
         1.03,
@@ -2349,14 +2385,15 @@ def main():
                 pass_dir_norm = 0.0
                 cross_dir_norm = 0.0
                 pass_side_dbg = 0.0
-                left_clear_dbg = 0.0
-                right_clear_dbg = 0.0
-                side_risk_dbg = 0.0
                 cmd_x_dbg = 0.0
                 cmd_x_dir_dbg = 0.0
-                choice_sign_dbg = 0.0
-                right_pass_dbg = 0.0
-                left_pass_dbg = 0.0
+                row_lat_dbg = 0.0
+                row_gap_center_dbg = 0.0
+                row_gap_row_y_dbg = 0.0
+                row_gap_left_dbg = 0.0
+                row_gap_right_dbg = 0.0
+                row_x_err_now_dbg = 0.0
+                row_x_err_prev_dbg = 0.0
                 pass_vis_mean = 0.0
                 pass_sector_mean = 0.0
                 low_vis_mean = 0.0
@@ -2393,17 +2430,22 @@ def main():
                     cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
                     pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
                     cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
-                    side_clear_margin_dbg = float(getattr(env.reward_cfg, "avoid_side_clear_margin", 0.15))
-                    side_probe_x_dbg = float(getattr(env.reward_cfg, "avoid_side_probe_x", 0.45))
-                    left_clear_t, right_clear_t = env._compute_side_candidate_clearance(
-                        debug_aff,
-                        lateral_probe_x=side_probe_x_dbg,
+                    robot_pos_dbg = env.env.root_states[:, :3]
+                    row_gap_center_t, row_gap_row_y_t, row_gap_valid_t, row_gap_left_t, row_gap_right_t = env._compute_nearest_row_gap_target(
+                        robot_pos_dbg
                     )
-                    left_clear_dbg = float(left_clear_t[env_idx].detach().cpu())
-                    right_clear_dbg = float(right_clear_t[env_idx].detach().cpu())
-                    side_risk_dbg = math.tanh(
-                        (right_clear_dbg - left_clear_dbg) / max(side_clear_margin_dbg, 1e-6)
-                    )
+                    row_gap_center_dbg = float(row_gap_center_t[env_idx].detach().cpu())
+                    row_gap_row_y_dbg = float(row_gap_row_y_t[env_idx].detach().cpu())
+                    row_gap_left_dbg = float(row_gap_left_t[env_idx].detach().cpu())
+                    row_gap_right_dbg = float(row_gap_right_t[env_idx].detach().cpu())
+                    robot_x_dbg = float(robot_pos_dbg[env_idx, 0].detach().cpu())
+                    row_x_err_now_dbg = abs(robot_x_dbg - row_gap_center_dbg)
+                    prev_robot_x_dbg = robot_x_dbg
+                    if prev_track_pos_world is not None:
+                        prev_robot_x_dbg = float(prev_track_pos_world[0])
+                    row_x_err_prev_dbg = abs(prev_robot_x_dbg - row_gap_center_dbg)
+                    if reward_terms is not None and "row_lat" in reward_terms:
+                        row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
                     if pass_dir_norm > 1e-6:
                         pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
                     if cross_dir_norm > 1e-6:
@@ -2432,12 +2474,9 @@ def main():
                         x_map = x_map.to(passable.device)
                     right_mask = ((x_map > 0.0) & visible).float()
                     left_mask = ((x_map < 0.0) & visible).float()
-                    right_pass_dbg = float((passable * right_mask).sum().detach().cpu())
-                    left_pass_dbg = float((passable * left_mask).sum().detach().cpu())
                     if cmd_show is not None:
                         cmd_x_dbg = float(cmd_show[0])
                         cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
-                        choice_sign_dbg = side_risk_dbg * cmd_x_dir_dbg
 
                     sector_deg = 0.0
                     if env.reward_cfg is not None:
@@ -2473,7 +2512,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side(pass/teach)={:.3f}/{:.3f} choice_sign={:.3f} clr_lr={:.3f}/{:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/c/l/r)=({:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} passable(g/a/o)={:.3f}/{:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2486,16 +2525,16 @@ def main():
                         reward_time,
                         reward_gate,
                         reward_risk,
+                        row_gap_row_y_dbg,
+                        row_gap_center_dbg,
+                        row_gap_left_dbg,
+                        row_gap_right_dbg,
+                        row_x_err_prev_dbg,
+                        row_x_err_now_dbg,
+                        row_lat_dbg,
                         passable_gate,
                         passable_align,
                         passable_occ_ratio,
-                        pass_side_dbg,
-                        side_risk_dbg,
-                        choice_sign_dbg,
-                        left_clear_dbg,
-                        right_clear_dbg,
-                        left_pass_dbg,
-                        right_pass_dbg,
                         crossable_gate,
                         crossable_align,
                         crossable_width,
@@ -2557,7 +2596,6 @@ def main():
                     front_half_t = env._compute_front_half_obstacle_distance(raw_aff_map)
                     block_ref_dbg = float(front_half_t[env_idx].detach().cpu())
                     block_dbg = max(0.0, 1.0 - block_ref_dbg / max(near_threshold_dbg, 1e-6))
-                    side_probe_x_dbg = float(getattr(env.reward_cfg, "avoid_side_probe_x", 0.45))
                     teacher_dump_dir = _prepare_teacher_dump_dir(args)
                     teacher_save_path = os.path.join(teacher_dump_dir, f"teacher_step{step_idx:06d}.png")
                     _save_s_avoid_teacher_snapshot(
@@ -2565,12 +2603,15 @@ def main():
                         env,
                         raw_aff_map[env_idx:env_idx + 1],
                         local_map_2ch_dbg[env_idx:env_idx + 1],
-                        left_clear=left_clear_dbg,
-                        right_clear=right_clear_dbg,
-                        side_risk=side_risk_dbg,
+                        row_y_world=row_gap_row_y_dbg,
+                        gap_left_world=row_gap_left_dbg,
+                        gap_right_world=row_gap_right_dbg,
+                        gap_center_world=row_gap_center_dbg,
+                        row_lat_reward=row_lat_dbg,
+                        x_err_now=row_x_err_now_dbg,
+                        x_err_prev=row_x_err_prev_dbg,
                         block=block_dbg,
                         cmd_exec=np.asarray(cmd_show, dtype=np.float32),
-                        probe_x=side_probe_x_dbg,
                         band_dbg=_extract_s_avoid_band_debug(env, env_idx),
                     )
                     print(f"[PlayHigh] teacher snapshot saved: {teacher_save_path}")

@@ -2143,6 +2143,136 @@ class HierarchicalHexapodEnv:
         right_clear = self._compute_clearance_along_cmd(aff_map, right_cmd)
         return left_clear, right_clear
 
+    def _compute_nearest_row_gap_target(
+        self,
+        robot_pos: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        gap_center = torch.zeros(self.num_envs, device=self.device)
+        row_y = torch.zeros(self.num_envs, device=self.device)
+        valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        gap_left = torch.zeros(self.num_envs, device=self.device)
+        gap_right = torch.zeros(self.num_envs, device=self.device)
+        if (
+            not hasattr(self.env, "s_avoid_active")
+            or self.env.s_avoid_active is None
+            or not hasattr(self.env, "s_avoid_pos_world")
+            or not hasattr(self.env, "s_avoid_band_x_min")
+            or not hasattr(self.env, "s_avoid_band_x_max")
+        ):
+            return gap_center, row_y, valid, gap_left, gap_right
+
+        cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
+        box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
+        wall_slots = int(getattr(self.env, "s_avoid_wall_slot_count", 0))
+        total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
+        if total_slots <= 0:
+            return gap_center, row_y, valid, gap_left, gap_right
+
+        cap_half = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
+        box_half = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
+        wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+        row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
+        row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
+        forward_margin = 0.05
+
+        def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
+            if slot_id < cap_slots:
+                return cap_half + row_margin, cap_half + row_margin
+            quat = self.env.s_avoid_quat_world[env_id, slot_id]
+            yaw = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
+            cos_yaw = abs(math.cos(yaw))
+            sin_yaw = abs(math.sin(yaw))
+            if slot_id < cap_slots + box_slots:
+                half_x = cos_yaw * box_half + sin_yaw * box_hy
+                half_y = sin_yaw * box_half + cos_yaw * box_hy
+                return half_x + row_margin, half_y + row_margin
+            if slot_id < cap_slots + box_slots + wall_slots:
+                half_x = cos_yaw * wall_hx + sin_yaw * wall_hy
+                half_y = sin_yaw * wall_hx + cos_yaw * wall_hy
+                return half_x + row_margin, half_y + row_margin
+            return row_margin, row_margin
+
+        for env_id in range(self.num_envs):
+            active_slots = self.env.s_avoid_active[env_id].nonzero(as_tuple=False).flatten()
+            if active_slots.numel() == 0:
+                continue
+            obs_xy = self.env.s_avoid_pos_world[env_id, active_slots, :2]
+            row_candidates = []
+            for idx, slot in enumerate(active_slots.tolist()):
+                cy = float(obs_xy[idx, 1].item())
+                _, half_y = slot_half_extents(env_id, int(slot))
+                if (cy + half_y - float(robot_pos[env_id, 1].item())) <= forward_margin:
+                    continue
+                row_candidates.append((slot, cy))
+            if len(row_candidates) == 0:
+                continue
+            nearest_row_y = min(item[1] for item in row_candidates)
+            row_slots = [
+                int(slot)
+                for slot, cy in row_candidates
+                if abs(cy - nearest_row_y) <= row_tol
+            ]
+            if len(row_slots) == 0:
+                continue
+
+            band_l = float(self.env.s_avoid_band_x_min[env_id].item())
+            band_r = float(self.env.s_avoid_band_x_max[env_id].item())
+            if band_r <= band_l:
+                continue
+
+            intervals = []
+            for slot in row_slots:
+                cx = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
+                half_x, _ = slot_half_extents(env_id, int(slot))
+                left = max(band_l, cx - half_x)
+                right = min(band_r, cx + half_x)
+                if right > left:
+                    intervals.append((left, right))
+
+            if intervals:
+                intervals.sort(key=lambda item: item[0])
+                merged = []
+                for left, right in intervals:
+                    if (not merged) or (left > merged[-1][1]):
+                        merged.append([left, right])
+                    else:
+                        merged[-1][1] = max(merged[-1][1], right)
+            else:
+                merged = []
+
+            cursor = band_l
+            best_width = -1.0
+            best_center = 0.5 * (band_l + band_r)
+            best_left = band_l
+            best_right = band_r
+            for left, right in merged:
+                if left > cursor:
+                    width = left - cursor
+                    if width > best_width:
+                        best_width = width
+                        best_center = 0.5 * (cursor + left)
+                        best_left = cursor
+                        best_right = left
+                cursor = max(cursor, right)
+            if band_r > cursor:
+                width = band_r - cursor
+                if width > best_width:
+                    best_width = width
+                    best_center = 0.5 * (cursor + band_r)
+                    best_left = cursor
+                    best_right = band_r
+
+            if best_width <= 1e-6:
+                continue
+            gap_center[env_id] = best_center
+            row_y[env_id] = nearest_row_y
+            gap_left[env_id] = best_left
+            gap_right[env_id] = best_right
+            valid[env_id] = True
+        return gap_center, row_y, valid, gap_left, gap_right
+
     @staticmethod
     def _risk_from_clearance(
         clearance: torch.Tensor,
@@ -2831,132 +2961,17 @@ class HierarchicalHexapodEnv:
                         neginf=0.0,
                     )
                     near_threshold = float(getattr(self.reward_cfg, "avoid_near_threshold", 0.8))
-                    avoid_clear_scale = float(getattr(self.reward_cfg, "avoid_clear_scale", 6.0))
-                    lat_pen_scale = float(getattr(self.reward_cfg, "avoid_lat_pen_scale", 0.5))
-                    lat_choice_scale = float(getattr(self.reward_cfg, "avoid_lat_choice_scale", 2.0))
-                    lat_mag_scale = float(getattr(self.reward_cfg, "avoid_lat_mag_scale", 4.0))
-                    lat_over_scale = float(getattr(self.reward_cfg, "avoid_lat_over_scale", 1.0))
-                    lat_cmd_scale = float(getattr(self.reward_cfg, "avoid_lat_cmd_scale", 0.3))
-                    lat_target_min = float(getattr(self.reward_cfg, "avoid_lat_target_min", 0.05))
-                    lat_target_max = float(getattr(self.reward_cfg, "avoid_lat_target_max", 0.12))
-                    if forward_clearance is not None:
-                        forward_clearance_ref = torch.nan_to_num(
-                            forward_clearance,
-                            nan=0.0,
-                            posinf=0.0,
-                            neginf=0.0,
-                        )
-                    else:
-                        forward_clearance_ref = curr_nearest_obs_dist
-                    if front_half_nearest_obs is not None:
-                        block_ref = torch.nan_to_num(
-                            front_half_nearest_obs,
-                            nan=near_threshold,
-                            posinf=near_threshold,
-                            neginf=0.0,
-                        )
-                    else:
-                        block_ref = torch.nan_to_num(
-                            curr_nearest_obs_dist,
-                            nan=near_threshold,
-                            posinf=near_threshold,
-                            neginf=0.0,
-                        )
-                    block = 1.0 - torch.clamp(block_ref / max(near_threshold, 1e-6), 0.0, 1.0)
-                    free = 1.0 - block
-                    forward_clearance_gain = forward_clearance_ref - self.prev_forward_clearance
-                    forward_clearance_valid = self.prev_forward_clearance_valid.float()
-                    inside_band_mask = torch.ones(
-                        self.num_envs,
-                        device=self.device,
-                        dtype=torch.bool,
+                    row_lat_scale = float(getattr(self.reward_cfg, "avoid_row_lat_scale", 6.0))
+                    gap_center, _, gap_valid, _, _ = self._compute_nearest_row_gap_target(robot_pos)
+                    row_err_abs = torch.abs(robot_pos[:, 0] - gap_center)
+                    prev_row_err_abs = torch.abs(self.prev_robot_pos[:, 0] - gap_center)
+                    row_lat_reward = (
+                        row_lat_scale
+                        * (prev_row_err_abs - row_err_abs)
+                        * gap_valid.float()
                     )
-                    if hasattr(self.env, "s_avoid_band_x_min") and hasattr(self.env, "s_avoid_band_x_max"):
-                        inside_band_mask = (
-                            (robot_pos[:, 0] >= self.env.s_avoid_band_x_min)
-                            & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
-                        )
-                    cmd_x = cmd_exec_mean[:, 0]
-                    side_clear_margin = float(getattr(self.reward_cfg, "avoid_side_clear_margin", 0.15))
-                    side_probe_x = float(getattr(self.reward_cfg, "avoid_side_probe_x", 0.45))
-                    if reward_aff_map is not None:
-                        left_clear_candidate, right_clear_candidate = self._compute_side_candidate_clearance(
-                            reward_aff_map,
-                            lateral_probe_x=side_probe_x,
-                        )
-                        left_clear_candidate = torch.nan_to_num(
-                            left_clear_candidate,
-                            nan=0.0,
-                            posinf=self.affordance_map_extent,
-                            neginf=0.0,
-                        )
-                        right_clear_candidate = torch.nan_to_num(
-                            right_clear_candidate,
-                            nan=0.0,
-                            posinf=self.affordance_map_extent,
-                            neginf=0.0,
-                        )
-                        side_risk = torch.tanh(
-                            (right_clear_candidate - left_clear_candidate) / max(side_clear_margin, 1e-6)
-                        )
-                    elif passable_side is not None:
-                        side_risk = -passable_side
-                    elif passable_dir is not None:
-                        side_risk = -passable_dir[:, 0]
-                    else:
-                        side_risk = torch.zeros_like(cmd_x)
-                    side_risk_mag = torch.clamp(torch.abs(side_risk), 0.0, 1.0)
-                    cmd_x_abs = torch.abs(cmd_x)
-                    cmd_x_dir = torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6))
-                    lat_penalty_reward = (
-                        -lat_pen_scale
-                        * free
-                        * cmd_x_abs
-                    )
-                    lat_dir_reward = (
-                        lat_choice_scale
-                        * block
-                        * torch.tanh(
-                            4.0
-                            * side_risk
-                            * cmd_x_dir,
-                        )
-                        * inside_band_mask.float()
-                    )
-                    lat_target = lat_target_min + (lat_target_max - lat_target_min) * side_risk_mag
-                    lat_dir_match = torch.clamp(
-                        torch.tanh(4.0 * side_risk * cmd_x_dir),
-                        min=0.0,
-                    )
-                    lat_mag_error = torch.abs(cmd_x_abs - lat_target) / lat_target.clamp_min(1e-6)
-                    lat_mag_reward = (
-                        lat_mag_scale
-                        * block
-                        * lat_dir_match
-                        * torch.clamp(1.0 - lat_mag_error, min=0.0)
-                        * inside_band_mask.float()
-                    )
-                    lat_over_penalty = (
-                        -lat_over_scale
-                        * block
-                        * torch.clamp(cmd_x_abs - lat_target_max, min=0.0)
-                        * inside_band_mask.float()
-                    )
-                    lat_choice_reward = lat_dir_reward + lat_mag_reward + lat_over_penalty
-                    lat_clear_reward = (
-                        avoid_clear_scale
-                        * block
-                        * torch.clamp(forward_clearance_gain, min=0.0)
-                        * inside_band_mask.float()
-                        * forward_clearance_valid
-                    )
-                    reward_dict['lat_penalty'] = lat_penalty_reward
-                    reward_dict['lat_dir'] = lat_dir_reward
-                    reward_dict['lat_mag'] = lat_mag_reward
-                    reward_dict['lat_over'] = lat_over_penalty
-                    reward_dict['lat_choice'] = lat_choice_reward
-                    reward_dict['lat_clear'] = lat_clear_reward
-                    reward_dict['total'] = reward_dict['total'] + lat_penalty_reward + lat_choice_reward + lat_clear_reward
+                    reward_dict['row_lat'] = row_lat_reward
+                    reward_dict['total'] = reward_dict['total'] + row_lat_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -3177,7 +3192,6 @@ class HierarchicalHexapodEnv:
                     neginf=0.0,
                 )
                 self.prev_forward_clearance_valid.fill_(True)
-        
         # done 的环境避免跨 episode 的 shaped reward 污染
         terminal_fail_mask = done_during | band_fail_mask
         if terminal_fail_mask.any():
@@ -4297,12 +4311,7 @@ def train(args):
             'velocity',
             'backward',
             'body_backward',
-            'lat_penalty',
-            'lat_dir',
-            'lat_mag',
-            'lat_over',
-            'lat_choice',
-            'lat_clear',
+            'row_lat',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -5966,12 +5975,7 @@ def train(args):
                 key
                 for key in (
                     'approach',
-                    'lat_penalty',
-                    'lat_dir',
-                    'lat_mag',
-                    'lat_over',
-                    'lat_choice',
-                    'lat_clear',
+                    'row_lat',
                     'avoid_band_penalty',
                     'collision',
                     'stability',
@@ -6084,13 +6088,10 @@ def train(args):
                           f"""{gate_line}"""
                           f"""{egpo_line}"""
                           f"""{avoid_line}"""
-                          f"""{'Passable gate/align:':>{pad}} {reward_term_means.get('passable_gate', 0.0):.3f} / {reward_term_means.get('passable_align', 0.0):.3f} (occ {passable_occ_ratio_mean:.3f})\n"""
-                          f"""{'Crossable gate/align:':>{pad}} {reward_term_means.get('crossable_gate', 0.0):.3f} / {reward_term_means.get('crossable_align', 0.0):.3f} (width {crossable_width_mean:.3f})\n"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/latC/latClr/latPen):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('lat_choice', 0.0):.3f} / {reward_term_means.get('lat_clear', 0.0):.3f} / {reward_term_means.get('lat_penalty', 0.0):.3f}\n"""
-                          f"""{'Reward(lat dir/mag/over):':>{pad}} {reward_term_means.get('lat_dir', 0.0):.3f} / {reward_term_means.get('lat_mag', 0.0):.3f} / {reward_term_means.get('lat_over', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/rowLat):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
