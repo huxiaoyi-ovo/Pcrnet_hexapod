@@ -129,6 +129,12 @@ def _prepare_avoid_map_dump_dir(args) -> str:
     return base
 
 
+def _prepare_teacher_dump_dir(args) -> str:
+    dump_dir = os.path.join(_prepare_avoid_map_dump_dir(args), "teacher_snapshots")
+    os.makedirs(dump_dir, exist_ok=True)
+    return dump_dir
+
+
 def _extract_s_avoid_debug_meta(env) -> dict:
     env_impl = getattr(env, "env", None)
     if env_impl is None or not hasattr(env_impl, "s_avoid_active"):
@@ -741,6 +747,116 @@ def _dump_s_avoid_debug_artifacts(args, env, raw_aff_map: torch.Tensor, local_ma
         )
 
 
+def _save_s_avoid_teacher_snapshot(
+    save_path: str,
+    env,
+    raw_aff_map: torch.Tensor,
+    local_map_2ch: torch.Tensor,
+    *,
+    left_clear: float,
+    right_clear: float,
+    side_risk: float,
+    block: float,
+    cmd_exec: np.ndarray,
+    probe_x: float,
+    band_dbg: Optional[dict] = None,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+    except Exception as exc:
+        print(f"[PlayHigh] ⚠ matplotlib unavailable; skip teacher snapshot export ({exc}).")
+        return
+
+    raw_np = raw_aff_map[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    local_np = local_map_2ch[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    debug_meta = _extract_s_avoid_debug_meta(env)
+    visible_np = None
+    if getattr(env, "affordance_visible_mask", None) is not None:
+        visible_np = env.affordance_visible_mask.detach().float().cpu().numpy().astype(np.float32, copy=False)
+
+    extent_m = float(env.affordance_map_extent)
+    extent = [-0.5 * extent_m, 0.5 * extent_m, 0.0, extent_m]
+    robot_xy = debug_meta.get("robot_center_xy_in_map", [0.0, 0.0])
+    robot_x = float(robot_xy[0]) if robot_xy is not None and len(robot_xy) == 2 else 0.0
+    robot_y = float(robot_xy[1]) if robot_xy is not None and len(robot_xy) == 2 else 0.0
+    heading_len = 0.55
+    cmd_len_scale = 2.5
+    cmd_dx = float(cmd_exec[0]) * cmd_len_scale
+    cmd_dy = float(cmd_exec[1]) * cmd_len_scale
+    left_end = np.array([robot_x - abs(probe_x), robot_y + 1.0], dtype=np.float32)
+    right_end = np.array([robot_x + abs(probe_x), robot_y + 1.0], dtype=np.float32)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.0), squeeze=False)
+    axes = axes[0]
+    panels = [
+        ("teacher_occ", raw_np[0].T, "gray"),
+        ("teacher_clear", local_np[1].T, "magma"),
+    ]
+    for ax, (title, image, cmap) in zip(axes, panels):
+        im = ax.imshow(image, origin="lower", extent=extent, cmap=cmap, vmin=0.0, vmax=1.0)
+        if visible_np is not None and title == "teacher_occ":
+            ax.imshow(
+                visible_np.T,
+                origin="lower",
+                extent=extent,
+                cmap="Greys",
+                vmin=0.0,
+                vmax=1.0,
+                alpha=0.15,
+            )
+        ax.set_title(title)
+        ax.set_xlabel("x_right (m)")
+        ax.set_ylabel("y_forward (m)")
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(-0.35, extent[3])
+        ax.scatter([robot_x], [robot_y], c="white", s=20, marker="o")
+        ax.add_patch(Circle((robot_x, robot_y), float(env.affordance_clearance), fill=False, color="cyan", linestyle="--", linewidth=1.1))
+        ax.plot([robot_x, robot_x], [robot_y, robot_y + heading_len], color="dodgerblue", linewidth=2.0)
+        ax.plot([robot_x, left_end[0]], [robot_y, left_end[1]], color="lime", linewidth=2.0, linestyle="--")
+        ax.plot([robot_x, right_end[0]], [robot_y, right_end[1]], color="yellow", linewidth=2.0, linestyle="--")
+        ax.arrow(
+            robot_x,
+            robot_y,
+            cmd_dx,
+            cmd_dy,
+            width=0.01,
+            head_width=0.05,
+            head_length=0.07,
+            length_includes_head=True,
+            color="red",
+            alpha=0.9,
+        )
+        if band_dbg:
+            x0 = float(band_dbg["band_x_min"])
+            x1 = float(band_dbg["band_x_max"])
+            y0 = float(band_dbg.get("band_y_min", 0.0))
+            y1 = float(band_dbg.get("band_y_max", extent_m))
+            ax.plot([x0, x0], [y0, y1], color="cyan", linewidth=1.0, alpha=0.8)
+            ax.plot([x1, x1], [y0, y1], color="cyan", linewidth=1.0, alpha=0.8)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    info = (
+        f"L/R clear={left_clear:.3f}/{right_clear:.3f}\n"
+        f"side_risk={side_risk:.3f} block={block:.3f}\n"
+        f"cmd_exec=({float(cmd_exec[0]):.3f},{float(cmd_exec[1]):.3f})\n"
+        f"probe_x={probe_x:.3f}"
+    )
+    axes[1].text(
+        1.03,
+        0.98,
+        info,
+        transform=axes[1].transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+    )
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _maybe_apply_e_s_corridor_overrides(args, env_cfg) -> None:
     if env_cfg is None or str(getattr(args, "task", "")) != "e_S_corridor":
         return
@@ -1208,6 +1324,12 @@ def parse_args():
         default="",
         choices=["", "front", "left", "right", "side_left", "side_right"],
         help="s_avoid_basic 静态验证：机器人固定不动，障碍按机身前方/左前/右前放置",
+    )
+    parser.add_argument(
+        "--dump_teacher_every_s",
+        type=float,
+        default=0.0,
+        help="s_avoid_basic: 每隔多少秒导出一次当前真实老师通道图（0=关闭）",
     )
     parser.add_argument(
         "--avoid_spawn_body_plus_y_deg",
@@ -1775,6 +1897,12 @@ def main():
     axis_disp_world_sum = np.zeros(2, dtype=np.float64)
     axis_disp_body_sum = np.zeros(2, dtype=np.float64)
     axis_disp_count = 0
+    teacher_dump_interval_s = max(float(getattr(args, "dump_teacher_every_s", 0.0)), 0.0)
+    high_level_dt = float(getattr(env, "high_level_dt", float(env.env.dt) * float(args.decimation)))
+    teacher_dump_interval_steps = 0
+    next_teacher_dump_step = 0
+    if teacher_dump_interval_s > 0.0:
+        teacher_dump_interval_steps = max(1, int(round(teacher_dump_interval_s / max(high_level_dt, 1e-6))))
 
     prev_dist = None
     aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
@@ -2418,6 +2546,35 @@ def main():
                         pass_out_sector,
                     )
                 )
+                if (
+                    args.task == "s_avoid_basic"
+                    and teacher_dump_interval_steps > 0
+                    and raw_aff_map is not None
+                    and step_idx >= next_teacher_dump_step
+                ):
+                    local_map_2ch_dbg = obs.get("local_map_2ch", th.build_avoid_local_map_2ch(raw_aff_map))
+                    near_threshold_dbg = float(getattr(env.reward_cfg, "avoid_near_threshold", 0.8))
+                    front_half_t = env._compute_front_half_obstacle_distance(raw_aff_map)
+                    block_ref_dbg = float(front_half_t[env_idx].detach().cpu())
+                    block_dbg = max(0.0, 1.0 - block_ref_dbg / max(near_threshold_dbg, 1e-6))
+                    side_probe_x_dbg = float(getattr(env.reward_cfg, "avoid_side_probe_x", 0.45))
+                    teacher_dump_dir = _prepare_teacher_dump_dir(args)
+                    teacher_save_path = os.path.join(teacher_dump_dir, f"teacher_step{step_idx:06d}.png")
+                    _save_s_avoid_teacher_snapshot(
+                        teacher_save_path,
+                        env,
+                        raw_aff_map[env_idx:env_idx + 1],
+                        local_map_2ch_dbg[env_idx:env_idx + 1],
+                        left_clear=left_clear_dbg,
+                        right_clear=right_clear_dbg,
+                        side_risk=side_risk_dbg,
+                        block=block_dbg,
+                        cmd_exec=np.asarray(cmd_show, dtype=np.float32),
+                        probe_x=side_probe_x_dbg,
+                        band_dbg=_extract_s_avoid_band_debug(env, env_idx),
+                    )
+                    print(f"[PlayHigh] teacher snapshot saved: {teacher_save_path}")
+                    next_teacher_dump_step += teacher_dump_interval_steps
                 print(
                     "[PlayHigh][goal] raw={} rot={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
                     "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} offset={:.3f}".format(

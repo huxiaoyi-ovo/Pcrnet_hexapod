@@ -1745,3 +1745,8 @@
 - [x] Must: 不再用“前半平面左右最近障碍距离差”做主方向老师，改成比较左右候选通道的前向 clearance
 - [x] Must: 保持 `block/free`、`lat_penalty`、`lat_clear` 主线不变，只替换“该往哪边避”的判断依据
 - [x] Must: 同步更新 `play` 调试输出，让 `side_risk` 与当前真实训练老师一致，避免继续用旧 `risk_lr` 误判
+
+## 2026-03-27 play 导出真实老师通道图
+
+- [x] Must: 在 `play_highlevel.py` 中按时间间隔导出老师真实使用的通道图，避免只靠终端数字猜老师是否看到了通道
+- [x] Must: 图上只使用当前训练真实老师的量：左右候选通道 clearance、`side_risk`、`block`、实际 `cmd_exec`，不再用旧 `passable_side` 充数
