@@ -2029,6 +2029,43 @@ class HierarchicalHexapodEnv:
             min_dist = torch.where(active, min_dist, global_clear)
         return min_dist
 
+    def _compute_front_half_obstacle_distance(
+        self,
+        aff_map: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Min distance to occupied cells in the front half-plane (y_forward > 0).
+        This is used for avoid-mode gating so side-front obstacles can trigger
+        avoidance without being polluted by obstacles behind the robot.
+        """
+        if aff_map.ndim != 4 or aff_map.size(1) < 1:
+            return torch.full((aff_map.shape[0],), self.affordance_map_extent, device=aff_map.device)
+
+        occ = aff_map[:, 0] > 0.5
+        dist_map = self.affordance_dist_map
+        y_map = self.affordance_y_map
+        visible = self.affordance_visible_mask
+        if dist_map.device != aff_map.device:
+            dist_map = dist_map.to(aff_map.device)
+        if y_map.device != aff_map.device:
+            y_map = y_map.to(aff_map.device)
+        if visible is None:
+            visible = torch.ones_like(dist_map, dtype=torch.bool)
+        elif visible.device != aff_map.device:
+            visible = visible.to(aff_map.device)
+
+        front_half = (y_map > 0.0) & visible
+        dist = torch.where(
+            front_half.view(1, *front_half.shape) & occ,
+            dist_map.view(1, *dist_map.shape),
+            torch.full_like(dist_map, self.affordance_map_extent).view(1, *dist_map.shape),
+        )
+        min_dist = dist.amin(dim=(1, 2))
+        no_obs = ~(front_half.view(1, *front_half.shape) & occ).flatten(1).any(dim=1)
+        if no_obs.any():
+            min_dist = torch.where(no_obs, torch.full_like(min_dist, self.affordance_map_extent), min_dist)
+        return min_dist
+
     @staticmethod
     def _risk_from_clearance(
         clearance: torch.Tensor,
@@ -2497,6 +2534,7 @@ class HierarchicalHexapodEnv:
         avoid_band_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         band_fail_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         nearest_obs = None
+        front_half_nearest_obs = None
         avoid_band_outside_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         clearance = None
         clearance_global = None
@@ -2558,6 +2596,7 @@ class HierarchicalHexapodEnv:
                 forward_cmd_xy = torch.zeros(self.num_envs, 2, device=self.device, dtype=cmd_exec_mean.dtype)
                 forward_cmd_xy[:, 1] = 1.0
                 forward_clearance = self._compute_clearance_along_cmd(reward_aff_map, forward_cmd_xy)
+                front_half_nearest_obs = self._compute_front_half_obstacle_distance(reward_aff_map)
         self.clearance_affordance_override = None
         passable_dir = None
         passable_gate = None
@@ -2709,17 +2748,31 @@ class HierarchicalHexapodEnv:
                     lat_choice_scale = float(getattr(self.reward_cfg, "avoid_lat_choice_scale", 2.0))
                     lat_cmd_scale = float(getattr(self.reward_cfg, "avoid_lat_cmd_scale", 0.3))
                     if forward_clearance is not None:
-                        near_clearance_ref = torch.nan_to_num(
+                        forward_clearance_ref = torch.nan_to_num(
                             forward_clearance,
                             nan=0.0,
                             posinf=0.0,
                             neginf=0.0,
                         )
                     else:
-                        near_clearance_ref = curr_nearest_obs_dist
-                    block = 1.0 - torch.clamp(near_clearance_ref / max(near_threshold, 1e-6), 0.0, 1.0)
+                        forward_clearance_ref = curr_nearest_obs_dist
+                    if front_half_nearest_obs is not None:
+                        block_ref = torch.nan_to_num(
+                            front_half_nearest_obs,
+                            nan=near_threshold,
+                            posinf=near_threshold,
+                            neginf=0.0,
+                        )
+                    else:
+                        block_ref = torch.nan_to_num(
+                            curr_nearest_obs_dist,
+                            nan=near_threshold,
+                            posinf=near_threshold,
+                            neginf=0.0,
+                        )
+                    block = 1.0 - torch.clamp(block_ref / max(near_threshold, 1e-6), 0.0, 1.0)
                     free = 1.0 - block
-                    forward_clearance_gain = near_clearance_ref - self.prev_forward_clearance
+                    forward_clearance_gain = forward_clearance_ref - self.prev_forward_clearance
                     forward_clearance_valid = self.prev_forward_clearance_valid.float()
                     inside_band_mask = torch.ones(
                         self.num_envs,
