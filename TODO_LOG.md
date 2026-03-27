@@ -86,6 +86,7 @@
 - [x] ~~Must: 将 `lat_choice` 改成有符号方向奖励：对边为正、错边为负，避免长期死零~~
 - [x] ~~Must: 将 `block/free` 的基础量从固定前向 `forward_clearance` 改为 `nearest_obs_dist`，让侧前方障碍也能及时进入避障模式~~
 - [x] ~~Must: 将 `block/free` 进一步收口为“前半平面最近障碍”，避免身后障碍继续误触发避障模式~~
+- [x] ~~Must: 将 `lat_choice` 的方向信号改成更直接的左右通行差，并去掉过强的 `passable_gate` 次级门控，强化“该往哪边避”的老师信号~~
 
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 

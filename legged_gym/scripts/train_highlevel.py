@@ -2086,10 +2086,10 @@ class HierarchicalHexapodEnv:
         aff_map: torch.Tensor,
         goal_local: torch.Tensor,
         block_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if aff_map.ndim != 4 or aff_map.size(1) < 2:
             zeros = torch.zeros(aff_map.shape[0], device=aff_map.device)
-            return torch.zeros(aff_map.shape[0], 2, device=aff_map.device), zeros, zeros
+            return torch.zeros(aff_map.shape[0], 2, device=aff_map.device), zeros, zeros, zeros
 
         occ = aff_map[:, 0]
         passable = aff_map[:, 1]
@@ -2112,6 +2112,11 @@ class HierarchicalHexapodEnv:
         passable_vis = passable * visible_f
         if block_mask is not None:
             passable_vis = passable_vis * (1.0 - block_mask)
+        right_mask = ((x_map > 0.0) & visible).float()
+        left_mask = ((x_map < 0.0) & visible).float()
+        right_pass = (passable_vis * right_mask).sum(dim=(1, 2))
+        left_pass = (passable_vis * left_mask).sum(dim=(1, 2))
+        passable_side = (right_pass - left_pass) / (right_pass + left_pass + 1e-6)
         dir_x = (passable_vis * x_map).sum(dim=(1, 2))
         dir_y = (passable_vis * y_map).sum(dim=(1, 2))
         pass_dir = torch.stack([dir_x, dir_y], dim=1)
@@ -2147,7 +2152,7 @@ class HierarchicalHexapodEnv:
         else:
             gate = torch.zeros_like(occ_ratio)
 
-        return pass_dir, gate, occ_ratio
+        return pass_dir, gate, occ_ratio, passable_side
 
     def _compute_low_obstacle_guidance(
         self,
@@ -2601,6 +2606,7 @@ class HierarchicalHexapodEnv:
         passable_dir = None
         passable_gate = None
         passable_occ_ratio = None
+        passable_side = None
         crossable_dir = None
         crossable_gate = None
         crossable_width = None
@@ -2617,7 +2623,7 @@ class HierarchicalHexapodEnv:
             crossable_dir, crossable_gate, crossable_width, low_block_mask = self._compute_low_obstacle_guidance(
                 reward_aff_map
             )
-            passable_dir, passable_gate, passable_occ_ratio = self._compute_passable_guidance(
+            passable_dir, passable_gate, passable_occ_ratio, passable_side = self._compute_passable_guidance(
                 reward_aff_map,
                 reward_obs['goal'],
                 block_mask=low_block_mask,
@@ -2785,7 +2791,9 @@ class HierarchicalHexapodEnv:
                             & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
                         )
                     cmd_x = cmd_exec_mean[:, 0]
-                    if passable_dir is not None:
+                    if passable_side is not None:
+                        passable_x = passable_side
+                    elif passable_dir is not None:
                         passable_x = passable_dir[:, 0]
                     else:
                         passable_x = torch.zeros_like(cmd_x)
@@ -2796,10 +2804,9 @@ class HierarchicalHexapodEnv:
                     )
                     lat_choice_reward = (
                         lat_choice_scale
-                        * torch.clamp(passable_gate, min=0.0, max=1.0)
                         * block
                         * torch.tanh(
-                            3.0
+                            4.0
                             * passable_x
                             * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
                         )
