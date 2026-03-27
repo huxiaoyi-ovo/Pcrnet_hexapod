@@ -2221,6 +2221,9 @@ def main():
                 pass_dir_norm = 0.0
                 cross_dir_norm = 0.0
                 pass_side_dbg = 0.0
+                left_risk_dbg = 0.0
+                right_risk_dbg = 0.0
+                side_risk_dbg = 0.0
                 cmd_x_dbg = 0.0
                 cmd_x_dir_dbg = 0.0
                 choice_sign_dbg = 0.0
@@ -2262,6 +2265,13 @@ def main():
                     cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
                     pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
                     cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
+                    near_threshold_dbg = float(getattr(env.reward_cfg, "avoid_near_threshold", 0.8))
+                    left_min_dbg, right_min_dbg = env._compute_front_side_obstacle_distance(debug_aff)
+                    left_ref_dbg = float(left_min_dbg[env_idx].detach().cpu())
+                    right_ref_dbg = float(right_min_dbg[env_idx].detach().cpu())
+                    left_risk_dbg = max(0.0, 1.0 - left_ref_dbg / max(near_threshold_dbg, 1e-6))
+                    right_risk_dbg = max(0.0, 1.0 - right_ref_dbg / max(near_threshold_dbg, 1e-6))
+                    side_risk_dbg = left_risk_dbg - right_risk_dbg
                     if pass_dir_norm > 1e-6:
                         pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
                     if cross_dir_norm > 1e-6:
@@ -2295,7 +2305,7 @@ def main():
                     if cmd_show is not None:
                         cmd_x_dbg = float(cmd_show[0])
                         cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
-                        choice_sign_dbg = pass_side_dbg * cmd_x_dir_dbg
+                        choice_sign_dbg = side_risk_dbg * cmd_x_dir_dbg
 
                     sector_deg = 0.0
                     if env.reward_cfg is not None:
@@ -2331,7 +2341,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side={:.3f} choice_sign={:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side(pass/risk)={:.3f}/{:.3f} choice_sign={:.3f} risk_lr={:.3f}/{:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2348,7 +2358,10 @@ def main():
                         passable_align,
                         passable_occ_ratio,
                         pass_side_dbg,
+                        side_risk_dbg,
                         choice_sign_dbg,
+                        left_risk_dbg,
+                        right_risk_dbg,
                         left_pass_dbg,
                         right_pass_dbg,
                         crossable_gate,

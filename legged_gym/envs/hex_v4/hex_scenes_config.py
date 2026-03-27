@@ -538,8 +538,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_clear_scale"] = 1.0
         reward_cfg["align_center_scale"] = 0.0
         reward_cfg["avoid_lat_pen_scale"] = 0.5
-        reward_cfg["avoid_lat_choice_scale"] = 6.0
+        reward_cfg["avoid_lat_choice_scale"] = 2.0
+        reward_cfg["avoid_lat_mag_scale"] = 4.0
+        reward_cfg["avoid_lat_over_scale"] = 1.0
         reward_cfg["avoid_lat_cmd_scale"] = 0.3
+        reward_cfg["avoid_lat_target_min"] = 0.05
+        reward_cfg["avoid_lat_target_max"] = 0.12
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

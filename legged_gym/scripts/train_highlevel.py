@@ -2809,7 +2809,11 @@ class HierarchicalHexapodEnv:
                     avoid_clear_scale = float(getattr(self.reward_cfg, "avoid_clear_scale", 6.0))
                     lat_pen_scale = float(getattr(self.reward_cfg, "avoid_lat_pen_scale", 0.5))
                     lat_choice_scale = float(getattr(self.reward_cfg, "avoid_lat_choice_scale", 2.0))
+                    lat_mag_scale = float(getattr(self.reward_cfg, "avoid_lat_mag_scale", 4.0))
+                    lat_over_scale = float(getattr(self.reward_cfg, "avoid_lat_over_scale", 1.0))
                     lat_cmd_scale = float(getattr(self.reward_cfg, "avoid_lat_cmd_scale", 0.3))
+                    lat_target_min = float(getattr(self.reward_cfg, "avoid_lat_target_min", 0.05))
+                    lat_target_max = float(getattr(self.reward_cfg, "avoid_lat_target_max", 0.12))
                     if forward_clearance is not None:
                         forward_clearance_ref = torch.nan_to_num(
                             forward_clearance,
@@ -2870,21 +2874,44 @@ class HierarchicalHexapodEnv:
                         side_risk = -passable_dir[:, 0]
                     else:
                         side_risk = torch.zeros_like(cmd_x)
+                    side_risk_mag = torch.clamp(torch.abs(side_risk), 0.0, 1.0)
+                    cmd_x_abs = torch.abs(cmd_x)
+                    cmd_x_dir = torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6))
                     lat_penalty_reward = (
                         -lat_pen_scale
                         * free
-                        * torch.abs(cmd_x)
+                        * cmd_x_abs
                     )
-                    lat_choice_reward = (
+                    lat_dir_reward = (
                         lat_choice_scale
                         * block
                         * torch.tanh(
                             4.0
                             * side_risk
-                            * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
+                            * cmd_x_dir,
                         )
                         * inside_band_mask.float()
                     )
+                    lat_target = lat_target_min + (lat_target_max - lat_target_min) * side_risk_mag
+                    lat_dir_match = torch.clamp(
+                        torch.tanh(4.0 * side_risk * cmd_x_dir),
+                        min=0.0,
+                    )
+                    lat_mag_error = torch.abs(cmd_x_abs - lat_target) / lat_target.clamp_min(1e-6)
+                    lat_mag_reward = (
+                        lat_mag_scale
+                        * block
+                        * lat_dir_match
+                        * torch.clamp(1.0 - lat_mag_error, min=0.0)
+                        * inside_band_mask.float()
+                    )
+                    lat_over_penalty = (
+                        -lat_over_scale
+                        * block
+                        * torch.clamp(cmd_x_abs - lat_target_max, min=0.0)
+                        * inside_band_mask.float()
+                    )
+                    lat_choice_reward = lat_dir_reward + lat_mag_reward + lat_over_penalty
                     lat_clear_reward = (
                         avoid_clear_scale
                         * block
@@ -2893,6 +2920,9 @@ class HierarchicalHexapodEnv:
                         * forward_clearance_valid
                     )
                     reward_dict['lat_penalty'] = lat_penalty_reward
+                    reward_dict['lat_dir'] = lat_dir_reward
+                    reward_dict['lat_mag'] = lat_mag_reward
+                    reward_dict['lat_over'] = lat_over_penalty
                     reward_dict['lat_choice'] = lat_choice_reward
                     reward_dict['lat_clear'] = lat_clear_reward
                     reward_dict['total'] = reward_dict['total'] + lat_penalty_reward + lat_choice_reward + lat_clear_reward
@@ -4237,6 +4267,9 @@ def train(args):
             'backward',
             'body_backward',
             'lat_penalty',
+            'lat_dir',
+            'lat_mag',
+            'lat_over',
             'lat_choice',
             'lat_clear',
             'turn_penalty',
@@ -5903,6 +5936,9 @@ def train(args):
                 for key in (
                     'approach',
                     'lat_penalty',
+                    'lat_dir',
+                    'lat_mag',
+                    'lat_over',
                     'lat_choice',
                     'lat_clear',
                     'avoid_band_penalty',
@@ -6023,6 +6059,7 @@ def train(args):
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(main appr/latC/latClr/latPen):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('lat_choice', 0.0):.3f} / {reward_term_means.get('lat_clear', 0.0):.3f} / {reward_term_means.get('lat_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(lat dir/mag/over):':>{pad}} {reward_term_means.get('lat_dir', 0.0):.3f} / {reward_term_means.get('lat_mag', 0.0):.3f} / {reward_term_means.get('lat_over', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
