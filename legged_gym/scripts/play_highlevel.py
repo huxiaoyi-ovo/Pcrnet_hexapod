@@ -2221,8 +2221,8 @@ def main():
                 pass_dir_norm = 0.0
                 cross_dir_norm = 0.0
                 pass_side_dbg = 0.0
-                left_risk_dbg = 0.0
-                right_risk_dbg = 0.0
+                left_clear_dbg = 0.0
+                right_clear_dbg = 0.0
                 side_risk_dbg = 0.0
                 cmd_x_dbg = 0.0
                 cmd_x_dir_dbg = 0.0
@@ -2265,13 +2265,17 @@ def main():
                     cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
                     pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
                     cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
-                    near_threshold_dbg = float(getattr(env.reward_cfg, "avoid_near_threshold", 0.8))
-                    left_min_dbg, right_min_dbg = env._compute_front_side_obstacle_distance(debug_aff)
-                    left_ref_dbg = float(left_min_dbg[env_idx].detach().cpu())
-                    right_ref_dbg = float(right_min_dbg[env_idx].detach().cpu())
-                    left_risk_dbg = max(0.0, 1.0 - left_ref_dbg / max(near_threshold_dbg, 1e-6))
-                    right_risk_dbg = max(0.0, 1.0 - right_ref_dbg / max(near_threshold_dbg, 1e-6))
-                    side_risk_dbg = left_risk_dbg - right_risk_dbg
+                    side_clear_margin_dbg = float(getattr(env.reward_cfg, "avoid_side_clear_margin", 0.15))
+                    side_probe_x_dbg = float(getattr(env.reward_cfg, "avoid_side_probe_x", 0.45))
+                    left_clear_t, right_clear_t = env._compute_side_candidate_clearance(
+                        debug_aff,
+                        lateral_probe_x=side_probe_x_dbg,
+                    )
+                    left_clear_dbg = float(left_clear_t[env_idx].detach().cpu())
+                    right_clear_dbg = float(right_clear_t[env_idx].detach().cpu())
+                    side_risk_dbg = math.tanh(
+                        (right_clear_dbg - left_clear_dbg) / max(side_clear_margin_dbg, 1e-6)
+                    )
                     if pass_dir_norm > 1e-6:
                         pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
                     if cross_dir_norm > 1e-6:
@@ -2341,7 +2345,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side(pass/risk)={:.3f}/{:.3f} choice_sign={:.3f} risk_lr={:.3f}/{:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) passable(g/a/o)={:.3f}/{:.3f}/{:.3f} side(pass/teach)={:.3f}/{:.3f} choice_sign={:.3f} clr_lr={:.3f}/{:.3f} lr_pass={:.3f}/{:.3f} crossable(g/a/w)={:.3f}/{:.3f}/{:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2360,8 +2364,8 @@ def main():
                         pass_side_dbg,
                         side_risk_dbg,
                         choice_sign_dbg,
-                        left_risk_dbg,
-                        right_risk_dbg,
+                        left_clear_dbg,
+                        right_clear_dbg,
                         left_pass_dbg,
                         right_pass_dbg,
                         crossable_gate,

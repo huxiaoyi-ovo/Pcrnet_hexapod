@@ -2118,6 +2118,31 @@ class HierarchicalHexapodEnv:
             right_min = torch.where(no_right, torch.full_like(right_min, self.affordance_map_extent), right_min)
         return left_min, right_min
 
+    def _compute_side_candidate_clearance(
+        self,
+        aff_map: torch.Tensor,
+        lateral_probe_x: float = 0.45,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compare two candidate passing channels:
+        - left candidate: slight left-shifted forward motion
+        - right candidate: slight right-shifted forward motion
+
+        This is a better side teacher for zig-zag avoid scenes than left/right
+        nearest-obstacle distance, because centered obstacles can still produce
+        asymmetric candidate-channel clearance.
+        """
+        probe_x = abs(float(lateral_probe_x))
+        left_cmd = torch.zeros((aff_map.shape[0], 2), device=aff_map.device, dtype=aff_map.dtype)
+        right_cmd = torch.zeros((aff_map.shape[0], 2), device=aff_map.device, dtype=aff_map.dtype)
+        left_cmd[:, 0] = -probe_x
+        left_cmd[:, 1] = 1.0
+        right_cmd[:, 0] = probe_x
+        right_cmd[:, 1] = 1.0
+        left_clear = self._compute_clearance_along_cmd(aff_map, left_cmd)
+        right_clear = self._compute_clearance_along_cmd(aff_map, right_cmd)
+        return left_clear, right_clear
+
     @staticmethod
     def _risk_from_clearance(
         clearance: torch.Tensor,
@@ -2852,22 +2877,28 @@ class HierarchicalHexapodEnv:
                             & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
                         )
                     cmd_x = cmd_exec_mean[:, 0]
-                    if front_left_nearest_obs is not None and front_right_nearest_obs is not None:
-                        left_ref = torch.nan_to_num(
-                            front_left_nearest_obs,
-                            nan=near_threshold,
-                            posinf=near_threshold,
+                    side_clear_margin = float(getattr(self.reward_cfg, "avoid_side_clear_margin", 0.15))
+                    side_probe_x = float(getattr(self.reward_cfg, "avoid_side_probe_x", 0.45))
+                    if reward_aff_map is not None:
+                        left_clear_candidate, right_clear_candidate = self._compute_side_candidate_clearance(
+                            reward_aff_map,
+                            lateral_probe_x=side_probe_x,
+                        )
+                        left_clear_candidate = torch.nan_to_num(
+                            left_clear_candidate,
+                            nan=0.0,
+                            posinf=self.affordance_map_extent,
                             neginf=0.0,
                         )
-                        right_ref = torch.nan_to_num(
-                            front_right_nearest_obs,
-                            nan=near_threshold,
-                            posinf=near_threshold,
+                        right_clear_candidate = torch.nan_to_num(
+                            right_clear_candidate,
+                            nan=0.0,
+                            posinf=self.affordance_map_extent,
                             neginf=0.0,
                         )
-                        left_risk = 1.0 - torch.clamp(left_ref / max(near_threshold, 1e-6), 0.0, 1.0)
-                        right_risk = 1.0 - torch.clamp(right_ref / max(near_threshold, 1e-6), 0.0, 1.0)
-                        side_risk = left_risk - right_risk
+                        side_risk = torch.tanh(
+                            (right_clear_candidate - left_clear_candidate) / max(side_clear_margin, 1e-6)
+                        )
                     elif passable_side is not None:
                         side_risk = -passable_side
                     elif passable_dir is not None:

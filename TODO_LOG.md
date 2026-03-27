@@ -1739,3 +1739,9 @@
 - [x] Must: 将 `s_avoid` 的 `band` 外逃从连续软惩罚升级为高层 episode 硬终止，堵住“出带绕障”退化解
 - [x] Must: 为 `band` 硬终止保留小余量，避免边界附近的正常摆动被误杀
 - [ ] Must: 先保持其余奖励系数不动，只做单因素短训验证 `band_out / episode_len / progress / success`
+
+## 2026-03-27 avoid 方向老师改成左右候选通道 clearance 差
+
+- [x] Must: 不再用“前半平面左右最近障碍距离差”做主方向老师，改成比较左右候选通道的前向 clearance
+- [x] Must: 保持 `block/free`、`lat_penalty`、`lat_clear` 主线不变，只替换“该往哪边避”的判断依据
+- [x] Must: 同步更新 `play` 调试输出，让 `side_risk` 与当前真实训练老师一致，避免继续用旧 `risk_lr` 误判
