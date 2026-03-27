@@ -518,6 +518,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["goal_reach_threshold"] = 0.0
         reward_cfg["heading_scale"] = 0.0
         reward_cfg["passable_align_scale"] = 0.0
+        reward_cfg["passable_occ_ratio_low"] = 0.05
+        reward_cfg["passable_occ_ratio_high"] = 0.4
         reward_cfg["passable_sector_deg"] = 60.0
         reward_cfg["crossable_align_scale"] = 0.0
         reward_cfg["risk_barrier_scale"] = 0.0
@@ -533,8 +535,11 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["turn_penalty_scale"] = 0.0
         reward_cfg["yaw_rate_penalty"] = 0.0
         reward_cfg["avoid_near_threshold"] = 0.8
-        reward_cfg["avoid_clear_scale"] = 6.0
-        reward_cfg["align_center_scale"] = 4.0
+        reward_cfg["avoid_clear_scale"] = 1.0
+        reward_cfg["align_center_scale"] = 0.0
+        reward_cfg["avoid_lat_pen_scale"] = 0.5
+        reward_cfg["avoid_lat_choice_scale"] = 2.0
+        reward_cfg["avoid_lat_cmd_scale"] = 0.3
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

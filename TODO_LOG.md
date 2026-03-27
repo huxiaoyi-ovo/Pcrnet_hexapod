@@ -78,6 +78,12 @@
 - [x] ~~Must: 将 `eval` 里的 `progress` 从“任意非零即算到达”收口为与训练一致的逐行比例均值，并单独保留 `progress_any_rate`~~
 - [x] ~~Must: 将 `s_avoid` 下已关闭的 `target_visible` 从 TensorBoard 奖励项输出里去掉，避免继续把零项当成有效奖励~~
 
+## 2026-03-27 avoid 横移主奖励按第一性原理重写
+
+- [x] ~~Must: 保留 `approach / collision / band / terminal / time` 主线不动，只替换当前 `clearance_improve + align_center` 的横移塑形逻辑~~
+- [x] ~~Must: 将横移奖励改成“前方通畅时惩罚横移、前方受阻时奖励正确选边、前方受阻时奖励前向通路改善”~~
+- [x] ~~Must: 下调 `passable_gate` 阈值，让当前固定模板里选边信号真正能进场~~
+
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 
 - [x] ~~[P0] 将 `s_avoid` 的 `heading` 与 `target_center` 从有效奖励里去掉，只保留 `target_visible` 作为最小视野约束，减少朝前/居中信号对横移避障的干扰~~

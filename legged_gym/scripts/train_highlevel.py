@@ -2705,7 +2705,9 @@ class HierarchicalHexapodEnv:
                     )
                     near_threshold = float(getattr(self.reward_cfg, "avoid_near_threshold", 0.8))
                     avoid_clear_scale = float(getattr(self.reward_cfg, "avoid_clear_scale", 6.0))
-                    align_center_scale = float(getattr(self.reward_cfg, "align_center_scale", 2.0))
+                    lat_pen_scale = float(getattr(self.reward_cfg, "avoid_lat_pen_scale", 0.5))
+                    lat_choice_scale = float(getattr(self.reward_cfg, "avoid_lat_choice_scale", 2.0))
+                    lat_cmd_scale = float(getattr(self.reward_cfg, "avoid_lat_cmd_scale", 0.3))
                     if forward_clearance is not None:
                         near_clearance_ref = torch.nan_to_num(
                             forward_clearance,
@@ -2715,10 +2717,10 @@ class HierarchicalHexapodEnv:
                         )
                     else:
                         near_clearance_ref = curr_nearest_obs_dist
-                    clearance_improvement = near_clearance_ref - self.prev_forward_clearance
-                    clearance_improve_valid = self.prev_forward_clearance_valid.float()
-                    near_obstacle_mask = near_clearance_ref < near_threshold
-                    far_obstacle_mask = ~near_obstacle_mask
+                    block = 1.0 - torch.clamp(near_clearance_ref / max(near_threshold, 1e-6), 0.0, 1.0)
+                    free = 1.0 - block
+                    forward_clearance_gain = near_clearance_ref - self.prev_forward_clearance
+                    forward_clearance_valid = self.prev_forward_clearance_valid.float()
                     inside_band_mask = torch.ones(
                         self.num_envs,
                         device=self.device,
@@ -2729,50 +2731,36 @@ class HierarchicalHexapodEnv:
                             (robot_pos[:, 0] >= self.env.s_avoid_band_x_min)
                             & (robot_pos[:, 0] <= self.env.s_avoid_band_x_max)
                         )
-                    clearance_direction_scale = torch.ones(
-                        self.num_envs,
-                        device=self.device,
-                        dtype=torch.float32,
-                    )
-                    if passable_dir is not None and passable_gate is not None:
-                        cmd_xy = cmd_exec_mean[:, :2]
-                        cmd_xy_norm = torch.norm(cmd_xy, dim=-1).clamp_min(1e-6)
-                        cmd_x_dir = cmd_xy[:, 0] / cmd_xy_norm
+                    cmd_x = cmd_exec_mean[:, 0]
+                    if passable_dir is not None:
                         passable_x = passable_dir[:, 0]
-                        direction_align = torch.clamp(
-                            cmd_x_dir * passable_x,
+                    else:
+                        passable_x = torch.zeros_like(cmd_x)
+                    lat_penalty_reward = (
+                        -lat_pen_scale
+                        * free
+                        * torch.abs(cmd_x)
+                    )
+                    lat_choice_reward = (
+                        lat_choice_scale
+                        * block
+                        * torch.clamp(
+                            passable_x * torch.tanh(cmd_x / max(lat_cmd_scale, 1e-6)),
                             min=0.0,
-                            max=1.0,
                         )
-                        gate = torch.clamp(passable_gate, min=0.0, max=1.0)
-                        clearance_direction_scale = (
-                            (1.0 - gate) + gate * direction_align
-                        )
-                    clearance_improve_reward = (
-                        torch.clamp(clearance_improvement, min=0.0)
-                        * clearance_direction_scale
-                        * avoid_clear_scale
-                        * near_obstacle_mask.float()
                         * inside_band_mask.float()
-                        * clearance_improve_valid
                     )
-                    band_center_x = 0.5 * (
-                        self.env.s_avoid_band_x_min + self.env.s_avoid_band_x_max
+                    lat_clear_reward = (
+                        avoid_clear_scale
+                        * block
+                        * torch.clamp(forward_clearance_gain, min=0.0)
+                        * inside_band_mask.float()
+                        * forward_clearance_valid
                     )
-                    curr_align_center_abs = torch.abs(robot_pos[:, 0] - band_center_x)
-                    align_center_improvement = torch.clamp(
-                        self.prev_align_center_abs - curr_align_center_abs,
-                        min=0.0,
-                    )
-                    align_center_reward = (
-                        align_center_improvement
-                        * align_center_scale
-                        * far_obstacle_mask.float()
-                        * self.prev_align_center_valid.float()
-                    )
-                    reward_dict['clearance_improve'] = clearance_improve_reward
-                    reward_dict['align_center'] = align_center_reward
-                    reward_dict['total'] = reward_dict['total'] + clearance_improve_reward + align_center_reward
+                    reward_dict['lat_penalty'] = lat_penalty_reward
+                    reward_dict['lat_choice'] = lat_choice_reward
+                    reward_dict['lat_clear'] = lat_clear_reward
+                    reward_dict['total'] = reward_dict['total'] + lat_penalty_reward + lat_choice_reward + lat_clear_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -2993,11 +2981,6 @@ class HierarchicalHexapodEnv:
                     neginf=0.0,
                 )
                 self.prev_forward_clearance_valid.fill_(True)
-            band_center_x = 0.5 * (
-                self.env.s_avoid_band_x_min + self.env.s_avoid_band_x_max
-            )
-            self.prev_align_center_abs = torch.abs(robot_pos[:, 0] - band_center_x)
-            self.prev_align_center_valid.fill_(True)
         
         # done 的环境避免跨 episode 的 shaped reward 污染
         terminal_fail_mask = done_during | band_fail_mask
@@ -4118,8 +4101,9 @@ def train(args):
             'velocity',
             'backward',
             'body_backward',
-            'clearance_improve',
-            'align_center',
+            'lat_penalty',
+            'lat_choice',
+            'lat_clear',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -5783,8 +5767,9 @@ def train(args):
                 key
                 for key in (
                     'approach',
-                    'clearance_improve',
-                    'align_center',
+                    'lat_penalty',
+                    'lat_choice',
+                    'lat_clear',
                     'avoid_band_penalty',
                     'collision',
                     'stability',
@@ -5902,7 +5887,7 @@ def train(args):
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/clear/align):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('clearance_improve', 0.0):.3f} / {reward_term_means.get('align_center', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/latC/latClr/latPen):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('lat_choice', 0.0):.3f} / {reward_term_means.get('lat_clear', 0.0):.3f} / {reward_term_means.get('lat_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
