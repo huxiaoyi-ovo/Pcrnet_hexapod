@@ -2303,7 +2303,7 @@ class HierarchicalHexapodEnv:
         right_err = torch.clamp(x - right, min=0.0)
         return left_err + right_err
 
-    def _compute_nearest_row_surface_distance(
+    def _compute_nearest_row_forward_distance(
         self,
         robot_pos: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -2373,15 +2373,11 @@ class HierarchicalHexapodEnv:
                 continue
 
             min_dist = self.affordance_map_extent
-            rx = float(robot_pos[env_id, 0].item())
             ry = float(robot_pos[env_id, 1].item())
             for slot in row_slots:
-                cx = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
                 cy = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
-                half_x, half_y = slot_half_extents(env_id, int(slot))
-                dx = max(abs(rx - cx) - half_x, 0.0)
-                dy = max(abs(ry - cy) - half_y, 0.0)
-                dist = math.sqrt(dx * dx + dy * dy)
+                _, half_y = slot_half_extents(env_id, int(slot))
+                dist = max((cy - half_y) - ry, 0.0)
                 if dist < min_dist:
                     min_dist = dist
             dist_out[env_id] = min_dist
@@ -3091,7 +3087,7 @@ class HierarchicalHexapodEnv:
                 row_near_release_margin = float(
                     getattr(self.reward_cfg, "avoid_row_near_release_margin", 0.08)
                 )
-                row_surface_dist, row_surface_valid = self._compute_nearest_row_surface_distance(robot_pos)
+                row_forward_dist, row_forward_valid = self._compute_nearest_row_forward_distance(robot_pos)
                 near_release_gate = torch.clamp(
                     row_err_abs / max(row_near_release_margin, 1e-6),
                     min=0.0,
@@ -3099,8 +3095,8 @@ class HierarchicalHexapodEnv:
                 )
                 row_near_penalty = (
                     -row_near_scale
-                    * torch.exp(-row_surface_dist / max(row_near_sigma, 1e-6))
-                    * row_surface_valid.float()
+                    * torch.exp(-row_forward_dist / max(row_near_sigma, 1e-6))
+                    * row_forward_valid.float()
                     * gap_eff_valid.float()
                     * near_release_gate
                 )

@@ -64,6 +64,10 @@
 
 - [x] ~~[P1] 用当前最终生效的 avoid 专家奖励、课程升级、固定模板几何、调试口径与训练命令，覆盖刷新 `CONTEXT.md`，避免后续新会话继续沿用旧的显存排查主线与过期奖励配置~~
 
+## 2026-03-28 avoid 近障惩罚语义收口
+
+- [x] ~~[P0] 将 `row_near_penalty` 从“二维表面距离惩罚”收口为“未进入当前最近一行 effective gap 时的前向接近惩罚”，避免继续静默错罚安全贴边通过~~
+
 ## 2026-03-26 训练一致性审计规则补强
 
 - [x] ~~[P1] 将“奖励生命周期 / 门控参考量 / 死信号 / done-reset 污染”补入 `AGENTS.md` 长期审计规则，后续默认先查这类静默污染问题~~
@@ -97,6 +101,7 @@
 - [x] ~~Must: 将最近一行奖励从“追 gap 中心点”改成“进入当前最近一行的有效 gap 区间”，并让 `row_near_penalty` 只在尚未进入该行有效 gap 时生效，避免安全贴边通过继续被罚~~
 - [x] ~~Must: 修补 effective gap 主线的一致性缺口：补齐 `_compute_nearest_row_gap_target()` 的返回值分支，给 `row_near_penalty` 增加 `gap_eff_valid` 门控，并将 `play` 主输出收口到 row-gap 主线~~
 - [x] ~~Must: 将 row-gap 主线彻底从 `nearest_obs` 外层门控中解开，并给 `row_near_penalty` 增加 effective-gap 边界过渡带，同时进一步清掉 `play`/snapshot 中残留的旧 `block/passable` 主解释~~
+- [x] ~~Must: 在当前“gap 判定已基本正确、但策略无视横向纠偏”的阶段，优先放大 `rowLat`（不先减 `approach`），先验证是否能把 `cmd_x` 明显抬起来~~
 
 ## 2026-03-26 avoid 去掉朝中/朝向约束并收紧有效奖励输出
 
