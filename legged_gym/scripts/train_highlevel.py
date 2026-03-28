@@ -3085,6 +3085,7 @@ class HierarchicalHexapodEnv:
                 row_gap_scale = float(getattr(self.reward_cfg, "avoid_row_gap_scale", 8.0))
                 row_push_scale = float(getattr(self.reward_cfg, "avoid_row_push_scale", 1.5))
                 row_push_margin = float(getattr(self.reward_cfg, "avoid_row_push_margin", 0.25))
+                row_cmdx_scale = float(getattr(self.reward_cfg, "avoid_row_cmdx_scale", 0.5))
                 row_gate_on = float(getattr(self.reward_cfg, "avoid_row_gate_on", 1.0))
                 row_gate_full = float(getattr(self.reward_cfg, "avoid_row_gate_full", 0.4))
                 row_forward_dist, row_forward_valid = self._compute_nearest_row_forward_distance(robot_pos)
@@ -3112,10 +3113,23 @@ class HierarchicalHexapodEnv:
                     * row_forward_valid.float()
                     * gap_eff_valid.float()
                 )
+                gap_center_eff = 0.5 * (gap_left_eff + gap_right_eff)
+                x_dir_to_gap = torch.sign(gap_center_eff - robot_pos[:, 0])
+                cmd_x = cmd_exec_mean[:, 0]
+                cmd_x_toward_gap = torch.clamp(cmd_x * x_dir_to_gap, min=0.0)
+                row_cmdx_reward = (
+                    row_cmdx_scale
+                    * gate_row
+                    * push_err
+                    * cmd_x_toward_gap
+                    * row_forward_valid.float()
+                    * gap_eff_valid.float()
+                )
                 reward_dict['row_lat'] = row_lat_reward
                 reward_dict['row_gap'] = row_gap_reward
                 reward_dict['row_push_penalty'] = row_push_penalty
-                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_gap_reward + row_push_penalty
+                reward_dict['row_cmdx_reward'] = row_cmdx_reward
+                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_gap_reward + row_push_penalty + row_cmdx_reward
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -4458,6 +4472,8 @@ def train(args):
             'row_lat',
             'row_gap',
             'row_push_penalty',
+            'row_cmdx_reward',
+            'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -4857,7 +4873,16 @@ def train(args):
                             aff_stack_buf,
                             critic_aff_stack_buf,
                         )
-                        rewards = rewards + args.gamma * timeout_values * timeout_mask.float()
+                        timeout_bonus = args.gamma * timeout_values * timeout_mask.float()
+                        rewards = rewards + timeout_bonus
+                        if env_info is not None and isinstance(env_info, dict):
+                            reward_terms_info = env_info.get("reward_terms", None)
+                            if isinstance(reward_terms_info, dict):
+                                prev_bonus = reward_terms_info.get("timeout_bootstrap_bonus", None)
+                                if torch.is_tensor(prev_bonus):
+                                    reward_terms_info["timeout_bootstrap_bonus"] = prev_bonus + timeout_bonus.detach()
+                                else:
+                                    reward_terms_info["timeout_bootstrap_bonus"] = timeout_bonus.detach()
                         timeout_bootstrap_count += timeout_mask.float().sum()
                     rewards = rewards.detach()
                     # Record raw/effective gate and command-conditioned risk proxies for diagnostics.
@@ -5016,7 +5041,16 @@ def train(args):
                             aff_stack_buf,
                             critic_aff_stack_buf,
                         )
-                        rewards = rewards + args.gamma * timeout_values * timeout_mask.float()
+                        timeout_bonus = args.gamma * timeout_values * timeout_mask.float()
+                        rewards = rewards + timeout_bonus
+                        if env_info is not None and isinstance(env_info, dict):
+                            reward_terms_info = env_info.get("reward_terms", None)
+                            if isinstance(reward_terms_info, dict):
+                                prev_bonus = reward_terms_info.get("timeout_bootstrap_bonus", None)
+                                if torch.is_tensor(prev_bonus):
+                                    reward_terms_info["timeout_bootstrap_bonus"] = prev_bonus + timeout_bonus.detach()
+                                else:
+                                    reward_terms_info["timeout_bootstrap_bonus"] = timeout_bonus.detach()
                         timeout_bootstrap_count += timeout_mask.float().sum()
                     rewards = rewards.detach()
                     if debug and use_egpo and egpo_diag_yaw_before is not None and egpo_diag_cmd_omega is not None:
@@ -6124,6 +6158,8 @@ def train(args):
                     'row_lat',
                     'row_gap',
                     'row_push_penalty',
+                    'row_cmdx_reward',
+                    'timeout_bootstrap_bonus',
                     'avoid_band_penalty',
                     'collision',
                     'stability',
@@ -6239,7 +6275,8 @@ def train(args):
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/rowLat/rowGap/rowPush):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
+                          f"""{'Reward(timeout bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")
