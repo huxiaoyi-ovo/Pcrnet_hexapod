@@ -1779,3 +1779,8 @@
 
 - [x] Must: 将 `s_avoid_basic` 的障碍碰撞从“扣分后继续滚样本”改成高层回合直接终止，先把撞前 through 动作学干净
 - [x] Must: 保持其余奖励项不动，只改碰撞后的回合生命周期，方便后续用同一 checkpoint 放开碰撞重置继续 finetune 连续避障
+
+## 2026-03-28 avoid rowCmdX 从“只奖对方向”改成“方向错也罚”
+
+- [x] Must: 将 `rowCmdX` 从 `clamp(cmd_pred_x * x_dir_to_gap, min=0)` 的单边正奖励，改成有符号方向奖励，让背离 gap 的横移也产生负梯度
+- [x] Must: 同步更新训练统计与 `play` 调试口径，避免继续用旧的 `toward` 正半轴解释方向学习

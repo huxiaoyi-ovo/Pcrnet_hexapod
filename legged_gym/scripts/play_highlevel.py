@@ -824,7 +824,7 @@ def _save_s_avoid_teacher_snapshot(
     x_err_prev: float,
     robot_x_world: float,
     x_dir_to_gap: float,
-    cmd_x_toward_gap: float,
+    cmd_x_signed_gap: float,
     cmd_exec: np.ndarray,
     band_dbg: Optional[dict] = None,
 ) -> None:
@@ -947,7 +947,7 @@ def _save_s_avoid_teacher_snapshot(
         f"raw_gap={gap_left_world:.3f}/{gap_right_world:.3f}\n"
         f"eff_gap={gap_left_eff_world:.3f}/{gap_right_eff_world:.3f} row_y={row_y_world:.3f}\n"
         f"gap_center={gap_center_eff_world:.3f} robot_x={robot_x_world:.3f}\n"
-        f"x_dir_to_gap={x_dir_to_gap:.1f} cmd_x_toward_gap={cmd_x_toward_gap:.3f}\n"
+        f"x_dir_to_gap={x_dir_to_gap:.1f} cmd_x_signed_gap={cmd_x_signed_gap:.3f}\n"
         f"x_err prev/now={x_err_prev:.3f}/{x_err_now:.3f}\n"
         f"row_lat={row_lat_reward:.3f} row_cmdx={row_cmdx_reward:.3f}\n"
         f"cmd_exec=({float(cmd_exec[0]):.3f},{float(cmd_exec[1]):.3f})\n"
@@ -2658,7 +2658,7 @@ def main():
                         cmd_x_dbg = float(cmd_show[0])
                         cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
                     x_dir_to_gap_dbg = 0.0
-                    cmd_x_toward_gap_dbg = 0.0
+                    cmd_x_signed_gap_dbg = 0.0
                     if bool(row_gap_eff_valid_t[env_idx].item()):
                         x_delta_to_gap = row_gap_center_eff_dbg - robot_x_dbg
                         if x_delta_to_gap > 1e-6:
@@ -2666,7 +2666,7 @@ def main():
                         elif x_delta_to_gap < -1e-6:
                             x_dir_to_gap_dbg = -1.0
                         if cmd_show is not None:
-                            cmd_x_toward_gap_dbg = max(cmd_x_dbg * x_dir_to_gap_dbg, 0.0)
+                            cmd_x_signed_gap_dbg = cmd_x_dbg * x_dir_to_gap_dbg
                     sector_deg = 0.0
                     if env.reward_cfg is not None:
                         sector_deg = float(getattr(env.reward_cfg, "passable_sector_deg", 0.0))
@@ -2701,7 +2701,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_toward={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_signed={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2729,7 +2729,7 @@ def main():
                         row_push_err_dbg,
                         row_gate_active_dbg,
                         x_dir_to_gap_dbg,
-                        cmd_x_toward_gap_dbg,
+                        cmd_x_signed_gap_dbg,
                         clearance,
                         risk_scale,
                         aff_delta,
@@ -2751,7 +2751,7 @@ def main():
                 print(
                     "[PlayHigh][diag] goal_bear={:.3f} row_eff_width={:.3f} row_x={:.3f} row_err={:.3f} "
                     "d_forward={:.3f} gate_row={:.3f} push_err={:.3f} gate_active={} "
-                    "gap_center={:.3f} x_dir={:.1f} cmd_x_toward={:.3f} row_cmdx={:.3f} "
+                    "gap_center={:.3f} x_dir={:.1f} cmd_x_signed={:.3f} row_cmdx={:.3f} "
                     "pass_gate_dbg={:.3f} pass_occ_dbg={:.3f} cross_width_dbg={:.3f} vis_ratio={:.3f} "
                     "pass_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f}".format(
                         goal_bearing,
@@ -2764,7 +2764,7 @@ def main():
                         row_gate_active_dbg,
                         row_gap_center_eff_dbg,
                         x_dir_to_gap_dbg,
-                        cmd_x_toward_gap_dbg,
+                        cmd_x_signed_gap_dbg,
                         row_cmdx_dbg,
                         pass_gate_dbg,
                         pass_occ_dbg,
@@ -2801,7 +2801,7 @@ def main():
                         x_err_prev=row_x_err_prev_dbg,
                         robot_x_world=robot_x_dbg,
                         x_dir_to_gap=x_dir_to_gap_dbg,
-                        cmd_x_toward_gap=cmd_x_toward_gap_dbg,
+                        cmd_x_signed_gap=cmd_x_signed_gap_dbg,
                         cmd_exec=np.asarray(cmd_show, dtype=np.float32),
                         band_dbg=_extract_s_avoid_band_debug(env, env_idx),
                     )

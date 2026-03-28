@@ -3124,12 +3124,12 @@ class HierarchicalHexapodEnv:
                 if cmd_raw.dim() == 1:
                     cmd_raw = cmd_raw.unsqueeze(0)
                 cmd_pred_x = cmd_raw[:, 0]
-                cmd_x_toward = torch.clamp(cmd_pred_x * x_dir_to_gap, min=0.0)
+                cmd_x_signed = cmd_pred_x * x_dir_to_gap
                 row_cmdx_reward = (
                     row_cmdx_scale
                     * gate_row
                     * out_gap
-                    * cmd_x_toward
+                    * cmd_x_signed
                     * row_forward_valid.float()
                 )
                 row_cmdx_log_mask = row_forward_valid.float() * gap_eff_valid.float()
@@ -3150,7 +3150,7 @@ class HierarchicalHexapodEnv:
                 reward_dict['row_gap'] = row_gap_reward
                 reward_dict['row_push_penalty'] = row_push_penalty
                 reward_dict['row_cmdx_reward'] = row_cmdx_reward
-                reward_dict['row_cmdx_toward'] = cmd_x_toward * row_cmdx_log_mask
+                reward_dict['row_cmdx_signed'] = cmd_x_signed * row_cmdx_log_mask
                 reward_dict['row_forward_dist'] = row_forward_dist_log
                 reward_dict['row_gate'] = row_gate_valid
                 reward_dict['row_gate_active'] = row_gate_active
@@ -4503,7 +4503,7 @@ def train(args):
             'row_gap',
             'row_push_penalty',
             'row_cmdx_reward',
-            'row_cmdx_toward',
+            'row_cmdx_signed',
             'row_forward_dist',
             'row_gate',
             'row_gate_active',
@@ -6205,8 +6205,8 @@ def train(args):
         writer.add_scalar('Stats/CmdSlewXAbs', cmd_slew_x_abs_mean, iteration)
         writer.add_scalar('Stats/CmdExecX', cmd_exec_x_mean, iteration)
         writer.add_scalar('Stats/CmdExecXAbs', cmd_exec_x_abs_mean, iteration)
-        if 'row_cmdx_toward' in reward_term_means:
-            writer.add_scalar('Stats/CmdXToward', reward_term_means['row_cmdx_toward'], iteration)
+        if 'row_cmdx_signed' in reward_term_means:
+            writer.add_scalar('Stats/CmdXSigned', reward_term_means['row_cmdx_signed'], iteration)
         writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
@@ -6349,7 +6349,7 @@ def train(args):
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'CmdX pred/slew/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX |pred|/|slew|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
-                          f"""{'CmdX pred/toward/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_toward', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
+                          f"""{'CmdX pred/signed/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'Row dFwd/gate/act/pushAct:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
                           f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
