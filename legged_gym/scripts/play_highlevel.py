@@ -2108,6 +2108,7 @@ def main():
             )
             gate_y = None
             gate_diag = None
+            avoid_cf_cmds = None
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
             goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
@@ -2164,6 +2165,29 @@ def main():
                             difficulty_input,
                             deterministic=deterministic,
                         )
+                        if (args.debug_cmd or debug) and skill == "avoid":
+                            aff_input_flip = torch.flip(aff_input, dims=[-2])
+                            aff_input_zero = torch.zeros_like(aff_input)
+                            difficulty_zero = torch.zeros_like(difficulty_input)
+                            cmd_flip, _ = policy.get_action(
+                                aff_input_flip,
+                                obs["state"],
+                                goal_input,
+                                difficulty_input,
+                                deterministic=True,
+                            )
+                            cmd_zero, _ = policy.get_action(
+                                aff_input_zero,
+                                obs["state"],
+                                goal_input,
+                                difficulty_zero,
+                                deterministic=True,
+                            )
+                            avoid_cf_cmds = {
+                                "orig": cmd.detach().clone(),
+                                "flip": cmd_flip.detach().clone(),
+                                "zero": cmd_zero.detach().clone(),
+                            }
             expert_cmd = None
             dircheck_alpha_pre = None
             dircheck_x_pre = None
@@ -2775,6 +2799,21 @@ def main():
                         sector_vis_ratio,
                     )
                 )
+                if avoid_cf_cmds is not None:
+                    cmd_orig_dbg = avoid_cf_cmds["orig"][env_idx].detach().cpu().numpy()
+                    cmd_flip_dbg = avoid_cf_cmds["flip"][env_idx].detach().cpu().numpy()
+                    cmd_zero_dbg = avoid_cf_cmds["zero"][env_idx].detach().cpu().numpy()
+                    print(
+                        "[PlayHigh][cf] cmd_x orig/flip/zero={:.3f}/{:.3f}/{:.3f} "
+                        "cmd_y orig/flip/zero={:.3f}/{:.3f}/{:.3f}".format(
+                            float(cmd_orig_dbg[0]),
+                            float(cmd_flip_dbg[0]),
+                            float(cmd_zero_dbg[0]),
+                            float(cmd_orig_dbg[1]),
+                            float(cmd_flip_dbg[1]),
+                            float(cmd_zero_dbg[1]),
+                        )
+                    )
                 if (
                     args.task == "s_avoid_basic"
                     and teacher_dump_interval_steps > 0
