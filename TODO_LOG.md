@@ -1769,3 +1769,8 @@
 
 - [x] Must: 在 `play_highlevel.py` 中按时间间隔导出老师真实使用的通道图，避免只靠终端数字猜老师是否看到了通道
 - [x] Must: 图上只使用当前训练真实老师的量：左右候选通道 clearance、`side_risk`、`block`、实际 `cmd_exec`，不再用旧 `passable_side` 充数
+
+## 2026-03-28 avoid rowCmdX 从目标型惩罚切回正向动作奖励
+
+- [x] Must: 停止使用 `|cmd_pred_x - x_target|` 目标型惩罚，改回“朝 gap 正确方向的原始 `cmd_pred_x`”正奖励，先把横移动作型态拉出来
+- [x] Must: 将 `avoid_row_cmdx_scale` 提到能与碰撞项竞争的量级，先验证 `|CmdX pred|` 能否脱离 `0.01` 档
