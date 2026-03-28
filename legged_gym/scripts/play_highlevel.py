@@ -567,6 +567,122 @@ def _occupancy_center_from_map(raw_occ: np.ndarray, map_extent: float) -> dict:
     }
 
 
+def _extract_passable_band_from_row(passable_map: np.ndarray, row_y_m: float, map_extent: float) -> dict:
+    if passable_map.ndim != 2:
+        return {}
+    size_x, size_y = passable_map.shape
+    if size_x <= 0 or size_y <= 0 or not math.isfinite(map_extent) or map_extent <= 0.0:
+        return {}
+    cell_x = float(map_extent) / float(size_x)
+    cell_y = float(map_extent) / float(size_y)
+    if not math.isfinite(row_y_m):
+        return {}
+    row_idx = int(math.floor(float(row_y_m) / max(cell_y, 1e-6)))
+    row_idx = max(0, min(size_y - 1, row_idx))
+    line = np.asarray(passable_map[:, row_idx] > 0.5, dtype=np.bool_)
+    if line.size == 0 or not bool(line.any()):
+        return {
+            "row_idx": row_idx,
+            "row_y_center_m": (row_idx + 0.5) * cell_y,
+            "band_valid": False,
+            "band_count": 0,
+        }
+
+    runs = []
+    start = None
+    for idx, active in enumerate(line.tolist()):
+        if active and start is None:
+            start = idx
+        elif (not active) and start is not None:
+            runs.append((start, idx - 1))
+            start = None
+    if start is not None:
+        runs.append((start, line.size - 1))
+    if not runs:
+        return {
+            "row_idx": row_idx,
+            "row_y_center_m": (row_idx + 0.5) * cell_y,
+            "band_valid": False,
+            "band_count": 0,
+        }
+
+    best_start, best_end = max(runs, key=lambda seg: (seg[1] - seg[0] + 1, -abs(((seg[0] + seg[1]) * 0.5) - 0.5 * (line.size - 1))))
+    left_m = -0.5 * float(map_extent) + best_start * cell_x
+    right_m = -0.5 * float(map_extent) + (best_end + 1) * cell_x
+    center_m = 0.5 * (left_m + right_m)
+    return {
+        "row_idx": row_idx,
+        "row_y_center_m": (row_idx + 0.5) * cell_y,
+        "band_valid": True,
+        "band_count": len(runs),
+        "band_left_m": float(left_m),
+        "band_right_m": float(right_m),
+        "band_center_m": float(center_m),
+        "band_width_m": float(max(right_m - left_m, 0.0)),
+    }
+
+
+def _summarize_local_map_support(
+    raw_aff_map: torch.Tensor,
+    local_map_2ch: torch.Tensor,
+    visible_mask: Optional[torch.Tensor],
+    map_extent: float,
+    row_y_m: float,
+) -> dict:
+    raw_occ = raw_aff_map[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    local_np = local_map_2ch.detach().cpu().numpy().astype(np.float32, copy=False)
+    summary = _occupancy_center_from_map(raw_occ, map_extent)
+    if raw_aff_map.shape[0] >= 2:
+        passable_np = raw_aff_map[1].detach().cpu().numpy().astype(np.float32, copy=False)
+        summary.update(_extract_passable_band_from_row(passable_np, row_y_m, map_extent))
+    else:
+        summary.update({"band_valid": False, "band_count": 0})
+
+    size_x, size_y = local_np.shape[1], local_np.shape[2]
+    cell_x = float(map_extent) / float(size_x) if size_x > 0 else 0.0
+    x_coords = (-0.5 * float(map_extent) + (np.arange(size_x, dtype=np.float32) + 0.5) * cell_x)
+    occ = local_np[0]
+    clearance = local_np[1] if local_np.shape[0] > 1 else (1.0 - occ)
+    if visible_mask is not None:
+        vis_np = visible_mask.detach().cpu().numpy().astype(np.float32, copy=False)
+        occ = occ * vis_np
+        clearance = clearance * vis_np
+        vis_bool = vis_np > 0.5
+    else:
+        vis_bool = np.ones_like(occ, dtype=np.bool_)
+
+    left_mask = (x_coords[:, None] < 0.0) & vis_bool
+    right_mask = (x_coords[:, None] > 0.0) & vis_bool
+    left_occ = occ[left_mask]
+    right_occ = occ[right_mask]
+    left_clear = clearance[left_mask]
+    right_clear = clearance[right_mask]
+    left_occ_mean = float(left_occ.mean()) if left_occ.size > 0 else 0.0
+    right_occ_mean = float(right_occ.mean()) if right_occ.size > 0 else 0.0
+    left_clear_mean = float(left_clear.mean()) if left_clear.size > 0 else 0.0
+    right_clear_mean = float(right_clear.mean()) if right_clear.size > 0 else 0.0
+    clear_diff = right_clear_mean - left_clear_mean
+    if clear_diff > 1e-4:
+        better_side = 1.0
+    elif clear_diff < -1e-4:
+        better_side = -1.0
+    else:
+        better_side = 0.0
+    summary.update(
+        {
+            "left_occ_mean": left_occ_mean,
+            "right_occ_mean": right_occ_mean,
+            "left_clear_mean": left_clear_mean,
+            "right_clear_mean": right_clear_mean,
+            "clear_diff": float(clear_diff),
+            "better_side": float(better_side),
+            "grid_size_xy": [int(size_x), int(size_y)],
+            "cell_size_m": float(cell_x),
+        }
+    )
+    return summary
+
+
 def _save_affordance_grid_figure(
     save_path: str,
     tensor: np.ndarray,
@@ -2109,6 +2225,7 @@ def main():
             gate_y = None
             gate_diag = None
             avoid_cf_cmds = None
+            avoid_cf_feats = None
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
             goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
@@ -2187,6 +2304,38 @@ def main():
                                 "orig": cmd.detach().clone(),
                                 "flip": cmd_flip.detach().clone(),
                                 "zero": cmd_zero.detach().clone(),
+                            }
+                            aff_feat_orig = policy.affordance_encoder(aff_input)
+                            aff_feat_flip = policy.affordance_encoder(aff_input_flip)
+                            aff_feat_zero = policy.affordance_encoder(aff_input_zero)
+                            hidden_orig = policy._encode_hidden(
+                                aff_input,
+                                obs["state"],
+                                goal_input,
+                                difficulty_input,
+                                critic=False,
+                            )
+                            hidden_flip = policy._encode_hidden(
+                                aff_input_flip,
+                                obs["state"],
+                                goal_input,
+                                difficulty_input,
+                                critic=False,
+                            )
+                            hidden_zero = policy._encode_hidden(
+                                aff_input_zero,
+                                obs["state"],
+                                goal_input,
+                                difficulty_zero,
+                                critic=False,
+                            )
+                            avoid_cf_feats = {
+                                "aff_orig": aff_feat_orig.detach().clone(),
+                                "aff_flip": aff_feat_flip.detach().clone(),
+                                "aff_zero": aff_feat_zero.detach().clone(),
+                                "hid_orig": hidden_orig.detach().clone(),
+                                "hid_flip": hidden_flip.detach().clone(),
+                                "hid_zero": hidden_zero.detach().clone(),
                             }
             expert_cmd = None
             dircheck_alpha_pre = None
@@ -2642,6 +2791,16 @@ def main():
                         and bool(row_forward_valid_t[env_idx].item())
                         and bool(row_gap_eff_valid_t[env_idx].item())
                     )
+                    map_support_dbg = {}
+                    if obs is not None and "local_map_2ch" in obs and raw_aff_map is not None:
+                        visible_dbg = getattr(env, "affordance_visible_mask", None)
+                        map_support_dbg = _summarize_local_map_support(
+                            raw_aff_map[env_idx],
+                            obs["local_map_2ch"][env_idx],
+                            visible_dbg,
+                            float(getattr(env, "affordance_map_extent", 0.0)),
+                            row_gap_row_y_dbg,
+                        )
                     if reward_terms is not None and "row_lat" in reward_terms:
                         row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
                     else:
@@ -2678,6 +2837,8 @@ def main():
                         x_map = x_map.to(passable.device)
                     right_mask = ((x_map > 0.0) & visible).float()
                     left_mask = ((x_map < 0.0) & visible).float()
+                    cmd_x_dbg = 0.0
+                    cmd_x_dir_dbg = 0.0
                     if cmd_show is not None:
                         cmd_x_dbg = float(cmd_show[0])
                         cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
@@ -2799,6 +2960,42 @@ def main():
                         sector_vis_ratio,
                     )
                 )
+                if map_support_dbg:
+                    map_occ_center = map_support_dbg.get("occupancy_center_map_xy", [0.0, 0.0])
+                    obs_xy_true = _extract_s_avoid_debug_meta(env).get("obstacle_xy_map", [0.0, 0.0])
+                    map_band_valid = int(bool(map_support_dbg.get("band_valid", False)))
+                    map_better_side = float(map_support_dbg.get("better_side", 0.0))
+                    print(
+                        "[PlayHigh][map] occ_true=({:.3f},{:.3f}) occ_map=({:.3f},{:.3f}) occ_min={:.3f} "
+                        "grid(size/cell)={} / {:.3f} row_y(idx/center)={}/ {:.3f} "
+                        "band(valid/cnt/l/r/c/w)={}/{}/{:.3f}/{:.3f}/{:.3f}/{:.3f} "
+                        "clr_l/r/diff={:.3f}/{:.3f}/{:.3f} occ_l/r={:.3f}/{:.3f} "
+                        "side(map/gt/cmd)={:.1f}/{:.1f}/{:.1f}".format(
+                            float(obs_xy_true[0]) if len(obs_xy_true) == 2 else 0.0,
+                            float(obs_xy_true[1]) if len(obs_xy_true) == 2 else 0.0,
+                            float(map_occ_center[0]) if len(map_occ_center) == 2 else 0.0,
+                            float(map_occ_center[1]) if len(map_occ_center) == 2 else 0.0,
+                            float(map_support_dbg.get("occupancy_min_distance_m", 0.0) or 0.0),
+                            map_support_dbg.get("grid_size_xy", [0, 0]),
+                            float(map_support_dbg.get("cell_size_m", 0.0)),
+                            int(map_support_dbg.get("row_idx", -1)),
+                            float(map_support_dbg.get("row_y_center_m", 0.0)),
+                            map_band_valid,
+                            int(map_support_dbg.get("band_count", 0)),
+                            float(map_support_dbg.get("band_left_m", 0.0)),
+                            float(map_support_dbg.get("band_right_m", 0.0)),
+                            float(map_support_dbg.get("band_center_m", 0.0)),
+                            float(map_support_dbg.get("band_width_m", 0.0)),
+                            float(map_support_dbg.get("left_clear_mean", 0.0)),
+                            float(map_support_dbg.get("right_clear_mean", 0.0)),
+                            float(map_support_dbg.get("clear_diff", 0.0)),
+                            float(map_support_dbg.get("left_occ_mean", 0.0)),
+                            float(map_support_dbg.get("right_occ_mean", 0.0)),
+                            map_better_side,
+                            x_dir_to_gap_dbg,
+                            cmd_x_dir_dbg,
+                        )
+                    )
                 if avoid_cf_cmds is not None:
                     cmd_orig_dbg = avoid_cf_cmds["orig"][env_idx].detach().cpu().numpy()
                     cmd_flip_dbg = avoid_cf_cmds["flip"][env_idx].detach().cpu().numpy()
@@ -2812,6 +3009,26 @@ def main():
                             float(cmd_orig_dbg[1]),
                             float(cmd_flip_dbg[1]),
                             float(cmd_zero_dbg[1]),
+                        )
+                    )
+                if avoid_cf_feats is not None:
+                    aff_orig_dbg = avoid_cf_feats["aff_orig"][env_idx]
+                    aff_flip_dbg = avoid_cf_feats["aff_flip"][env_idx]
+                    aff_zero_dbg = avoid_cf_feats["aff_zero"][env_idx]
+                    hid_orig_dbg = avoid_cf_feats["hid_orig"][env_idx]
+                    hid_flip_dbg = avoid_cf_feats["hid_flip"][env_idx]
+                    hid_zero_dbg = avoid_cf_feats["hid_zero"][env_idx]
+                    aff_df = float(torch.norm(aff_orig_dbg - aff_flip_dbg).detach().cpu())
+                    aff_dz = float(torch.norm(aff_orig_dbg - aff_zero_dbg).detach().cpu())
+                    hid_df = float(torch.norm(hid_orig_dbg - hid_flip_dbg).detach().cpu())
+                    hid_dz = float(torch.norm(hid_orig_dbg - hid_zero_dbg).detach().cpu())
+                    print(
+                        "[PlayHigh][cf-feat] aff(orig-flip/orig-zero)={:.4f}/{:.4f} "
+                        "hid(orig-flip/orig-zero)={:.4f}/{:.4f}".format(
+                            aff_df,
+                            aff_dz,
+                            hid_df,
+                            hid_dz,
                         )
                     )
                 if (

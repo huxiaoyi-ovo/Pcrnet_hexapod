@@ -1799,3 +1799,8 @@
 
 - [x] Must: 修正高层 affordance encoder 的 CoordConv 坐标轴解释，使其与上游地图真实空间轴顺序 `[x_right, y_forward]` 一致
 - [x] Must: 保持上游 GT 图构造、reward 几何与 `play` 左右翻图维度不变，只修正 encoder 侧坐标通道，避免继续把左右信息读成错位语义
+
+## 2026-03-29 play encoder 特征因果诊断
+
+- [x] Must: 在原图/翻图/清零图三路 deterministic 对照上，同时打印 `affordance encoder` 和 actor hidden 的差异，直接判断图信息是没编码出来，还是编码出来后被后续状态/目标淹没
+- [x] Must: 保持真实执行命令不变，只补 `play` 调试输出
