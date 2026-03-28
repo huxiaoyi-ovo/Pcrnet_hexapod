@@ -3340,6 +3340,7 @@ class HierarchicalHexapodEnv:
                         reward_terms["total"] = total_reward
 
         success_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         cross_line_dist_snapshot = None
         s_avoid_episode_collision_snapshot = None
@@ -3356,6 +3357,9 @@ class HierarchicalHexapodEnv:
                 success_mask = self.env._get_s_avoid_episode_success_flags(env_ids)
                 done_any |= success_mask
                 manual_reset_mask |= success_mask
+            collision_reset_mask = collision_mask.clone()
+            done_any |= collision_reset_mask
+            manual_reset_mask |= collision_reset_mask
         
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
@@ -3377,7 +3381,7 @@ class HierarchicalHexapodEnv:
                 )
                 self.prev_forward_clearance_valid.fill_(True)
         # done 的环境避免跨 episode 的 shaped reward 污染
-        terminal_fail_mask = done_during | band_fail_mask
+        terminal_fail_mask = done_during | band_fail_mask | collision_reset_mask
         if terminal_fail_mask.any():
             terminal_fail_penalty = float(getattr(self, "terminal_fail_penalty", -10.0))
             collision_fail_penalty = min(

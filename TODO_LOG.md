@@ -1774,3 +1774,8 @@
 
 - [x] Must: 停止使用 `|cmd_pred_x - x_target|` 目标型惩罚，改回“朝 gap 正确方向的原始 `cmd_pred_x`”正奖励，先把横移动作型态拉出来
 - [x] Must: 将 `avoid_row_cmdx_scale` 提到能与碰撞项竞争的量级，先验证 `|CmdX pred|` 能否脱离 `0.01` 档
+
+## 2026-03-28 avoid 碰撞即高层重置
+
+- [x] Must: 将 `s_avoid_basic` 的障碍碰撞从“扣分后继续滚样本”改成高层回合直接终止，先把撞前 through 动作学干净
+- [x] Must: 保持其余奖励项不动，只改碰撞后的回合生命周期，方便后续用同一 checkpoint 放开碰撞重置继续 finetune 连续避障
