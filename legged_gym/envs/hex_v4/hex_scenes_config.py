@@ -550,7 +550,10 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_gap_scale"] = 8.0
         reward_cfg["avoid_row_push_scale"] = 0.5
         reward_cfg["avoid_row_push_margin"] = 0.25
-        reward_cfg["avoid_row_cmdx_scale"] = 5.0
+        reward_cfg["avoid_row_cmdx_scale"] = 2.0
+        reward_cfg["avoid_row_cmdx_err_gain"] = 1.0
+        reward_cfg["avoid_row_cmdx_min"] = 0.08
+        reward_cfg["avoid_row_cmdx_max"] = 0.60
         reward_cfg["avoid_row_group_tol"] = 0.25
         reward_cfg["avoid_row_margin"] = 0.15
         reward_cfg["avoid_row_effective_margin"] = 0.0
