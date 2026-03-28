@@ -563,7 +563,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
     class algorithm(HexGroundCfgPPO.algorithm):
-        entropy_coef = 0.03
+        entropy_coef = 0.08
 
     class runner(HexGroundCfgPPO.runner):
         experiment_name = "s_avoid_basic"

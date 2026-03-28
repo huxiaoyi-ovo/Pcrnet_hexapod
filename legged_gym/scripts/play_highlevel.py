@@ -11,7 +11,7 @@ import types
 import json
 import csv
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 from isaacgym import gymapi
@@ -481,6 +481,65 @@ def _draw_local_map_fov_debug_lines(env, viewer, env_id: int = 0) -> None:
         (camera_world, left_far, (0.5, 0.8, 1.0)),
         (camera_world, right_far, (0.5, 0.8, 1.0)),
         (camera_world, center_far, (1.0, 1.0, 1.0)),
+    ]
+    vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
+    colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
+    env_impl.gym.add_lines(viewer, env_impl.envs[env_id], len(segments), vertices, colors)
+
+
+def _draw_s_avoid_row_gap_debug_lines(
+    env,
+    viewer,
+    *,
+    env_id: int = 0,
+    cmd_exec_mean: Optional[np.ndarray] = None,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs") or not hasattr(env_impl, "root_states"):
+        return
+    robot_pos = env_impl.root_states[:, :3]
+    (
+        _gap_center,
+        row_y,
+        _gap_valid,
+        gap_left,
+        gap_right,
+        gap_left_eff,
+        gap_right_eff,
+        gap_eff_valid,
+    ) = env._compute_nearest_row_gap_target(robot_pos)
+    if not bool(gap_eff_valid[env_id].item()):
+        return
+
+    robot = env_impl.root_states[env_id]
+    robot_x = float(robot[0].item())
+    robot_y = float(robot[1].item())
+    robot_z = float(robot[2].item()) + 0.06
+    raw_l = float(gap_left[env_id].item())
+    raw_r = float(gap_right[env_id].item())
+    eff_l = float(gap_left_eff[env_id].item())
+    eff_r = float(gap_right_eff[env_id].item())
+    row_y_w = float(row_y[env_id].item())
+    gap_center = 0.5 * (eff_l + eff_r)
+
+    center_half = 0.10
+    robot_half = 0.05
+    arrow_len = 0.25
+    cmd_x = 0.0
+    if cmd_exec_mean is not None and len(cmd_exec_mean) >= 1:
+        cmd_x = float(cmd_exec_mean[0])
+    arrow_end_x = robot_x + cmd_x * arrow_len / max(abs(cmd_x), 1e-3)
+    arrow_end_y = robot_y
+
+    segments = [
+        ((raw_l, row_y_w, robot_z), (raw_r, row_y_w, robot_z), (0.95, 0.75, 0.10)),
+        ((eff_l, row_y_w, robot_z + 0.02), (eff_r, row_y_w, robot_z + 0.02), (0.10, 0.95, 0.25)),
+        ((gap_center, row_y_w - center_half, robot_z + 0.04), (gap_center, row_y_w + center_half, robot_z + 0.04), (0.10, 0.90, 1.00)),
+        ((robot_x - robot_half, robot_y, robot_z + 0.01), (robot_x + robot_half, robot_y, robot_z + 0.01), (1.00, 1.00, 1.00)),
+        ((robot_x, robot_y - robot_half, robot_z + 0.01), (robot_x, robot_y + robot_half, robot_z + 0.01), (1.00, 1.00, 1.00)),
+        ((robot_x, robot_y, robot_z + 0.06), (arrow_end_x, arrow_end_y, robot_z + 0.06), (1.00, 0.20, 0.20)),
     ]
     vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
     colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
@@ -2270,10 +2329,22 @@ def main():
             band_debug = _extract_s_avoid_band_debug(env, env_id=track_env_idx)
             if input_enabled and debug and getattr(args, "task", "") == "s_avoid_basic":
                 env_impl = getattr(env, "env", None)
+                post_info_dbg = info.get("post_info") if isinstance(info, dict) else None
+                cmd_exec_mean_dbg = None
+                if isinstance(post_info_dbg, dict):
+                    cmd_exec_mean_t = post_info_dbg.get("cmd_exec_mean", None)
+                    if torch.is_tensor(cmd_exec_mean_t):
+                        cmd_exec_mean_dbg = cmd_exec_mean_t[track_env_idx].detach().cpu().numpy()
                 if env_impl is not None and hasattr(env_impl, "gym"):
                     env_impl.gym.clear_lines(viewer)
                 _draw_s_avoid_band_debug_lines(env, viewer, env_id=track_env_idx)
                 _draw_local_map_fov_debug_lines(env, viewer, env_id=track_env_idx)
+                _draw_s_avoid_row_gap_debug_lines(
+                    env,
+                    viewer,
+                    env_id=track_env_idx,
+                    cmd_exec_mean=cmd_exec_mean_dbg,
+                )
             if hasattr(env.env, "root_states"):
                 root = env.env.root_states[track_env_idx]
                 pos_xy = root[:2].detach().cpu().numpy()
