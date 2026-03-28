@@ -3082,27 +3082,40 @@ class HierarchicalHexapodEnv:
                     * (prev_row_err_abs - row_err_abs)
                     * gap_eff_valid.float()
                 )
-                row_near_scale = float(getattr(self.reward_cfg, "avoid_row_near_scale", 0.5))
-                row_near_sigma = float(getattr(self.reward_cfg, "avoid_row_near_sigma", 0.30))
-                row_near_release_margin = float(
-                    getattr(self.reward_cfg, "avoid_row_near_release_margin", 0.08)
-                )
+                row_gap_scale = float(getattr(self.reward_cfg, "avoid_row_gap_scale", 8.0))
+                row_push_scale = float(getattr(self.reward_cfg, "avoid_row_push_scale", 1.5))
+                row_push_margin = float(getattr(self.reward_cfg, "avoid_row_push_margin", 0.25))
+                row_gate_on = float(getattr(self.reward_cfg, "avoid_row_gate_on", 1.0))
+                row_gate_full = float(getattr(self.reward_cfg, "avoid_row_gate_full", 0.4))
                 row_forward_dist, row_forward_valid = self._compute_nearest_row_forward_distance(robot_pos)
-                near_release_gate = torch.clamp(
-                    row_err_abs / max(row_near_release_margin, 1e-6),
+                gate_row = torch.clamp(
+                    (row_gate_on - row_forward_dist) / max(row_gate_on - row_gate_full, 1e-6),
                     min=0.0,
                     max=1.0,
                 )
-                row_near_penalty = (
-                    -row_near_scale
-                    * torch.exp(-row_forward_dist / max(row_near_sigma, 1e-6))
+                row_gap_reward = (
+                    row_gap_scale
+                    * gate_row
+                    * (prev_row_err_abs - row_err_abs)
                     * row_forward_valid.float()
                     * gap_eff_valid.float()
-                    * near_release_gate
+                )
+                push_err = torch.clamp(
+                    row_err_abs / max(row_push_margin, 1e-6),
+                    min=0.0,
+                    max=1.0,
+                )
+                row_push_penalty = (
+                    -row_push_scale
+                    * gate_row
+                    * push_err
+                    * row_forward_valid.float()
+                    * gap_eff_valid.float()
                 )
                 reward_dict['row_lat'] = row_lat_reward
-                reward_dict['row_near_penalty'] = row_near_penalty
-                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_near_penalty
+                reward_dict['row_gap'] = row_gap_reward
+                reward_dict['row_push_penalty'] = row_push_penalty
+                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_gap_reward + row_push_penalty
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -4443,7 +4456,8 @@ def train(args):
             'backward',
             'body_backward',
             'row_lat',
-            'row_near_penalty',
+            'row_gap',
+            'row_push_penalty',
             'turn_penalty',
             'yaw_rate_penalty',
             'avoid_band_penalty',
@@ -6108,7 +6122,8 @@ def train(args):
                 for key in (
                     'approach',
                     'row_lat',
-                    'row_near_penalty',
+                    'row_gap',
+                    'row_push_penalty',
                     'avoid_band_penalty',
                     'collision',
                     'stability',
@@ -6224,7 +6239,7 @@ def train(args):
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/rowLat/rowNear):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_near_penalty', 0.0):.3f}\n"""
+                          f"""{'Reward(main appr/rowLat/rowGap/rowPush):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")

@@ -68,6 +68,8 @@
 
 - [x] ~~[P0] 将 `row_near_penalty` 从“二维表面距离惩罚”收口为“未进入当前最近一行 effective gap 时的前向接近惩罚”，避免继续静默错罚安全贴边通过~~
 - [x] ~~[P0] 在当前“gap 判定正确但横向纠偏仍压不过前进主项”的阶段，同时上调 `rowLat`、下调 `rowNear`，先强推进入 effective gap、再避免 near 负项继续压主线~~
+- [x] ~~[P0] 放弃 `rowNear` 主线，改成 `rowGap + rowPush`：`rowGap` 只在当前最近一行接近时放大横向对准，`rowPush` 只罚“近了但还没进入 effective gap”的状态~~
+- [x] ~~[P0] 将 `rowPush` 从二值 `out_gap` 收口为连续 `push_err`，让“偏离一点”和“偏离很远”在 gap 外阶段受到不同强度的状态惩罚~~
 
 ## 2026-03-26 训练一致性审计规则补强
 
