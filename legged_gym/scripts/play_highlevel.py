@@ -2008,6 +2008,8 @@ def main():
     axis_disp_world_sum = np.zeros(2, dtype=np.float64)
     axis_disp_body_sum = np.zeros(2, dtype=np.float64)
     axis_disp_count = 0
+    track_ep_cmd_pred_x = []
+    track_ep_cmd_exec_x = []
     teacher_dump_interval_s = max(float(getattr(args, "dump_teacher_every_s", 0.0)), 0.0)
     high_level_dt = float(getattr(env, "high_level_dt", float(env.env.dt) * float(args.decimation)))
     teacher_dump_interval_steps = 0
@@ -2289,6 +2291,25 @@ def main():
                 stack_reset_mask = dones.clone()
                 track_done = bool(dones[track_env_idx].item())
                 if track_done:
+                    if track_ep_cmd_pred_x or track_ep_cmd_exec_x:
+                        pred_arr = np.asarray(track_ep_cmd_pred_x, dtype=np.float64)
+                        exec_arr = np.asarray(track_ep_cmd_exec_x, dtype=np.float64)
+                        pred_mean = float(pred_arr.mean()) if pred_arr.size > 0 else 0.0
+                        pred_std = float(pred_arr.std()) if pred_arr.size > 0 else 0.0
+                        exec_mean = float(exec_arr.mean()) if exec_arr.size > 0 else 0.0
+                        exec_std = float(exec_arr.std()) if exec_arr.size > 0 else 0.0
+                        print(
+                            "[PlayHigh][cmdx-episode] step={} pred_x(mean/std)={:.4f}/{:.4f} exec_x(mean/std)={:.4f}/{:.4f} samples={}".format(
+                                step_idx,
+                                pred_mean,
+                                pred_std,
+                                exec_mean,
+                                exec_std,
+                                max(pred_arr.size, exec_arr.size),
+                            )
+                        )
+                    track_ep_cmd_pred_x.clear()
+                    track_ep_cmd_exec_x.clear()
                     # Avoid post-reset displacement spikes in diagnostics.
                     prev_track_pos_world = None
                     prev_track_yaw = None
@@ -2376,6 +2397,18 @@ def main():
             goal_dist = float(np.linalg.norm(goal))
             progress = 0.0 if prev_dist is None else float(prev_dist - goal_dist)
             prev_dist = goal_dist
+            if cmd.shape[0] > track_env_idx:
+                track_ep_cmd_pred_x.append(float(cmd[track_env_idx, 0].detach().cpu().item()))
+            post_info_track = info.get("post_info") if isinstance(info, dict) else None
+            cmd_exec_mean_track = None
+            if isinstance(post_info_track, dict):
+                cmd_exec_mean_t = post_info_track.get("cmd_exec_mean", None)
+                if torch.is_tensor(cmd_exec_mean_t) and cmd_exec_mean_t.shape[0] > track_env_idx:
+                    cmd_exec_mean_track = float(cmd_exec_mean_t[track_env_idx, 0].detach().cpu().item())
+            if cmd_exec_mean_track is None and hasattr(env.env, "commands") and env.env.commands.shape[0] > track_env_idx:
+                cmd_exec_mean_track = float(env.env.commands[track_env_idx, 0].detach().cpu().item())
+            if cmd_exec_mean_track is not None:
+                track_ep_cmd_exec_x.append(cmd_exec_mean_track)
 
             if args.debug_cmd and step_idx % args.debug_interval == 0:
                 env_idx = 0

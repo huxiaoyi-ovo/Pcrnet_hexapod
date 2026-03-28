@@ -4493,6 +4493,12 @@ def train(args):
         gate_risk_f_sum = torch.zeros((), device=device)
         gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
+        cmd_pred_x_sum = torch.zeros((), device=device)
+        cmd_pred_x_abs_sum = torch.zeros((), device=device)
+        cmd_slew_x_sum = torch.zeros((), device=device)
+        cmd_slew_x_abs_sum = torch.zeros((), device=device)
+        cmd_exec_x_sum = torch.zeros((), device=device)
+        cmd_exec_x_abs_sum = torch.zeros((), device=device)
         body_forward_speed_sum = torch.zeros((), device=device)
         body_backward_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
@@ -5140,8 +5146,25 @@ def train(args):
                 cmd_diag_exec = env.env.commands[:, :3]
             if cmd_diag_exec is None:
                 cmd_diag_exec = cmd_used
+            if cmd_used is not None:
+                cmd_pred_x_sum += cmd_used[:, 0].sum()
+                cmd_pred_x_abs_sum += torch.abs(cmd_used[:, 0]).sum()
+            cmd_diag_slew = None
+            if post_info is not None and isinstance(post_info, dict):
+                cmd_diag_slew = post_info.get('cmd_slew', None)
+                if cmd_diag_slew is not None and not torch.is_tensor(cmd_diag_slew):
+                    cmd_diag_slew = torch.as_tensor(cmd_diag_slew, device=device)
+                if torch.is_tensor(cmd_diag_slew) and cmd_diag_slew.dim() == 1:
+                    cmd_diag_slew = cmd_diag_slew.unsqueeze(0)
+            if cmd_diag_slew is None:
+                cmd_diag_slew = cmd_used
+            if cmd_diag_slew is not None:
+                cmd_slew_x_sum += cmd_diag_slew[:, 0].sum()
+                cmd_slew_x_abs_sum += torch.abs(cmd_diag_slew[:, 0]).sum()
             if cmd_diag_exec is not None:
                 cmd_speed_sum += torch.norm(cmd_diag_exec[:, :2], dim=1).sum()
+                cmd_exec_x_sum += cmd_diag_exec[:, 0].sum()
+                cmd_exec_x_abs_sum += torch.abs(cmd_diag_exec[:, 0]).sum()
             if hasattr(env.env, "base_lin_vel"):
                 body_lin_vel = env.env.base_lin_vel
                 body_forward = body_lin_vel[:, 1]
@@ -5919,6 +5942,12 @@ def train(args):
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
+        cmd_pred_x_mean = (cmd_pred_x_sum / total_samples).item()
+        cmd_pred_x_abs_mean = (cmd_pred_x_abs_sum / total_samples).item()
+        cmd_slew_x_mean = (cmd_slew_x_sum / total_samples).item()
+        cmd_slew_x_abs_mean = (cmd_slew_x_abs_sum / total_samples).item()
+        cmd_exec_x_mean = (cmd_exec_x_sum / total_samples).item()
+        cmd_exec_x_abs_mean = (cmd_exec_x_abs_sum / total_samples).item()
         cmd_jerk_lin_mean = (cmd_jerk_lin_sum / total_samples).item()
         cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
@@ -6135,6 +6164,12 @@ def train(args):
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
+        writer.add_scalar('Stats/CmdPredX', cmd_pred_x_mean, iteration)
+        writer.add_scalar('Stats/CmdPredXAbs', cmd_pred_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdSlewX', cmd_slew_x_mean, iteration)
+        writer.add_scalar('Stats/CmdSlewXAbs', cmd_slew_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdExecX', cmd_exec_x_mean, iteration)
+        writer.add_scalar('Stats/CmdExecXAbs', cmd_exec_x_abs_mean, iteration)
         writer.add_scalar('Stats/BodyForwardSpeed', body_forward_speed_mean, iteration)
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
@@ -6263,6 +6298,8 @@ def train(args):
                           f"""{'Nonfinite act(pol/exp/tch):':>{pad}} {policy_nonfinite_action_count} / {expert_nonfinite_action_count} / {teacher_nonfinite_action_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
+                          f"""{'CmdX pred/slew/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
+                          f"""{'CmdX |pred|/|slew|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
                           f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
