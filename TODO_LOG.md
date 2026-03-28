@@ -72,6 +72,7 @@
 - [x] ~~[P0] 将 `rowPush` 从二值 `out_gap` 收口为连续 `push_err`，让“偏离一点”和“偏离很远”在 gap 外阶段受到不同强度的状态惩罚~~
 - [x] ~~[P0] 在 row-gap 主线下补一个有方向的 `rowCmdX` 动作奖励，直接塑形朝当前行 effective gap 方向的横移指令，避免继续只靠状态差分拉动 `cmd_x`~~
 - [x] ~~[P1] 将 `play` 诊断收口到“只显示当前最近一行”的 row-gap 主线：显式画出当前行 `raw/effective gap + gap center`，并打印 `x_dir_to_gap / cmd_x_toward_gap / row_cmdx_reward` 直接核对动作奖励方向~~
+- [ ] [P0] 在 `rowCmdX` 已确认落地但量级仍远小于 `rowPush` 的阶段，先将 `rowCmdX` 提到可见量级、同时压低 `rowPush`，优先验证横移指令是否能被直接拉起
 
 ## 2026-03-26 训练一致性审计规则补强
 
