@@ -3125,10 +3125,27 @@ class HierarchicalHexapodEnv:
                     * row_forward_valid.float()
                     * gap_eff_valid.float()
                 )
+                row_gate_valid = gate_row * row_forward_valid.float() * gap_eff_valid.float()
+                row_gate_active = (
+                    (gate_row > 0.05)
+                    & row_forward_valid
+                    & gap_eff_valid
+                ).float()
+                row_push_active = (
+                    (gate_row > 0.05)
+                    & (push_err > 0.05)
+                    & row_forward_valid
+                    & gap_eff_valid
+                ).float()
+                row_forward_dist_log = row_forward_dist * row_forward_valid.float() * gap_eff_valid.float()
                 reward_dict['row_lat'] = row_lat_reward
                 reward_dict['row_gap'] = row_gap_reward
                 reward_dict['row_push_penalty'] = row_push_penalty
                 reward_dict['row_cmdx_reward'] = row_cmdx_reward
+                reward_dict['row_forward_dist'] = row_forward_dist_log
+                reward_dict['row_gate'] = row_gate_valid
+                reward_dict['row_gate_active'] = row_gate_active
+                reward_dict['row_push_active'] = row_push_active
                 reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_gap_reward + row_push_penalty + row_cmdx_reward
             total_reward = reward_dict['total']
 
@@ -4473,6 +4490,10 @@ def train(args):
             'row_gap',
             'row_push_penalty',
             'row_cmdx_reward',
+            'row_forward_dist',
+            'row_gate',
+            'row_gate_active',
+            'row_push_active',
             'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
@@ -6184,6 +6205,14 @@ def train(args):
         writer.add_scalar('Stats/TargetReflectCountMean', target_reflect_count_mean, iteration)
         writer.add_scalar('Stats/TargetResetDistError', target_reset_dist_error_mean, iteration)
         writer.add_scalar('Stats/TargetResetBearingErrorDeg', target_reset_bearing_error_deg_mean, iteration)
+        if 'row_forward_dist' in reward_term_means:
+            writer.add_scalar('Stats/RowForwardDist', reward_term_means['row_forward_dist'], iteration)
+        if 'row_gate' in reward_term_means:
+            writer.add_scalar('Stats/RowGate', reward_term_means['row_gate'], iteration)
+        if 'row_gate_active' in reward_term_means:
+            writer.add_scalar('Stats/RowGateActiveRatio', reward_term_means['row_gate_active'], iteration)
+        if 'row_push_active' in reward_term_means:
+            writer.add_scalar('Stats/RowPushActiveRatio', reward_term_means['row_push_active'], iteration)
         reward_log_keys = list(reward_term_means.keys())
         if use_avoid_local_map:
             reward_log_keys = [
@@ -6194,6 +6223,10 @@ def train(args):
                     'row_gap',
                     'row_push_penalty',
                     'row_cmdx_reward',
+                    'row_forward_dist',
+                    'row_gate',
+                    'row_gate_active',
+                    'row_push_active',
                     'timeout_bootstrap_bonus',
                     'avoid_band_penalty',
                     'collision',
@@ -6300,6 +6333,7 @@ def train(args):
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'CmdX pred/slew/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX |pred|/|slew|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
+                          f"""{'Row dFwd/gate/act/pushAct:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
                           f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""

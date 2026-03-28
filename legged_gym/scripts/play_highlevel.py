@@ -2521,6 +2521,10 @@ def main():
                 row_gap_right_eff_dbg = 0.0
                 row_x_err_now_dbg = 0.0
                 row_x_err_prev_dbg = 0.0
+                row_forward_dist_dbg = 0.0
+                row_gate_dbg = 0.0
+                row_push_err_dbg = 0.0
+                row_gate_active_dbg = 0
                 pass_vis_mean = 0.0
                 pass_sector_mean = 0.0
                 low_vis_mean = 0.0
@@ -2570,6 +2574,9 @@ def main():
                     ) = env._compute_nearest_row_gap_target(
                         robot_pos_dbg
                     )
+                    row_forward_dist_t, row_forward_valid_t = env._compute_nearest_row_forward_distance(
+                        robot_pos_dbg
+                    )
                     row_gap_row_y_dbg = float(row_gap_row_y_t[env_idx].detach().cpu())
                     row_gap_left_dbg = float(row_gap_left_t[env_idx].detach().cpu())
                     row_gap_right_dbg = float(row_gap_right_t[env_idx].detach().cpu())
@@ -2588,6 +2595,29 @@ def main():
                         row_x_err_prev_dbg = max(row_gap_left_eff_dbg - prev_robot_x_dbg, 0.0) + max(prev_robot_x_dbg - row_gap_right_eff_dbg, 0.0)
                     else:
                         row_x_err_prev_dbg = 0.0
+                    row_gate_on_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_on", 1.0)) if env.reward_cfg is not None else 1.0
+                    row_gate_full_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_full", 0.4)) if env.reward_cfg is not None else 0.4
+                    row_push_margin_dbg = float(getattr(env.reward_cfg, "avoid_row_push_margin", 0.25)) if env.reward_cfg is not None else 0.25
+                    row_forward_dist_dbg = float(row_forward_dist_t[env_idx].detach().cpu())
+                    row_gate_dbg = float(
+                        torch.clamp(
+                            (row_gate_on_dbg - row_forward_dist_t[env_idx]) / max(row_gate_on_dbg - row_gate_full_dbg, 1e-6),
+                            min=0.0,
+                            max=1.0,
+                        ).detach().cpu()
+                    )
+                    row_push_err_dbg = float(
+                        torch.clamp(
+                            torch.tensor(row_x_err_now_dbg, device=row_forward_dist_t.device) / max(row_push_margin_dbg, 1e-6),
+                            min=0.0,
+                            max=1.0,
+                        ).detach().cpu()
+                    )
+                    row_gate_active_dbg = int(
+                        row_gate_dbg > 0.05
+                        and bool(row_forward_valid_t[env_idx].item())
+                        and bool(row_gap_eff_valid_t[env_idx].item())
+                    )
                     if reward_terms is not None and "row_lat" in reward_terms:
                         row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
                     else:
@@ -2672,7 +2702,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} x_dir={:.1f} cmd_x_toward={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_toward={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2695,6 +2725,10 @@ def main():
                         row_x_err_now_dbg,
                         row_lat_dbg,
                         row_cmdx_dbg,
+                        row_forward_dist_dbg,
+                        row_gate_dbg,
+                        row_push_err_dbg,
+                        row_gate_active_dbg,
                         x_dir_to_gap_dbg,
                         cmd_x_toward_gap_dbg,
                         clearance,
@@ -2717,6 +2751,7 @@ def main():
                 )
                 print(
                     "[PlayHigh][diag] goal_bear={:.3f} row_eff_width={:.3f} row_x={:.3f} row_err={:.3f} "
+                    "d_forward={:.3f} gate_row={:.3f} push_err={:.3f} gate_active={} "
                     "gap_center={:.3f} x_dir={:.1f} cmd_x_toward={:.3f} row_cmdx={:.3f} "
                     "pass_gate_dbg={:.3f} pass_occ_dbg={:.3f} cross_width_dbg={:.3f} vis_ratio={:.3f} "
                     "pass_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f}".format(
@@ -2724,6 +2759,10 @@ def main():
                         max(row_gap_right_eff_dbg - row_gap_left_eff_dbg, 0.0),
                         robot_x_dbg,
                         row_x_err_now_dbg,
+                        row_forward_dist_dbg,
+                        row_gate_dbg,
+                        row_push_err_dbg,
+                        row_gate_active_dbg,
                         row_gap_center_eff_dbg,
                         x_dir_to_gap_dbg,
                         cmd_x_toward_gap_dbg,
