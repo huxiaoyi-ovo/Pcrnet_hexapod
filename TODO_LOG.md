@@ -1784,3 +1784,8 @@
 
 - [x] Must: 将 `rowCmdX` 从 `clamp(cmd_pred_x * x_dir_to_gap, min=0)` 的单边正奖励，改成有符号方向奖励，让背离 gap 的横移也产生负梯度
 - [x] Must: 同步更新训练统计与 `play` 调试口径，避免继续用旧的 `toward` 正半轴解释方向学习
+
+## 2026-03-28 avoid 放大 rowGap 方向结果信号
+
+- [x] Must: 将 `avoid_row_gap_scale` 从 `8.0` 提到 `32.0`，优先让“往正确通路靠近”的位置结果在早期就能进入可见量级
+- [x] Must: 保持其余奖励、碰撞重置与课程设置不动，只做单因素验证 `rowGap -> signed_pos/neg -> succ` 这条链
