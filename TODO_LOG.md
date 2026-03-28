@@ -1794,3 +1794,8 @@
 
 - [x] Must: 在同一时刻同一状态下，同时比较原始图、左右翻转图、全零图的 deterministic `cmd_pred_x`，直接验证高层是否真的在用图里的左右信息
 - [x] Must: 只做 `play` 调试输出，不改真实执行命令，不影响训练与评测口径
+
+## 2026-03-28 高层 CoordConv 轴顺序对齐
+
+- [x] Must: 修正高层 affordance encoder 的 CoordConv 坐标轴解释，使其与上游地图真实空间轴顺序 `[x_right, y_forward]` 一致
+- [x] Must: 保持上游 GT 图构造、reward 几何与 `play` 左右翻图维度不变，只修正 encoder 侧坐标通道，避免继续把左右信息读成错位语义

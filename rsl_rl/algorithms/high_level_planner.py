@@ -67,9 +67,11 @@ class AffordanceCNNEncoder(nn.Module):
 
     def forward(self, affordance_map: torch.Tensor) -> torch.Tensor:
         batch, _, height, width = affordance_map.shape
-        coord_x = torch.linspace(-1.0, 1.0, width, device=affordance_map.device)
-        coord_y = torch.linspace(-1.0, 1.0, height, device=affordance_map.device)
-        yy, xx = torch.meshgrid(coord_y, coord_x, indexing="ij")
+        # Upstream affordance maps use spatial order [x_right, y_forward],
+        # i.e. height stores x and width stores y.
+        coord_x = torch.linspace(-1.0, 1.0, height, device=affordance_map.device)
+        coord_y = torch.linspace(-1.0, 1.0, width, device=affordance_map.device)
+        xx, yy = torch.meshgrid(coord_x, coord_y, indexing="ij")
         coord = torch.stack([xx, yy], dim=0).unsqueeze(0).expand(batch, -1, -1, -1)
         x = torch.cat([affordance_map, coord], dim=1)
         x = self.cnn(x)
