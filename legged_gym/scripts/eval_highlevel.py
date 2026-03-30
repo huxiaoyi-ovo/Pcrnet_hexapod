@@ -146,6 +146,7 @@ class EpisodeAccumulator:
     gate_switch_count: int = 0
     cmd_jerk_lin_sum: float = 0.0
     cmd_jerk_ang_sum: float = 0.0
+    rotate_only_steps: int = 0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     cmd_f_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -665,6 +666,28 @@ class EvalRunner:
                     if math.isfinite(cross_line_val):
                         ai.cross_line_dist_min = min(ai.cross_line_dist_min, cross_line_val)
 
+                    if isinstance(post_info, dict):
+                        rotate_only_t = post_info.get("rotate_only_active", None)
+                        if torch.is_tensor(rotate_only_t):
+                            ai.rotate_only_steps += int(bool(rotate_only_t[i].item()))
+
+                        cmd_final_t = post_info.get("cmd_exec_mean", None)
+                        if cmd_final_t is None:
+                            cmd_final_t = post_info.get("cmd_override_final", None)
+                        if cmd_final_t is None:
+                            cmd_final_t = post_info.get("cmd_post", post_info.get("cmd_slew", cmd_raw))
+                        if torch.is_tensor(cmd_final_t):
+                            cmd_final_v = [float(x) for x in cmd_final_t[i].detach().cpu().tolist()[:3]]
+                            for j in range(3):
+                                ai.cmd_final_sum[j] += cmd_final_v[j]
+                            if ai.prev_cmd_final is not None:
+                                dx = cmd_final_v[0] - ai.prev_cmd_final[0]
+                                dy = cmd_final_v[1] - ai.prev_cmd_final[1]
+                                dw = cmd_final_v[2] - ai.prev_cmd_final[2]
+                                ai.cmd_jerk_lin_sum += math.hypot(dx, dy)
+                                ai.cmd_jerk_ang_sum += abs(dw)
+                            ai.prev_cmd_final = cmd_final_v
+
                     if self.args.skill == "moe" and isinstance(post_info, dict):
                         gate_raw_t = post_info.get("gate_y_raw", None)
                         y_eff_t = post_info.get("y_eff", None)
@@ -675,7 +698,6 @@ class EvalRunner:
                         risk_a_t = post_info.get("risk_A", None)
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
-                        cmd_final_t = post_info.get("cmd_exec_mean", post_info.get("cmd_slew", cmd_raw))
                         clearance_pp_t = post_info.get("clearance_pp", None)
                         safe_thr_t = post_info.get("post_safe_distance", None)
 
@@ -705,17 +727,6 @@ class EvalRunner:
                             cmd_a_v = [float(x) for x in cmd_a_t[i].detach().cpu().tolist()[:3]]
                             for j in range(3):
                                 ai.cmd_a_sum[j] += cmd_a_v[j]
-                        if torch.is_tensor(cmd_final_t):
-                            cmd_final_v = [float(x) for x in cmd_final_t[i].detach().cpu().tolist()[:3]]
-                            for j in range(3):
-                                ai.cmd_final_sum[j] += cmd_final_v[j]
-                            if ai.prev_cmd_final is not None:
-                                dx = cmd_final_v[0] - ai.prev_cmd_final[0]
-                                dy = cmd_final_v[1] - ai.prev_cmd_final[1]
-                                dw = cmd_final_v[2] - ai.prev_cmd_final[2]
-                                ai.cmd_jerk_lin_sum += math.hypot(dx, dy)
-                                ai.cmd_jerk_ang_sum += abs(dw)
-                            ai.prev_cmd_final = cmd_final_v
                         if torch.is_tensor(clearance_pp_t) and safe_thr_t is not None:
                             safe_thr_v = _safe_float(
                                 safe_thr_t[i].item() if torch.is_tensor(safe_thr_t) and safe_thr_t.ndim > 0 else float(safe_thr_t),
@@ -773,6 +784,7 @@ class EvalRunner:
                             "risk_a_mean": ai.risk_a_sum / denom_steps,
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
+                            "rotate_only_rate": ai.rotate_only_steps / denom_steps,
                             "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
                             "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
                             "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
@@ -828,6 +840,7 @@ class EvalRunner:
         risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
         switch_vals = _clean([r.get("switch_rate", float("nan")) for r in rows])
         near_miss_vals = _clean([r.get("near_miss_rate", float("nan")) for r in rows])
+        rotate_only_vals = _clean([r.get("rotate_only_rate", float("nan")) for r in rows])
         cmd_jerk_lin_vals = _clean([r.get("cmd_jerk_lin_mean", float("nan")) for r in rows])
         cmd_jerk_ang_vals = _clean([r.get("cmd_jerk_ang_mean", float("nan")) for r in rows])
 
@@ -861,6 +874,7 @@ class EvalRunner:
             "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
             "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
             "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
+            "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
             "cmd_jerk_lin_mean": float(np.mean(cmd_jerk_lin_vals)) if cmd_jerk_lin_vals else float("nan"),
             "cmd_jerk_ang_mean": float(np.mean(cmd_jerk_ang_vals)) if cmd_jerk_ang_vals else float("nan"),
             "inference_latency_ms_p50": _quantile(latency_ms_samples, 0.50),
@@ -888,6 +902,7 @@ class EvalRunner:
             risk_f_d = _clean([r.get("risk_f_mean", float("nan")) for r in sub])
             switch_d = _clean([r.get("switch_rate", float("nan")) for r in sub])
             near_miss_d = _clean([r.get("near_miss_rate", float("nan")) for r in sub])
+            rotate_only_d = _clean([r.get("rotate_only_rate", float("nan")) for r in sub])
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
@@ -915,6 +930,7 @@ class EvalRunner:
                 "risk_f_mean": float(np.mean(risk_f_d)) if risk_f_d else float("nan"),
                 "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
                 "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
+                "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
             }
 
         result = {
@@ -993,6 +1009,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "risk_a_mean",
         "switch_rate",
         "near_miss_rate",
+        "rotate_only_rate",
         "cmd_jerk_lin_mean",
         "cmd_jerk_ang_mean",
         "cmd_f_mean_x",

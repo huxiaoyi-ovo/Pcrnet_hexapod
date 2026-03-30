@@ -60,6 +60,18 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-03-30 avoid 连续避障收口阶段
+
+- [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
+
+## 2026-03-30 avoid 机身长度感知的行释放条件
+
+- [x] ~~[P0] 将 `s_avoid_basic` 的当前行释放 / cross_line / success 判定从“机身中心过线”收口为“机身后缘过线”，避免头部刚过第一行就提前为下一行横移，导致后半身蹭回当前行障碍~~
+
+## 2026-03-30 avoid rotate-only 回正门控
+
+- [x] ~~[P0] 将 `s_avoid_basic` 的回正策略从“常态 `omega` 混合控制”收口为“偏航超阈值时的 rotate-only 硬门控”：只在已基本进 gap 或当前行已释放时触发，触发后强制 `cmd_x/cmd_y=0`，仅保留限幅 `cmd_omega`~~
+
 ## 2026-03-26 CONTEXT 文档刷新
 
 - [x] ~~[P1] 用当前最终生效的 avoid 专家奖励、课程升级、固定模板几何、调试口径与训练命令，覆盖刷新 `CONTEXT.md`，避免后续新会话继续沿用旧的显存排查主线与过期奖励配置~~
@@ -1804,3 +1816,9 @@
 
 - [x] Must: 在原图/翻图/清零图三路 deterministic 对照上，同时打印 `affordance encoder` 和 actor hidden 的差异，直接判断图信息是没编码出来，还是编码出来后被后续状态/目标淹没
 - [x] Must: 保持真实执行命令不变，只补 `play` 调试输出
+
+## 2026-03-30 avoid 几何口径与执行层可见性一致性修复
+
+- [x] Must: 将 `s_avoid` 的逐行 `progress` 也改成按机身后缘计算，和 `success/cross_line` 口径统一
+- [x] Must: 将高层命令日志拆成 `cmd_post` 与最终执行命令，避免 `rotate_only` 之后继续用混合口径解释训练
+- [x] Must: 在 `play/eval` 里补出 `rotate_only_active` 与最终命令可见性，方便直接判断门控是否在抢控制权

@@ -488,7 +488,11 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Avoid expert stage: no moving target actor (keep target non-collision by design).
         moving_target_enable = False
         spawn_edge_enable = False
-        max_ang_vel_command = 0.0
+        max_ang_vel_command = 0.3
+        rotate_only_yaw_on_deg = 15.0
+        rotate_only_yaw_off_deg = 8.0
+        rotate_only_yaw_gain = 0.8
+        rotate_only_gap_margin = 0.08
         goal_mode = "fixed"
         goal_min_distance = 2.0
         goal_range_x = [-1.2, 1.2]
@@ -497,6 +501,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         goal_sample_max_tries = 32
         goal_allow_fallback = True
         goal_behind_obstacles = True
+        avoid_body_half_length = 0.25
         goal_behind_margin_y = 0.25
         goal_behind_x_half_width = 0.45
         goal_side_threshold = 0.55
@@ -562,6 +567,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_near_release_margin"] = 0.08
         reward_cfg["avoid_row_gate_on"] = 1.0
         reward_cfg["avoid_row_gate_full"] = 0.4
+        reward_cfg["avoid_smooth_scale"] = 4.0
+        reward_cfg["avoid_heading_keep_scale"] = 0.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):

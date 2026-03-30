@@ -2588,11 +2588,23 @@ def main():
                 cmd_pred = cmd[env_idx].detach().cpu().numpy()
                 cmd_exec = None
                 cmd_exec_mean = None
+                cmd_post = None
+                cmd_override_final = None
+                rotate_only_active_dbg = 0
                 post_info = info.get("post_info") if info is not None else None
                 if isinstance(post_info, dict):
                     cmd_exec_mean_t = post_info.get("cmd_exec_mean", None)
                     if torch.is_tensor(cmd_exec_mean_t):
                         cmd_exec_mean = cmd_exec_mean_t[env_idx].detach().cpu().numpy()
+                    cmd_post_t = post_info.get("cmd_post", post_info.get("cmd_slew", None))
+                    if torch.is_tensor(cmd_post_t):
+                        cmd_post = cmd_post_t[env_idx].detach().cpu().numpy()
+                    cmd_override_t = post_info.get("cmd_override_final", None)
+                    if torch.is_tensor(cmd_override_t):
+                        cmd_override_final = cmd_override_t[env_idx].detach().cpu().numpy()
+                    rotate_only_t = post_info.get("rotate_only_active", None)
+                    if torch.is_tensor(rotate_only_t):
+                        rotate_only_active_dbg = int(bool(rotate_only_t[env_idx].item()))
                 if hasattr(env.env, "commands"):
                     cmd_exec = env.env.commands[env_idx, :3].detach().cpu().numpy()
                 cmd_show = cmd_exec_mean if cmd_exec_mean is not None else (cmd_exec if cmd_exec is not None else cmd_pred)
@@ -2672,6 +2684,7 @@ def main():
                         goal_world_bear_y = math.atan2(rel_x, rel_y)
                 if goal is not None:
                     bearing_y = math.atan2(goal[0], goal[1])
+                yaw_err_deg = abs(yaw_policy) * (180.0 / math.pi)
                 if hasattr(env.env, "goal_buf"):
                     goal_raw_dbg = env.env.goal_buf[env_idx].detach().cpu().numpy()
                     goal_raw_bear_xy = math.atan2(goal_raw_dbg[1], goal_raw_dbg[0])
@@ -2886,7 +2899,7 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_signed={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_signed={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} yaw_err_deg={:.1f} rot_only={} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
                         progress,
@@ -2928,9 +2941,22 @@ def main():
                         cmd_x_dir_dbg,
                         yaw_raw,
                         yaw_policy,
+                        yaw_err_deg,
+                        rotate_only_active_dbg,
                         bearing_y,
                         heading_err_pos,
                         heading_err_neg,
+                    )
+                )
+                cmd_post_str = "None" if cmd_post is None else np.array2string(cmd_post, precision=3, floatmode="fixed")
+                cmd_override_str = "None" if cmd_override_final is None else np.array2string(
+                    cmd_override_final, precision=3, floatmode="fixed"
+                )
+                print(
+                    "[PlayHigh][cmd] post={} final={} exec={}".format(
+                        cmd_post_str,
+                        cmd_override_str,
+                        cmd_str,
                     )
                 )
                 print(

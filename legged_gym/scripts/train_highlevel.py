@@ -1351,6 +1351,8 @@ class HierarchicalHexapodEnv:
         self.prev_forward_clearance_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.prev_align_center_abs = torch.zeros(self.num_envs, device=device)
         self.prev_align_center_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.prev_cmd_exec_mean = torch.zeros(self.num_envs, 3, device=device)
+        self.rotate_only_active = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         
         # 频率控制 (High-Level 10Hz, Low-Level 50Hz)
         self.decimation = getattr(args, 'decimation', 5)
@@ -1464,6 +1466,8 @@ class HierarchicalHexapodEnv:
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
         self.prev_robot_pos = self.env.root_states[:, :3].clone()
+        self.prev_cmd_exec_mean.zero_()
+        self.rotate_only_active.zero_()
         if hasattr(self.env, "goal_world"):
             self.prev_goal_world = self.env.goal_world.clone()
         
@@ -2331,6 +2335,7 @@ class HierarchicalHexapodEnv:
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
         forward_margin = 0.05
+        body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
 
         def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
             if slot_id < cap_slots:
@@ -2355,10 +2360,11 @@ class HierarchicalHexapodEnv:
                 continue
             obs_xy = self.env.s_avoid_pos_world[env_id, active_slots, :2]
             row_candidates = []
+            rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
             for idx, slot in enumerate(active_slots.tolist()):
                 cy = float(obs_xy[idx, 1].item())
                 _, half_y = slot_half_extents(env_id, int(slot))
-                if (cy + half_y - float(robot_pos[env_id, 1].item())) <= forward_margin:
+                if (cy + half_y - rear_y) <= forward_margin:
                     continue
                 row_candidates.append((slot, cy))
             if len(row_candidates) == 0:
@@ -2373,7 +2379,7 @@ class HierarchicalHexapodEnv:
                 continue
 
             min_dist = self.affordance_map_extent
-            ry = float(robot_pos[env_id, 1].item())
+            ry = rear_y
             for slot in row_slots:
                 cy = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
                 _, half_y = slot_half_extents(env_id, int(slot))
@@ -2727,9 +2733,53 @@ class HierarchicalHexapodEnv:
         velocity_cmd, post_info = self.post_processor.process(
             cmd_vel, clearance_pp, beta=self.beta_override
         )
+        velocity_cmd_post = velocity_cmd.detach().clone()
         if bool(getattr(self.env, "s_avoid_enabled", False)):
             velocity_cmd = velocity_cmd.clone()
             velocity_cmd[:, 1] = torch.clamp(velocity_cmd[:, 1], min=self.forced_forward_speed)
+            nav_cfg = getattr(self.env.cfg, "navigation", None)
+            yaw_on_deg = float(getattr(nav_cfg, "rotate_only_yaw_on_deg", 15.0))
+            yaw_off_deg = float(getattr(nav_cfg, "rotate_only_yaw_off_deg", 8.0))
+            yaw_gain = float(getattr(nav_cfg, "rotate_only_yaw_gain", 0.8))
+            rotate_gap_margin = float(getattr(nav_cfg, "rotate_only_gap_margin", 0.08))
+            row_gate_on = float(getattr(self.reward_cfg, "avoid_row_gate_on", 1.0))
+            robot_pos_now = self.env.root_states[:, :3]
+            (
+                _gap_center_now,
+                _row_y_now,
+                _gap_valid_now,
+                _gap_left_now,
+                _gap_right_now,
+                gap_left_eff_now,
+                gap_right_eff_now,
+                gap_eff_valid_now,
+            ) = self._compute_nearest_row_gap_target(robot_pos_now)
+            row_err_abs_now = self._distance_to_interval(robot_pos_now[:, 0], gap_left_eff_now, gap_right_eff_now)
+            row_forward_dist_now, row_forward_valid_now = self._compute_nearest_row_forward_distance(robot_pos_now)
+            rotate_in_gap = gap_eff_valid_now & (row_err_abs_now <= rotate_gap_margin)
+            rotate_row_released = row_forward_valid_now & (row_forward_dist_now >= row_gate_on)
+            rotate_allow = rotate_in_gap | rotate_row_released
+            quat_now = self.env.root_states[:, 3:7]
+            yaw_now = self._quat_to_yaw(quat_now)
+            heading_offset = float(getattr(self.reward_cfg, "heading_offset_rad", 0.0))
+            yaw_error = torch.atan2(
+                torch.sin(yaw_now + heading_offset),
+                torch.cos(yaw_now + heading_offset),
+            )
+            yaw_deg = torch.abs(yaw_error) * (180.0 / math.pi)
+            rotate_only_active = (
+                (yaw_deg > yaw_on_deg)
+                | (self.rotate_only_active & (yaw_deg > yaw_off_deg))
+            ) & rotate_allow
+            omega_cmd = torch.clamp(
+                -yaw_gain * yaw_error,
+                min=-float(getattr(nav_cfg, "max_ang_vel_command", 0.3)),
+                max=float(getattr(nav_cfg, "max_ang_vel_command", 0.3)),
+            )
+            velocity_cmd[rotate_only_active, 0] = 0.0
+            velocity_cmd[rotate_only_active, 1] = 0.0
+            velocity_cmd[rotate_only_active, 2] = omega_cmd[rotate_only_active]
+            self.rotate_only_active = rotate_only_active.detach().clone()
             if getattr(self.post_processor, "last_cmd", None) is not None:
                 self.post_processor.last_cmd = velocity_cmd.detach().clone()
         if clearance_aff_map is not None:
@@ -2741,10 +2791,13 @@ class HierarchicalHexapodEnv:
         if cmd_preview is not None:
             post_info_payload["cmd_preview_for_clearance"] = cmd_preview.detach().clone()
         post_info_payload.setdefault("cmd_raw", cmd_vel)
-        post_info_payload["cmd_slew"] = velocity_cmd.detach().clone()
-        post_info_payload["cmd_clamped"] = velocity_cmd.detach().clone()
+        post_info_payload["cmd_post"] = velocity_cmd_post.detach().clone()
+        post_info_payload["cmd_override_final"] = velocity_cmd.detach().clone()
+        post_info_payload["cmd_slew"] = velocity_cmd_post.detach().clone()
+        post_info_payload["cmd_clamped"] = velocity_cmd_post.detach().clone()
         if bool(getattr(self.env, "s_avoid_enabled", False)):
             post_info_payload["forced_forward_speed"] = self.forced_forward_speed.detach().clone()
+            post_info_payload["rotate_only_active"] = self.rotate_only_active.detach().clone()
         post_info_payload["clearance_pp"] = clearance_pp
         # Prefer per-call effective params (beta-adjusted) when available.
         safe_distance = post_info_payload.get("safe_distance", getattr(self.post_processor, "safe_distance", None))
@@ -3023,8 +3076,11 @@ class HierarchicalHexapodEnv:
                     )
                     cross_line_local_y[stage_ids == stage_id] = last_row_y + 0.3
                 cross_line_world_y = self.env.env_origins[:, 1] + cross_line_local_y
-                curr_dist = torch.clamp(cross_line_world_y - robot_pos[:, 1], min=0.0)
-                prev_dist = torch.clamp(cross_line_world_y - self.prev_robot_pos[:, 1], min=0.0)
+                body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
+                curr_rear_y = robot_pos[:, 1] - body_half_length
+                prev_rear_y = self.prev_robot_pos[:, 1] - body_half_length
+                curr_dist = torch.clamp(cross_line_world_y - curr_rear_y, min=0.0)
+                prev_dist = torch.clamp(cross_line_world_y - prev_rear_y, min=0.0)
                 approach_progress = (prev_dist - curr_dist) * float(self.reward_cfg.goal_approach_scale)
                 prev_total = reward_dict['total']
                 prev_approach = reward_dict.get('approach', torch.zeros_like(approach_progress))
@@ -3132,6 +3188,8 @@ class HierarchicalHexapodEnv:
                     * cmd_x_signed
                     * row_forward_valid.float()
                 )
+                avoid_smooth_scale = float(getattr(self.reward_cfg, "avoid_smooth_scale", 0.0))
+                heading_keep_scale = float(getattr(self.reward_cfg, "avoid_heading_keep_scale", 0.0))
                 row_cmdx_log_mask = row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_valid = gate_row * row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_active = (
@@ -3146,10 +3204,26 @@ class HierarchicalHexapodEnv:
                     & gap_eff_valid
                 ).float()
                 row_forward_dist_log = row_forward_dist * row_forward_valid.float() * gap_eff_valid.float()
+                cmd_x_delta = cmd_exec_mean[:, 0] - self.prev_cmd_exec_mean[:, 0]
+                avoid_smooth_penalty = (
+                    -avoid_smooth_scale
+                    * (cmd_x_delta ** 2)
+                )
+                yaw_error_wrapped = torch.atan2(
+                    torch.sin(heading_error),
+                    torch.cos(heading_error),
+                )
+                heading_keep_reward = (
+                    -heading_keep_scale
+                    * row_gate_active
+                    * (yaw_error_wrapped ** 2)
+                )
                 reward_dict['row_lat'] = row_lat_reward
                 reward_dict['row_gap'] = row_gap_reward
                 reward_dict['row_push_penalty'] = row_push_penalty
                 reward_dict['row_cmdx_reward'] = row_cmdx_reward
+                reward_dict['avoid_smooth_penalty'] = avoid_smooth_penalty
+                reward_dict['heading_keep'] = heading_keep_reward
                 reward_dict['row_cmdx_signed'] = cmd_x_signed * row_cmdx_log_mask
                 reward_dict['row_cmdx_signed_abs'] = cmd_x_signed.abs() * row_cmdx_log_mask
                 reward_dict['row_cmdx_signed_pos'] = torch.clamp(cmd_x_signed, min=0.0) * row_cmdx_log_mask
@@ -3158,7 +3232,15 @@ class HierarchicalHexapodEnv:
                 reward_dict['row_gate'] = row_gate_valid
                 reward_dict['row_gate_active'] = row_gate_active
                 reward_dict['row_push_active'] = row_push_active
-                reward_dict['total'] = reward_dict['total'] + row_lat_reward + row_gap_reward + row_push_penalty + row_cmdx_reward
+                reward_dict['total'] = (
+                    reward_dict['total']
+                    + row_lat_reward
+                    + row_gap_reward
+                    + row_push_penalty
+                    + row_cmdx_reward
+                    + avoid_smooth_penalty
+                    + heading_keep_reward
+                )
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -3367,6 +3449,7 @@ class HierarchicalHexapodEnv:
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
         self.prev_gate_y = gate_y_raw_curr.clone()
+        self.prev_cmd_exec_mean = cmd_exec_mean.detach().clone()
         if nearest_obs is not None:
             self.prev_nearest_obs_dist = torch.nan_to_num(
                 nearest_obs,
@@ -3518,6 +3601,8 @@ class HierarchicalHexapodEnv:
                 self.env.compute_observations()
             self._refresh_depth_images(force=True)
             self.prev_robot_pos[reset_ids] = self.env.root_states[reset_ids, :3]
+            self.prev_cmd_exec_mean[reset_ids] = 0.0
+            self.rotate_only_active[reset_ids] = False
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
                 self.prev_goal_world[reset_ids] = self.env.goal_world[reset_ids]
             self.prev_nearest_obs_dist[reset_ids] = 0.0
@@ -3544,6 +3629,8 @@ class HierarchicalHexapodEnv:
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
+            self.prev_cmd_exec_mean[done_any] = 0.0
+            self.rotate_only_active[done_any] = False
             self.prev_nearest_obs_dist[done_any] = 0.0
             self.prev_nearest_obs_valid[done_any] = False
             self.prev_forward_clearance[done_any] = 0.0
@@ -4506,6 +4593,8 @@ def train(args):
             'row_gap',
             'row_push_penalty',
             'row_cmdx_reward',
+            'avoid_smooth_penalty',
+            'heading_keep',
             'row_cmdx_signed',
             'row_cmdx_signed_abs',
             'row_cmdx_signed_pos',
@@ -5105,14 +5194,16 @@ def train(args):
                         if env_info is not None and isinstance(env_info, dict):
                             post_info = env_info.get("post_info", None)
                             if post_info is not None and isinstance(post_info, dict):
-                                cmd_slew = post_info.get("cmd_slew", None)
-                                if cmd_slew is not None:
-                                    if not torch.is_tensor(cmd_slew):
-                                        cmd_slew = torch.as_tensor(cmd_slew, device=device)
-                                    if cmd_slew.dim() == 1:
-                                        cmd_slew = cmd_slew.unsqueeze(0)
-                                    if cmd_slew.shape[0] == env.num_envs and cmd_slew.shape[1] >= 3:
-                                        cmd_omega_eval = cmd_slew[:, 2].detach()
+                                cmd_override = post_info.get("cmd_override_final", None)
+                                if cmd_override is None:
+                                    cmd_override = post_info.get("cmd_exec_mean", None)
+                                if cmd_override is not None:
+                                    if not torch.is_tensor(cmd_override):
+                                        cmd_override = torch.as_tensor(cmd_override, device=device)
+                                    if cmd_override.dim() == 1:
+                                        cmd_override = cmd_override.unsqueeze(0)
+                                    if cmd_override.shape[0] == env.num_envs and cmd_override.shape[1] >= 3:
+                                        cmd_omega_eval = cmd_override[:, 2].detach()
                         quat_after = env.env.root_states[:, 3:7]
                         x_a, y_a, z_a, w_a = quat_after[:, 0], quat_after[:, 1], quat_after[:, 2], quat_after[:, 3]
                         yaw_after = torch.atan2(
@@ -5178,7 +5269,9 @@ def train(args):
             if post_info is not None and isinstance(post_info, dict):
                 cmd_diag_exec = post_info.get('cmd_exec_mean', None)
                 if cmd_diag_exec is None:
-                    cmd_diag_exec = post_info.get('cmd_slew', None)
+                    cmd_diag_exec = post_info.get('cmd_override_final', None)
+                if cmd_diag_exec is None:
+                    cmd_diag_exec = post_info.get('cmd_post', None)
                 if cmd_diag_exec is not None and not torch.is_tensor(cmd_diag_exec):
                     cmd_diag_exec = torch.as_tensor(cmd_diag_exec, device=device)
                 if torch.is_tensor(cmd_diag_exec) and cmd_diag_exec.dim() == 1:
@@ -5192,7 +5285,9 @@ def train(args):
                 cmd_pred_x_abs_sum += torch.abs(cmd_used[:, 0]).sum()
             cmd_diag_slew = None
             if post_info is not None and isinstance(post_info, dict):
-                cmd_diag_slew = post_info.get('cmd_slew', None)
+                cmd_diag_slew = post_info.get('cmd_post', None)
+                if cmd_diag_slew is None:
+                    cmd_diag_slew = post_info.get('cmd_slew', None)
                 if cmd_diag_slew is not None and not torch.is_tensor(cmd_diag_slew):
                     cmd_diag_slew = torch.as_tensor(cmd_diag_slew, device=device)
                 if torch.is_tensor(cmd_diag_slew) and cmd_diag_slew.dim() == 1:
@@ -5301,7 +5396,11 @@ def train(args):
                     else min(clearance_min_value, clearance_min_curr)
                 )
             if post_info is not None:
-                cmd_exec_for_diag = post_info.get('cmd_exec_mean', post_info.get('cmd_slew', None))
+                cmd_exec_for_diag = post_info.get('cmd_exec_mean', None)
+                if cmd_exec_for_diag is None:
+                    cmd_exec_for_diag = post_info.get('cmd_override_final', None)
+                if cmd_exec_for_diag is None:
+                    cmd_exec_for_diag = post_info.get('cmd_post', None)
                 if cmd_exec_for_diag is not None:
                     if not torch.is_tensor(cmd_exec_for_diag):
                         cmd_exec_for_diag = torch.as_tensor(cmd_exec_for_diag, device=device)
@@ -6251,6 +6350,8 @@ def train(args):
                     'row_gap',
                     'row_push_penalty',
                     'row_cmdx_reward',
+                    'avoid_smooth_penalty',
+                    'heading_keep',
                     'row_forward_dist',
                     'row_gate',
                     'row_gate_active',
@@ -6377,6 +6478,7 @@ def train(args):
                           f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
+                          f"""{'Reward(smooth/headingKeep):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
                           f"""{'Reward(timeout bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""

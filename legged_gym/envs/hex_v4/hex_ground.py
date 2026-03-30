@@ -2939,7 +2939,8 @@ class HexGround(LeggedRobot):
             return torch.zeros(0, device=self.device, dtype=torch.float32)
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
-        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
+        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
         cross_line_y = torch.full_like(
             robot_local_y,
             float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)) + 0.3,
@@ -2972,7 +2973,8 @@ class HexGround(LeggedRobot):
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
-        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
+        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
         pass_counts = torch.zeros_like(stage_ids, dtype=torch.long)
         row_pass_offset = 0.30
         for stage_v in (1, 2, 3, 4):
