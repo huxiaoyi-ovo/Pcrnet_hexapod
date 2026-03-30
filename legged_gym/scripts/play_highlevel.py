@@ -2711,6 +2711,10 @@ def main():
                 row_gate_dbg = 0.0
                 row_push_err_dbg = 0.0
                 row_gate_active_dbg = 0
+                rear_y_dbg = 0.0
+                cross_line_y_dbg = 0.0
+                cross_line_dist_dbg = 0.0
+                success_dbg = 0
                 pass_vis_mean = 0.0
                 pass_sector_mean = 0.0
                 low_vis_mean = 0.0
@@ -2822,6 +2826,19 @@ def main():
                         row_cmdx_dbg = float(reward_terms["row_cmdx_reward"][env_idx].detach().cpu())
                     else:
                         row_cmdx_dbg = 0.0
+                    if isinstance(info, dict):
+                        rear_y_t = info.get("rear_y", None)
+                        cross_line_y_t = info.get("cross_line_y", None)
+                        cross_line_dist_t = info.get("cross_line_dist", None)
+                        success_t = info.get("success_mask", None)
+                        if torch.is_tensor(rear_y_t):
+                            rear_y_dbg = float(rear_y_t[env_idx].detach().cpu())
+                        if torch.is_tensor(cross_line_y_t):
+                            cross_line_y_dbg = float(cross_line_y_t[env_idx].detach().cpu())
+                        if torch.is_tensor(cross_line_dist_t):
+                            cross_line_dist_dbg = float(cross_line_dist_t[env_idx].detach().cpu())
+                        if torch.is_tensor(success_t):
+                            success_dbg = int(bool(success_t[env_idx].item()))
                     if pass_dir_norm > 1e-6:
                         pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
                     if cross_dir_norm > 1e-6:
@@ -2984,6 +3001,14 @@ def main():
                         pass_vis_mean,
                         pass_sector_mean,
                         sector_vis_ratio,
+                    )
+                )
+                print(
+                    "[PlayHigh][term] rear_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} success={}".format(
+                        rear_y_dbg,
+                        cross_line_y_dbg,
+                        cross_line_dist_dbg,
+                        success_dbg,
                     )
                 )
                 if map_support_dbg:

@@ -1226,6 +1226,14 @@ class HexGround(LeggedRobot):
         self.s_avoid_episode_goal_best_dist = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_episode_rows_passed_best = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_episode_rows_success_best = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.s_avoid_terminal_valid = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_collision = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_success = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_progress_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_row_success_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_cross_line_dist = torch.full(self.num_envs, float("nan"), device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_rear_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_cross_line_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage_per_env = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage = 1
@@ -1279,6 +1287,7 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage_exposure_rate"] = 0.0
         self.extras["avoid_stage_progress_rate"] = 0.0
         self.extras["avoid_stage_success_rate"] = 0.0
+        self.extras["avoid_stage_row_success_rate"] = 0.0
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = 0
         self.extras["avoid_stage_completed_episodes"] = 0
@@ -1292,6 +1301,7 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage_switch_exposure_rate"] = 0.0
         self.extras["avoid_stage_switch_progress_rate"] = 0.0
         self.extras["avoid_stage_switch_success_rate"] = 0.0
+        self.extras["avoid_stage_switch_row_success_rate"] = 0.0
         self.extras["avoid_stage4_shrink_event"] = 0.0
         self.extras["avoid_stage4_shrink_from_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_stage4_shrink_to_width"] = float(self.s_avoid_corridor_width)
@@ -2649,6 +2659,7 @@ class HexGround(LeggedRobot):
             "exposure": deque(maxlen=maxlen),
             "progress": deque(maxlen=maxlen),
             "success": deque(maxlen=maxlen),
+            "row_success": deque(maxlen=maxlen),
         }
 
     def _clear_s_avoid_metric_history(self, stage: int) -> None:
@@ -2662,16 +2673,17 @@ class HexGround(LeggedRobot):
         if stage == 4:
             self.s_avoid_last_shrink_stage_episode = 0
 
-    def _get_s_avoid_stage_metric_rates(self, stage: int) -> Tuple[float, float, float, float]:
+    def _get_s_avoid_stage_metric_rates(self, stage: int) -> Tuple[float, float, float, float, float]:
         stage = int(stage)
         stage_hists = self.s_avoid_stage_metric_hists.get(stage, None)
         if stage_hists is None:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0
         return (
             self._s_avoid_collision_rate(stage_hists["collision"]),
             self._s_avoid_collision_rate(stage_hists["exposure"]),
             self._s_avoid_collision_rate(stage_hists["progress"]),
             self._s_avoid_collision_rate(stage_hists["success"]),
+            self._s_avoid_collision_rate(stage_hists["row_success"]),
         )
 
     def _get_s_avoid_stage_window_size(self, stage: int) -> int:
@@ -2745,6 +2757,7 @@ class HexGround(LeggedRobot):
         episode_exposure_flags: Optional[torch.Tensor] = None,
         episode_progress_flags: Optional[torch.Tensor] = None,
         episode_success_flags: Optional[torch.Tensor] = None,
+        episode_row_success_flags: Optional[torch.Tensor] = None,
     ):
         if not self.s_avoid_enabled or episode_collision_flags.numel() == 0:
             return
@@ -2761,12 +2774,16 @@ class HexGround(LeggedRobot):
         if episode_success_flags is None:
             episode_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.float32)
         success_flags = episode_success_flags.detach().to(device="cpu", dtype=torch.float32).tolist()
-        for stage_id, flag, exposed, progressed, succeeded in zip(
+        if episode_row_success_flags is None:
+            episode_row_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.float32)
+        row_success_flags = episode_row_success_flags.detach().to(device="cpu", dtype=torch.float32).tolist()
+        for stage_id, flag, exposed, progressed, succeeded, row_succeeded in zip(
             stage_ids,
             flags,
             exposure_flags,
             progress_flags,
             success_flags,
+            row_success_flags,
         ):
             stage_hists = self.s_avoid_stage_metric_hists.get(int(stage_id), None)
             if stage_hists is None:
@@ -2775,6 +2792,7 @@ class HexGround(LeggedRobot):
             stage_hists["exposure"].append(1.0 if bool(exposed) else 0.0)
             stage_hists["progress"].append(float(progressed))
             stage_hists["success"].append(float(succeeded))
+            stage_hists["row_success"].append(float(row_succeeded))
             self.s_avoid_stage_completed_episodes[int(stage_id)] = (
                 int(self.s_avoid_stage_completed_episodes.get(int(stage_id), 0)) + 1
             )
@@ -2784,7 +2802,9 @@ class HexGround(LeggedRobot):
         stage_hists = self.s_avoid_stage_metric_hists.get(current_stage, None)
         if stage_hists is None:
             return
-        rate_stage, exposure_stage, progress_stage, success_stage = self._get_s_avoid_stage_metric_rates(current_stage)
+        rate_stage, exposure_stage, progress_stage, success_stage, row_success_stage = (
+            self._get_s_avoid_stage_metric_rates(current_stage)
+        )
         stage_window_size = self._get_s_avoid_stage_window_size(current_stage)
         stage_completed_eps = int(self.s_avoid_stage_completed_episodes.get(current_stage, 0))
         shrink_th = float(
@@ -2866,15 +2886,18 @@ class HexGround(LeggedRobot):
             self.extras["avoid_stage_switch_exposure_rate"] = float(exposure_stage)
             self.extras["avoid_stage_switch_progress_rate"] = float(progress_stage)
             self.extras["avoid_stage_switch_success_rate"] = float(success_stage)
+            self.extras["avoid_stage_switch_row_success_rate"] = float(row_success_stage)
             print(
                 f"[s_avoid_basic] stage {old_stage}->{self.s_avoid_stage} | "
                 f"stage_episodes={stage_completed_eps}, total_episodes={self.s_avoid_total_completed_episodes}, "
                 f"window={stage_window_size}, collision={rate_stage:.3f}, exposure={exposure_stage:.3f}, "
-                f"progress={progress_stage:.3f}, success={success_stage:.3f}"
+                f"progress={progress_stage:.3f}, success={success_stage:.3f}, row_success={row_success_stage:.3f}"
             )
 
         current_stage = int(self.s_avoid_stage)
-        rate_stage, exposure_stage, progress_stage, success_stage = self._get_s_avoid_stage_metric_rates(current_stage)
+        rate_stage, exposure_stage, progress_stage, success_stage, row_success_stage = (
+            self._get_s_avoid_stage_metric_rates(current_stage)
+        )
         stage_window_size = self._get_s_avoid_stage_window_size(current_stage)
         stage_completed_eps = int(self.s_avoid_stage_completed_episodes.get(current_stage, 0))
         shrink_rate = 0.0
@@ -2917,6 +2940,7 @@ class HexGround(LeggedRobot):
         self.extras["avoid_stage_exposure_rate"] = float(exposure_stage)
         self.extras["avoid_stage_progress_rate"] = float(progress_stage)
         self.extras["avoid_stage_success_rate"] = float(success_stage)
+        self.extras["avoid_stage_row_success_rate"] = float(row_success_stage)
         self.extras["avoid_corridor_width"] = float(self.s_avoid_corridor_width)
         self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
         self.extras["avoid_stage_completed_episodes"] = int(stage_completed_eps)
@@ -2930,29 +2954,39 @@ class HexGround(LeggedRobot):
         )
         self._update_s_avoid_preset_diag_extras()
 
-    def _get_s_avoid_cross_line_dist(
+    def _get_s_avoid_cross_line_terms(
         self,
         env_ids: torch.Tensor,
         stage_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if env_ids.numel() == 0:
-            return torch.zeros(0, device=self.device, dtype=torch.float32)
+            empty = torch.zeros(0, device=self.device, dtype=torch.float32)
+            return empty, empty, empty
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
         robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
         cross_line_y = torch.full_like(
             robot_local_y,
-            float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)) + 0.3,
+            float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)),
         )
         for stage_v in (1, 2, 3, 4):
             stage_last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_v}_last_row_y", 2.0))
             cross_line_y = torch.where(
                 stage_ids.to(device=self.device) == stage_v,
-                torch.full_like(robot_local_y, stage_last_row_y + 0.3),
+                torch.full_like(robot_local_y, stage_last_row_y),
                 cross_line_y,
             )
-        return torch.clamp(cross_line_y - robot_local_y, min=0.0)
+        cross_line_dist = torch.clamp(cross_line_y - robot_local_y, min=0.0)
+        return cross_line_dist, robot_local_y, cross_line_y
+
+    def _get_s_avoid_cross_line_dist(
+        self,
+        env_ids: torch.Tensor,
+        stage_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        cross_line_dist, _, _ = self._get_s_avoid_cross_line_terms(env_ids, stage_ids=stage_ids)
+        return cross_line_dist
 
     def _reset_s_avoid_episode_progress(self, env_ids: torch.Tensor) -> None:
         if (not self.s_avoid_enabled) or env_ids.numel() == 0:
@@ -2976,7 +3010,6 @@ class HexGround(LeggedRobot):
         body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
         robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
         pass_counts = torch.zeros_like(stage_ids, dtype=torch.long)
-        row_pass_offset = 0.30
         for stage_v in (1, 2, 3, 4):
             stage_mask = stage_ids == stage_v
             if not bool(stage_mask.any().item()):
@@ -2985,7 +3018,7 @@ class HexGround(LeggedRobot):
             if len(row_y) == 0:
                 continue
             thresholds = torch.tensor(
-                [float(y) + row_pass_offset for y in row_y],
+                [float(y) for y in row_y],
                 device=self.device,
                 dtype=robot_local_y.dtype,
             )
@@ -5211,20 +5244,39 @@ class HexGround(LeggedRobot):
                 completed_stage_ids = self.s_avoid_stage_per_env[completed_env_ids].clone()
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
+                completed_cross_line_dist, completed_rear_y, completed_cross_line_y = (
+                    self._get_s_avoid_cross_line_terms(
+                        completed_env_ids,
+                        stage_ids=completed_stage_ids,
+                    )
+                )
                 completed_progress = self._get_s_avoid_episode_row_progress_ratios(
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
-                completed_success = self._get_s_avoid_episode_row_success_ratios(
+                completed_success = self._get_s_avoid_episode_success_flags(
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
+                completed_row_success = self._get_s_avoid_episode_row_success_ratios(
+                    completed_env_ids,
+                    stage_ids=completed_stage_ids,
+                )
+                self.s_avoid_terminal_valid[completed_env_ids] = True
+                self.s_avoid_terminal_collision[completed_env_ids] = completed_flags
+                self.s_avoid_terminal_success[completed_env_ids] = completed_success
+                self.s_avoid_terminal_progress_ratio[completed_env_ids] = completed_progress
+                self.s_avoid_terminal_row_success_ratio[completed_env_ids] = completed_row_success
+                self.s_avoid_terminal_cross_line_dist[completed_env_ids] = completed_cross_line_dist
+                self.s_avoid_terminal_rear_y[completed_env_ids] = completed_rear_y
+                self.s_avoid_terminal_cross_line_y[completed_env_ids] = completed_cross_line_y
                 self._update_s_avoid_curriculum(
                     completed_flags,
                     completed_stage_ids,
                     completed_exposed,
                     completed_progress,
                     completed_success,
+                    completed_row_success,
                 )
             self.s_avoid_episode_collision[env_ids] = False
             self.s_avoid_episode_exposed[env_ids] = False

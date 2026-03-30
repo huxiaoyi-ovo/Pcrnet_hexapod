@@ -489,8 +489,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         moving_target_enable = False
         spawn_edge_enable = False
         max_ang_vel_command = 0.3
-        rotate_only_yaw_on_deg = 15.0
-        rotate_only_yaw_off_deg = 8.0
+        rotate_only_yaw_on_deg = 20.0
+        rotate_only_yaw_off_deg = 1.0
         rotate_only_yaw_gain = 0.8
         rotate_only_gap_margin = 0.08
         goal_mode = "fixed"
@@ -562,18 +562,19 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_group_tol"] = 0.25
         reward_cfg["avoid_row_margin"] = 0.15
         reward_cfg["avoid_row_effective_margin"] = 0.0
+        reward_cfg["avoid_row_release_offset"] = 0.15
         reward_cfg["avoid_row_near_scale"] = 0.0
         reward_cfg["avoid_row_near_sigma"] = 0.50
         reward_cfg["avoid_row_near_release_margin"] = 0.08
         reward_cfg["avoid_row_gate_on"] = 1.0
         reward_cfg["avoid_row_gate_full"] = 0.4
-        reward_cfg["avoid_smooth_scale"] = 4.0
+        reward_cfg["avoid_smooth_scale"] = 10.0
         reward_cfg["avoid_heading_keep_scale"] = 0.0
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
     class algorithm(HexGroundCfgPPO.algorithm):
-        entropy_coef = 0.08
+        entropy_coef = 0.04
 
     class runner(HexGroundCfgPPO.runner):
         experiment_name = "s_avoid_basic"

@@ -2191,7 +2191,8 @@ class HierarchicalHexapodEnv:
         wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
-        forward_margin = 0.05
+        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.15))
+        body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
         robot_half_width = 0.5 * float(getattr(self, "body_width", 0.44))
         eff_margin = float(getattr(self.reward_cfg, "avoid_row_effective_margin", 0.0))
         gap_shrink = max(robot_half_width + eff_margin, 0.0)
@@ -2219,10 +2220,10 @@ class HierarchicalHexapodEnv:
                 continue
             obs_xy = self.env.s_avoid_pos_world[env_id, active_slots, :2]
             row_candidates = []
+            rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
             for idx, slot in enumerate(active_slots.tolist()):
                 cy = float(obs_xy[idx, 1].item())
-                _, half_y = slot_half_extents(env_id, int(slot))
-                if (cy + half_y - float(robot_pos[env_id, 1].item())) <= forward_margin:
+                if rear_y >= (cy + row_release_offset):
                     continue
                 row_candidates.append((slot, cy))
             if len(row_candidates) == 0:
@@ -2334,7 +2335,7 @@ class HierarchicalHexapodEnv:
         wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
-        forward_margin = 0.05
+        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.15))
         body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
 
         def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
@@ -2363,8 +2364,7 @@ class HierarchicalHexapodEnv:
             rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
             for idx, slot in enumerate(active_slots.tolist()):
                 cy = float(obs_xy[idx, 1].item())
-                _, half_y = slot_half_extents(env_id, int(slot))
-                if (cy + half_y - rear_y) <= forward_margin:
+                if rear_y >= (cy + row_release_offset):
                     continue
                 row_candidates.append((slot, cy))
             if len(row_candidates) == 0:
@@ -3074,7 +3074,7 @@ class HierarchicalHexapodEnv:
                     last_row_y = float(
                         getattr(self.env.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0)
                     )
-                    cross_line_local_y[stage_ids == stage_id] = last_row_y + 0.3
+                    cross_line_local_y[stage_ids == stage_id] = last_row_y
                 cross_line_world_y = self.env.env_origins[:, 1] + cross_line_local_y
                 body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
                 curr_rear_y = robot_pos[:, 1] - body_half_length
@@ -3428,20 +3428,69 @@ class HierarchicalHexapodEnv:
         collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         cross_line_dist_snapshot = None
+        rear_y_snapshot = None
+        cross_line_y_snapshot = None
         s_avoid_episode_collision_snapshot = None
         if bool(getattr(self.env, "s_avoid_enabled", False)):
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
             if hasattr(self.env, "s_avoid_episode_collision"):
                 self.env.s_avoid_episode_collision |= strict_obstacle_contact_mask
                 s_avoid_episode_collision_snapshot = self.env.s_avoid_episode_collision.clone()
-            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
             if hasattr(self.env, "_get_s_avoid_episode_progress_flags"):
                 s_avoid_progress_mask = self.env._get_s_avoid_episode_progress_flags(env_ids)
-            if hasattr(self.env, "_get_s_avoid_cross_line_dist"):
+            if hasattr(self.env, "_get_s_avoid_cross_line_terms"):
+                cross_line_dist_snapshot, rear_y_snapshot, cross_line_y_snapshot = (
+                    self.env._get_s_avoid_cross_line_terms(env_ids)
+                )
+            elif hasattr(self.env, "_get_s_avoid_cross_line_dist"):
                 cross_line_dist_snapshot = self.env._get_s_avoid_cross_line_dist(env_ids)
             if hasattr(self.env, "_get_s_avoid_episode_success_flags"):
                 success_mask = self.env._get_s_avoid_episode_success_flags(env_ids)
                 done_any |= success_mask
                 manual_reset_mask |= success_mask
+            if done_during.any() and hasattr(self.env, "s_avoid_terminal_valid"):
+                terminal_mask = done_during & self.env.s_avoid_terminal_valid
+                if terminal_mask.any():
+                    if hasattr(self.env, "s_avoid_terminal_progress_ratio"):
+                        s_avoid_progress_mask = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_progress_ratio,
+                            s_avoid_progress_mask,
+                        )
+                    if hasattr(self.env, "s_avoid_terminal_success"):
+                        success_mask = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_success,
+                            success_mask,
+                        )
+                    if hasattr(self.env, "s_avoid_terminal_collision"):
+                        s_avoid_episode_collision_snapshot = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_collision,
+                            s_avoid_episode_collision_snapshot,
+                        )
+                    if (
+                        cross_line_dist_snapshot is not None
+                        and hasattr(self.env, "s_avoid_terminal_cross_line_dist")
+                    ):
+                        cross_line_dist_snapshot = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_cross_line_dist,
+                            cross_line_dist_snapshot,
+                        )
+                    if rear_y_snapshot is not None and hasattr(self.env, "s_avoid_terminal_rear_y"):
+                        rear_y_snapshot = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_rear_y,
+                            rear_y_snapshot,
+                        )
+                    if cross_line_y_snapshot is not None and hasattr(self.env, "s_avoid_terminal_cross_line_y"):
+                        cross_line_y_snapshot = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_cross_line_y,
+                            cross_line_y_snapshot,
+                        )
+                    self.env.s_avoid_terminal_valid[terminal_mask] = False
             collision_reset_mask = collision_mask.clone()
             done_any |= collision_reset_mask
             manual_reset_mask |= collision_reset_mask
@@ -3669,6 +3718,8 @@ class HierarchicalHexapodEnv:
             'success_mask': success_mask,
             's_avoid_progress_mask': s_avoid_progress_mask,
             'cross_line_dist': cross_line_dist_snapshot,
+            'rear_y': rear_y_snapshot,
+            'cross_line_y': cross_line_y_snapshot,
             's_avoid_episode_collision': s_avoid_episode_collision_snapshot,
             'timeout': timeout,
             'timeout_bootstrap_obs': timeout_bootstrap_obs,
@@ -4629,6 +4680,13 @@ def train(args):
         cmd_slew_x_abs_sum = torch.zeros((), device=device)
         cmd_exec_x_sum = torch.zeros((), device=device)
         cmd_exec_x_abs_sum = torch.zeros((), device=device)
+        cmd_x_delta_abs_sum = torch.zeros((), device=device)
+        cmd_x_delta_abs_active_sum = torch.zeros((), device=device)
+        cmd_x_sign_switch_count = torch.zeros((), device=device)
+        cmd_x_sign_switch_active_count = torch.zeros((), device=device)
+        cmd_x_switch_valid_count = torch.zeros((), device=device)
+        cmd_x_switch_valid_active_count = torch.zeros((), device=device)
+        cmd_x_gate_active_count = torch.zeros((), device=device)
         body_forward_speed_sum = torch.zeros((), device=device)
         body_backward_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
@@ -4669,6 +4727,7 @@ def train(args):
         aff_stack_filled_sum = torch.zeros((), device=device)
         prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
+        cmd_x_switch_threshold = 0.02
         expert_action_diff_sum = torch.zeros((), device=device)
         egpo_heading_align_cos_sum = torch.zeros((), device=device)
         egpo_heading_error_deg_samples = []
@@ -4688,6 +4747,7 @@ def train(args):
         avoid_exposure_rate100_value = 0.0
         avoid_progress_rate_value = 0.0
         avoid_success_rate_value = 0.0
+        avoid_row_success_rate_value = 0.0
         avoid_nearest_obstacle_dist_value = 5.0
         avoid_stage_switch_event_value = 0.0
         avoid_stage_switch_from_value = 0.0
@@ -4696,6 +4756,7 @@ def train(args):
         avoid_stage_switch_exposure_value = 0.0
         avoid_stage_switch_progress_value = 0.0
         avoid_stage_switch_success_value = 0.0
+        avoid_stage_switch_row_success_value = 0.0
         avoid_stage4_shrink_event_value = 0.0
         avoid_stage4_shrink_from_width_value = 0.0
         avoid_stage4_shrink_to_width_value = 0.0
@@ -5411,6 +5472,28 @@ def train(args):
                         delta_cmd[reset_mask_prev] = 0.0
                     cmd_jerk_lin_sum += torch.norm(delta_cmd[:, :2], dim=1).sum()
                     cmd_jerk_ang_sum += torch.abs(delta_cmd[:, 2]).sum()
+                    delta_cmd_x_abs = torch.abs(delta_cmd[:, 0])
+                    cmd_x_delta_abs_sum += delta_cmd_x_abs.sum()
+                    if reward_terms is not None and 'row_gate_active' in reward_terms:
+                        row_gate_active_mask = reward_terms['row_gate_active'] > 0.5
+                    else:
+                        row_gate_active_mask = torch.zeros((env.num_envs,), dtype=torch.bool, device=device)
+                    cmd_x_gate_active_count += row_gate_active_mask.float().sum()
+                    cmd_x_delta_abs_active_sum += delta_cmd_x_abs[row_gate_active_mask].sum()
+                    prev_cmd_x = prev_cmd_slew[:, 0]
+                    curr_cmd_x = cmd_exec_for_diag[:, 0]
+                    switch_valid = (
+                        (~reset_mask_prev)
+                        & (torch.abs(prev_cmd_x) > cmd_x_switch_threshold)
+                        & (torch.abs(curr_cmd_x) > cmd_x_switch_threshold)
+                    )
+                    sign_switch = switch_valid & ((prev_cmd_x * curr_cmd_x) < 0.0)
+                    cmd_x_switch_valid_count += switch_valid.float().sum()
+                    cmd_x_sign_switch_count += sign_switch.float().sum()
+                    switch_valid_active = switch_valid & row_gate_active_mask
+                    sign_switch_active = sign_switch & row_gate_active_mask
+                    cmd_x_switch_valid_active_count += switch_valid_active.float().sum()
+                    cmd_x_sign_switch_active_count += sign_switch_active.float().sum()
                     prev_cmd_slew = cmd_exec_for_diag.detach()
                 clearance_pp = post_info.get('clearance_pp', None)
                 if clearance_pp is not None:
@@ -5469,6 +5552,9 @@ def train(args):
                     avoid_success_rate_value = float(
                         extras.get("avoid_stage_success_rate", avoid_success_rate_value)
                     )
+                    avoid_row_success_rate_value = float(
+                        extras.get("avoid_stage_row_success_rate", avoid_row_success_rate_value)
+                    )
                     avoid_nearest_obstacle_dist_value = float(extras.get("avoid_nearest_obstacle_dist", avoid_nearest_obstacle_dist_value))
                     avoid_preset_retry_mean_value = float(
                         extras.get("avoid_preset_retry_mean", avoid_preset_retry_mean_value)
@@ -5508,6 +5594,9 @@ def train(args):
                     )
                     avoid_stage_switch_success_value = float(
                         extras.get("avoid_stage_switch_success_rate", avoid_stage_switch_success_value)
+                    )
+                    avoid_stage_switch_row_success_value = float(
+                        extras.get("avoid_stage_switch_row_success_rate", avoid_stage_switch_row_success_value)
                     )
                     avoid_stage4_shrink_event_value = float(
                         extras.get("avoid_stage4_shrink_event", avoid_stage4_shrink_event_value)
@@ -6088,6 +6177,19 @@ def train(args):
         cmd_slew_x_abs_mean = (cmd_slew_x_abs_sum / total_samples).item()
         cmd_exec_x_mean = (cmd_exec_x_sum / total_samples).item()
         cmd_exec_x_abs_mean = (cmd_exec_x_abs_sum / total_samples).item()
+        cmd_x_delta_abs_mean = (cmd_x_delta_abs_sum / total_samples).item()
+        cmd_x_delta_abs_active_mean = (
+            (cmd_x_delta_abs_active_sum / cmd_x_gate_active_count.clamp_min(1.0)).item()
+            if float(cmd_x_gate_active_count.item()) > 0.0 else 0.0
+        )
+        cmd_x_sign_switch_rate = (
+            (cmd_x_sign_switch_count / cmd_x_switch_valid_count.clamp_min(1.0)).item()
+            if float(cmd_x_switch_valid_count.item()) > 0.0 else 0.0
+        )
+        cmd_x_sign_switch_active_rate = (
+            (cmd_x_sign_switch_active_count / cmd_x_switch_valid_active_count.clamp_min(1.0)).item()
+            if float(cmd_x_switch_valid_active_count.item()) > 0.0 else 0.0
+        )
         cmd_jerk_lin_mean = (cmd_jerk_lin_sum / total_samples).item()
         cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
@@ -6148,6 +6250,7 @@ def train(args):
                 float(mean_reward),
             )
             online_selection_metric_name = 'avoid_success_progress_reward_lexicographic'
+        episode_collision_rate_value = avoid_collision_rate100_value if use_avoid_local_map else 0.0
         collision_rate_mean = (collision_rate_sum / total_samples).item()
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
         strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
@@ -6224,6 +6327,7 @@ def train(args):
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
+        writer.add_scalar('Diag/EpisodeCollisionRate', episode_collision_rate_value, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateRate', obstacle_contact_candidate_rate_mean, iteration)
         writer.add_scalar('Diag/StrictObstacleContactRate', strict_obstacle_contact_rate_mean, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateMinClearance', obstacle_contact_candidate_min_clearance_mean, iteration)
@@ -6265,6 +6369,7 @@ def train(args):
             writer.add_scalar('Avoid/StageExposureRate', avoid_exposure_rate100_value, iteration)
             writer.add_scalar('Avoid/StageProgressRate', avoid_progress_rate_value, iteration)
             writer.add_scalar('Avoid/StageSuccessRate', avoid_success_rate_value, iteration)
+            writer.add_scalar('Avoid/StageRowSuccessRate', avoid_row_success_rate_value, iteration)
             writer.add_scalar('Avoid/NearestObstacleDist', avoid_nearest_obstacle_dist_value, iteration)
             writer.add_scalar('Avoid/PresetRetryMean', avoid_preset_retry_mean_value, iteration)
             writer.add_scalar('Avoid/PresetSampleFailMean', avoid_preset_sample_fail_mean_value, iteration)
@@ -6279,6 +6384,7 @@ def train(args):
             writer.add_scalar('Avoid/StageSwitchExposureRate', avoid_stage_switch_exposure_value, iteration)
             writer.add_scalar('Avoid/StageSwitchProgressRate', avoid_stage_switch_progress_value, iteration)
             writer.add_scalar('Avoid/StageSwitchSuccessRate', avoid_stage_switch_success_value, iteration)
+            writer.add_scalar('Avoid/StageSwitchRowSuccessRate', avoid_stage_switch_row_success_value, iteration)
             writer.add_scalar('Avoid/Stage4ShrinkEvent', avoid_stage4_shrink_event_value, iteration)
             writer.add_scalar('Avoid/Stage4ShrinkFromWidth', avoid_stage4_shrink_from_width_value, iteration)
             writer.add_scalar('Avoid/Stage4ShrinkToWidth', avoid_stage4_shrink_to_width_value, iteration)
@@ -6310,6 +6416,10 @@ def train(args):
         writer.add_scalar('Stats/CmdSlewXAbs', cmd_slew_x_abs_mean, iteration)
         writer.add_scalar('Stats/CmdExecX', cmd_exec_x_mean, iteration)
         writer.add_scalar('Stats/CmdExecXAbs', cmd_exec_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdXDeltaAbs', cmd_x_delta_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdXDeltaAbsActive', cmd_x_delta_abs_active_mean, iteration)
+        writer.add_scalar('Stats/CmdXSignSwitchRate', cmd_x_sign_switch_rate, iteration)
+        writer.add_scalar('Stats/CmdXSignSwitchRateActive', cmd_x_sign_switch_active_rate, iteration)
         if 'row_cmdx_signed' in reward_term_means:
             writer.add_scalar('Stats/CmdXSigned', reward_term_means['row_cmdx_signed'], iteration)
         if 'row_cmdx_signed_abs' in reward_term_means:
@@ -6427,8 +6537,9 @@ def train(args):
                 avoid_line = (
                     f"""{'Avoid stage/width/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
                     f"""{'Avoid stage eps/stage4 win:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
-                    f"""{'Avoid coll(stage/shrink)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
+                    f"""{'Avoid coll ep(stage/shr)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
                     f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
+                    f"""{'Avoid stage row succ:':>{pad}} {avoid_row_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
                     f"""{'Avoid preset retry/sfail/pfail:':>{pad}} {avoid_preset_retry_mean_value:.3f} / {avoid_preset_sample_fail_mean_value:.3f} / {avoid_preset_passage_fail_mean_value:.3f}\n"""
                     f"""{'Avoid preset ygap/depth/core:':>{pad}} {avoid_preset_min_y_gap_mean_value:.3f} / {avoid_preset_passage_depth_mean_value:.3f} / {avoid_preset_core_depth_mean_value:.3f}\n"""
@@ -6462,6 +6573,8 @@ def train(args):
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'CmdX pred/slew/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX |pred|/|slew|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
+                          f"""{'CmdX delta/switch:':>{pad}} {cmd_x_delta_abs_mean:.3f} / {cmd_x_sign_switch_rate:.3f}\n"""
+                          f"""{'CmdX delta/switch active:':>{pad}} {cmd_x_delta_abs_active_mean:.3f} / {cmd_x_sign_switch_active_rate:.3f}\n"""
                           f"""{'CmdX pred/signed/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX signed abs/pos/neg:':>{pad}} {reward_term_means.get('row_cmdx_signed_abs', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_pos', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_neg', 0.0):.3f}\n"""
                           f"""{'Row dFwd/gate/act/pushAct:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
@@ -6475,7 +6588,7 @@ def train(args):
                           f"""{egpo_line}"""
                           f"""{avoid_line}"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
-                          f"""{'Collision rate/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
+                          f"""{'Collision step/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
                           f"""{'Reward(smooth/headingKeep):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""

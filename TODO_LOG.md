@@ -1822,3 +1822,14 @@
 - [x] Must: 将 `s_avoid` 的逐行 `progress` 也改成按机身后缘计算，和 `success/cross_line` 口径统一
 - [x] Must: 将高层命令日志拆成 `cmd_post` 与最终执行命令，避免 `rotate_only` 之后继续用混合口径解释训练
 - [x] Must: 在 `play/eval` 里补出 `rotate_only_active` 与最终命令可见性，方便直接判断门控是否在抢控制权
+
+## 2026-03-30 avoid 课程 success 口径修复
+
+- [x] Must: 将课程与训练面板里的 `stage success` 从 `row_success_ratio` 改成真正的 `episode_success_flag`，让升级判断与 `play/eval` 的最终 through 成功定义一致
+- [x] Must: 保留 `row_success_ratio` 作为单独统计项，避免继续把“按行无撞比例”误读成“最终 through 成功率”
+
+## 2026-03-30 avoid 终局统计口径与行切换阈值修复
+
+- [x] Must: 将“通过当前行”的判据收成机身后缘过 `row_y`，但将下一行 gap 切换阈值单独收成机身后缘过 `row_y + 0.15`
+- [x] Must: 为 `success / collision / progress / cross_line_dist_end` 增加 reset 前终局快照，避免 `play/eval/info` 读到新回合状态
+- [x] Must: 拆清 step 级与 episode 级碰撞统计命名，并在 `play` 里直接打印 `rear_y / cross_line_y / cross_line_dist / success_mask`
