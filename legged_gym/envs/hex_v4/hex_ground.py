@@ -1231,7 +1231,7 @@ class HexGround(LeggedRobot):
         self.s_avoid_terminal_success = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.s_avoid_terminal_progress_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_terminal_row_success_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
-        self.s_avoid_terminal_cross_line_dist = torch.full(self.num_envs, float("nan"), device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_cross_line_dist = torch.full((self.num_envs,), float("nan"), device=self.device, dtype=torch.float)
         self.s_avoid_terminal_rear_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_terminal_cross_line_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)

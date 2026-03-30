@@ -341,12 +341,12 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Fixed-layout curriculum: keep stage switch criteria minimal and fast.
         avoid_stage12_window = 200
         avoid_stage12_min_episodes = 300
-        avoid_stage12_collision_threshold = 0.05
+        avoid_stage12_collision_threshold = 0.25
         avoid_stage12_exposure_threshold = 0.70
-        avoid_stage12_progress_threshold = 0.80
+        avoid_stage12_progress_threshold = 0.45
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
-        avoid_stage12_success_threshold = 0.50
+        avoid_stage12_success_threshold = 0.40
 
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage23_window = 200

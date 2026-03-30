@@ -1833,3 +1833,18 @@
 - [x] Must: 将“通过当前行”的判据收成机身后缘过 `row_y`，但将下一行 gap 切换阈值单独收成机身后缘过 `row_y + 0.15`
 - [x] Must: 为 `success / collision / progress / cross_line_dist_end` 增加 reset 前终局快照，避免 `play/eval/info` 读到新回合状态
 - [x] Must: 拆清 step 级与 episode 级碰撞统计命名，并在 `play` 里直接打印 `rear_y / cross_line_y / cross_line_dist / success_mask`
+
+## 2026-03-30 avoid stage1->2 自动升级门槛放宽
+
+- [x] Must: 仅放宽 `stage1 -> stage2` 的自动升级门槛，让当前已能在 `play` 中通过人工验收的策略尽快进入下一阶段训练
+- [x] Must: 保持 `stage2/3/4` 升级阈值、奖励项和统计语义不变，避免一次改多因子
+
+## 2026-03-30 avoid 全流程训练一致性审查与修复
+
+- [x] Must: 沿 `env -> wrapper -> train -> eval -> play -> logging` 做一次全链路一致性审查，优先检查成功/进度/碰撞/终局快照/课程升级语义
+- [x] Must: 对会污染训练结论、评测口径或日志解释的问题做最小修复，不做无关改动
+
+## 2026-03-30 train/play 输出语义清理
+
+- [x] Must: 拆清 `train` 输出里的 `step级 / episode级 / stage窗口级` 指标，避免同一行混不同层级
+- [x] Must: 拆清 `play` 调试输出里的 `goal_dist_delta / cross_line_dist / episode_progress / success / collision`，避免继续用模糊名字误判行为

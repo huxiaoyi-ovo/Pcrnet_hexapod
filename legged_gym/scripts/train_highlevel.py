@@ -3627,7 +3627,7 @@ class HierarchicalHexapodEnv:
         # 5. 处理超时
         timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if not self.no_episode_timeout:
-            timeout = self.episode_length_buf >= self.max_episode_length
+            timeout = (self.episode_length_buf >= self.max_episode_length) & (~done_any)
         timeout_bootstrap_obs = None
         if timeout.any():
             timeout_bootstrap_obs = {}
@@ -4545,6 +4545,7 @@ def train(args):
     episode_rewards = deque(maxlen=100)
     episode_lengths = deque(maxlen=100)
     goal_change_counts = deque(maxlen=100)
+    episode_collision_flags = deque(maxlen=100)
     if not resume_path:
         best_reward = float("-inf")
     
@@ -5627,6 +5628,12 @@ def train(args):
                 goal_changes = env_info.get('goal_change_count', None)
                 if goal_changes is not None:
                     goal_change_counts.extend(goal_changes[done_ids].detach().cpu().tolist())
+                if use_avoid_local_map:
+                    episode_collision = env_info.get('s_avoid_episode_collision', None) if env_info is not None else None
+                    if torch.is_tensor(episode_collision):
+                        episode_collision_flags.extend(
+                            episode_collision[done_ids].detach().to(dtype=torch.float32).cpu().tolist()
+                        )
             else:
                 running_returns += rewards
             
@@ -6243,14 +6250,18 @@ def train(args):
         if use_avoid_local_map:
             goal_dist_display_mean = reward_term_means.get('cross_line_dist', goal_dist_mean)
             goal_dist_tb_name = 'Stats/CrossLineTargetDist'
-            goal_dist_console_label = 'Cross-line target dist / Cmd / Tgt speed:'
+            goal_dist_console_label = 'Cross-line dist / Cmd speed / Tgt speed:'
             online_selection_metric = (
                 float(avoid_success_rate_value),
                 float(avoid_progress_rate_value),
                 float(mean_reward),
             )
             online_selection_metric_name = 'avoid_success_progress_reward_lexicographic'
-        episode_collision_rate_value = avoid_collision_rate100_value if use_avoid_local_map else 0.0
+        episode_collision_rate_value = (
+            float(np.mean(episode_collision_flags))
+            if (use_avoid_local_map and episode_collision_flags)
+            else 0.0
+        )
         collision_rate_mean = (collision_rate_sum / total_samples).item()
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
         strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
@@ -6328,6 +6339,7 @@ def train(args):
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
         writer.add_scalar('Diag/EpisodeCollisionRate', episode_collision_rate_value, iteration)
+        writer.add_scalar('Diag/StageWindowCollisionRate', avoid_collision_rate100_value if use_avoid_local_map else 0.0, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateRate', obstacle_contact_candidate_rate_mean, iteration)
         writer.add_scalar('Diag/StrictObstacleContactRate', strict_obstacle_contact_rate_mean, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateMinClearance', obstacle_contact_candidate_min_clearance_mean, iteration)
@@ -6535,11 +6547,11 @@ def train(args):
             avoid_line = ""
             if use_avoid_local_map:
                 avoid_line = (
-                    f"""{'Avoid stage/width/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
-                    f"""{'Avoid stage eps/stage4 win:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
-                    f"""{'Avoid coll ep(stage/shr)/exp:':>{pad}} {avoid_collision_rate100_value:.3f} / {avoid_collision_rate50_value:.3f} / {avoid_exposure_rate100_value:.3f}\n"""
-                    f"""{'Avoid stage prog/succ:':>{pad}} {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
-                    f"""{'Avoid stage row succ:':>{pad}} {avoid_row_success_rate_value:.3f}\n"""
+                    f"""{'Avoid stage/corridor/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
+                    f"""{'Avoid stage episodes/shrinkWin:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
+                    f"""{'Avoid coll(stageWin/ep/shr):':>{pad}} {avoid_collision_rate100_value:.3f} / {episode_collision_rate_value:.3f} / {avoid_collision_rate50_value:.3f}\n"""
+                    f"""{'Avoid exposure/progress/success:':>{pad}} {avoid_exposure_rate100_value:.3f} / {avoid_progress_rate_value:.3f} / {avoid_success_rate_value:.3f}\n"""
+                    f"""{'Avoid rowSuccessRatio:':>{pad}} {avoid_row_success_rate_value:.3f}\n"""
                     f"""{'Avoid nearest obs dist:':>{pad}} {avoid_nearest_obstacle_dist_value:.3f}\n"""
                     f"""{'Avoid preset retry/sfail/pfail:':>{pad}} {avoid_preset_retry_mean_value:.3f} / {avoid_preset_sample_fail_mean_value:.3f} / {avoid_preset_passage_fail_mean_value:.3f}\n"""
                     f"""{'Avoid preset ygap/depth/core:':>{pad}} {avoid_preset_min_y_gap_mean_value:.3f} / {avoid_preset_passage_depth_mean_value:.3f} / {avoid_preset_core_depth_mean_value:.3f}\n"""
@@ -6571,14 +6583,14 @@ def train(args):
                           f"""{'Nonfinite act(pol/exp/tch):':>{pad}} {policy_nonfinite_action_count} / {expert_nonfinite_action_count} / {teacher_nonfinite_action_count}\n"""
                           f"""{'Explained variance:':>{pad}} {explained_var.item():.4f}\n"""
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
-                          f"""{'CmdX pred/slew/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
-                          f"""{'CmdX |pred|/|slew|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
-                          f"""{'CmdX delta/switch:':>{pad}} {cmd_x_delta_abs_mean:.3f} / {cmd_x_sign_switch_rate:.3f}\n"""
-                          f"""{'CmdX delta/switch active:':>{pad}} {cmd_x_delta_abs_active_mean:.3f} / {cmd_x_sign_switch_active_rate:.3f}\n"""
-                          f"""{'CmdX pred/signed/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
+                          f"""{'CmdX pred/post/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
+                          f"""{'CmdX |pred|/|post|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
+                          f"""{'CmdX deltaAbs(all/gated):':>{pad}} {cmd_x_delta_abs_mean:.3f} / {cmd_x_delta_abs_active_mean:.3f}\n"""
+                          f"""{'CmdX switchRate(all/gated):':>{pad}} {cmd_x_sign_switch_rate:.3f} / {cmd_x_sign_switch_active_rate:.3f}\n"""
+                          f"""{'CmdX pred/towardGap/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX signed abs/pos/neg:':>{pad}} {reward_term_means.get('row_cmdx_signed_abs', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_pos', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_neg', 0.0):.3f}\n"""
-                          f"""{'Row dFwd/gate/act/pushAct:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
-                          f"""{'Cross-line dist:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
+                          f"""{'Row fwdDist/gate/gOn/pOn:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
+                          f"""{'Cross-line dist(step mean):':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""
@@ -6588,11 +6600,12 @@ def train(args):
                           f"""{egpo_line}"""
                           f"""{avoid_line}"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
-                          f"""{'Collision step/force:':>{pad}} {collision_rate_mean:.3f} / {collision_force_mean:.3f} (p95 {collision_force_p95:.3f}, th {collision_threshold_str} {collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
+                          f"""{'Collision step/episode/stage:':>{pad}} {collision_rate_mean:.3f} / {episode_collision_rate_value:.3f} / {(avoid_collision_rate100_value if use_avoid_local_map else 0.0):.3f}\n"""
+                          f"""{'Collision force mean/p95/th:':>{pad}} {collision_force_mean:.3f} / {collision_force_p95:.3f} / {collision_threshold_str} ({collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
                           f"""{'Reward(smooth/headingKeep):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
-                          f"""{'Reward(timeout bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
+                          f"""{'Reward(timeout-only bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
                           f"""{'#' * width}\n""")

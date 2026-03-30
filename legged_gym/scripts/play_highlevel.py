@@ -2447,18 +2447,26 @@ def main():
                 if torch.is_tensor(success_bonus):
                     success_mask = success_bonus.to(device=dones.device) > 0.0
 
-            timeout_mask = torch.zeros_like(dones, dtype=torch.bool)
-            if hasattr(env, "no_episode_timeout") and (not bool(getattr(env, "no_episode_timeout", False))):
-                ep_len_snapshot = info.get("episode_length", None) if isinstance(info, dict) else None
-                if torch.is_tensor(ep_len_snapshot):
-                    timeout_mask = ep_len_snapshot.to(device=dones.device) >= int(getattr(env, "max_episode_length", 0))
-                    timeout_mask &= dones
-
             reach_mask = torch.zeros_like(dones, dtype=torch.bool)
             if isinstance(reward_terms, dict) and ("reach" in reward_terms):
                 reach_term = reward_terms["reach"]
                 if torch.is_tensor(reach_term):
                     reach_mask = dones & (reach_term.to(device=dones.device) > 0.0)
+            timeout_mask = torch.zeros_like(dones, dtype=torch.bool)
+            if isinstance(info, dict):
+                timeout_from_info = info.get("timeout", None)
+                if torch.is_tensor(timeout_from_info):
+                    timeout_mask = timeout_from_info.to(device=dones.device, dtype=torch.bool)
+            if (
+                (not timeout_mask.any())
+                and hasattr(env, "no_episode_timeout")
+                and (not bool(getattr(env, "no_episode_timeout", False)))
+            ):
+                ep_len_snapshot = info.get("episode_length", None) if isinstance(info, dict) else None
+                if torch.is_tensor(ep_len_snapshot):
+                    timeout_mask = ep_len_snapshot.to(device=dones.device) >= int(getattr(env, "max_episode_length", 0))
+            timeout_mask &= dones
+            timeout_mask &= (~done_during) & (~success_mask) & (~reach_mask)
             other_done_mask = dones & (~done_during) & (~success_mask) & (~timeout_mask) & (~reach_mask)
             if dones.any():
                 stack_reset_mask = dones.clone()
@@ -2471,13 +2479,23 @@ def main():
                         pred_std = float(pred_arr.std()) if pred_arr.size > 0 else 0.0
                         exec_mean = float(exec_arr.mean()) if exec_arr.size > 0 else 0.0
                         exec_std = float(exec_arr.std()) if exec_arr.size > 0 else 0.0
+                        pred_sign = np.sign(pred_arr[np.abs(pred_arr) > 1.0e-4])
+                        exec_sign = np.sign(exec_arr[np.abs(exec_arr) > 1.0e-4])
+                        pred_switch = int(np.sum(pred_sign[1:] * pred_sign[:-1] < 0.0)) if pred_sign.size > 1 else 0
+                        exec_switch = int(np.sum(exec_sign[1:] * exec_sign[:-1] < 0.0)) if exec_sign.size > 1 else 0
+                        pred_switch_rate = float(pred_switch / max(pred_sign.size - 1, 1)) if pred_sign.size > 1 else 0.0
+                        exec_switch_rate = float(exec_switch / max(exec_sign.size - 1, 1)) if exec_sign.size > 1 else 0.0
                         print(
-                            "[PlayHigh][cmdx-episode] step={} pred_x(mean/std)={:.4f}/{:.4f} exec_x(mean/std)={:.4f}/{:.4f} samples={}".format(
+                            "[PlayHigh][cmdx-episode] step={} pred_x(mean/std/switch/rate)={:.4f}/{:.4f}/{}/{} exec_x(mean/std/switch/rate)={:.4f}/{:.4f}/{}/{} samples={}".format(
                                 step_idx,
                                 pred_mean,
                                 pred_std,
+                                pred_switch,
+                                f"{pred_switch_rate:.4f}",
                                 exec_mean,
                                 exec_std,
+                                exec_switch,
+                                f"{exec_switch_rate:.4f}",
                                 max(pred_arr.size, exec_arr.size),
                             )
                         )
@@ -2568,7 +2586,7 @@ def main():
             env_idx = 0
             goal = obs["goal"][env_idx].detach().cpu().numpy()
             goal_dist = float(np.linalg.norm(goal))
-            progress = 0.0 if prev_dist is None else float(prev_dist - goal_dist)
+            goal_dist_delta = 0.0 if prev_dist is None else float(prev_dist - goal_dist)
             prev_dist = goal_dist
             if cmd.shape[0] > track_env_idx:
                 track_ep_cmd_pred_x.append(float(cmd[track_env_idx, 0].detach().cpu().item()))
@@ -2714,6 +2732,8 @@ def main():
                 rear_y_dbg = 0.0
                 cross_line_y_dbg = 0.0
                 cross_line_dist_dbg = 0.0
+                episode_progress_ratio_dbg = 0.0
+                episode_collision_dbg = 0
                 success_dbg = 0
                 pass_vis_mean = 0.0
                 pass_sector_mean = 0.0
@@ -2830,6 +2850,8 @@ def main():
                         rear_y_t = info.get("rear_y", None)
                         cross_line_y_t = info.get("cross_line_y", None)
                         cross_line_dist_t = info.get("cross_line_dist", None)
+                        progress_ratio_t = info.get("s_avoid_progress_mask", None)
+                        episode_collision_t = info.get("s_avoid_episode_collision", None)
                         success_t = info.get("success_mask", None)
                         if torch.is_tensor(rear_y_t):
                             rear_y_dbg = float(rear_y_t[env_idx].detach().cpu())
@@ -2837,6 +2859,10 @@ def main():
                             cross_line_y_dbg = float(cross_line_y_t[env_idx].detach().cpu())
                         if torch.is_tensor(cross_line_dist_t):
                             cross_line_dist_dbg = float(cross_line_dist_t[env_idx].detach().cpu())
+                        if torch.is_tensor(progress_ratio_t):
+                            episode_progress_ratio_dbg = float(progress_ratio_t[env_idx].detach().cpu())
+                        if torch.is_tensor(episode_collision_t):
+                            episode_collision_dbg = int(bool(episode_collision_t[env_idx].item()))
                         if torch.is_tensor(success_t):
                             success_dbg = int(bool(success_t[env_idx].item()))
                     if pass_dir_norm > 1e-6:
@@ -2916,10 +2942,10 @@ def main():
                     aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
                     aff_std = stack.std(dim=0, unbiased=False).mean().item()
                 print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} progress={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(dfwd/g/p/a)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_signed={:.3f} clr={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} yaw_err_deg={:.1f} rot_only={} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                    "[PlayHigh] step={} |cmd_xy|={:.3f} goal_dist_delta={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(fwdDist/gate/pushErr/active)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_toward_gap={:.3f} clearance={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} goal_dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} yaw_err_deg={:.1f} rotate_only={} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
                         step_idx,
                         cmd_speed,
-                        progress,
+                        goal_dist_delta,
                         gate_raw_val,
                         gate_val,
                         gate_w_val,
@@ -2970,17 +2996,17 @@ def main():
                     cmd_override_final, precision=3, floatmode="fixed"
                 )
                 print(
-                    "[PlayHigh][cmd] post={} final={} exec={}".format(
+                    "[PlayHigh][cmd] postProcessor={} finalOverride={} execMean={}".format(
                         cmd_post_str,
                         cmd_override_str,
                         cmd_str,
                     )
                 )
                 print(
-                    "[PlayHigh][diag] goal_bear={:.3f} row_eff_width={:.3f} row_x={:.3f} row_err={:.3f} "
-                    "d_forward={:.3f} gate_row={:.3f} push_err={:.3f} gate_active={} "
-                    "gap_center={:.3f} x_dir={:.1f} cmd_x_signed={:.3f} row_cmdx={:.3f} "
-                    "pass_gate_dbg={:.3f} pass_occ_dbg={:.3f} cross_width_dbg={:.3f} vis_ratio={:.3f} "
+                    "[PlayHigh][diag] goal_bearing={:.3f} row_gap_width={:.3f} row_x={:.3f} row_err={:.3f} "
+                    "row_fwdDist={:.3f} row_gate={:.3f} row_pushErr={:.3f} row_gateActive={} "
+                    "gap_center={:.3f} x_dir={:.1f} cmd_x_toward_gap={:.3f} row_cmdx={:.3f} "
+                    "pass_gate={:.3f} pass_occ={:.3f} cross_width={:.3f} vis_ratio={:.3f} "
                     "pass_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f}".format(
                         goal_bearing,
                         max(row_gap_right_eff_dbg - row_gap_left_eff_dbg, 0.0),
@@ -3004,11 +3030,13 @@ def main():
                     )
                 )
                 print(
-                    "[PlayHigh][term] rear_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} success={}".format(
+                    "[PlayHigh][term] rear_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} episode_progress={:.3f} success={} episode_collision={}".format(
                         rear_y_dbg,
                         cross_line_y_dbg,
                         cross_line_dist_dbg,
+                        episode_progress_ratio_dbg,
                         success_dbg,
+                        episode_collision_dbg,
                     )
                 )
                 if map_support_dbg:
