@@ -119,6 +119,19 @@ def _distance_to_oriented_box(center_xy, half_x: float, half_y: float, yaw_rad: 
     return float(max(0.0, outside + inside))
 
 
+def _world_point_to_map_xy(env, env_idx: int, world_x: float, world_y: float) -> Tuple[float, float]:
+    ref_xy, ref_yaw = env._get_affordance_reference_pose()
+    ref_xy = ref_xy[env_idx:env_idx + 1]
+    ref_yaw = ref_yaw[env_idx:env_idx + 1]
+    world_xy = torch.tensor(
+        [[float(world_x), float(world_y)]],
+        device=ref_xy.device,
+        dtype=ref_xy.dtype,
+    )
+    local_xy = env._world_to_local_xy(world_xy, ref_xy, ref_yaw)[0]
+    return float(local_xy[0].item()), float(local_xy[1].item())
+
+
 def _prepare_avoid_map_dump_dir(args) -> str:
     base = getattr(args, "avoid_map_dump_dir", None)
     if base is None or str(base).strip() == "":
@@ -567,7 +580,7 @@ def _occupancy_center_from_map(raw_occ: np.ndarray, map_extent: float) -> dict:
     }
 
 
-def _extract_passable_band_from_row(passable_map: np.ndarray, row_y_m: float, map_extent: float) -> dict:
+def _extract_passable_band_from_row(passable_map: np.ndarray, row_y_map_m: float, map_extent: float) -> dict:
     if passable_map.ndim != 2:
         return {}
     size_x, size_y = passable_map.shape
@@ -575,9 +588,9 @@ def _extract_passable_band_from_row(passable_map: np.ndarray, row_y_m: float, ma
         return {}
     cell_x = float(map_extent) / float(size_x)
     cell_y = float(map_extent) / float(size_y)
-    if not math.isfinite(row_y_m):
+    if not math.isfinite(row_y_map_m):
         return {}
-    row_idx = int(math.floor(float(row_y_m) / max(cell_y, 1e-6)))
+    row_idx = int(math.floor(float(row_y_map_m) / max(cell_y, 1e-6)))
     row_idx = max(0, min(size_y - 1, row_idx))
     line = np.asarray(passable_map[:, row_idx] > 0.5, dtype=np.bool_)
     if line.size == 0 or not bool(line.any()):
@@ -627,16 +640,26 @@ def _summarize_local_map_support(
     local_map_2ch: torch.Tensor,
     visible_mask: Optional[torch.Tensor],
     map_extent: float,
-    row_y_m: float,
+    row_y_map_m: float,
+    robot_x_map_m: float,
 ) -> dict:
     raw_occ = raw_aff_map[0].detach().cpu().numpy().astype(np.float32, copy=False)
     local_np = local_map_2ch.detach().cpu().numpy().astype(np.float32, copy=False)
     summary = _occupancy_center_from_map(raw_occ, map_extent)
     if raw_aff_map.shape[0] >= 2:
         passable_np = raw_aff_map[1].detach().cpu().numpy().astype(np.float32, copy=False)
-        summary.update(_extract_passable_band_from_row(passable_np, row_y_m, map_extent))
+        summary.update(_extract_passable_band_from_row(passable_np, row_y_map_m, map_extent))
     else:
         summary.update({"band_valid": False, "band_count": 0})
+    row_side = 0.0
+    row_delta_m = 0.0
+    if bool(summary.get("band_valid", False)):
+        band_center_m = float(summary.get("band_center_m", 0.0))
+        row_delta_m = band_center_m - float(robot_x_map_m)
+        if row_delta_m > 1e-4:
+            row_side = 1.0
+        elif row_delta_m < -1e-4:
+            row_side = -1.0
 
     size_x, size_y = local_np.shape[1], local_np.shape[2]
     cell_x = float(map_extent) / float(size_x) if size_x > 0 else 0.0
@@ -678,6 +701,9 @@ def _summarize_local_map_support(
             "better_side": float(better_side),
             "grid_size_xy": [int(size_x), int(size_y)],
             "cell_size_m": float(cell_x),
+            "row_side": float(row_side),
+            "row_delta_m": float(row_delta_m),
+            "robot_x_map_m": float(robot_x_map_m),
         }
     )
     return summary
@@ -2729,7 +2755,7 @@ def main():
                 row_gate_dbg = 0.0
                 row_push_err_dbg = 0.0
                 row_gate_active_dbg = 0
-                rear_y_dbg = 0.0
+                center_y_dbg = 0.0
                 cross_line_y_dbg = 0.0
                 cross_line_dist_dbg = 0.0
                 episode_progress_ratio_dbg = 0.0
@@ -2794,6 +2820,21 @@ def main():
                     row_gap_right_eff_dbg = float(row_gap_right_eff_t[env_idx].detach().cpu())
                     row_gap_center_eff_dbg = 0.5 * (row_gap_left_eff_dbg + row_gap_right_eff_dbg)
                     robot_x_dbg = float(robot_pos_dbg[env_idx, 0].detach().cpu())
+                    robot_y_dbg = float(robot_pos_dbg[env_idx, 1].detach().cpu())
+                    robot_x_map_dbg, _robot_y_map_dbg = _world_point_to_map_xy(
+                        env,
+                        env_idx,
+                        robot_x_dbg,
+                        robot_y_dbg,
+                    )
+                    row_gap_row_y_map_dbg = float("nan")
+                    if bool(row_gap_eff_valid_t[env_idx].item()):
+                        _row_gap_center_map_dbg, row_gap_row_y_map_dbg = _world_point_to_map_xy(
+                            env,
+                            env_idx,
+                            row_gap_center_eff_dbg,
+                            row_gap_row_y_dbg,
+                        )
                     if bool(row_gap_eff_valid_t[env_idx].item()):
                         row_x_err_now_dbg = max(row_gap_left_eff_dbg - robot_x_dbg, 0.0) + max(robot_x_dbg - row_gap_right_eff_dbg, 0.0)
                     else:
@@ -2836,7 +2877,8 @@ def main():
                             obs["local_map_2ch"][env_idx],
                             visible_dbg,
                             float(getattr(env, "affordance_map_extent", 0.0)),
-                            row_gap_row_y_dbg,
+                            row_gap_row_y_map_dbg,
+                            robot_x_map_dbg,
                         )
                     if reward_terms is not None and "row_lat" in reward_terms:
                         row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
@@ -2847,14 +2889,14 @@ def main():
                     else:
                         row_cmdx_dbg = 0.0
                     if isinstance(info, dict):
-                        rear_y_t = info.get("rear_y", None)
+                        center_y_t = info.get("center_y", info.get("rear_y", None))
                         cross_line_y_t = info.get("cross_line_y", None)
                         cross_line_dist_t = info.get("cross_line_dist", None)
                         progress_ratio_t = info.get("s_avoid_progress_mask", None)
                         episode_collision_t = info.get("s_avoid_episode_collision", None)
                         success_t = info.get("success_mask", None)
-                        if torch.is_tensor(rear_y_t):
-                            rear_y_dbg = float(rear_y_t[env_idx].detach().cpu())
+                        if torch.is_tensor(center_y_t):
+                            center_y_dbg = float(center_y_t[env_idx].detach().cpu())
                         if torch.is_tensor(cross_line_y_t):
                             cross_line_y_dbg = float(cross_line_y_t[env_idx].detach().cpu())
                         if torch.is_tensor(cross_line_dist_t):
@@ -3030,8 +3072,8 @@ def main():
                     )
                 )
                 print(
-                    "[PlayHigh][term] rear_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} episode_progress={:.3f} success={} episode_collision={}".format(
-                        rear_y_dbg,
+                    "[PlayHigh][term] center_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} episode_progress={:.3f} success={} episode_collision={}".format(
+                        center_y_dbg,
                         cross_line_y_dbg,
                         cross_line_dist_dbg,
                         episode_progress_ratio_dbg,
@@ -3044,12 +3086,15 @@ def main():
                     obs_xy_true = _extract_s_avoid_debug_meta(env).get("obstacle_xy_map", [0.0, 0.0])
                     map_band_valid = int(bool(map_support_dbg.get("band_valid", False)))
                     map_better_side = float(map_support_dbg.get("better_side", 0.0))
+                    map_row_side = float(map_support_dbg.get("row_side", 0.0))
+                    map_row_delta = float(map_support_dbg.get("row_delta_m", 0.0))
+                    map_robot_x = float(map_support_dbg.get("robot_x_map_m", 0.0))
                     print(
-                        "[PlayHigh][map] occ_true=({:.3f},{:.3f}) occ_map=({:.3f},{:.3f}) occ_min={:.3f} "
-                        "grid(size/cell)={} / {:.3f} row_y(idx/center)={}/ {:.3f} "
+                        "[PlayHigh][map-gt] occ_true=({:.3f},{:.3f}) occ_gt=({:.3f},{:.3f}) occ_min={:.3f} "
+                        "grid(size/cell)={} / {:.3f} row(mapIdx/centerY)={}/ {:.3f} "
                         "band(valid/cnt/l/r/c/w)={}/{}/{:.3f}/{:.3f}/{:.3f}/{:.3f} "
-                        "clr_l/r/diff={:.3f}/{:.3f}/{:.3f} occ_l/r={:.3f}/{:.3f} "
-                        "side(map/gt/cmd)={:.1f}/{:.1f}/{:.1f}".format(
+                        "row(robotX/bandDx)={:.3f}/{:.3f} "
+                        "side(rowGT/gt/cmd)={:.1f}/{:.1f}/{:.1f}".format(
                             float(obs_xy_true[0]) if len(obs_xy_true) == 2 else 0.0,
                             float(obs_xy_true[1]) if len(obs_xy_true) == 2 else 0.0,
                             float(map_occ_center[0]) if len(map_occ_center) == 2 else 0.0,
@@ -3065,14 +3110,22 @@ def main():
                             float(map_support_dbg.get("band_right_m", 0.0)),
                             float(map_support_dbg.get("band_center_m", 0.0)),
                             float(map_support_dbg.get("band_width_m", 0.0)),
+                            map_robot_x,
+                            map_row_delta,
+                            map_row_side,
+                            x_dir_to_gap_dbg,
+                            cmd_x_dir_dbg,
+                        )
+                    )
+                    print(
+                        "[PlayHigh][map-local] clr_l/r/diff={:.3f}/{:.3f}/{:.3f} occ_l/r={:.3f}/{:.3f} "
+                        "clrSide={:.1f}".format(
                             float(map_support_dbg.get("left_clear_mean", 0.0)),
                             float(map_support_dbg.get("right_clear_mean", 0.0)),
                             float(map_support_dbg.get("clear_diff", 0.0)),
                             float(map_support_dbg.get("left_occ_mean", 0.0)),
                             float(map_support_dbg.get("right_occ_mean", 0.0)),
                             map_better_side,
-                            x_dir_to_gap_dbg,
-                            cmd_x_dir_dbg,
                         )
                     )
                 if avoid_cf_cmds is not None:

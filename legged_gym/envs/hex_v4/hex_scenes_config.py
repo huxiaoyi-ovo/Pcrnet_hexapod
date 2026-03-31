@@ -351,7 +351,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage23_window = 200
         avoid_stage23_min_episodes = 400
-        avoid_stage23_collision_threshold = 0.05
+        avoid_stage23_collision_threshold = 0.10
         avoid_stage23_exposure_threshold = 0.80
         avoid_stage23_progress_threshold = 0.85
         avoid_stage23_progress_delta = 0.35
@@ -361,7 +361,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage34_window = 200
         avoid_stage34_min_episodes = 500
-        avoid_stage34_collision_threshold = 0.04
+        avoid_stage34_collision_threshold = 0.15
         avoid_stage34_exposure_threshold = 0.85
         avoid_stage34_progress_threshold = 0.88
         avoid_stage34_progress_delta = 0.35
@@ -490,7 +490,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         spawn_edge_enable = False
         max_ang_vel_command = 0.3
         rotate_only_yaw_on_deg = 20.0
-        rotate_only_yaw_off_deg = 1.0
+        rotate_only_yaw_off_deg = 5.0
         rotate_only_yaw_gain = 0.8
         rotate_only_gap_margin = 0.08
         goal_mode = "fixed"
@@ -562,13 +562,15 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_group_tol"] = 0.25
         reward_cfg["avoid_row_margin"] = 0.15
         reward_cfg["avoid_row_effective_margin"] = 0.0
-        reward_cfg["avoid_row_release_offset"] = 0.15
+        reward_cfg["avoid_row_release_offset"] = 0.20
         reward_cfg["avoid_row_near_scale"] = 0.0
         reward_cfg["avoid_row_near_sigma"] = 0.50
         reward_cfg["avoid_row_near_release_margin"] = 0.08
         reward_cfg["avoid_row_gate_on"] = 1.0
         reward_cfg["avoid_row_gate_full"] = 0.4
         reward_cfg["avoid_smooth_scale"] = 10.0
+        reward_cfg["avoid_smooth_switch_threshold"] = 0.05
+        reward_cfg["avoid_smooth_switch_unit"] = 0.002
         reward_cfg["avoid_heading_keep_scale"] = 0.0
 
 

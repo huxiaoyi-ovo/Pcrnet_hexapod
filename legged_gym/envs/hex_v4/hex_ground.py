@@ -1232,7 +1232,7 @@ class HexGround(LeggedRobot):
         self.s_avoid_terminal_progress_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_terminal_row_success_ratio = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_terminal_cross_line_dist = torch.full((self.num_envs,), float("nan"), device=self.device, dtype=torch.float)
-        self.s_avoid_terminal_rear_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_center_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_terminal_cross_line_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage_per_env = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
@@ -2964,21 +2964,20 @@ class HexGround(LeggedRobot):
             return empty, empty, empty
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
-        body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
-        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
+        robot_center_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
         cross_line_y = torch.full_like(
-            robot_local_y,
+            robot_center_local_y,
             float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)),
         )
         for stage_v in (1, 2, 3, 4):
             stage_last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_v}_last_row_y", 2.0))
             cross_line_y = torch.where(
                 stage_ids.to(device=self.device) == stage_v,
-                torch.full_like(robot_local_y, stage_last_row_y),
+                torch.full_like(robot_center_local_y, stage_last_row_y),
                 cross_line_y,
             )
-        cross_line_dist = torch.clamp(cross_line_y - robot_local_y, min=0.0)
-        return cross_line_dist, robot_local_y, cross_line_y
+        cross_line_dist = torch.clamp(cross_line_y - robot_center_local_y, min=0.0)
+        return cross_line_dist, robot_center_local_y, cross_line_y
 
     def _get_s_avoid_cross_line_dist(
         self,
@@ -3007,8 +3006,7 @@ class HexGround(LeggedRobot):
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
-        body_half_length = float(getattr(self.cfg.terrain, "avoid_body_half_length", 0.0))
-        robot_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1] - body_half_length
+        robot_center_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
         pass_counts = torch.zeros_like(stage_ids, dtype=torch.long)
         for stage_v in (1, 2, 3, 4):
             stage_mask = stage_ids == stage_v
@@ -3020,9 +3018,9 @@ class HexGround(LeggedRobot):
             thresholds = torch.tensor(
                 [float(y) for y in row_y],
                 device=self.device,
-                dtype=robot_local_y.dtype,
+                dtype=robot_center_local_y.dtype,
             )
-            local_y = robot_local_y[stage_mask].unsqueeze(1)
+            local_y = robot_center_local_y[stage_mask].unsqueeze(1)
             pass_counts[stage_mask] = (local_y >= thresholds.unsqueeze(0)).sum(dim=1).to(torch.long)
         return pass_counts
 
@@ -5244,7 +5242,7 @@ class HexGround(LeggedRobot):
                 completed_stage_ids = self.s_avoid_stage_per_env[completed_env_ids].clone()
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
-                completed_cross_line_dist, completed_rear_y, completed_cross_line_y = (
+                completed_cross_line_dist, completed_center_y, completed_cross_line_y = (
                     self._get_s_avoid_cross_line_terms(
                         completed_env_ids,
                         stage_ids=completed_stage_ids,
@@ -5268,7 +5266,7 @@ class HexGround(LeggedRobot):
                 self.s_avoid_terminal_progress_ratio[completed_env_ids] = completed_progress
                 self.s_avoid_terminal_row_success_ratio[completed_env_ids] = completed_row_success
                 self.s_avoid_terminal_cross_line_dist[completed_env_ids] = completed_cross_line_dist
-                self.s_avoid_terminal_rear_y[completed_env_ids] = completed_rear_y
+                self.s_avoid_terminal_center_y[completed_env_ids] = completed_center_y
                 self.s_avoid_terminal_cross_line_y[completed_env_ids] = completed_cross_line_y
                 self._update_s_avoid_curriculum(
                     completed_flags,

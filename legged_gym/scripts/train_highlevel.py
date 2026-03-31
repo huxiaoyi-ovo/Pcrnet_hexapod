@@ -1351,6 +1351,7 @@ class HierarchicalHexapodEnv:
         self.prev_forward_clearance_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.prev_align_center_abs = torch.zeros(self.num_envs, device=device)
         self.prev_align_center_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.prev_cmd_pred_x = torch.zeros(self.num_envs, device=device)
         self.prev_cmd_exec_mean = torch.zeros(self.num_envs, 3, device=device)
         self.rotate_only_active = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         
@@ -1466,6 +1467,7 @@ class HierarchicalHexapodEnv:
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
         self.prev_robot_pos = self.env.root_states[:, :3].clone()
+        self.prev_cmd_pred_x.zero_()
         self.prev_cmd_exec_mean.zero_()
         self.rotate_only_active.zero_()
         if hasattr(self.env, "goal_world"):
@@ -2191,7 +2193,7 @@ class HierarchicalHexapodEnv:
         wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
-        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.15))
+        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.20))
         body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
         robot_half_width = 0.5 * float(getattr(self, "body_width", 0.44))
         eff_margin = float(getattr(self.reward_cfg, "avoid_row_effective_margin", 0.0))
@@ -2335,7 +2337,7 @@ class HierarchicalHexapodEnv:
         wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
         row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
         row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
-        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.15))
+        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.20))
         body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
 
         def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
@@ -3006,6 +3008,7 @@ class HierarchicalHexapodEnv:
             )
 
         reward_terms = None
+        cmd_pred_x = torch.zeros(self.num_envs, device=self.device, dtype=cmd_exec_mean.dtype)
         if gate_y_exec is None:
             gate_y_exec = torch.zeros(self.num_envs, device=self.device)
         if gate_y_raw_curr is None:
@@ -3076,11 +3079,10 @@ class HierarchicalHexapodEnv:
                     )
                     cross_line_local_y[stage_ids == stage_id] = last_row_y
                 cross_line_world_y = self.env.env_origins[:, 1] + cross_line_local_y
-                body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
-                curr_rear_y = robot_pos[:, 1] - body_half_length
-                prev_rear_y = self.prev_robot_pos[:, 1] - body_half_length
-                curr_dist = torch.clamp(cross_line_world_y - curr_rear_y, min=0.0)
-                prev_dist = torch.clamp(cross_line_world_y - prev_rear_y, min=0.0)
+                curr_center_y = robot_pos[:, 1]
+                prev_center_y = self.prev_robot_pos[:, 1]
+                curr_dist = torch.clamp(cross_line_world_y - curr_center_y, min=0.0)
+                prev_dist = torch.clamp(cross_line_world_y - prev_center_y, min=0.0)
                 approach_progress = (prev_dist - curr_dist) * float(self.reward_cfg.goal_approach_scale)
                 prev_total = reward_dict['total']
                 prev_approach = reward_dict.get('approach', torch.zeros_like(approach_progress))
@@ -3189,6 +3191,12 @@ class HierarchicalHexapodEnv:
                     * row_forward_valid.float()
                 )
                 avoid_smooth_scale = float(getattr(self.reward_cfg, "avoid_smooth_scale", 0.0))
+                avoid_smooth_switch_threshold = float(
+                    getattr(self.reward_cfg, "avoid_smooth_switch_threshold", 0.05)
+                )
+                avoid_smooth_switch_unit = float(
+                    getattr(self.reward_cfg, "avoid_smooth_switch_unit", 0.001)
+                )
                 heading_keep_scale = float(getattr(self.reward_cfg, "avoid_heading_keep_scale", 0.0))
                 row_cmdx_log_mask = row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_valid = gate_row * row_forward_valid.float() * gap_eff_valid.float()
@@ -3204,10 +3212,22 @@ class HierarchicalHexapodEnv:
                     & gap_eff_valid
                 ).float()
                 row_forward_dist_log = row_forward_dist * row_forward_valid.float() * gap_eff_valid.float()
-                cmd_x_delta = cmd_exec_mean[:, 0] - self.prev_cmd_exec_mean[:, 0]
+                inside_gap = (
+                    (row_err_abs <= 1e-3)
+                    & row_forward_valid
+                    & gap_eff_valid
+                )
+                smooth_switch_valid = (
+                    inside_gap
+                    & (torch.abs(cmd_pred_x) > avoid_smooth_switch_threshold)
+                    & (torch.abs(self.prev_cmd_pred_x) > avoid_smooth_switch_threshold)
+                )
+                smooth_switch_event = smooth_switch_valid & ((cmd_pred_x * self.prev_cmd_pred_x) < 0.0)
                 avoid_smooth_penalty = (
                     -avoid_smooth_scale
-                    * (cmd_x_delta ** 2)
+                    * avoid_smooth_switch_unit
+                    * gate_row
+                    * smooth_switch_event.float()
                 )
                 yaw_error_wrapped = torch.atan2(
                     torch.sin(heading_error),
@@ -3232,6 +3252,8 @@ class HierarchicalHexapodEnv:
                 reward_dict['row_gate'] = row_gate_valid
                 reward_dict['row_gate_active'] = row_gate_active
                 reward_dict['row_push_active'] = row_push_active
+                reward_dict['avoid_smooth_switch_valid'] = smooth_switch_valid.float()
+                reward_dict['avoid_smooth_switch_event'] = smooth_switch_event.float()
                 reward_dict['total'] = (
                     reward_dict['total']
                     + row_lat_reward
@@ -3428,7 +3450,7 @@ class HierarchicalHexapodEnv:
         collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         cross_line_dist_snapshot = None
-        rear_y_snapshot = None
+        center_y_snapshot = None
         cross_line_y_snapshot = None
         s_avoid_episode_collision_snapshot = None
         if bool(getattr(self.env, "s_avoid_enabled", False)):
@@ -3439,7 +3461,7 @@ class HierarchicalHexapodEnv:
             if hasattr(self.env, "_get_s_avoid_episode_progress_flags"):
                 s_avoid_progress_mask = self.env._get_s_avoid_episode_progress_flags(env_ids)
             if hasattr(self.env, "_get_s_avoid_cross_line_terms"):
-                cross_line_dist_snapshot, rear_y_snapshot, cross_line_y_snapshot = (
+                cross_line_dist_snapshot, center_y_snapshot, cross_line_y_snapshot = (
                     self.env._get_s_avoid_cross_line_terms(env_ids)
                 )
             elif hasattr(self.env, "_get_s_avoid_cross_line_dist"):
@@ -3478,11 +3500,11 @@ class HierarchicalHexapodEnv:
                             self.env.s_avoid_terminal_cross_line_dist,
                             cross_line_dist_snapshot,
                         )
-                    if rear_y_snapshot is not None and hasattr(self.env, "s_avoid_terminal_rear_y"):
-                        rear_y_snapshot = torch.where(
+                    if center_y_snapshot is not None and hasattr(self.env, "s_avoid_terminal_center_y"):
+                        center_y_snapshot = torch.where(
                             terminal_mask,
-                            self.env.s_avoid_terminal_rear_y,
-                            rear_y_snapshot,
+                            self.env.s_avoid_terminal_center_y,
+                            center_y_snapshot,
                         )
                     if cross_line_y_snapshot is not None and hasattr(self.env, "s_avoid_terminal_cross_line_y"):
                         cross_line_y_snapshot = torch.where(
@@ -3498,6 +3520,7 @@ class HierarchicalHexapodEnv:
         # 4. 更新缓冲区
         self.prev_robot_pos = robot_pos.clone()
         self.prev_gate_y = gate_y_raw_curr.clone()
+        self.prev_cmd_pred_x = cmd_pred_x.detach().clone()
         self.prev_cmd_exec_mean = cmd_exec_mean.detach().clone()
         if nearest_obs is not None:
             self.prev_nearest_obs_dist = torch.nan_to_num(
@@ -3650,6 +3673,7 @@ class HierarchicalHexapodEnv:
                 self.env.compute_observations()
             self._refresh_depth_images(force=True)
             self.prev_robot_pos[reset_ids] = self.env.root_states[reset_ids, :3]
+            self.prev_cmd_pred_x[reset_ids] = 0.0
             self.prev_cmd_exec_mean[reset_ids] = 0.0
             self.rotate_only_active[reset_ids] = False
             if self.prev_goal_world is not None and hasattr(self.env, "goal_world"):
@@ -3678,6 +3702,7 @@ class HierarchicalHexapodEnv:
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
+            self.prev_cmd_pred_x[done_any] = 0.0
             self.prev_cmd_exec_mean[done_any] = 0.0
             self.rotate_only_active[done_any] = False
             self.prev_nearest_obs_dist[done_any] = 0.0
@@ -3718,7 +3743,7 @@ class HierarchicalHexapodEnv:
             'success_mask': success_mask,
             's_avoid_progress_mask': s_avoid_progress_mask,
             'cross_line_dist': cross_line_dist_snapshot,
-            'rear_y': rear_y_snapshot,
+            'center_y': center_y_snapshot,
             'cross_line_y': cross_line_y_snapshot,
             's_avoid_episode_collision': s_avoid_episode_collision_snapshot,
             'timeout': timeout,
@@ -4655,6 +4680,8 @@ def train(args):
             'row_gate',
             'row_gate_active',
             'row_push_active',
+            'avoid_smooth_switch_valid',
+            'avoid_smooth_switch_event',
             'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
@@ -4687,6 +4714,8 @@ def train(args):
         cmd_x_sign_switch_active_count = torch.zeros((), device=device)
         cmd_x_switch_valid_count = torch.zeros((), device=device)
         cmd_x_switch_valid_active_count = torch.zeros((), device=device)
+        cmd_x_sign_switch_gap_count = torch.zeros((), device=device)
+        cmd_x_switch_valid_gap_count = torch.zeros((), device=device)
         cmd_x_gate_active_count = torch.zeros((), device=device)
         body_forward_speed_sum = torch.zeros((), device=device)
         body_backward_speed_sum = torch.zeros((), device=device)
@@ -5495,6 +5524,16 @@ def train(args):
                     sign_switch_active = sign_switch & row_gate_active_mask
                     cmd_x_switch_valid_active_count += switch_valid_active.float().sum()
                     cmd_x_sign_switch_active_count += sign_switch_active.float().sum()
+                    if reward_terms is not None and 'avoid_smooth_switch_valid' in reward_terms:
+                        switch_valid_gap = reward_terms['avoid_smooth_switch_valid'] > 0.5
+                    else:
+                        switch_valid_gap = torch.zeros((env.num_envs,), dtype=torch.bool, device=device)
+                    if reward_terms is not None and 'avoid_smooth_switch_event' in reward_terms:
+                        sign_switch_gap = reward_terms['avoid_smooth_switch_event'] > 0.5
+                    else:
+                        sign_switch_gap = torch.zeros((env.num_envs,), dtype=torch.bool, device=device)
+                    cmd_x_switch_valid_gap_count += switch_valid_gap.float().sum()
+                    cmd_x_sign_switch_gap_count += sign_switch_gap.float().sum()
                     prev_cmd_slew = cmd_exec_for_diag.detach()
                 clearance_pp = post_info.get('clearance_pp', None)
                 if clearance_pp is not None:
@@ -6197,6 +6236,10 @@ def train(args):
             (cmd_x_sign_switch_active_count / cmd_x_switch_valid_active_count.clamp_min(1.0)).item()
             if float(cmd_x_switch_valid_active_count.item()) > 0.0 else 0.0
         )
+        cmd_x_sign_switch_gap_rate = (
+            (cmd_x_sign_switch_gap_count / cmd_x_switch_valid_gap_count.clamp_min(1.0)).item()
+            if float(cmd_x_switch_valid_gap_count.item()) > 0.0 else 0.0
+        )
         cmd_jerk_lin_mean = (cmd_jerk_lin_sum / total_samples).item()
         cmd_jerk_ang_mean = (cmd_jerk_ang_sum / total_samples).item()
         near_miss_excess_mean = (near_miss_excess_sum / total_samples).item()
@@ -6430,8 +6473,9 @@ def train(args):
         writer.add_scalar('Stats/CmdExecXAbs', cmd_exec_x_abs_mean, iteration)
         writer.add_scalar('Stats/CmdXDeltaAbs', cmd_x_delta_abs_mean, iteration)
         writer.add_scalar('Stats/CmdXDeltaAbsActive', cmd_x_delta_abs_active_mean, iteration)
-        writer.add_scalar('Stats/CmdXSignSwitchRate', cmd_x_sign_switch_rate, iteration)
-        writer.add_scalar('Stats/CmdXSignSwitchRateActive', cmd_x_sign_switch_active_rate, iteration)
+        writer.add_scalar('Stats/CmdXExecSignSwitchRate', cmd_x_sign_switch_rate, iteration)
+        writer.add_scalar('Stats/CmdXExecSignSwitchRateGated', cmd_x_sign_switch_active_rate, iteration)
+        writer.add_scalar('Stats/CmdXPredSignSwitchRateInGap', cmd_x_sign_switch_gap_rate, iteration)
         if 'row_cmdx_signed' in reward_term_means:
             writer.add_scalar('Stats/CmdXSigned', reward_term_means['row_cmdx_signed'], iteration)
         if 'row_cmdx_signed_abs' in reward_term_means:
@@ -6586,7 +6630,7 @@ def train(args):
                           f"""{'CmdX pred/post/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX |pred|/|post|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
                           f"""{'CmdX deltaAbs(all/gated):':>{pad}} {cmd_x_delta_abs_mean:.3f} / {cmd_x_delta_abs_active_mean:.3f}\n"""
-                          f"""{'CmdX switchRate(all/gated):':>{pad}} {cmd_x_sign_switch_rate:.3f} / {cmd_x_sign_switch_active_rate:.3f}\n"""
+                          f"""{'CmdX switchRate(exec/gated/predInGap):':>{pad}} {cmd_x_sign_switch_rate:.3f} / {cmd_x_sign_switch_active_rate:.3f} / {cmd_x_sign_switch_gap_rate:.3f}\n"""
                           f"""{'CmdX pred/towardGap/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX signed abs/pos/neg:':>{pad}} {reward_term_means.get('row_cmdx_signed_abs', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_pos', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_neg', 0.0):.3f}\n"""
                           f"""{'Row fwdDist/gate/gOn/pOn:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""

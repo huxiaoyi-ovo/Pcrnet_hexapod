@@ -1848,3 +1848,31 @@
 
 - [x] Must: 拆清 `train` 输出里的 `step级 / episode级 / stage窗口级` 指标，避免同一行混不同层级
 - [x] Must: 拆清 `play` 调试输出里的 `goal_dist_delta / cross_line_dist / episode_progress / success / collision`，避免继续用模糊名字误判行为
+- [x] Must: 将 `play` 里的 `side(map/gt/cmd)` 改成同一当前 row 语义下可比较的三列，并修正 `row_y` 世界坐标直接索引局部图的混用
+
+## 2026-03-31 avoid gap内横移反向切换惩罚
+
+- [x] Must: 将 `avoid_smooth` 从泛化的 `cmd_x` 执行增量惩罚改成“仅在当前 gap 内的横移反向切换惩罚”，直接打到无意义左右翻向
+- [x] Must: 补出 `in-gap` 翻向事件统计，方便直接判断这次改动有没有把 gap 内来回横移压下去
+
+## 2026-03-31 train/play 开关率与地图调试口径拆清
+
+- [x] Must: 将 `play` 里混在一行的 `GT raw affordance` 与 `local_map_2ch` 调试量拆开，避免继续把两路来源误当成同一老师信号
+- [x] Must: 将训练输出里的 `switchRate` 显式区分 `Exec` 与 `PredInGap`，避免横向比较时误读 smooth 的实际作用层
+
+## 2026-03-31 avoid gap内横移切换惩罚加大
+
+- [x] Must: 在不改其他奖励项的前提下，仅上调 `gap` 内横移方向切换惩罚强度，优先压掉已进通道后的无意义左右翻向
+
+## 2026-03-31 朝向修正退出角度下限提高
+
+- [x] Must: 将 `rotate_only` 的退出角度下限提高到 `5°`，减少小角度误差下反复进出朝向修正
+
+## 2026-03-31 avoid 过线与切行语义调整
+
+- [x] Must: 将 `progress` 与最终 `success` 的过线判定统一改成“机身中心过线”，并让最后一行中心过线计入 `progress=1.0`
+- [x] Must: 保持下一行 `gap` 切换更保守，仅当机身后缘超过当前行 `+0.2m` 后才切到下一行
+
+## 2026-03-31 avoid stage2/3 升级碰撞门槛放宽
+
+- [x] Must: 仅放宽 `stage2 -> stage3` 与 `stage3 -> stage4` 的 `collision_rate` 门槛，避免当前已具备通过能力的策略继续被过严碰撞阈值卡住
