@@ -2736,6 +2736,7 @@ class HierarchicalHexapodEnv:
             cmd_vel, clearance_pp, beta=self.beta_override
         )
         velocity_cmd_post = velocity_cmd.detach().clone()
+        rotate_only_trigger_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if bool(getattr(self.env, "s_avoid_enabled", False)):
             velocity_cmd = velocity_cmd.clone()
             velocity_cmd[:, 1] = torch.clamp(velocity_cmd[:, 1], min=self.forced_forward_speed)
@@ -2773,6 +2774,7 @@ class HierarchicalHexapodEnv:
                 (yaw_deg > yaw_on_deg)
                 | (self.rotate_only_active & (yaw_deg > yaw_off_deg))
             ) & rotate_allow
+            rotate_only_trigger_event = rotate_only_active & (~self.rotate_only_active)
             omega_cmd = torch.clamp(
                 -yaw_gain * yaw_error,
                 min=-float(getattr(nav_cfg, "max_ang_vel_command", 0.3)),
@@ -3197,7 +3199,7 @@ class HierarchicalHexapodEnv:
                 avoid_smooth_switch_unit = float(
                     getattr(self.reward_cfg, "avoid_smooth_switch_unit", 0.001)
                 )
-                heading_keep_scale = float(getattr(self.reward_cfg, "avoid_heading_keep_scale", 0.0))
+                heading_event_penalty = float(getattr(self.reward_cfg, "avoid_heading_event_penalty", 0.0))
                 row_cmdx_log_mask = row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_valid = gate_row * row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_active = (
@@ -3229,14 +3231,9 @@ class HierarchicalHexapodEnv:
                     * gate_row
                     * smooth_switch_event.float()
                 )
-                yaw_error_wrapped = torch.atan2(
-                    torch.sin(heading_error),
-                    torch.cos(heading_error),
-                )
                 heading_keep_reward = (
-                    -heading_keep_scale
-                    * row_gate_active
-                    * (yaw_error_wrapped ** 2)
+                    -heading_event_penalty
+                    * rotate_only_trigger_event.float()
                 )
                 reward_dict['row_lat'] = row_lat_reward
                 reward_dict['row_gap'] = row_gap_reward

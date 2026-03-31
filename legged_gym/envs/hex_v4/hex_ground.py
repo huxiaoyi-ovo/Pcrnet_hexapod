@@ -3040,7 +3040,14 @@ class HexGround(LeggedRobot):
             if not bool(stage_mask.any().item()):
                 continue
             row_totals[stage_mask] = float(len(self._get_s_avoid_fixed_stage_row_y(int(stage_v))))
-        best_counts = self.s_avoid_episode_rows_passed_best[env_ids].to(dtype=torch.float32)
+        current_counts = self._get_s_avoid_episode_row_pass_counts(
+            env_ids,
+            stage_ids=stage_ids,
+        ).to(dtype=torch.float32)
+        best_counts = torch.maximum(
+            self.s_avoid_episode_rows_passed_best[env_ids].to(dtype=torch.float32),
+            current_counts,
+        )
         return torch.clamp(best_counts / torch.clamp(row_totals, min=1.0), min=0.0, max=1.0)
 
     def _get_s_avoid_episode_row_success_ratios(
@@ -3059,7 +3066,16 @@ class HexGround(LeggedRobot):
             if not bool(stage_mask.any().item()):
                 continue
             row_totals[stage_mask] = float(len(self._get_s_avoid_fixed_stage_row_y(int(stage_v))))
-        best_counts = self.s_avoid_episode_rows_success_best[env_ids].to(dtype=torch.float32)
+        current_counts = self._get_s_avoid_episode_row_pass_counts(
+            env_ids,
+            stage_ids=stage_ids,
+        ).to(dtype=torch.float32)
+        collision_free_mask = (~self.s_avoid_episode_collision[env_ids]).to(dtype=torch.float32)
+        current_counts = current_counts * collision_free_mask
+        best_counts = torch.maximum(
+            self.s_avoid_episode_rows_success_best[env_ids].to(dtype=torch.float32),
+            current_counts,
+        )
         return torch.clamp(best_counts / torch.clamp(row_totals, min=1.0), min=0.0, max=1.0)
 
     def _get_s_avoid_episode_progress_flags(

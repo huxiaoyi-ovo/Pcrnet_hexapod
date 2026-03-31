@@ -570,8 +570,9 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_gate_full"] = 0.4
         reward_cfg["avoid_smooth_scale"] = 10.0
         reward_cfg["avoid_smooth_switch_threshold"] = 0.05
-        reward_cfg["avoid_smooth_switch_unit"] = 0.002
+        reward_cfg["avoid_smooth_switch_unit"] = 0.004
         reward_cfg["avoid_heading_keep_scale"] = 0.0
+        reward_cfg["avoid_heading_event_penalty"] = 0.2
 
 
 class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
