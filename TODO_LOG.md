@@ -1890,3 +1890,13 @@
 
 - [x] Must: 取消连续朝向平方惩罚，改成“触发一次朝向修复就罚一次”的稀疏事件惩罚
 - [x] Must: 单次朝向修复事件惩罚设为 `-0.2`，让该信号真正进入策略取舍
+
+## 2026-04-01 avoid 后两级课程移除 progress 硬门槛
+
+- [x] Must: 将 `stage2 -> stage3` 与 `stage3 -> stage4` 的升级条件从 `success + collision + progress` 收成 `success + collision`
+- [x] Must: 保留 `progress` 统计用于观察，但不再作为后两级课程的硬门槛
+
+## 2026-04-01 avoid x切换惩罚与朝向修复事件惩罚继续加大
+
+- [x] Must: 将 `gap` 内 `x` 方向切换惩罚继续加大，优先直接压低 `CmdXPredSignSwitchRateInGap`
+- [x] Must: 将触发 `rotate_only` 的单次事件惩罚继续加大，让策略更明确回避需要角度恢复的状态
