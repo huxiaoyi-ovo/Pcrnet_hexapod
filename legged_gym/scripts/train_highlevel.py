@@ -37,7 +37,7 @@ import numpy as np
 import torch.nn.functional as F
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from typing import Tuple, Dict, Optional, Any
+from typing import Tuple, Dict, Optional, Any, List
 from collections import deque
 
 # Use CLI flag to gate debug output before args are parsed.
