@@ -1900,3 +1900,19 @@
 
 - [x] Must: 将 `gap` 内 `x` 方向切换惩罚继续加大，优先直接压低 `CmdXPredSignSwitchRateInGap`
 - [x] Must: 将触发 `rotate_only` 的单次事件惩罚继续加大，让策略更明确回避需要角度恢复的状态
+
+## 2026-04-02 avoid through阶段提前切下一行横移惩罚
+
+- [x] Must: 将当前行 through 阶段单独收口，只要 `gap` 还没切换就不鼓励提前朝下一行做明显横移准备
+- [x] Must: 对“当前行未 release 且明显朝下一行 gap 横移”的命令加入专门惩罚，优先减少 stage3/4 里擦到当前行侧面的碰撞
+
+## 2026-04-02 avoid gap切换release改为障碍后缘+0.05
+
+- [x] Must: 将当前行 release 判据从“后缘过行中心+固定偏移”改成“后缘过当前行障碍后缘+0.05”，避免尚未完全 through 就切到下一行
+- [x] Must: 同步修改最近行选择与前向距离 helper，确保 train/play 使用同一 release 语义
+
+## 2026-04-02 avoid 课程升级条件统一
+
+- [x] Must: 将三段课程升级统一成只看 `success_rate + collision_rate`，不再保留任何 `progress` 硬门槛
+- [x] Must: 将三段 `min_episodes` 统一为 `400`，`window` 统一为 `200`
+- [x] Must: 升级阈值统一为 `1->2: success 0.70 / collision 0.20`，`2->3: success 0.90 / collision 0.10`，`3->4: success 0.85 / collision 0.15`

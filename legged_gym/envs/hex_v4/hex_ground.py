@@ -2851,7 +2851,6 @@ class HexGround(LeggedRobot):
             current_stage == 1
             and stage_completed_eps >= int(getattr(self.cfg.terrain, "avoid_stage12_min_episodes", 200))
             and len(stage_hists["collision"]) >= stage_hists["collision"].maxlen
-            and progress_stage >= float(getattr(self.cfg.terrain, "avoid_stage12_progress_threshold", 0.35))
             and success_stage >= float(getattr(self.cfg.terrain, "avoid_stage12_success_threshold", 0.30))
             and rate_stage < float(getattr(self.cfg.terrain, "avoid_stage12_collision_threshold", 0.03))
         ):

@@ -340,13 +340,13 @@ class HexAvoidBasicCfg(HexGroundCfg):
 
         # Fixed-layout curriculum: keep stage switch criteria minimal and fast.
         avoid_stage12_window = 200
-        avoid_stage12_min_episodes = 300
-        avoid_stage12_collision_threshold = 0.25
+        avoid_stage12_min_episodes = 400
+        avoid_stage12_collision_threshold = 0.20
         avoid_stage12_exposure_threshold = 0.70
         avoid_stage12_progress_threshold = 0.45
         avoid_stage12_progress_delta = 0.25
         avoid_stage12_success_distance = 0.80
-        avoid_stage12_success_threshold = 0.40
+        avoid_stage12_success_threshold = 0.70
 
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage23_window = 200
@@ -356,17 +356,17 @@ class HexAvoidBasicCfg(HexGroundCfg):
         avoid_stage23_progress_threshold = 0.85
         avoid_stage23_progress_delta = 0.35
         avoid_stage23_success_distance = 0.65
-        avoid_stage23_success_threshold = 0.55
+        avoid_stage23_success_threshold = 0.90
 
         # Fixed-layout curriculum: later stages use the same short window.
         avoid_stage34_window = 200
-        avoid_stage34_min_episodes = 500
+        avoid_stage34_min_episodes = 400
         avoid_stage34_collision_threshold = 0.15
         avoid_stage34_exposure_threshold = 0.85
         avoid_stage34_progress_threshold = 0.88
         avoid_stage34_progress_delta = 0.35
         avoid_stage34_success_distance = 0.65
-        avoid_stage34_success_threshold = 0.60
+        avoid_stage34_success_threshold = 0.85
 
         # Stage-4 corridor shrink curriculum.
         avoid_stage4_shrink_window = 100
@@ -562,7 +562,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_row_group_tol"] = 0.25
         reward_cfg["avoid_row_margin"] = 0.15
         reward_cfg["avoid_row_effective_margin"] = 0.0
-        reward_cfg["avoid_row_release_offset"] = 0.20
+        reward_cfg["avoid_row_release_offset"] = 0.05
         reward_cfg["avoid_row_near_scale"] = 0.0
         reward_cfg["avoid_row_near_sigma"] = 0.50
         reward_cfg["avoid_row_near_release_margin"] = 0.08
@@ -571,6 +571,8 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_smooth_scale"] = 10.0
         reward_cfg["avoid_smooth_switch_threshold"] = 0.05
         reward_cfg["avoid_smooth_switch_unit"] = 0.008
+        reward_cfg["avoid_early_next_gap_threshold"] = 0.30
+        reward_cfg["avoid_early_next_gap_scale"] = 1.0
         reward_cfg["avoid_heading_keep_scale"] = 0.0
         reward_cfg["avoid_heading_event_penalty"] = 0.4
 

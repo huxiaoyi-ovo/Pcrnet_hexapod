@@ -2225,7 +2225,9 @@ class HierarchicalHexapodEnv:
             rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
             for idx, slot in enumerate(active_slots.tolist()):
                 cy = float(obs_xy[idx, 1].item())
-                if rear_y >= (cy + row_release_offset):
+                _, half_y = slot_half_extents(env_id, int(slot))
+                row_back_edge = cy + half_y
+                if rear_y >= (row_back_edge + row_release_offset):
                     continue
                 row_candidates.append((slot, cy))
             if len(row_candidates) == 0:
@@ -2300,6 +2302,179 @@ class HierarchicalHexapodEnv:
             eff_valid[env_id] = eff_right > eff_left
         return gap_center, row_y, valid, gap_left, gap_right, gap_left_eff, gap_right_eff, eff_valid
 
+    def _compute_current_next_row_gap_state(
+        self,
+        robot_pos: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        current_gap_center = torch.zeros(self.num_envs, device=self.device)
+        current_row_front_edge = torch.zeros(self.num_envs, device=self.device)
+        current_row_back_edge = torch.zeros(self.num_envs, device=self.device)
+        current_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        next_gap_center = torch.zeros(self.num_envs, device=self.device)
+        next_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if (
+            not hasattr(self.env, "s_avoid_active")
+            or self.env.s_avoid_active is None
+            or not hasattr(self.env, "s_avoid_pos_world")
+            or not hasattr(self.env, "s_avoid_band_x_min")
+            or not hasattr(self.env, "s_avoid_band_x_max")
+        ):
+            return (
+                current_gap_center,
+                current_row_front_edge,
+                current_row_back_edge,
+                current_valid,
+                next_gap_center,
+                next_valid,
+            )
+
+        cap_slots = int(getattr(self.env, "s_avoid_capsule_slot_count", 0))
+        box_slots = int(getattr(self.env, "s_avoid_box_slot_count", 0))
+        wall_slots = int(getattr(self.env, "s_avoid_wall_slot_count", 0))
+        total_slots = int(getattr(self.env, "s_avoid_total_slots", 0))
+        if total_slots <= 0:
+            return (
+                current_gap_center,
+                current_row_front_edge,
+                current_row_back_edge,
+                current_valid,
+                next_gap_center,
+                next_valid,
+            )
+
+        cap_half = float(getattr(self.env.cfg.terrain, "avoid_capsule_radius", 0.15))
+        box_half = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_x", 0.4))
+        box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
+        wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
+        wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+        row_tol = float(getattr(self.reward_cfg, "avoid_row_group_tol", 0.25))
+        row_margin = float(getattr(self.reward_cfg, "avoid_row_margin", 0.15))
+        row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.20))
+        body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
+
+        def slot_half_extents(env_id: int, slot_id: int) -> Tuple[float, float]:
+            if slot_id < cap_slots:
+                return cap_half + row_margin, cap_half + row_margin
+            quat = self.env.s_avoid_quat_world[env_id, slot_id]
+            yaw = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
+            cos_yaw = abs(math.cos(yaw))
+            sin_yaw = abs(math.sin(yaw))
+            if slot_id < cap_slots + box_slots:
+                half_x = cos_yaw * box_half + sin_yaw * box_hy
+                half_y = sin_yaw * box_half + cos_yaw * box_hy
+                return half_x + row_margin, half_y + row_margin
+            if slot_id < cap_slots + box_slots + wall_slots:
+                half_x = cos_yaw * wall_hx + sin_yaw * wall_hy
+                half_y = sin_yaw * wall_hx + cos_yaw * wall_hy
+                return half_x + row_margin, half_y + row_margin
+            return row_margin, row_margin
+
+        def summarize_row(env_id: int, row_slots: List[int], band_l: float, band_r: float) -> Tuple[float, float, float, bool]:
+            intervals = []
+            row_front = float("inf")
+            row_back = float("-inf")
+            for slot in row_slots:
+                cx = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
+                cy = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
+                half_x, half_y = slot_half_extents(env_id, int(slot))
+                row_front = min(row_front, cy - half_y)
+                row_back = max(row_back, cy + half_y)
+                left = max(band_l, cx - half_x)
+                right = min(band_r, cx + half_x)
+                if right > left:
+                    intervals.append((left, right))
+            if row_back < row_front:
+                return 0.0, 0.0, 0.0, False
+            if intervals:
+                intervals.sort(key=lambda item: item[0])
+                merged = []
+                for left, right in intervals:
+                    if (not merged) or (left > merged[-1][1]):
+                        merged.append([left, right])
+                    else:
+                        merged[-1][1] = max(merged[-1][1], right)
+            else:
+                merged = []
+            cursor = band_l
+            best_width = -1.0
+            best_center = 0.5 * (band_l + band_r)
+            for left, right in merged:
+                if left > cursor:
+                    width = left - cursor
+                    if width > best_width:
+                        best_width = width
+                        best_center = 0.5 * (cursor + left)
+                cursor = max(cursor, right)
+            if band_r > cursor:
+                width = band_r - cursor
+                if width > best_width:
+                    best_width = width
+                    best_center = 0.5 * (cursor + band_r)
+            return best_center, row_front, row_back, best_width > 1e-6
+
+        for env_id in range(self.num_envs):
+            active_slots = self.env.s_avoid_active[env_id].nonzero(as_tuple=False).flatten()
+            if active_slots.numel() == 0:
+                continue
+            obs_xy = self.env.s_avoid_pos_world[env_id, active_slots, :2]
+            row_candidates = []
+            rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
+            for idx, slot in enumerate(active_slots.tolist()):
+                cy = float(obs_xy[idx, 1].item())
+                _, half_y = slot_half_extents(env_id, int(slot))
+                row_back_edge = cy + half_y
+                if rear_y >= (row_back_edge + row_release_offset):
+                    continue
+                row_candidates.append((int(slot), cy))
+            if len(row_candidates) == 0:
+                continue
+            row_candidates.sort(key=lambda item: item[1])
+            grouped_rows = []
+            for slot, cy in row_candidates:
+                if (not grouped_rows) or abs(cy - grouped_rows[-1][0]) > row_tol:
+                    grouped_rows.append((cy, [slot]))
+                else:
+                    grouped_rows[-1][1].append(slot)
+            if len(grouped_rows) == 0:
+                continue
+
+            band_l = float(self.env.s_avoid_band_x_min[env_id].item())
+            band_r = float(self.env.s_avoid_band_x_max[env_id].item())
+            if band_r <= band_l:
+                continue
+
+            curr_center, curr_front, curr_back, curr_ok = summarize_row(
+                env_id,
+                grouped_rows[0][1],
+                band_l,
+                band_r,
+            )
+            if curr_ok:
+                current_gap_center[env_id] = curr_center
+                current_row_front_edge[env_id] = curr_front
+                current_row_back_edge[env_id] = curr_back
+                current_valid[env_id] = True
+
+            if len(grouped_rows) > 1:
+                next_center, _, _, next_ok = summarize_row(
+                    env_id,
+                    grouped_rows[1][1],
+                    band_l,
+                    band_r,
+                )
+                if next_ok:
+                    next_gap_center[env_id] = next_center
+                    next_valid[env_id] = True
+
+        return (
+            current_gap_center,
+            current_row_front_edge,
+            current_row_back_edge,
+            current_valid,
+            next_gap_center,
+            next_valid,
+        )
+
     @staticmethod
     def _distance_to_interval(
         x: torch.Tensor,
@@ -2366,7 +2541,9 @@ class HierarchicalHexapodEnv:
             rear_y = float(robot_pos[env_id, 1].item()) - body_half_length
             for idx, slot in enumerate(active_slots.tolist()):
                 cy = float(obs_xy[idx, 1].item())
-                if rear_y >= (cy + row_release_offset):
+                _, half_y = slot_half_extents(env_id, int(slot))
+                row_back_edge = cy + half_y
+                if rear_y >= (row_back_edge + row_release_offset):
                     continue
                 row_candidates.append((slot, cy))
             if len(row_candidates) == 0:
@@ -3199,6 +3376,12 @@ class HierarchicalHexapodEnv:
                 avoid_smooth_switch_unit = float(
                     getattr(self.reward_cfg, "avoid_smooth_switch_unit", 0.001)
                 )
+                avoid_early_next_gap_threshold = float(
+                    getattr(self.reward_cfg, "avoid_early_next_gap_threshold", 0.30)
+                )
+                avoid_early_next_gap_scale = float(
+                    getattr(self.reward_cfg, "avoid_early_next_gap_scale", 1.0)
+                )
                 heading_event_penalty = float(getattr(self.reward_cfg, "avoid_heading_event_penalty", 0.0))
                 row_cmdx_log_mask = row_forward_valid.float() * gap_eff_valid.float()
                 row_gate_valid = gate_row * row_forward_valid.float() * gap_eff_valid.float()
@@ -3231,6 +3414,39 @@ class HierarchicalHexapodEnv:
                     * gate_row
                     * smooth_switch_event.float()
                 )
+                (
+                    current_row_gap_center,
+                    current_row_front_edge,
+                    current_row_back_edge,
+                    current_row_valid,
+                    next_row_gap_center,
+                    next_row_valid,
+                ) = self._compute_current_next_row_gap_state(robot_pos)
+                body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
+                row_release_offset = float(getattr(self.reward_cfg, "avoid_row_release_offset", 0.20))
+                robot_front_y = robot_pos[:, 1] + body_half_length
+                robot_rear_y = robot_pos[:, 1] - body_half_length
+                in_row_through = (
+                    current_row_valid
+                    & next_row_valid
+                    & (robot_front_y >= current_row_front_edge)
+                    & (robot_rear_y <= (current_row_back_edge + row_release_offset))
+                )
+                current_row_x_dir = torch.sign(current_row_gap_center - robot_pos[:, 0])
+                next_row_x_dir = torch.sign(next_row_gap_center - robot_pos[:, 0])
+                next_row_conflict = (current_row_x_dir * next_row_x_dir) < 0.0
+                toward_next_gap_strength = cmd_pred_x * next_row_x_dir
+                early_next_gap_active = (
+                    in_row_through
+                    & next_row_conflict
+                    & (toward_next_gap_strength > avoid_early_next_gap_threshold)
+                )
+                early_next_gap_penalty = (
+                    -avoid_early_next_gap_scale
+                    * gate_row
+                    * torch.clamp(toward_next_gap_strength - avoid_early_next_gap_threshold, min=0.0)
+                    * early_next_gap_active.float()
+                )
                 heading_keep_reward = (
                     -heading_event_penalty
                     * rotate_only_trigger_event.float()
@@ -3240,6 +3456,7 @@ class HierarchicalHexapodEnv:
                 reward_dict['row_push_penalty'] = row_push_penalty
                 reward_dict['row_cmdx_reward'] = row_cmdx_reward
                 reward_dict['avoid_smooth_penalty'] = avoid_smooth_penalty
+                reward_dict['early_next_gap_penalty'] = early_next_gap_penalty
                 reward_dict['heading_keep'] = heading_keep_reward
                 reward_dict['row_cmdx_signed'] = cmd_x_signed * row_cmdx_log_mask
                 reward_dict['row_cmdx_signed_abs'] = cmd_x_signed.abs() * row_cmdx_log_mask
@@ -3251,6 +3468,7 @@ class HierarchicalHexapodEnv:
                 reward_dict['row_push_active'] = row_push_active
                 reward_dict['avoid_smooth_switch_valid'] = smooth_switch_valid.float()
                 reward_dict['avoid_smooth_switch_event'] = smooth_switch_event.float()
+                reward_dict['early_next_gap_active'] = early_next_gap_active.float()
                 reward_dict['total'] = (
                     reward_dict['total']
                     + row_lat_reward
@@ -3258,6 +3476,7 @@ class HierarchicalHexapodEnv:
                     + row_push_penalty
                     + row_cmdx_reward
                     + avoid_smooth_penalty
+                    + early_next_gap_penalty
                     + heading_keep_reward
                 )
             total_reward = reward_dict['total']
@@ -4668,6 +4887,7 @@ def train(args):
             'row_push_penalty',
             'row_cmdx_reward',
             'avoid_smooth_penalty',
+            'early_next_gap_penalty',
             'heading_keep',
             'row_cmdx_signed',
             'row_cmdx_signed_abs',
@@ -4679,6 +4899,7 @@ def train(args):
             'row_push_active',
             'avoid_smooth_switch_valid',
             'avoid_smooth_switch_event',
+            'early_next_gap_active',
             'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
@@ -6645,7 +6866,7 @@ def train(args):
                           f"""{'Collision force mean/p95/th:':>{pad}} {collision_force_mean:.3f} / {collision_force_p95:.3f} / {collision_threshold_str} ({collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
                           f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
-                          f"""{'Reward(smooth/headingKeep):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
+                          f"""{'Reward(smooth/earlyNext/head):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('early_next_gap_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
                           f"""{'Reward(timeout-only bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
                           f"""{'Reward(time/total):':>{pad}} {reward_term_means.get('time', 0.0):.3f} / {reward_term_means.get('total', 0.0):.3f}\n"""
