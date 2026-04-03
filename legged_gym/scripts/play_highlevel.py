@@ -69,6 +69,7 @@ def _compute_moe_follow_cmd_from_goal(
     goal_tensor: torch.Tensor,
     reset_mask: Optional[torch.Tensor],
     cmd_scale,
+    env_ref=None,
 ) -> torch.Tensor:
     if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
         raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
@@ -76,13 +77,7 @@ def _compute_moe_follow_cmd_from_goal(
         raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
     robot_pos_world_xy = state_tensor[:, :2]
     robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-    goal_x = goal_tensor[:, 0]
-    goal_y = goal_tensor[:, 1]
-    cos_heading = torch.cos(robot_heading)
-    sin_heading = torch.sin(robot_heading)
-    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
-    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
-    target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+    target_world_xy = th.get_follow_target_world_xy(env_ref, state_tensor, goal_tensor)
     return s0_follow_expert_fn(
         robot_pos_world_xy=robot_pos_world_xy,
         robot_heading=robot_heading,
@@ -2253,7 +2248,9 @@ def main():
             avoid_cf_cmds = None
             avoid_cf_feats = None
             cmd = torch.zeros((env.num_envs, 3), device=device, dtype=torch.float32)
-            goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
+            policy_goal = th.get_policy_goal_tensor(obs, skill)
+            goal_input = torch.zeros_like(policy_goal) if bool(getattr(args, "zero_goal", False)) else policy_goal
+            avoid_goal_input = torch.zeros_like(obs["goal"]) if bool(getattr(args, "zero_goal", False)) else obs["goal"]
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
             avoid_aff_input = (
                 torch.zeros_like(avoid_aff_stack_buf)
@@ -2282,11 +2279,12 @@ def main():
                             goal_input,
                             reset_mask,
                             cmd_scale,
+                            env_ref=env,
                         )
                         cmd_a, _ = avoid_policy.get_action(
                             avoid_aff_input,
                             expert_state,
-                            goal_input,
+                            avoid_goal_input,
                             avoid_difficulty_input,
                             deterministic=True,
                         )

@@ -571,7 +571,7 @@ class HexAvoidBasicCfg(HexGroundCfg):
         reward_cfg["avoid_smooth_scale"] = 10.0
         reward_cfg["avoid_smooth_switch_threshold"] = 0.05
         reward_cfg["avoid_smooth_switch_unit"] = 0.008
-        reward_cfg["avoid_early_next_gap_threshold"] = 0.30
+        reward_cfg["avoid_early_next_gap_threshold"] = 0.20
         reward_cfg["avoid_early_next_gap_scale"] = 1.0
         reward_cfg["avoid_heading_keep_scale"] = 0.0
         reward_cfg["avoid_heading_event_penalty"] = 0.4
@@ -583,6 +583,46 @@ class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
 
     class runner(HexGroundCfgPPO.runner):
         experiment_name = "s_avoid_basic"
+
+
+class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
+    """
+    s_pcr_line_avoid_basic:
+    Keep s_avoid_basic geometry and curriculum unchanged, but add a scripted
+    moving target on a fixed straight line for PCR follow-vs-avoid coordination.
+    """
+
+    class navigation(HexAvoidBasicCfg.navigation):
+        moving_target_enable = True
+        moving_target_mode = "pcr_line_script"
+        moving_target_pcr_line_x = -0.60
+        moving_target_pcr_line_speed = 0.55
+        moving_target_pcr_line_end_margin_y = 0.80
+        moving_target_pcr_line_min_forward = 0.80
+
+        follow_distance_desired = 1.5
+        follow_distance_min = 1.0
+        follow_distance_max = 2.2
+        target_lost_k = 0
+        target_center_scale = 0.0
+        target_visible_scale = 0.0
+        pcr_follow_far_distance = 4.0
+        pcr_follow_far_time_s = 3.0
+
+        reward_cfg = dict(HexAvoidBasicCfg.navigation.reward_cfg)
+        reward_cfg["follow_enable"] = True
+        reward_cfg["follow_distance_desired"] = 1.5
+        reward_cfg["follow_distance_sigma"] = 0.30
+        reward_cfg["follow_distance_scale"] = 10.0
+        reward_cfg["follow_band_scale"] = 3.0
+
+
+class HexPCRLineAvoidBasicCfgPPO(HexGroundCfgPPO):
+    class algorithm(HexGroundCfgPPO.algorithm):
+        entropy_coef = 0.04
+
+    class runner(HexGroundCfgPPO.runner):
+        experiment_name = "s_pcr_line_avoid_basic"
 
 
 class HexS1Cfg(HexGroundCfg):

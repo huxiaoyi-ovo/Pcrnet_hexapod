@@ -741,9 +741,11 @@ def s2_forest_terrain(terrain, difficulty: float, rng, cfg: LeggedRobotCfg.terra
             centers.append((x, y))
             placed = True
             break
+        # If we fail to place one obstacle after the retry budget, just skip it.
+        # Do not insert sentinel coordinates here, otherwise the next distance
+        # check will read None and crash before we get a chance to filter it out.
         if not placed:
-            centers.append((None, None))
-    centers = [c for c in centers if c[0] is not None]
+            continue
 
     shapes = (["pole"] * num_poles) + (["block"] * num_blocks)
     rng.shuffle(shapes)

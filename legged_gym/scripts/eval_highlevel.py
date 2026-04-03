@@ -88,6 +88,7 @@ def _compute_moe_follow_cmd_from_goal(
     goal_tensor: torch.Tensor,
     reset_mask: Optional[torch.Tensor],
     cmd_scale: Tuple[float, float, float],
+    env_ref=None,
 ) -> torch.Tensor:
     if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
         raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
@@ -95,13 +96,7 @@ def _compute_moe_follow_cmd_from_goal(
         raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
     robot_pos_world_xy = state_tensor[:, :2]
     robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-    goal_x = goal_tensor[:, 0]
-    goal_y = goal_tensor[:, 1]
-    cos_heading = torch.cos(robot_heading)
-    sin_heading = torch.sin(robot_heading)
-    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
-    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
-    target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+    target_world_xy = th.get_follow_target_world_xy(env_ref, state_tensor, goal_tensor)
     return s0_follow_expert_fn(
         robot_pos_world_xy=robot_pos_world_xy,
         robot_heading=robot_heading,
@@ -439,7 +434,8 @@ class EvalRunner:
         gate_aff_map: Optional[torch.Tensor] = None,
     ):
         state = obs_dict["state"]
-        goal = obs_dict["goal"]
+        goal = th.get_policy_goal_tensor(obs_dict, self.args.skill)
+        avoid_goal = obs_dict["goal"]
 
         if self.args.skill == "moe":
             if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:
@@ -451,11 +447,12 @@ class EvalRunner:
                     goal,
                     self.done_prev,
                     tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()),
+                    env_ref=self.env,
                 )
                 cmd_a, _ = self.avoid_model.get_action(
                     avoid_aff_stack,
                     expert_state,
-                    goal,
+                    avoid_goal,
                     avoid_difficulty,
                     deterministic=not self.args.stochastic,
                 )

@@ -60,6 +60,14 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-04-02 场景命名体系收口
+
+- [x] ~~[P0] 将项目主线场景体系收口为两类命名：`s_` 仅表示训练场景，`e_` 仅表示实验场景；除这两类外的旧场景名默认废弃，不再作为主线讨论、命令示例与结果汇报依据~~
+
+## 2026-04-02 PCR 第一场景：固定避障几何 + 直线移动目标
+
+- [x] ~~[P0] 新增 `s_pcr_line_avoid_basic`：场景几何、固定模板、课程与 `s_avoid_basic` 完全一致，只增加一条固定 `x_line` 的直线移动目标，用于第一版 PCR 跟随-避障协调训练~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
@@ -1916,3 +1924,8 @@
 - [x] Must: 将三段课程升级统一成只看 `success_rate + collision_rate`，不再保留任何 `progress` 硬门槛
 - [x] Must: 将三段 `min_episodes` 统一为 `400`，`window` 统一为 `200`
 - [x] Must: 升级阈值统一为 `1->2: success 0.70 / collision 0.20`，`2->3: success 0.90 / collision 0.10`，`3->4: success 0.85 / collision 0.15`
+
+## 2026-04-03 avoid through惩罚改为打逆当前gap方向大横移
+
+- [x] Must: 将 through 阶段惩罚从“朝下一行 gap 提前准备”改成“当前行未 release 时逆当前 gap 方向的大横移”
+- [x] Must: 触发门槛收成 `cmd_x_toward_gap < -0.20`，优先直接打中 stage3/4 里的侧擦碰坏样本

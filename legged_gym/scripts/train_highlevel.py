@@ -86,6 +86,7 @@ LEGACY_TASK_ALIASES = {
     "hex_debug_heightfield": "s_debug_heightfield",
 }
 S0_FOLLOW_TASK_NAME = "s_follow_basic"
+PCR_LINE_TASK_NAME = "s_pcr_line_avoid_basic"
 
 
 def normalize_task_name(task_name: str) -> str:
@@ -97,6 +98,40 @@ def normalize_task_name(task_name: str) -> str:
 
 def is_s0_follow_task_name(task_name: str) -> bool:
     return normalize_task_name(task_name) == S0_FOLLOW_TASK_NAME
+
+
+def is_pcr_line_task_name(task_name: str) -> bool:
+    return normalize_task_name(task_name) == PCR_LINE_TASK_NAME
+
+
+def get_policy_goal_tensor(obs_dict: Dict[str, torch.Tensor], skill_name: str) -> torch.Tensor:
+    use_follow_goal = bool(obs_dict.get("use_follow_goal", False))
+    if use_follow_goal and skill_name in ("follow", "moe") and "follow_goal" in obs_dict:
+        follow_goal = obs_dict.get("follow_goal", None)
+        if torch.is_tensor(follow_goal):
+            return follow_goal
+    return obs_dict["goal"]
+
+
+def get_follow_target_world_xy(
+    env_like: Any,
+    state_tensor: torch.Tensor,
+    goal_tensor: torch.Tensor,
+) -> torch.Tensor:
+    base_env = getattr(env_like, "env", env_like)
+    target_world_xy = getattr(base_env, "target_world", None)
+    if torch.is_tensor(target_world_xy) and target_world_xy.ndim == 2 and target_world_xy.shape[1] >= 2:
+        if target_world_xy.shape[0] == state_tensor.shape[0]:
+            return target_world_xy[:, :2]
+    robot_pos_world_xy = state_tensor[:, :2]
+    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
+    goal_x = goal_tensor[:, 0]
+    goal_y = goal_tensor[:, 1]
+    cos_heading = torch.cos(robot_heading)
+    sin_heading = torch.sin(robot_heading)
+    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
+    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
+    return robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
 
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
@@ -1250,6 +1285,8 @@ class HierarchicalHexapodEnv:
                     f"got terrain_type='{terrain_type or 'unset'}'"
                 )
         self.is_s0_follow_task = is_s0_follow_task_name(str(getattr(args, "task", "")).lower()) or (terrain_type in ("s0_follow_plane", "s0"))
+        moving_mode = str(getattr(nav_cfg, "moving_target_mode", "")).strip().lower() if nav_cfg is not None else ""
+        self.is_pcr_line_task = is_pcr_line_task_name(str(getattr(args, "task", "")).lower()) or (moving_mode == "pcr_line_script")
         self.scene_difficulty_pending = 0.0
         self.scene_difficulty_override = torch.zeros(
             self.num_envs, device=self.env.device, dtype=torch.float32
@@ -1272,6 +1309,8 @@ class HierarchicalHexapodEnv:
         self.s0_follow_success_time_s = float(
             getattr(nav_cfg, "follow_success_time_s", success_time_default)
         ) if nav_cfg is not None else success_time_default
+        self.pcr_follow_far_distance = float(getattr(nav_cfg, "pcr_follow_far_distance", 4.0)) if nav_cfg is not None else 4.0
+        self.pcr_follow_far_time_s = float(getattr(nav_cfg, "pcr_follow_far_time_s", 3.0)) if nav_cfg is not None else 3.0
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -1337,6 +1376,7 @@ class HierarchicalHexapodEnv:
         self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.pcr_follow_far_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.stable_follow_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
@@ -1363,6 +1403,9 @@ class HierarchicalHexapodEnv:
         self.no_episode_timeout = bool(getattr(env_cfg.env, "no_episode_timeout", False))
         self.s0_follow_steps_success = max(
             1, int(self.s0_follow_success_time_s / max(1e-6, self.high_level_dt))
+        )
+        self.pcr_follow_far_steps_limit = max(
+            1, int(self.pcr_follow_far_time_s / max(1e-6, self.high_level_dt))
         )
         
         if self.debug:
@@ -1458,6 +1501,7 @@ class HierarchicalHexapodEnv:
         self.reach_given.zero_()
         self.goal_change_count.zero_()
         self.target_lost_steps.zero_()
+        self.pcr_follow_far_steps.zero_()
         self.stable_follow_steps.zero_()
         self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
@@ -2793,6 +2837,11 @@ class HierarchicalHexapodEnv:
             obs_dict['goal'] = self.env.goal_buf.clone()
         else:
             obs_dict['goal'] = self.env.commands[:, :2].clone()
+        if hasattr(self.env, 'follow_goal_buf'):
+            obs_dict['follow_goal'] = self.env.follow_goal_buf.clone()
+        else:
+            obs_dict['follow_goal'] = obs_dict['goal'].clone()
+        obs_dict['use_follow_goal'] = bool(self.is_s0_follow_task or self.is_pcr_line_task)
         if offset != 0.0:
             goal = obs_dict['goal']
             cos_o = math.cos(offset)
@@ -2800,6 +2849,10 @@ class HierarchicalHexapodEnv:
             goal_x = cos_o * goal[:, 0] - sin_o * goal[:, 1]
             goal_y = sin_o * goal[:, 0] + cos_o * goal[:, 1]
             obs_dict['goal'] = torch.stack([goal_x, goal_y], dim=1)
+            follow_goal = obs_dict['follow_goal']
+            follow_goal_x = cos_o * follow_goal[:, 0] - sin_o * follow_goal[:, 1]
+            follow_goal_y = sin_o * follow_goal[:, 0] + cos_o * follow_goal[:, 1]
+            obs_dict['follow_goal'] = torch.stack([follow_goal_x, follow_goal_y], dim=1)
         
         # 3. GT Affordance
         aff_map = self._build_gt_affordance_map()
@@ -3263,20 +3316,22 @@ class HierarchicalHexapodEnv:
                 curr_dist = torch.clamp(cross_line_world_y - curr_center_y, min=0.0)
                 prev_dist = torch.clamp(cross_line_world_y - prev_center_y, min=0.0)
                 approach_progress = (prev_dist - curr_dist) * float(self.reward_cfg.goal_approach_scale)
-                prev_total = reward_dict['total']
-                prev_approach = reward_dict.get('approach', torch.zeros_like(approach_progress))
                 reward_dict['cross_line_dist'] = curr_dist
-                reward_dict['approach'] = approach_progress
-                reward_dict['total'] = prev_total - prev_approach + approach_progress
+                reward_dict['cross_line_progress'] = prev_dist - curr_dist
+                if not self.is_pcr_line_task:
+                    prev_total = reward_dict['total']
+                    prev_approach = reward_dict.get('approach', torch.zeros_like(approach_progress))
+                    reward_dict['approach'] = approach_progress
+                    reward_dict['total'] = prev_total - prev_approach + approach_progress
 
-                forward_progress_speed = torch.clamp(
-                    (prev_dist - curr_dist) / max(float(self.high_level_dt), 1e-6),
-                    min=0.0,
-                )
-                velocity_reward = forward_progress_speed * float(self.reward_cfg.velocity_scale)
-                prev_velocity = reward_dict.get('velocity', torch.zeros_like(velocity_reward))
-                reward_dict['velocity'] = velocity_reward
-                reward_dict['total'] = reward_dict['total'] - prev_velocity + velocity_reward
+                    forward_progress_speed = torch.clamp(
+                        (prev_dist - curr_dist) / max(float(self.high_level_dt), 1e-6),
+                        min=0.0,
+                    )
+                    velocity_reward = forward_progress_speed * float(self.reward_cfg.velocity_scale)
+                    prev_velocity = reward_dict.get('velocity', torch.zeros_like(velocity_reward))
+                    reward_dict['velocity'] = velocity_reward
+                    reward_dict['total'] = reward_dict['total'] - prev_velocity + velocity_reward
 
                 heading_error = reward_obs['state'][:, 2]
                 heading_weight = 1.0
@@ -3433,18 +3488,15 @@ class HierarchicalHexapodEnv:
                     & (robot_rear_y <= (current_row_back_edge + row_release_offset))
                 )
                 current_row_x_dir = torch.sign(current_row_gap_center - robot_pos[:, 0])
-                next_row_x_dir = torch.sign(next_row_gap_center - robot_pos[:, 0])
-                next_row_conflict = (current_row_x_dir * next_row_x_dir) < 0.0
-                toward_next_gap_strength = cmd_pred_x * next_row_x_dir
+                cmd_x_toward_current_gap = cmd_pred_x * current_row_x_dir
                 early_next_gap_active = (
                     in_row_through
-                    & next_row_conflict
-                    & (toward_next_gap_strength > avoid_early_next_gap_threshold)
+                    & (cmd_x_toward_current_gap < (-avoid_early_next_gap_threshold))
                 )
                 early_next_gap_penalty = (
                     -avoid_early_next_gap_scale
                     * gate_row
-                    * torch.clamp(toward_next_gap_strength - avoid_early_next_gap_threshold, min=0.0)
+                    * torch.clamp((-cmd_x_toward_current_gap) - avoid_early_next_gap_threshold, min=0.0)
                     * early_next_gap_active.float()
                 )
                 heading_keep_reward = (
@@ -3663,6 +3715,9 @@ class HierarchicalHexapodEnv:
                         reward_terms["total"] = total_reward
 
         success_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        follow_lost_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        target_finish_fail_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        target_line_finished_snapshot = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         cross_line_dist_snapshot = None
@@ -3682,7 +3737,7 @@ class HierarchicalHexapodEnv:
                 )
             elif hasattr(self.env, "_get_s_avoid_cross_line_dist"):
                 cross_line_dist_snapshot = self.env._get_s_avoid_cross_line_dist(env_ids)
-            if hasattr(self.env, "_get_s_avoid_episode_success_flags"):
+            if hasattr(self.env, "_get_s_avoid_episode_success_flags") and (not self.is_pcr_line_task):
                 success_mask = self.env._get_s_avoid_episode_success_flags(env_ids)
                 done_any |= success_mask
                 manual_reset_mask |= success_mask
@@ -3729,6 +3784,39 @@ class HierarchicalHexapodEnv:
                             cross_line_y_snapshot,
                         )
                     self.env.s_avoid_terminal_valid[terminal_mask] = False
+            if self.is_pcr_line_task and hasattr(self.env, "target_world"):
+                target_world_xy = self.env.target_world
+                robot_world_xy = self.env.root_states[:, :2]
+                dist_to_target = torch.norm(target_world_xy - robot_world_xy, dim=1)
+                far_mask = dist_to_target > self.pcr_follow_far_distance
+                far_mask = far_mask & (~done_during)
+                self.pcr_follow_far_steps = torch.where(
+                    far_mask,
+                    self.pcr_follow_far_steps + 1,
+                    torch.zeros_like(self.pcr_follow_far_steps),
+                )
+                follow_lost_reset_mask = self.pcr_follow_far_steps >= self.pcr_follow_far_steps_limit
+                if follow_lost_reset_mask.any():
+                    done_any |= follow_lost_reset_mask
+                    manual_reset_mask |= follow_lost_reset_mask
+                target_finished = getattr(self.env, "target_line_finished", None)
+                if torch.is_tensor(target_finished):
+                    target_finished = target_finished.to(device=self.device, dtype=torch.bool)
+                    target_line_finished_snapshot = target_finished.clone()
+                    episode_collision_for_finish = (
+                        s_avoid_episode_collision_snapshot
+                        if s_avoid_episode_collision_snapshot is not None
+                        else torch.zeros_like(target_finished)
+                    )
+                    success_mask = (
+                        target_finished
+                        & (s_avoid_progress_mask >= 0.999)
+                        & (~episode_collision_for_finish)
+                    )
+                    target_finish_fail_mask = target_finished & (~success_mask)
+                    if target_finished.any():
+                        done_any |= target_finished
+                        manual_reset_mask |= target_finished
             collision_reset_mask = collision_mask.clone()
             done_any |= collision_reset_mask
             manual_reset_mask |= collision_reset_mask
@@ -3755,7 +3843,7 @@ class HierarchicalHexapodEnv:
                 )
                 self.prev_forward_clearance_valid.fill_(True)
         # done 的环境避免跨 episode 的 shaped reward 污染
-        terminal_fail_mask = done_during | band_fail_mask | collision_reset_mask
+        terminal_fail_mask = done_during | band_fail_mask | collision_reset_mask | follow_lost_reset_mask | target_finish_fail_mask
         if terminal_fail_mask.any():
             terminal_fail_penalty = float(getattr(self, "terminal_fail_penalty", -10.0))
             collision_fail_penalty = min(
@@ -3914,6 +4002,7 @@ class HierarchicalHexapodEnv:
             self.reach_given[done_any] = False
             self.goal_change_count[done_any] = 0
             self.target_lost_steps[done_any] = 0
+            self.pcr_follow_far_steps[done_any] = 0
             self.stable_follow_steps[done_any] = 0
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
@@ -3957,6 +4046,8 @@ class HierarchicalHexapodEnv:
             'done_during': done_during,
             'manual_reset_mask': manual_reset_mask,
             'success_mask': success_mask,
+            'follow_lost_mask': follow_lost_reset_mask,
+            'target_line_finished': target_line_finished_snapshot,
             's_avoid_progress_mask': s_avoid_progress_mask,
             'cross_line_dist': cross_line_dist_snapshot,
             'center_y': center_y_snapshot,
@@ -4020,7 +4111,7 @@ def train(args):
     recommended_by_skill = {
         "follow": ("s_follow_basic",),
         "avoid": ("s_avoid_basic", "s_cylinder", "s_narrow_passage", "s_step_field", "s_dense_obstacles"),
-        "moe": ("s_avoid_basic",),
+        "moe": ("s_avoid_basic", "s_pcr_line_avoid_basic"),
     }
     eval_only_by_skill = {
         "avoid": ("s_ood_holdout", "s_ood_holdout_large"),
@@ -4295,13 +4386,7 @@ def train(args):
             raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
         robot_pos_world_xy = state_tensor[:, :2]
         robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-        goal_x = goal_tensor[:, 0]
-        goal_y = goal_tensor[:, 1]
-        cos_heading = torch.cos(robot_heading)
-        sin_heading = torch.sin(robot_heading)
-        delta_world_x = cos_heading * goal_x - sin_heading * goal_y
-        delta_world_y = sin_heading * goal_x + cos_heading * goal_y
-        target_world_xy = robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
+        target_world_xy = get_follow_target_world_xy(env, state_tensor, goal_tensor)
         return compute_s0_follow_expert_cmd(
             robot_pos_world_xy=robot_pos_world_xy,
             robot_heading=robot_heading,
@@ -4735,7 +4820,7 @@ def train(args):
     ) -> torch.Tensor:
         with torch.no_grad():
             bootstrap_state = bootstrap_obs['state']
-            bootstrap_goal = bootstrap_obs['goal']
+            bootstrap_goal = get_policy_goal_tensor(bootstrap_obs, skill)
             bootstrap_critic_aff_map, bootstrap_critic_difficulty = _get_critic_gt_inputs(bootstrap_obs)
             bootstrap_use_student_aff = args.mode != 'teacher'
             if is_gate and moe_use_student_aff:
@@ -4874,6 +4959,8 @@ def train(args):
             'target_center',
             'target_visible',
             'target_lost',
+            'follow_lost',
+            'follow_outside',
             'success_bonus',
             'risk_barrier',
             'gate_smooth',
@@ -4900,6 +4987,7 @@ def train(args):
             'avoid_smooth_switch_valid',
             'avoid_smooth_switch_event',
             'early_next_gap_active',
+            'cross_line_progress',
             'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
@@ -4938,6 +5026,10 @@ def train(args):
         body_forward_speed_sum = torch.zeros((), device=device)
         body_backward_speed_sum = torch.zeros((), device=device)
         goal_dist_sum = torch.zeros((), device=device)
+        follow_dist_sum = torch.zeros((), device=device)
+        follow_lost_rate_sum = torch.zeros((), device=device)
+        target_finish_rate_sum = torch.zeros((), device=device)
+        follow_dist_samples = []
         collision_rate_sum = torch.zeros((), device=device)
         obstacle_contact_candidate_rate_sum = torch.zeros((), device=device)
         strict_obstacle_contact_rate_sum = torch.zeros((), device=device)
@@ -5058,6 +5150,7 @@ def train(args):
             # 准备输入
             state = obs_dict['state']
             goal_raw = obs_dict['goal']
+            policy_goal_raw = get_policy_goal_tensor(obs_dict, skill)
             egpo_diag_yaw_before = None
             egpo_diag_cmd_omega = None
             
@@ -5183,14 +5276,14 @@ def train(args):
                     if start.any():
                         env.t1_occ_steps[start] = torch.randint(1, max_steps + 1, (start.sum(),), device=device)
                     occ_mask = env.t1_occ_steps > 0
-                    goal, last_goal_obs = apply_goal_occlusion(goal_raw, last_goal_obs, occ_mask)
+                    goal, last_goal_obs = apply_goal_occlusion(policy_goal_raw, last_goal_obs, occ_mask)
                     env.t1_occ_steps[occ_mask] -= 1
                 else:
-                    goal = goal_raw
-                    last_goal_obs = goal_raw.detach()
+                    goal = policy_goal_raw
+                    last_goal_obs = policy_goal_raw.detach()
             else:
-                goal = goal_raw
-                last_goal_obs = goal_raw.detach()
+                goal = policy_goal_raw
+                last_goal_obs = policy_goal_raw.detach()
 
             finite_masks = [
                 _row_finite_mask(state),
@@ -5251,7 +5344,7 @@ def train(args):
                         reset_mask_prev,
                     )
                     cmd_a, _ = avoid_model.get_action(
-                        moe_avoid_aff_stack_buf, moe_expert_state, goal, avoid_difficulty,
+                        moe_avoid_aff_stack_buf, moe_expert_state, goal_raw, avoid_difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True))
                     )
                     cmd_f, cmd_f_bad = _sanitize_or_fail_action_tensor(
@@ -5553,6 +5646,16 @@ def train(args):
 
             # 统计分量与行为
             goal_dist_sum += torch.norm(goal, dim=1).sum()
+            if bool(getattr(env, "moving_target_enable", False)) and hasattr(env.env, "target_world"):
+                follow_dist = torch.norm(env.env.target_world - env.env.root_states[:, :2], dim=1)
+                follow_dist_sum += follow_dist.sum()
+                follow_dist_samples.append(follow_dist.detach().cpu())
+            follow_lost_mask = env_info.get('follow_lost_mask', None) if env_info is not None else None
+            if torch.is_tensor(follow_lost_mask):
+                follow_lost_rate_sum += follow_lost_mask.float().sum()
+            target_line_finished = env_info.get('target_line_finished', None) if env_info is not None else None
+            if torch.is_tensor(target_line_finished):
+                target_finish_rate_sum += target_line_finished.float().sum()
             if is_gate:
                 gate_y_sum += y_eff.sum()
                 gate_y_raw_sum += gate_y_raw.sum()
@@ -5900,7 +6003,7 @@ def train(args):
             if dones.any():
                 if last_goal_obs is not None:
                     last_goal_obs = last_goal_obs.clone()
-                    last_goal_obs[dones] = obs_dict['goal'][dones]
+                    last_goal_obs[dones] = get_policy_goal_tensor(obs_dict, skill)[dones]
 
         rollout_time = time.time() - rollout_start
         avoid_goal_retry_total_curr = float(getattr(env.env, "_avoid_goal_stats_retry_total", avoid_goal_retry_total_base))
@@ -5953,7 +6056,7 @@ def train(args):
         # 计算最后一步的 value (Bootstrap)
         with torch.no_grad():
             state = obs_dict['state']
-            goal = obs_dict['goal']
+            goal = get_policy_goal_tensor(obs_dict, skill)
             if getattr(args, "t1_goal_occlusion", False) and last_goal_obs is not None:
                 goal = last_goal_obs
             critic_aff_map_next, critic_difficulty_next = _get_critic_gt_inputs(obs_dict)
@@ -6423,6 +6526,13 @@ def train(args):
         cmd_speed_mean = (cmd_speed_sum / total_samples).item()
         body_forward_speed_mean = (body_forward_speed_sum / total_samples).item()
         body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
+        follow_dist_mean = (follow_dist_sum / total_samples).item()
+        follow_lost_rate_mean = (follow_lost_rate_sum / total_samples).item()
+        target_finish_rate_mean = (target_finish_rate_sum / total_samples).item()
+        follow_dist_p95 = 0.0
+        if follow_dist_samples:
+            follow_dist_all = torch.cat(follow_dist_samples, dim=0)
+            follow_dist_p95 = torch.quantile(follow_dist_all, 0.95).item()
         gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
         gate_y_raw_mean = (gate_y_raw_sum / total_samples).item() if is_gate else 0.0
         gate_y_safe_mean = (gate_y_safe_sum / total_samples).item() if is_gate else 0.0
@@ -6584,6 +6694,10 @@ def train(args):
         writer.add_scalar('Perf/FPS', fps, iteration)
         writer.add_scalar('Perf/LearningRate', current_lr, iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
+        writer.add_scalar('Perf/FollowDistMean', follow_dist_mean, iteration)
+        writer.add_scalar('Perf/FollowDistP95', follow_dist_p95, iteration)
+        writer.add_scalar('Perf/FollowLostRate', follow_lost_rate_mean, iteration)
+        writer.add_scalar('Perf/TargetFinishRate', target_finish_rate_mean, iteration)
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
         writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
         writer.add_scalar('Perf/DifficultyMax', buffer.difficulties.max().item(), iteration)
@@ -6839,6 +6953,8 @@ def train(args):
                           f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
+                          f"""{'Follow dist mean/p95/lost:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
+                          f"""{'Target finish rate:':>{pad}} {target_finish_rate_mean:.3f}\n"""
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""

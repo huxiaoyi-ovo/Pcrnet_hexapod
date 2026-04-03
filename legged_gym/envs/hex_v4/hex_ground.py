@@ -4324,11 +4324,91 @@ class HexGround(LeggedRobot):
         self.target_vel_world = vel_local
         self.goal_world[:] = self.target_world
 
+    def _get_pcr_line_target_end_local_y(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if env_ids.numel() == 0:
+            return torch.zeros(0, device=self.device, dtype=torch.float32)
+        if hasattr(self, "s_avoid_stage_per_env"):
+            stage_ids = self.s_avoid_stage_per_env[env_ids].to(dtype=torch.long)
+        else:
+            stage_ids = torch.full(
+                (env_ids.numel(),),
+                int(getattr(self, "s_avoid_stage", 1)),
+                device=self.device,
+                dtype=torch.long,
+            )
+        margin = float(getattr(self.nav_cfg, "moving_target_pcr_line_end_margin_y", 0.80))
+        end_local_y = torch.zeros(env_ids.numel(), device=self.device, dtype=torch.float32)
+        for stage_value in torch.unique(stage_ids).tolist():
+            stage_id = int(stage_value)
+            last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0))
+            end_local_y[stage_ids == stage_id] = last_row_y + margin
+        return end_local_y
+
+    def _reset_moving_target_pcr_line(self, env_ids: torch.Tensor):
+        """Reset fixed straight-line moving target for PCR avoid-follow coordination."""
+        if env_ids.numel() == 0:
+            return
+        desired = float(getattr(self.nav_cfg, "follow_distance_desired", 1.5))
+        min_forward = float(getattr(self.nav_cfg, "moving_target_pcr_line_min_forward", 0.80))
+        x_line = float(getattr(self.nav_cfg, "moving_target_pcr_line_x", -0.60))
+        speed = float(getattr(self.nav_cfg, "moving_target_pcr_line_speed", 0.55))
+
+        robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
+        target_local = robot_local.clone()
+        target_local[:, 0] = x_line
+        dx = target_local[:, 0] - robot_local[:, 0]
+        y_forward = torch.sqrt(torch.clamp(desired * desired - dx * dx, min=min_forward * min_forward))
+        target_local[:, 1] = robot_local[:, 1] + y_forward
+        target_end_y = self._get_pcr_line_target_end_local_y(env_ids)
+        target_local[:, 1] = torch.minimum(target_local[:, 1], target_end_y)
+
+        self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        self.target_vel_world[env_ids].zero_()
+        self.target_heading[env_ids] = 0.0
+        self.target_heading_des[env_ids] = 0.0
+        self.target_speed[env_ids] = speed
+        self.target_speed_des[env_ids] = speed
+        self.target_line_finished[env_ids] = False
+        self.goal_world[env_ids] = self.target_world[env_ids]
+
+    def _update_moving_target_pcr_line(self, dt: float):
+        """Advance straight-line target along +Y until it exits beyond the last row."""
+        speed = float(getattr(self.nav_cfg, "moving_target_pcr_line_speed", 0.55))
+        x_line = float(getattr(self.nav_cfg, "moving_target_pcr_line_x", -0.60))
+        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        end_local_y = self._get_pcr_line_target_end_local_y(env_ids)
+
+        pos_local = self.target_world - self.env_origins[:, :2]
+        vel_local = torch.zeros_like(pos_local)
+        active = ~self.target_line_finished
+        pos_local[:, 0] = x_line
+        pos_local[active, 1] += speed * float(dt)
+        vel_local[active, 1] = speed
+
+        reached_end = active & (pos_local[:, 1] >= end_local_y)
+        if reached_end.any():
+            pos_local[reached_end, 1] = end_local_y[reached_end]
+            vel_local[reached_end].zero_()
+        self.target_line_finished |= reached_end
+
+        self.target_world[:] = self.env_origins[:, :2] + pos_local
+        self.target_vel_world[:] = vel_local
+        self.target_heading.zero_()
+        self.target_heading_des.zero_()
+        self.target_speed[:] = torch.where(
+            self.target_line_finished,
+            torch.zeros_like(self.target_speed),
+            torch.full_like(self.target_speed, speed),
+        )
+        self.target_speed_des[:] = self.target_speed
+        self.goal_world[:] = self.target_world
+
     def _reset_moving_target(self, env_ids: torch.Tensor):
         """Reset moving target state for selected envs."""
         if env_ids.numel() == 0 or not self._moving_target_enabled():
             return
         moving_mode = self._moving_target_mode()
+        self.target_line_finished[env_ids] = False
         if moving_mode == "s1_gate_script":
             self._reset_moving_target_s1(env_ids)
             return
@@ -4340,6 +4420,9 @@ class HexGround(LeggedRobot):
             return
         if moving_mode == "e_s_corridor_script":
             self._reset_moving_target_e_s_corridor(env_ids)
+            return
+        if moving_mode == "pcr_line_script":
+            self._reset_moving_target_pcr_line(env_ids)
             return
         # Place target straight ahead of the robot (camera center) at reset.
         robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
@@ -4410,6 +4493,9 @@ class HexGround(LeggedRobot):
             return
         if moving_mode == "e_s_corridor_script":
             self._update_moving_target_e_s_corridor(dt=dt)
+            return
+        if moving_mode == "pcr_line_script":
+            self._update_moving_target_pcr_line(dt=dt)
             return
 
         d = self._current_scene_difficulty(expected_num=self.num_envs, device=device, dtype=torch.float32)
@@ -5762,6 +5848,7 @@ class HexGround(LeggedRobot):
             'depth': depth_images,
             'robot_state': self.robot_state_buf,
             'goal': self.goal_buf,
+            'follow_goal': self.follow_goal_buf,
         }
 
     def get_observations_separated(self):
@@ -5826,6 +5913,14 @@ class HexGround(LeggedRobot):
             x_right = torch.zeros_like(cross_line_dist)
             y_forward = cross_line_dist
         self.goal_buf[:] = torch.stack([x_right, y_forward], dim=1)
+
+        follow_world = goal_world
+        if self._moving_target_enabled() and hasattr(self, "target_world"):
+            follow_world = self.target_world
+        follow_delta_world = follow_world - self.root_states[:, :2]
+        follow_x_right = cos_h * follow_delta_world[:, 0] + sin_h * follow_delta_world[:, 1]
+        follow_y_forward = -sin_h * follow_delta_world[:, 0] + cos_h * follow_delta_world[:, 1]
+        self.follow_goal_buf[:] = torch.stack([follow_x_right, follow_y_forward], dim=1)
 
         if getattr(self.nav_cfg, "resample_on_reach", False):
             dist = torch.norm(delta_world, dim=1)
@@ -6083,6 +6178,9 @@ class HexGround(LeggedRobot):
         self.goal_buf = torch.zeros(
             self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.follow_goal_buf = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
+        )
         self.goal_world = torch.zeros(
             self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
         )
@@ -6114,6 +6212,9 @@ class HexGround(LeggedRobot):
         )
         self.target_speed_phase = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.target_line_finished = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False
         )
         # Per-step diagnostics for moving-target behavior.
         self.target_turn_events = torch.zeros(
