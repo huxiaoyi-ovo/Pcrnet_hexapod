@@ -87,6 +87,99 @@ LEGACY_TASK_ALIASES = {
 }
 S0_FOLLOW_TASK_NAME = "s_follow_basic"
 PCR_LINE_TASK_NAME = "s_pcr_line_avoid_basic"
+PCR_REQUIRED_NAV_ATTRS = (
+    "follow_distance_desired",
+    "follow_distance_min",
+    "follow_distance_max",
+    "pcr_follow_far_distance",
+    "pcr_follow_far_time_s",
+    "pcr_progress_reward_scale",
+    "pcr_progress_cap",
+    "pcr_follow_quality_floor",
+    "pcr_follow_quality_sigma",
+    "pcr_gate_aux_scale",
+    "pcr_gap_success_bonus",
+    "avoid_band_activate_progress",
+    "avoid_band_penalty_scale",
+    "avoid_band_fail_margin",
+)
+PCR_REQUIRED_REWARD_CFG_KEYS = (
+    "goal_approach_scale",
+    "goal_reach_bonus",
+    "goal_reach_threshold",
+    "follow_enable",
+    "follow_distance_desired",
+    "follow_distance_sigma",
+    "follow_distance_scale",
+    "follow_band_scale",
+    "follow_outside_penalty",
+    "collision_penalty",
+    "terminal_fail_penalty",
+    "heading_scale",
+    "heading_offset_rad",
+    "heading_use_difficulty_gate",
+    "heading_min_weight",
+    "heading_gate_use",
+    "heading_gate_min_speed",
+    "heading_gate_min_approach",
+    "passable_align_scale",
+    "passable_occ_ratio_low",
+    "passable_occ_ratio_high",
+    "passable_sector_deg",
+    "crossable_align_scale",
+    "crossable_gate_min_speed",
+    "gate_smooth_penalty",
+    "gate_max_change",
+    "risk_barrier_scale",
+    "risk_barrier_safe",
+    "risk_barrier_free",
+    "risk_barrier_tau",
+    "time_penalty",
+    "stability_scale",
+    "pitch_threshold",
+    "roll_threshold",
+    "velocity_scale",
+    "backward_scale",
+    "body_backward_scale",
+    "turn_penalty_scale",
+    "yaw_rate_penalty",
+    "avoid_near_threshold",
+    "avoid_clear_scale",
+    "align_center_scale",
+    "avoid_lat_pen_scale",
+    "avoid_lat_choice_scale",
+    "avoid_lat_mag_scale",
+    "avoid_lat_over_scale",
+    "avoid_lat_cmd_scale",
+    "avoid_lat_target_min",
+    "avoid_lat_target_max",
+    "avoid_side_probe_x",
+    "avoid_side_clear_margin",
+    "avoid_row_lat_scale",
+    "avoid_row_gap_scale",
+    "avoid_row_push_scale",
+    "avoid_row_push_margin",
+    "avoid_row_cmdx_scale",
+    "avoid_row_cmdx_err_gain",
+    "avoid_row_cmdx_min",
+    "avoid_row_cmdx_max",
+    "avoid_row_group_tol",
+    "avoid_row_margin",
+    "avoid_row_effective_margin",
+    "avoid_row_release_offset",
+    "avoid_row_near_scale",
+    "avoid_row_near_sigma",
+    "avoid_row_near_release_margin",
+    "avoid_row_gate_on",
+    "avoid_row_gate_full",
+    "avoid_smooth_scale",
+    "avoid_smooth_switch_threshold",
+    "avoid_smooth_switch_unit",
+    "avoid_early_next_gap_threshold",
+    "avoid_early_next_gap_scale",
+    "avoid_heading_keep_scale",
+    "avoid_heading_event_penalty",
+)
 
 
 def normalize_task_name(task_name: str) -> str:
@@ -102,6 +195,33 @@ def is_s0_follow_task_name(task_name: str) -> bool:
 
 def is_pcr_line_task_name(task_name: str) -> bool:
     return normalize_task_name(task_name) == PCR_LINE_TASK_NAME
+
+
+def validate_pcr_reward_config(nav_cfg: Any, reward_cfg_dict: Dict[str, Any]) -> None:
+    missing_nav = [key for key in PCR_REQUIRED_NAV_ATTRS if not hasattr(nav_cfg, key)]
+    if missing_nav:
+        raise RuntimeError(
+            "PCR reward config missing navigation attrs: "
+            + ", ".join(sorted(missing_nav))
+        )
+    missing_reward = [key for key in PCR_REQUIRED_REWARD_CFG_KEYS if key not in reward_cfg_dict]
+    if missing_reward:
+        raise RuntimeError(
+            "PCR reward config missing reward_cfg keys: "
+            + ", ".join(sorted(missing_reward))
+        )
+    none_nav = [key for key in PCR_REQUIRED_NAV_ATTRS if getattr(nav_cfg, key) is None]
+    if none_nav:
+        raise RuntimeError(
+            "PCR reward config has None navigation attrs: "
+            + ", ".join(sorted(none_nav))
+        )
+    none_reward = [key for key in PCR_REQUIRED_REWARD_CFG_KEYS if reward_cfg_dict.get(key) is None]
+    if none_reward:
+        raise RuntimeError(
+            "PCR reward config has None reward_cfg values: "
+            + ", ".join(sorted(none_reward))
+        )
 
 
 def get_policy_goal_tensor(obs_dict: Dict[str, torch.Tensor], skill_name: str) -> torch.Tensor:
@@ -1285,8 +1405,7 @@ class HierarchicalHexapodEnv:
                     f"got terrain_type='{terrain_type or 'unset'}'"
                 )
         self.is_s0_follow_task = is_s0_follow_task_name(str(getattr(args, "task", "")).lower()) or (terrain_type in ("s0_follow_plane", "s0"))
-        moving_mode = str(getattr(nav_cfg, "moving_target_mode", "")).strip().lower() if nav_cfg is not None else ""
-        self.is_pcr_line_task = is_pcr_line_task_name(str(getattr(args, "task", "")).lower()) or (moving_mode == "pcr_line_script")
+        self.is_pcr_line_task = is_pcr_line_task_name(str(getattr(args, "task", "")).lower())
         self.scene_difficulty_pending = 0.0
         self.scene_difficulty_override = torch.zeros(
             self.num_envs, device=self.env.device, dtype=torch.float32
@@ -1311,6 +1430,12 @@ class HierarchicalHexapodEnv:
         ) if nav_cfg is not None else success_time_default
         self.pcr_follow_far_distance = float(getattr(nav_cfg, "pcr_follow_far_distance", 4.0)) if nav_cfg is not None else 4.0
         self.pcr_follow_far_time_s = float(getattr(nav_cfg, "pcr_follow_far_time_s", 3.0)) if nav_cfg is not None else 3.0
+        self.pcr_progress_reward_scale = float(getattr(nav_cfg, "pcr_progress_reward_scale", 60.0)) if nav_cfg is not None else 60.0
+        self.pcr_progress_cap = float(getattr(nav_cfg, "pcr_progress_cap", 0.8)) if nav_cfg is not None else 0.8
+        self.pcr_follow_quality_floor = float(getattr(nav_cfg, "pcr_follow_quality_floor", 0.12)) if nav_cfg is not None else 0.12
+        self.pcr_follow_quality_sigma = float(getattr(nav_cfg, "pcr_follow_quality_sigma", 0.40)) if nav_cfg is not None else 0.40
+        self.pcr_gate_aux_scale = float(getattr(nav_cfg, "pcr_gate_aux_scale", 5.0)) if nav_cfg is not None else 5.0
+        self.pcr_gap_success_bonus = float(getattr(nav_cfg, "pcr_gap_success_bonus", 25.0)) if nav_cfg is not None else 25.0
 
         if hasattr(self.env, "_resample_commands"):
             def _no_resample(self, env_ids):
@@ -1343,6 +1468,8 @@ class HierarchicalHexapodEnv:
             reward_defaults = NavigationRewardConfig()
             reward_kwargs = {k: getattr(reward_defaults, k) for k in reward_defaults.__dict__.keys()}
             reward_cfg_dict = dict(getattr(nav_cfg, "reward_cfg")) if (nav_cfg is not None and hasattr(nav_cfg, "reward_cfg")) else {}
+            if self.is_pcr_line_task:
+                validate_pcr_reward_config(nav_cfg, reward_cfg_dict)
             self.reward_cfg_raw = reward_cfg_dict
             self.terminal_fail_penalty = float(
                 self.reward_cfg_raw.get(
@@ -1378,6 +1505,22 @@ class HierarchicalHexapodEnv:
         self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_follow_far_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.stable_follow_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.pcr_max_rows = 1
+        if self.is_pcr_line_task and hasattr(self.env, "_get_s_avoid_fixed_stage_row_y"):
+            for stage_id in (1, 2, 3, 4):
+                try:
+                    self.pcr_max_rows = max(
+                        self.pcr_max_rows,
+                        len(tuple(self.env._get_s_avoid_fixed_stage_row_y(stage_id))),
+                    )
+                except Exception:
+                    continue
+        self.pcr_row_success_flags = torch.zeros(
+            self.num_envs,
+            self.pcr_max_rows,
+            device=device,
+            dtype=torch.bool,
+        )
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
@@ -1503,6 +1646,7 @@ class HierarchicalHexapodEnv:
         self.target_lost_steps.zero_()
         self.pcr_follow_far_steps.zero_()
         self.stable_follow_steps.zero_()
+        self.pcr_row_success_flags.zero_()
         self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
@@ -1519,6 +1663,12 @@ class HierarchicalHexapodEnv:
         
         self.last_obs = obs_dict
         return obs_dict
+
+    def _reset_idx(self, env_ids: torch.Tensor) -> None:
+        if env_ids is None or env_ids.numel() == 0:
+            return
+        self.pcr_row_success_flags[env_ids] = False
+        self.env.reset_idx(env_ids)
 
     def _resample_forced_forward_speed(self, env_ids: torch.Tensor) -> None:
         if env_ids is None or env_ids.numel() == 0:
@@ -2349,12 +2499,27 @@ class HierarchicalHexapodEnv:
     def _compute_current_next_row_gap_state(
         self,
         robot_pos: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         current_gap_center = torch.zeros(self.num_envs, device=self.device)
+        current_gap_width = torch.zeros(self.num_envs, device=self.device)
+        current_row_center_y = torch.zeros(self.num_envs, device=self.device)
         current_row_front_edge = torch.zeros(self.num_envs, device=self.device)
         current_row_back_edge = torch.zeros(self.num_envs, device=self.device)
+        current_row_index = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         current_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         next_gap_center = torch.zeros(self.num_envs, device=self.device)
+        next_row_center_y = torch.zeros(self.num_envs, device=self.device)
         next_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if (
             not hasattr(self.env, "s_avoid_active")
@@ -2365,10 +2530,14 @@ class HierarchicalHexapodEnv:
         ):
             return (
                 current_gap_center,
+                current_gap_width,
+                current_row_center_y,
                 current_row_front_edge,
                 current_row_back_edge,
+                current_row_index,
                 current_valid,
                 next_gap_center,
+                next_row_center_y,
                 next_valid,
             )
 
@@ -2379,10 +2548,14 @@ class HierarchicalHexapodEnv:
         if total_slots <= 0:
             return (
                 current_gap_center,
+                current_gap_width,
+                current_row_center_y,
                 current_row_front_edge,
                 current_row_back_edge,
+                current_row_index,
                 current_valid,
                 next_gap_center,
+                next_row_center_y,
                 next_valid,
             )
 
@@ -2413,7 +2586,13 @@ class HierarchicalHexapodEnv:
                 return half_x + row_margin, half_y + row_margin
             return row_margin, row_margin
 
-        def summarize_row(env_id: int, row_slots: List[int], band_l: float, band_r: float) -> Tuple[float, float, float, bool]:
+        def summarize_row(
+            env_id: int,
+            row_slots: List[int],
+            row_center: float,
+            band_l: float,
+            band_r: float,
+        ) -> Tuple[float, float, float, float, bool]:
             intervals = []
             row_front = float("inf")
             row_back = float("-inf")
@@ -2428,7 +2607,7 @@ class HierarchicalHexapodEnv:
                 if right > left:
                     intervals.append((left, right))
             if row_back < row_front:
-                return 0.0, 0.0, 0.0, False
+                return 0.0, 0.0, 0.0, 0.0, False
             if intervals:
                 intervals.sort(key=lambda item: item[0])
                 merged = []
@@ -2454,7 +2633,7 @@ class HierarchicalHexapodEnv:
                 if width > best_width:
                     best_width = width
                     best_center = 0.5 * (cursor + band_r)
-            return best_center, row_front, row_back, best_width > 1e-6
+            return best_center, row_center, row_front, row_back, best_width, best_width > 1e-6
 
         for env_id in range(self.num_envs):
             active_slots = self.env.s_avoid_active[env_id].nonzero(as_tuple=False).flatten()
@@ -2487,35 +2666,56 @@ class HierarchicalHexapodEnv:
             if band_r <= band_l:
                 continue
 
-            curr_center, curr_front, curr_back, curr_ok = summarize_row(
+            curr_center, curr_center_y, curr_front, curr_back, curr_width, curr_ok = summarize_row(
                 env_id,
                 grouped_rows[0][1],
+                float(grouped_rows[0][0]),
                 band_l,
                 band_r,
             )
             if curr_ok:
+                current_abs_row_index = 0
+                if hasattr(self.env, "_get_s_avoid_fixed_stage_row_y") and hasattr(self.env, "s_avoid_stage_per_env"):
+                    stage_id = int(self.env.s_avoid_stage_per_env[env_id].item())
+                    stage_row_y = tuple(self.env._get_s_avoid_fixed_stage_row_y(stage_id))
+                    if len(stage_row_y) > 0:
+                        current_abs_row_index = int(
+                            min(
+                                range(len(stage_row_y)),
+                                key=lambda idx: abs(float(stage_row_y[idx]) - curr_center_y),
+                            )
+                        )
                 current_gap_center[env_id] = curr_center
+                current_gap_width[env_id] = curr_width
+                current_row_center_y[env_id] = curr_center_y
                 current_row_front_edge[env_id] = curr_front
                 current_row_back_edge[env_id] = curr_back
+                current_row_index[env_id] = current_abs_row_index
                 current_valid[env_id] = True
 
             if len(grouped_rows) > 1:
-                next_center, _, _, next_ok = summarize_row(
+                next_center, next_center_y, _, _, _, next_ok = summarize_row(
                     env_id,
                     grouped_rows[1][1],
+                    float(grouped_rows[1][0]),
                     band_l,
                     band_r,
                 )
                 if next_ok:
                     next_gap_center[env_id] = next_center
+                    next_row_center_y[env_id] = next_center_y
                     next_valid[env_id] = True
 
         return (
             current_gap_center,
+            current_gap_width,
+            current_row_center_y,
             current_row_front_edge,
             current_row_back_edge,
+            current_row_index,
             current_valid,
             next_gap_center,
+            next_row_center_y,
             next_valid,
         )
 
@@ -3143,6 +3343,20 @@ class HierarchicalHexapodEnv:
         )
         avoid_band_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         band_fail_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        pcr_conflict = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_gate_target = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_gate_aux = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_core_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_follow_quality = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_follow_err = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_progress_y = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_gap_success_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_gap_width = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_current_row_center_y = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_current_row_index = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+        pcr_next_row_center_y = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_current_row_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        pcr_next_row_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         nearest_obs = None
         front_half_nearest_obs = None
         front_left_nearest_obs = None
@@ -3292,6 +3506,12 @@ class HierarchicalHexapodEnv:
                 reward_dict['passable_occ_ratio'] = passable_occ_ratio
             if crossable_width is not None:
                 reward_dict['crossable_width'] = crossable_width
+            if self.is_pcr_line_task:
+                legacy_approach = reward_dict.get('approach', torch.zeros(self.num_envs, device=self.device))
+                legacy_follow_outside = reward_dict.get('follow_outside', torch.zeros(self.num_envs, device=self.device))
+                reward_dict['total'] = reward_dict['total'] - legacy_approach - legacy_follow_outside
+                reward_dict['approach'] = torch.zeros_like(legacy_approach)
+                reward_dict['follow_outside'] = torch.zeros_like(legacy_follow_outside)
             if bool(getattr(self.env, "s_avoid_enabled", False)):
                 stage_ids = getattr(self.env, "s_avoid_stage_per_env", None)
                 if stage_ids is None:
@@ -3471,10 +3691,14 @@ class HierarchicalHexapodEnv:
                 )
                 (
                     current_row_gap_center,
+                    current_row_gap_width,
+                    current_row_center_y,
                     current_row_front_edge,
                     current_row_back_edge,
+                    current_row_index,
                     current_row_valid,
                     next_row_gap_center,
+                    next_row_center_y,
                     next_row_valid,
                 ) = self._compute_current_next_row_gap_state(robot_pos)
                 body_half_length = float(getattr(self.env.cfg.terrain, "avoid_body_half_length", 0.0))
@@ -3531,6 +3755,59 @@ class HierarchicalHexapodEnv:
                     + early_next_gap_penalty
                     + heading_keep_reward
                 )
+                if self.is_pcr_line_task and hasattr(self.env, "target_world"):
+                    target_world_xy = self.env.target_world
+                    target_x = target_world_xy[:, 0]
+                    dist_to_target = torch.norm(target_world_xy - robot_pos[:, :2], dim=1)
+                    pcr_follow_err = torch.abs(dist_to_target - float(self.s0_follow_d_des))
+                    sigma_d = max(float(self.pcr_follow_quality_sigma), 1e-6)
+                    pcr_follow_quality = torch.exp(-0.5 * torch.square(pcr_follow_err / sigma_d))
+                    progress_denom = max(float(self.high_level_dt), 1e-6)
+                    pcr_progress_y = torch.clamp(
+                        (robot_pos[:, 1] - self.prev_robot_pos[:, 1]) / progress_denom,
+                        min=0.0,
+                        max=float(self.pcr_progress_cap),
+                    )
+                    q_floor = float(self.pcr_follow_quality_floor)
+                    pcr_core_reward = (
+                        float(self.pcr_progress_reward_scale)
+                        * pcr_progress_y
+                        * (q_floor + (1.0 - q_floor) * pcr_follow_quality)
+                    )
+                    pcr_gap_width = torch.clamp(current_row_gap_width, min=1e-6)
+                    pcr_current_row_center_y = current_row_center_y
+                    pcr_current_row_index = current_row_index
+                    pcr_next_row_center_y = next_row_center_y
+                    pcr_current_row_valid = current_row_valid
+                    pcr_next_row_valid = next_row_valid
+                    pcr_conflict = torch.zeros_like(pcr_progress_y)
+                    valid_conflict = current_row_valid & (pcr_gap_width > 1e-6)
+                    if valid_conflict.any():
+                        pcr_conflict = torch.where(
+                            valid_conflict,
+                            torch.clamp(
+                                torch.abs(target_x - current_row_gap_center) / pcr_gap_width,
+                                min=0.0,
+                                max=1.0,
+                            ),
+                            pcr_conflict,
+                        )
+                    pcr_gate_target = 1.0 - pcr_conflict
+                    pcr_gate_aux = (
+                        -float(self.pcr_gate_aux_scale)
+                        * torch.square(gate_y_raw_curr - pcr_gate_target)
+                        * current_row_valid.float()
+                    )
+                    reward_dict['pcr_progress_y'] = pcr_progress_y
+                    reward_dict['pcr_follow_quality'] = pcr_follow_quality
+                    reward_dict['pcr_follow_err'] = pcr_follow_err
+                    reward_dict['pcr_core'] = pcr_core_reward
+                    reward_dict['pcr_conflict'] = pcr_conflict
+                    reward_dict['pcr_conflict_valid'] = current_row_valid.float()
+                    reward_dict['pcr_gap_width'] = pcr_gap_width * current_row_valid.float()
+                    reward_dict['pcr_gate_target'] = pcr_gate_target * current_row_valid.float()
+                    reward_dict['pcr_gate_aux'] = pcr_gate_aux
+                    reward_dict['total'] = reward_dict['total'] + pcr_core_reward + pcr_gate_aux
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -3596,6 +3873,40 @@ class HierarchicalHexapodEnv:
             if band_fail_mask.any():
                 done_any |= band_fail_mask
                 manual_reset_mask |= band_fail_mask
+
+        if self.is_pcr_line_task:
+            valid_row_success = (
+                pcr_current_row_valid
+                & (pcr_current_row_index >= 0)
+                & (pcr_current_row_index < self.pcr_row_success_flags.shape[1])
+            )
+            if valid_row_success.any():
+                row_half_spacing = torch.where(
+                    pcr_next_row_valid,
+                    0.5 * torch.clamp(pcr_next_row_center_y - pcr_current_row_center_y, min=0.0),
+                    0.5 * torch.clamp(cross_line_world_y - pcr_current_row_center_y, min=0.0),
+                )
+                row_success_threshold_y = pcr_current_row_center_y + row_half_spacing
+                crossed_row_success = (
+                    valid_row_success
+                    & (robot_pos[:, 1] > row_success_threshold_y)
+                    & (~collision_mask)
+                    & (~band_fail_mask)
+                )
+                if crossed_row_success.any():
+                    env_ids_row = crossed_row_success.nonzero(as_tuple=False).flatten()
+                    row_ids = pcr_current_row_index[env_ids_row].to(dtype=torch.long)
+                    fresh_mask = ~self.pcr_row_success_flags[env_ids_row, row_ids]
+                    if fresh_mask.any():
+                        fresh_env_ids = env_ids_row[fresh_mask]
+                        fresh_row_ids = row_ids[fresh_mask]
+                        self.pcr_row_success_flags[fresh_env_ids, fresh_row_ids] = True
+                        pcr_gap_success_reward[fresh_env_ids] = float(self.pcr_gap_success_bonus)
+                        total_reward = total_reward + pcr_gap_success_reward
+                        reward_terms["pcr_gap_success"] = pcr_gap_success_reward
+                        reward_terms["total"] = total_reward
+            if "pcr_gap_success" not in reward_terms:
+                reward_terms["pcr_gap_success"] = pcr_gap_success_reward
 
         # Add target centering / visibility shaping when explicitly enabled.
         use_target_view_reward = (
@@ -3971,7 +4282,7 @@ class HierarchicalHexapodEnv:
         manual_reset_mask = manual_reset_mask & (~done_during)
         if manual_reset_mask.any():
             reset_ids = manual_reset_mask.nonzero(as_tuple=False).flatten()
-            self.env.reset_idx(reset_ids)
+            self._reset_idx(reset_ids)
             # reset_idx 仅重置状态，不会刷新 high-level 观测缓存；这里显式刷新一次。
             if hasattr(self.env, "compute_observations"):
                 self.env.compute_observations()
@@ -4004,6 +4315,7 @@ class HierarchicalHexapodEnv:
             self.target_lost_steps[done_any] = 0
             self.pcr_follow_far_steps[done_any] = 0
             self.stable_follow_steps[done_any] = 0
+            self.pcr_row_success_flags[done_any] = False
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
@@ -4166,6 +4478,8 @@ def train(args):
     # 创建环境
     env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
+    is_pcr_output_task = bool(getattr(env, "is_pcr_line_task", False))
+    is_avoid_output_task = bool(use_avoid_local_map and not is_pcr_output_task)
     
     # 初始 reset（用于确定观测维度）
     obs_dict = env.reset()
@@ -4719,6 +5033,10 @@ def train(args):
     best_reward = float("-inf")
     best_success = float("-inf")
     best_progress = float("-inf")
+    best_pcr_target_finish = float("-inf")
+    best_pcr_gap_success = float("-inf")
+    best_pcr_collision = float("inf")
+    best_pcr_follow_dist_error = float("inf")
     best_selection_metric_name = "online_mean_reward_monitor_only"
     if resume_path:
         if not bool(getattr(args, "allow_inexact_resume", False)):
@@ -4753,6 +5071,12 @@ def train(args):
         if isinstance(ckpt, dict):
             best_success = float(ckpt.get("best_online_success", -float("inf")))
             best_progress = float(ckpt.get("best_online_progress", -float("inf")))
+            best_pcr_target_finish = float(ckpt.get("best_online_target_finish", -float("inf")))
+            best_pcr_gap_success = float(ckpt.get("best_online_gap_success", -float("inf")))
+            best_pcr_collision = float(ckpt.get("best_online_collision", float("inf")))
+            best_pcr_follow_dist_error = float(
+                ckpt.get("best_online_follow_dist_error", float("inf"))
+            )
             best_selection_metric_name = str(
                 ckpt.get("best_online_selection_metric", ckpt.get("selection_metric", best_selection_metric_name))
             )
@@ -4988,6 +5312,16 @@ def train(args):
             'avoid_smooth_switch_event',
             'early_next_gap_active',
             'cross_line_progress',
+            'pcr_progress_y',
+            'pcr_follow_quality',
+            'pcr_follow_err',
+            'pcr_core',
+            'pcr_conflict',
+            'pcr_conflict_valid',
+            'pcr_gap_width',
+            'pcr_gate_target',
+            'pcr_gate_aux',
+            'pcr_gap_success',
             'timeout_bootstrap_bonus',
             'turn_penalty',
             'yaw_rate_penalty',
@@ -5029,6 +5363,18 @@ def train(args):
         follow_dist_sum = torch.zeros((), device=device)
         follow_lost_rate_sum = torch.zeros((), device=device)
         target_finish_rate_sum = torch.zeros((), device=device)
+        completed_episode_count_sum = torch.zeros((), device=device)
+        pcr_gap_success_rate_sum = torch.zeros((), device=device)
+        pcr_conflict_sum = torch.zeros((), device=device)
+        pcr_conflict_sq_sum = torch.zeros((), device=device)
+        pcr_conflict_y_cross_sum = torch.zeros((), device=device)
+        pcr_conflict_valid_count = torch.zeros((), device=device)
+        pcr_y_raw_valid_sum = torch.zeros((), device=device)
+        pcr_y_raw_sq_sum = torch.zeros((), device=device)
+        pcr_high_conflict_y_sum = torch.zeros((), device=device)
+        pcr_high_conflict_count = torch.zeros((), device=device)
+        pcr_low_conflict_y_sum = torch.zeros((), device=device)
+        pcr_low_conflict_count = torch.zeros((), device=device)
         follow_dist_samples = []
         collision_rate_sum = torch.zeros((), device=device)
         obstacle_contact_candidate_rate_sum = torch.zeros((), device=device)
@@ -5656,6 +6002,40 @@ def train(args):
             target_line_finished = env_info.get('target_line_finished', None) if env_info is not None else None
             if torch.is_tensor(target_line_finished):
                 target_finish_rate_sum += target_line_finished.float().sum()
+            if torch.is_tensor(dones):
+                completed_episode_count_sum += dones.float().sum()
+            reward_terms_info = env_info.get('reward_terms', None) if env_info is not None else None
+            if isinstance(reward_terms_info, dict):
+                pcr_conflict_step = reward_terms_info.get('pcr_conflict', None)
+                pcr_conflict_valid_step = reward_terms_info.get('pcr_conflict_valid', None)
+                if torch.is_tensor(pcr_conflict_step):
+                    pcr_conflict_step = pcr_conflict_step.to(device=device, dtype=torch.float32)
+                    if torch.is_tensor(pcr_conflict_valid_step):
+                        pcr_conflict_valid_step = pcr_conflict_valid_step.to(device=device, dtype=torch.float32)
+                    else:
+                        pcr_conflict_valid_step = torch.ones_like(pcr_conflict_step)
+                    valid_conflict_mask = pcr_conflict_valid_step > 0.5
+                    if valid_conflict_mask.any():
+                        pcr_conflict_valid = pcr_conflict_step[valid_conflict_mask]
+                        pcr_conflict_sum += pcr_conflict_valid.sum()
+                        pcr_conflict_sq_sum += torch.square(pcr_conflict_valid).sum()
+                        pcr_conflict_valid_count += valid_conflict_mask.float().sum()
+                        if is_gate:
+                            gate_y_raw_valid = gate_y_raw[valid_conflict_mask]
+                            pcr_conflict_y_cross_sum += (pcr_conflict_valid * gate_y_raw_valid).sum()
+                            pcr_y_raw_valid_sum += gate_y_raw_valid.sum()
+                            pcr_y_raw_sq_sum += torch.square(gate_y_raw_valid).sum()
+                            high_conflict_mask = pcr_conflict_valid > 0.6
+                            low_conflict_mask = pcr_conflict_valid < 0.3
+                            if high_conflict_mask.any():
+                                pcr_high_conflict_y_sum += gate_y_raw_valid[high_conflict_mask].sum()
+                                pcr_high_conflict_count += high_conflict_mask.float().sum()
+                            if low_conflict_mask.any():
+                                pcr_low_conflict_y_sum += gate_y_raw_valid[low_conflict_mask].sum()
+                                pcr_low_conflict_count += low_conflict_mask.float().sum()
+                pcr_gap_success_step = reward_terms_info.get('pcr_gap_success', None)
+                if torch.is_tensor(pcr_gap_success_step):
+                    pcr_gap_success_rate_sum += (pcr_gap_success_step > 0.0).float().sum()
             if is_gate:
                 gate_y_sum += y_eff.sum()
                 gate_y_raw_sum += gate_y_raw.sum()
@@ -6527,12 +6907,34 @@ def train(args):
         body_forward_speed_mean = (body_forward_speed_sum / total_samples).item()
         body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
         follow_dist_mean = (follow_dist_sum / total_samples).item()
-        follow_lost_rate_mean = (follow_lost_rate_sum / total_samples).item()
-        target_finish_rate_mean = (target_finish_rate_sum / total_samples).item()
+        completed_episode_count = completed_episode_count_sum.clamp_min(1.0)
+        follow_lost_rate_mean = (follow_lost_rate_sum / completed_episode_count).item()
+        target_finish_rate_mean = (target_finish_rate_sum / completed_episode_count).item()
+        pcr_gap_success_per_episode_mean = (pcr_gap_success_rate_sum / completed_episode_count).item()
+        pcr_gap_success_step_rate_mean = (pcr_gap_success_rate_sum / total_samples).item()
+        pcr_conflict_valid_count_clamped = pcr_conflict_valid_count.clamp_min(1.0)
+        pcr_conflict_mean = (pcr_conflict_sum / pcr_conflict_valid_count_clamped).item()
+        pcr_high_conflict_y_mean = (
+            pcr_high_conflict_y_sum / torch.clamp(pcr_high_conflict_count, min=1.0)
+        ).item()
+        pcr_low_conflict_y_mean = (
+            pcr_low_conflict_y_sum / torch.clamp(pcr_low_conflict_count, min=1.0)
+        ).item()
+        pcr_conflict_y_corr = 0.0
+        if is_gate and float(pcr_conflict_valid_count.item()) > 0.0:
+            mean_conflict = pcr_conflict_sum / pcr_conflict_valid_count_clamped
+            mean_y_raw = pcr_y_raw_valid_sum / pcr_conflict_valid_count_clamped
+            cov_conflict_y = (pcr_conflict_y_cross_sum / pcr_conflict_valid_count_clamped) - (mean_conflict * mean_y_raw)
+            var_conflict = (pcr_conflict_sq_sum / pcr_conflict_valid_count_clamped) - torch.square(mean_conflict)
+            var_y_raw = (pcr_y_raw_sq_sum / pcr_conflict_valid_count_clamped) - torch.square(mean_y_raw)
+            denom = torch.sqrt(torch.clamp(var_conflict * var_y_raw, min=1e-12))
+            pcr_conflict_y_corr = (cov_conflict_y / denom).item()
         follow_dist_p95 = 0.0
+        follow_dist_std = 0.0
         if follow_dist_samples:
             follow_dist_all = torch.cat(follow_dist_samples, dim=0)
             follow_dist_p95 = torch.quantile(follow_dist_all, 0.95).item()
+            follow_dist_std = torch.std(follow_dist_all, unbiased=False).item()
         gate_y_mean = (gate_y_sum / total_samples).item() if is_gate else 0.0
         gate_y_raw_mean = (gate_y_raw_sum / total_samples).item() if is_gate else 0.0
         gate_y_safe_mean = (gate_y_safe_sum / total_samples).item() if is_gate else 0.0
@@ -6618,7 +7020,9 @@ def train(args):
         goal_dist_console_label = 'Goal dist / Cmd / Tgt speed:'
         online_selection_metric = (float(mean_reward),)
         online_selection_metric_name = 'online_mean_reward_monitor_only'
-        if use_avoid_local_map:
+        collision_rate_mean = (collision_rate_sum / total_samples).item()
+        pcr_follow_dist_error_value = abs(float(follow_dist_mean) - 1.5)
+        if is_avoid_output_task:
             goal_dist_display_mean = reward_term_means.get('cross_line_dist', goal_dist_mean)
             goal_dist_tb_name = 'Stats/CrossLineTargetDist'
             goal_dist_console_label = 'Cross-line dist / Cmd speed / Tgt speed:'
@@ -6628,12 +7032,23 @@ def train(args):
                 float(mean_reward),
             )
             online_selection_metric_name = 'avoid_success_progress_reward_lexicographic'
+        elif is_pcr_output_task:
+            goal_dist_display_mean = follow_dist_mean
+            goal_dist_tb_name = 'Stats/FollowTargetDist'
+            goal_dist_console_label = 'Follow dist / Cmd speed / Tgt speed:'
+            online_selection_metric = (
+                float(target_finish_rate_mean),
+                float(pcr_gap_success_per_episode_mean),
+                -float(collision_rate_mean),
+                -float(pcr_follow_dist_error_value),
+                float(mean_reward),
+            )
+            online_selection_metric_name = 'pcr_target_finish_gap_collision_follow_reward_lexicographic'
         episode_collision_rate_value = (
             float(np.mean(episode_collision_flags))
-            if (use_avoid_local_map and episode_collision_flags)
+            if ((is_avoid_output_task or is_pcr_output_task) and episode_collision_flags)
             else 0.0
         )
-        collision_rate_mean = (collision_rate_sum / total_samples).item()
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
         strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
         obstacle_contact_candidate_min_clearance_mean = (
@@ -6695,9 +7110,18 @@ def train(args):
         writer.add_scalar('Perf/LearningRate', current_lr, iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
         writer.add_scalar('Perf/FollowDistMean', follow_dist_mean, iteration)
+        writer.add_scalar('Perf/FollowDistStd', follow_dist_std, iteration)
         writer.add_scalar('Perf/FollowDistP95', follow_dist_p95, iteration)
         writer.add_scalar('Perf/FollowLostRate', follow_lost_rate_mean, iteration)
         writer.add_scalar('Perf/TargetFinishRate', target_finish_rate_mean, iteration)
+        writer.add_scalar('Perf/PCRGapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
+        writer.add_scalar('Perf/PCRGapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
+        writer.add_scalar('Diag/PCRConflictMean', pcr_conflict_mean, iteration)
+        if is_gate:
+            writer.add_scalar('Diag/PCRYRawMean', gate_y_raw_mean, iteration)
+            writer.add_scalar('Diag/PCRConflictYCorr', pcr_conflict_y_corr, iteration)
+            writer.add_scalar('Diag/PCRHighConflictYMean', pcr_high_conflict_y_mean, iteration)
+            writer.add_scalar('Diag/PCRLowConflictYMean', pcr_low_conflict_y_mean, iteration)
         writer.add_scalar('Perf/DifficultyMean', buffer.difficulties.mean().item(), iteration)
         writer.add_scalar('Perf/DifficultyMin', buffer.difficulties.min().item(), iteration)
         writer.add_scalar('Perf/DifficultyMax', buffer.difficulties.max().item(), iteration)
@@ -6714,12 +7138,17 @@ def train(args):
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
         writer.add_scalar('Diag/CollisionStepRatio', collision_rate_mean, iteration)
         writer.add_scalar('Diag/EpisodeCollisionRate', episode_collision_rate_value, iteration)
-        writer.add_scalar('Diag/StageWindowCollisionRate', avoid_collision_rate100_value if use_avoid_local_map else 0.0, iteration)
+        if is_avoid_output_task:
+            writer.add_scalar('Diag/StageWindowCollisionRate', avoid_collision_rate100_value, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateRate', obstacle_contact_candidate_rate_mean, iteration)
         writer.add_scalar('Diag/StrictObstacleContactRate', strict_obstacle_contact_rate_mean, iteration)
         writer.add_scalar('Diag/ObstacleContactCandidateMinClearance', obstacle_contact_candidate_min_clearance_mean, iteration)
-        writer.add_scalar('Diag/AvoidBandActiveRate', avoid_band_active_rate_mean, iteration)
-        writer.add_scalar('Diag/AvoidBandOutsideDist', avoid_band_outside_dist_mean, iteration)
+        if is_avoid_output_task:
+            writer.add_scalar('Diag/AvoidBandActiveRate', avoid_band_active_rate_mean, iteration)
+            writer.add_scalar('Diag/AvoidBandOutsideDist', avoid_band_outside_dist_mean, iteration)
+        elif is_pcr_output_task:
+            writer.add_scalar('PCR/Diag/BandActiveRate', avoid_band_active_rate_mean, iteration)
+            writer.add_scalar('PCR/Diag/BandOutsideDist', avoid_band_outside_dist_mean, iteration)
         writer.add_scalar('Diag/CollisionForceMean', collision_force_mean, iteration)
         writer.add_scalar('Diag/CollisionForceP95', collision_force_p95, iteration)
         writer.add_scalar('Diag/SkippedNonFiniteUpdates', skipped_nonfinite_updates, iteration)
@@ -6745,7 +7174,7 @@ def train(args):
         writer.add_scalar('Stats/NearMissRatio', near_miss_ratio, iteration)
         writer.add_scalar('Stats/GateEffSwitchRate', gate_switch_rate_mean, iteration)
         writer.add_scalar('Stats/SceneDifficulty', d_scene, iteration)
-        if use_avoid_local_map:
+        if is_avoid_output_task:
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
             writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
             writer.add_scalar('Avoid/StageWindow', avoid_stage_window_value, iteration)
@@ -6788,6 +7217,36 @@ def train(args):
                 writer.add_scalar('Avoid/GoalSideRate_S4', avoid_goal_side_count_s4_iter / avoid_goal_count_s4_iter, iteration)
                 writer.add_scalar('Avoid/GoalFallbackRate_S4', avoid_goal_fallback_count_s4_iter / avoid_goal_count_s4_iter, iteration)
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
+        if is_pcr_output_task:
+            writer.add_scalar('PCR/Task/TargetFinishRate', target_finish_rate_mean, iteration)
+            writer.add_scalar('PCR/Task/GapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
+            writer.add_scalar('PCR/Task/GapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
+            writer.add_scalar('PCR/Task/FollowDistMean', follow_dist_mean, iteration)
+            writer.add_scalar('PCR/Task/FollowDistStd', follow_dist_std, iteration)
+            writer.add_scalar('PCR/Task/FollowLostRate', follow_lost_rate_mean, iteration)
+            writer.add_scalar('PCR/Task/CollisionRate', collision_rate_mean, iteration)
+            if is_gate:
+                writer.add_scalar('PCR/Gate/YRawMean', gate_y_raw_mean, iteration)
+                writer.add_scalar('PCR/Gate/YEffMean', gate_y_mean, iteration)
+                writer.add_scalar('PCR/Gate/YHighConflictMean', pcr_high_conflict_y_mean, iteration)
+                writer.add_scalar('PCR/Gate/YLowConflictMean', pcr_low_conflict_y_mean, iteration)
+                writer.add_scalar('PCR/Gate/YEffChange', gate_y_change_mean, iteration)
+            writer.add_scalar('PCR/Gate/ConflictMean', pcr_conflict_mean, iteration)
+            writer.add_scalar('PCR/Gate/ConflictYCorr', pcr_conflict_y_corr, iteration)
+            writer.add_scalar('PCR/Reward/Core', reward_term_means.get('pcr_core', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/GateAux', reward_term_means.get('pcr_gate_aux', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/GapSuccess', reward_term_means.get('pcr_gap_success', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeRowLat', reward_term_means.get('row_lat', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeRowGap', reward_term_means.get('row_gap', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeRowPush', reward_term_means.get('row_push_penalty', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeRowCmdX', reward_term_means.get('row_cmdx_reward', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeSmooth', reward_term_means.get('avoid_smooth_penalty', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeEarlyNext', reward_term_means.get('early_next_gap_penalty', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/ShapeHeading', reward_term_means.get('heading_keep', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/HardBand', reward_term_means.get('avoid_band_penalty', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/HardCollision', reward_term_means.get('collision', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/HardTerminal', reward_term_means.get('terminal_penalty', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/HardTime', reward_term_means.get('time', 0.0), iteration)
         if is_gate:
             writer.add_scalar('Stats/GateYEff', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
@@ -6820,7 +7279,10 @@ def train(args):
         writer.add_scalar('Stats/BodyBackwardSpeed', body_backward_speed_mean, iteration)
         writer.add_scalar('Stats/TargetSpeed', target_speed_mean, iteration)
         writer.add_scalar(goal_dist_tb_name, goal_dist_display_mean, iteration)
-        writer.add_scalar('Stats/CrossLineDist', reward_term_means.get('cross_line_dist', 0.0), iteration)
+        if is_avoid_output_task:
+            writer.add_scalar('Stats/CrossLineDist', reward_term_means.get('cross_line_dist', 0.0), iteration)
+        elif is_pcr_output_task:
+            writer.add_scalar('PCR/Diag/GapLineDist', reward_term_means.get('cross_line_dist', 0.0), iteration)
         writer.add_scalar('Stats/GoalWorldDelta', goal_world_delta_mean, iteration)
         writer.add_scalar('Stats/TargetTurnEventRate', target_turn_event_rate, iteration)
         writer.add_scalar('Stats/TargetPreTurnEventRate', target_preturn_event_rate, iteration)
@@ -6839,7 +7301,7 @@ def train(args):
         if 'row_push_active' in reward_term_means:
             writer.add_scalar('Stats/RowPushActiveRatio', reward_term_means['row_push_active'], iteration)
         reward_log_keys = list(reward_term_means.keys())
-        if use_avoid_local_map:
+        if is_avoid_output_task:
             reward_log_keys = [
                 key
                 for key in (
@@ -6854,6 +7316,10 @@ def train(args):
                     'row_gate',
                     'row_gate_active',
                     'row_push_active',
+                    'pcr_core',
+                    'pcr_gate_aux',
+                    'pcr_gap_success',
+                    'pcr_conflict',
                     'timeout_bootstrap_bonus',
                     'avoid_band_penalty',
                     'collision',
@@ -6864,6 +7330,8 @@ def train(args):
                 )
                 if key in reward_term_means
             ]
+        elif is_pcr_output_task:
+            reward_log_keys = []
         for key in reward_log_keys:
             writer.add_scalar(f'Reward/{key}', reward_term_means[key], iteration)
         
@@ -6921,7 +7389,7 @@ def train(args):
                         f"""{'EGPO yaw response match:':>{pad}} {egpo_yaw_resp_sign_match_rate:.3f}\n"""
                     )
             avoid_line = ""
-            if use_avoid_local_map:
+            if is_avoid_output_task:
                 avoid_line = (
                     f"""{'Avoid stage/corridor/window:':>{pad}} {avoid_stage_value:.0f} / {avoid_corridor_width_value:.3f} / {avoid_stage_window_value:.0f}\n"""
                     f"""{'Avoid stage episodes/shrinkWin:':>{pad}} {avoid_stage_completed_eps_value:.0f} / {avoid_shrink_window_value:.0f}\n"""
@@ -6953,8 +7421,10 @@ def train(args):
                           f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
-                          f"""{'Follow dist mean/p95/lost:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
-                          f"""{'Target finish rate:':>{pad}} {target_finish_rate_mean:.3f}\n"""
+                          f"""{'Follow dist mean/std/p95/lostEp:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_std:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
+                          f"""{'Target finish ep rate:':>{pad}} {target_finish_rate_mean:.3f}\n"""
+                          f"""{'PCR gapSuccEp/conflict/corr:':>{pad}} {pcr_gap_success_per_episode_mean:.3f} / {pcr_conflict_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
+                          f"""{'PCR y low/high conflict:':>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f}\n"""
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
@@ -6968,7 +7438,7 @@ def train(args):
                           f"""{'CmdX pred/towardGap/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX signed abs/pos/neg:':>{pad}} {reward_term_means.get('row_cmdx_signed_abs', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_pos', 0.0):.3f} / {reward_term_means.get('row_cmdx_signed_neg', 0.0):.3f}\n"""
                           f"""{'Row fwdDist/gate/gOn/pOn:':>{pad}} {reward_term_means.get('row_forward_dist', 0.0):.3f} / {reward_term_means.get('row_gate', 0.0):.3f} / {reward_term_means.get('row_gate_active', 0.0):.3f} / {reward_term_means.get('row_push_active', 0.0):.3f}\n"""
-                          f"""{'Cross-line dist(step mean):':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
+                          f"""{('Cross-line dist(step mean):' if is_avoid_output_task else 'Gap-line dist(step mean):'):>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f}\n"""
                           f"""{'Body fwd / back speed:':>{pad}} {body_forward_speed_mean:.3f} / {body_backward_speed_mean:.3f}\n"""
                           f"""{'Goal world delta:':>{pad}} {goal_world_delta_mean:.3f}\n"""
                           f"""{'Target turn/pre/reflect:':>{pad}} {target_turn_event_rate:.3f} / {target_preturn_event_rate:.3f} / {target_reflect_event_rate:.3f}\n"""
@@ -6978,10 +7448,12 @@ def train(args):
                           f"""{egpo_line}"""
                           f"""{avoid_line}"""
                           f"""{'AffStack d/std/filled:':>{pad}} {aff_stack_delta_mean:.3f} / {aff_stack_std_mean:.3f} / {aff_stack_filled_mean:.3f}\n"""
-                          f"""{'Collision step/episode/stage:':>{pad}} {collision_rate_mean:.3f} / {episode_collision_rate_value:.3f} / {(avoid_collision_rate100_value if use_avoid_local_map else 0.0):.3f}\n"""
+                          f"""{('Collision step/episode/stage:' if is_avoid_output_task else 'Collision step/episode:'):>{pad}} {collision_rate_mean:.3f} / {episode_collision_rate_value:.3f}{(f' / {avoid_collision_rate100_value:.3f}' if is_avoid_output_task else '')}\n"""
                           f"""{'Collision force mean/p95/th:':>{pad}} {collision_force_mean:.3f} / {collision_force_p95:.3f} / {collision_threshold_str} ({collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(main appr/rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('approach', 0.0):.3f} / {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
+                          f"""{'Reward(PCR core/gate/gapSucc):':>{pad}} {reward_term_means.get('pcr_core', 0.0):.3f} / {reward_term_means.get('pcr_gate_aux', 0.0):.3f} / {reward_term_means.get('pcr_gap_success', 0.0):.3f}\n"""
+                          f"""{'Diag(PCR conflict mean):':>{pad}} {pcr_conflict_mean:.3f}\n"""
+                          f"""{'Reward(rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
                           f"""{'Reward(smooth/earlyNext/head):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('early_next_gap_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
                           f"""{'Reward(timeout-only bootstrap):':>{pad}} {reward_term_means.get('timeout_bootstrap_bonus', 0.0):.3f}\n"""
                           f"""{'Reward(cost band/col/stab/term):':>{pad}} {reward_term_means.get('avoid_band_penalty', 0.0):.3f} / {reward_term_means.get('collision', 0.0):.3f} / {reward_term_means.get('stability', 0.0):.3f} / {reward_term_means.get('terminal_penalty', 0.0):.3f}\n"""
@@ -7008,6 +7480,10 @@ def train(args):
                 'best_online_reward': best_reward,
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
+                'best_online_target_finish': best_pcr_target_finish,
+                'best_online_gap_success': best_pcr_gap_success,
+                'best_online_collision': best_pcr_collision,
+                'best_online_follow_dist_error': best_pcr_follow_dist_error,
                 'best_online_selection_metric': best_selection_metric_name,
                 'selection_metric': 'periodic_checkpoint',
                 'experiment_meta': run_meta,
@@ -7018,10 +7494,31 @@ def train(args):
             dprint(f"  Saved: {ckpt_path}")
         
         # Save best online-monitor checkpoint.
-        current_best_tuple = (best_success, best_progress, best_reward) if use_avoid_local_map else (best_reward,)
+        if is_avoid_output_task:
+            current_best_tuple = (best_success, best_progress, best_reward)
+        elif is_pcr_output_task:
+            current_best_tuple = (
+                best_pcr_target_finish,
+                best_pcr_gap_success,
+                -best_pcr_collision,
+                -best_pcr_follow_dist_error,
+                best_reward,
+            )
+        else:
+            current_best_tuple = (best_reward,)
         if online_selection_metric > current_best_tuple and len(episode_rewards) >= 10:
-            if use_avoid_local_map:
+            if is_avoid_output_task:
                 best_success, best_progress, best_reward = online_selection_metric
+            elif is_pcr_output_task:
+                (
+                    best_pcr_target_finish,
+                    best_pcr_gap_success,
+                    best_pcr_collision_neg,
+                    best_pcr_follow_dist_error_neg,
+                    best_reward,
+                ) = online_selection_metric
+                best_pcr_collision = -best_pcr_collision_neg
+                best_pcr_follow_dist_error = -best_pcr_follow_dist_error_neg
             else:
                 best_reward = online_selection_metric[0]
             best_selection_metric_name = online_selection_metric_name
@@ -7034,14 +7531,24 @@ def train(args):
                 'best_online_reward': best_reward,
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
+                'best_online_target_finish': best_pcr_target_finish,
+                'best_online_gap_success': best_pcr_gap_success,
+                'best_online_collision': best_pcr_collision,
+                'best_online_follow_dist_error': best_pcr_follow_dist_error,
                 'best_online_selection_metric': best_selection_metric_name,
                 'selection_metric': best_selection_metric_name,
                 'experiment_meta': run_meta,
             }, best_path)
-            if use_avoid_local_map:
+            if is_avoid_output_task:
                 dprint(
                     f"  ★ New online best (succ/prog/reward): "
                     f"{best_success:.3f} / {best_progress:.3f} / {best_reward:.2f}"
+                )
+            elif is_pcr_output_task:
+                dprint(
+                    f"  ★ New PCR best (finish/gap/coll/follow/reward): "
+                    f"{best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+                    f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
                 )
             else:
                 dprint(f"  ★ New online best: {mean_reward:.2f}")
@@ -7049,10 +7556,16 @@ def train(args):
     # 训练结束
     print(f"\n{'='*60}")
     print(f"Training Complete!")
-    if use_avoid_local_map:
+    if is_avoid_output_task:
         print(
             f"Best Online Monitor (succ/prog/reward): "
             f"{best_success:.3f} / {best_progress:.3f} / {best_reward:.2f}"
+        )
+    elif is_pcr_output_task:
+        print(
+            f"Best PCR Monitor (finish/gap/coll/follow/reward): "
+            f"{best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+            f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
         )
     else:
         print(f"Best Online Reward: {best_reward:.2f}")

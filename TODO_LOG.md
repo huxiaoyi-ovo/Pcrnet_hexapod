@@ -68,6 +68,14 @@
 
 - [x] ~~[P0] 新增 `s_pcr_line_avoid_basic`：场景几何、固定模板、课程与 `s_avoid_basic` 完全一致，只增加一条固定 `x_line` 的直线移动目标，用于第一版 PCR 跟随-避障协调训练~~
 
+## 2026-04-07 PCR 第一场景奖励重构：从双任务相加改为联合结果评价
+
+- [x] ~~[P0] 在 `s_pcr_line_avoid_basic` 中新增独立 PCR 奖励分支：以 `R_core(前向进度×follow_quality)` 为主信号，加入解析 `conflict` 的 Gate 辅助项与逐行 `gap_success` 里程碑，同时显式关闭旧的 `approach/follow_outside` 双任务叠加口径，并将 row 系列降级为小整形项~~
+- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的 PCR 奖励配置收口为单点全覆盖：所有参与训练、终止或显式关闭的奖励系数都在该场景配置里显式声明，并在训练入口对关键配置缺失直接报错，避免静默继承父类或默认值~~
+- [x] ~~[P0] 将 PCR 奖励定稿为最终版分层结构：`R_core + R_gate_aux + R_gap_success + R_shape + R_hard`，并强制 PCR 分支只绑定 `s_pcr_line_avoid_basic` 场景名，同时在 wrapper `_reset_idx` 中显式清零 `row_success_flags`~~
+- [x] ~~[P0] 修复 PCR 指标口径：`conflict/y_high/y_low/corr` 只统计当前 row 有效步骤；`TargetFinishRate/FollowLostRate` 改为按 episode 结束事件统计，避免短训验收被 step 平均静默污染~~
+- [x] ~~[P0] 将训练输出与 best checkpoint 选择从 `avoid` 口径中分流：`avoid` 保持原输出；`pcr` 切到独立 `PCR/*` 输出与 PCR 专属 online selection metric，避免 TensorBoard 与 best ckpt 被 `avoid` 指标误导~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
