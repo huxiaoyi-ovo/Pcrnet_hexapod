@@ -612,7 +612,7 @@ class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
         pcr_progress_cap = 0.8
         pcr_follow_quality_floor = 0.12
         pcr_follow_quality_sigma = 0.40
-        pcr_gate_aux_scale = 5.0
+        pcr_gate_aux_scale = 10.0
         pcr_gap_success_bonus = 25.0
         avoid_band_activate_progress = 0.0
         avoid_band_penalty_scale = 0.8
