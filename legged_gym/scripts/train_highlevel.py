@@ -1521,6 +1521,29 @@ class HierarchicalHexapodEnv:
             device=device,
             dtype=torch.bool,
         )
+        self.pcr_row_collision_flags = torch.zeros(
+            self.num_envs,
+            self.pcr_max_rows,
+            device=device,
+            dtype=torch.bool,
+        )
+        self.pcr_row_band_fail_flags = torch.zeros(
+            self.num_envs,
+            self.pcr_max_rows,
+            device=device,
+            dtype=torch.bool,
+        )
+        self.pcr_prev_row_index = torch.full(
+            (self.num_envs,),
+            -1,
+            device=device,
+            dtype=torch.long,
+        )
+        self.pcr_prev_row_valid = torch.zeros(
+            self.num_envs,
+            device=device,
+            dtype=torch.bool,
+        )
         self.episode_return_buf = torch.zeros(self.num_envs, device=device)
         self.episode_len_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.clearance_override = None
@@ -1647,6 +1670,10 @@ class HierarchicalHexapodEnv:
         self.pcr_follow_far_steps.zero_()
         self.stable_follow_steps.zero_()
         self.pcr_row_success_flags.zero_()
+        self.pcr_row_collision_flags.zero_()
+        self.pcr_row_band_fail_flags.zero_()
+        self.pcr_prev_row_index.fill_(-1)
+        self.pcr_prev_row_valid.zero_()
         self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
@@ -1668,6 +1695,10 @@ class HierarchicalHexapodEnv:
         if env_ids is None or env_ids.numel() == 0:
             return
         self.pcr_row_success_flags[env_ids] = False
+        self.pcr_row_collision_flags[env_ids] = False
+        self.pcr_row_band_fail_flags[env_ids] = False
+        self.pcr_prev_row_index[env_ids] = -1
+        self.pcr_prev_row_valid[env_ids] = False
         self.env.reset_idx(env_ids)
 
     def _resample_forced_forward_speed(self, env_ids: torch.Tensor) -> None:
@@ -3167,7 +3198,7 @@ class HierarchicalHexapodEnv:
         )
         velocity_cmd_post = velocity_cmd.detach().clone()
         rotate_only_trigger_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        if bool(getattr(self.env, "s_avoid_enabled", False)):
+        if bool(getattr(self.env, "s_avoid_enabled", False)) and (not self.is_pcr_line_task):
             velocity_cmd = velocity_cmd.clone()
             velocity_cmd[:, 1] = torch.clamp(velocity_cmd[:, 1], min=self.forced_forward_speed)
             nav_cfg = getattr(self.env.cfg, "navigation", None)
@@ -3216,6 +3247,8 @@ class HierarchicalHexapodEnv:
             self.rotate_only_active = rotate_only_active.detach().clone()
             if getattr(self.post_processor, "last_cmd", None) is not None:
                 self.post_processor.last_cmd = velocity_cmd.detach().clone()
+        elif self.is_pcr_line_task:
+            self.rotate_only_active.zero_()
         if clearance_aff_map is not None:
             cmd_preview = velocity_cmd.detach()
             clearance_pp = self._compute_clearance_along_cmd(clearance_aff_map, cmd_preview[:, :2])
@@ -3875,38 +3908,48 @@ class HierarchicalHexapodEnv:
                 manual_reset_mask |= band_fail_mask
 
         if self.is_pcr_line_task:
-            valid_row_success = (
-                pcr_current_row_valid
-                & (pcr_current_row_index >= 0)
-                & (pcr_current_row_index < self.pcr_row_success_flags.shape[1])
+            prev_valid_row_success = (
+                self.pcr_prev_row_valid
+                & (self.pcr_prev_row_index >= 0)
+                & (self.pcr_prev_row_index < self.pcr_row_success_flags.shape[1])
             )
-            if valid_row_success.any():
-                row_half_spacing = torch.where(
-                    pcr_next_row_valid,
-                    0.5 * torch.clamp(pcr_next_row_center_y - pcr_current_row_center_y, min=0.0),
-                    0.5 * torch.clamp(cross_line_world_y - pcr_current_row_center_y, min=0.0),
-                )
-                row_success_threshold_y = pcr_current_row_center_y + row_half_spacing
-                crossed_row_success = (
-                    valid_row_success
-                    & (robot_pos[:, 1] > row_success_threshold_y)
-                    & (~collision_mask)
-                    & (~band_fail_mask)
-                )
-                if crossed_row_success.any():
-                    env_ids_row = crossed_row_success.nonzero(as_tuple=False).flatten()
-                    row_ids = pcr_current_row_index[env_ids_row].to(dtype=torch.long)
-                    fresh_mask = ~self.pcr_row_success_flags[env_ids_row, row_ids]
-                    if fresh_mask.any():
-                        fresh_env_ids = env_ids_row[fresh_mask]
-                        fresh_row_ids = row_ids[fresh_mask]
-                        self.pcr_row_success_flags[fresh_env_ids, fresh_row_ids] = True
-                        pcr_gap_success_reward[fresh_env_ids] = float(self.pcr_gap_success_bonus)
-                        total_reward = total_reward + pcr_gap_success_reward
-                        reward_terms["pcr_gap_success"] = pcr_gap_success_reward
-                        reward_terms["total"] = total_reward
+            if prev_valid_row_success.any():
+                prev_env_ids = prev_valid_row_success.nonzero(as_tuple=False).flatten()
+                prev_row_ids = self.pcr_prev_row_index[prev_env_ids].to(dtype=torch.long)
+                self.pcr_row_collision_flags[prev_env_ids, prev_row_ids] |= collision_mask[prev_env_ids]
+                self.pcr_row_band_fail_flags[prev_env_ids, prev_row_ids] |= band_fail_mask[prev_env_ids]
+            if pcr_current_row_valid.any():
+                active_env_ids = pcr_current_row_valid.nonzero(as_tuple=False).flatten()
+                active_row_ids = pcr_current_row_index[active_env_ids].to(dtype=torch.long)
+                self.pcr_row_collision_flags[active_env_ids, active_row_ids] |= collision_mask[active_env_ids]
+                self.pcr_row_band_fail_flags[active_env_ids, active_row_ids] |= band_fail_mask[active_env_ids]
+            row_released = prev_valid_row_success & (
+                (~pcr_current_row_valid) | (pcr_current_row_index != self.pcr_prev_row_index)
+            )
+            if row_released.any():
+                env_ids_row = row_released.nonzero(as_tuple=False).flatten()
+                row_ids = self.pcr_prev_row_index[env_ids_row].to(dtype=torch.long)
+                row_collision_fail = self.pcr_row_collision_flags[env_ids_row, row_ids]
+                row_band_fail = self.pcr_row_band_fail_flags[env_ids_row, row_ids]
+                fresh_mask = (~self.pcr_row_success_flags[env_ids_row, row_ids]) & (~row_collision_fail) & (~row_band_fail)
+                if fresh_mask.any():
+                    fresh_env_ids = env_ids_row[fresh_mask]
+                    fresh_row_ids = row_ids[fresh_mask]
+                    self.pcr_row_success_flags[fresh_env_ids, fresh_row_ids] = True
+                    pcr_gap_success_reward[fresh_env_ids] = float(self.pcr_gap_success_bonus)
+                    total_reward = total_reward + pcr_gap_success_reward
+                    reward_terms["pcr_gap_success"] = pcr_gap_success_reward
+                    reward_terms["total"] = total_reward
+                self.pcr_row_collision_flags[env_ids_row, row_ids] = False
+                self.pcr_row_band_fail_flags[env_ids_row, row_ids] = False
             if "pcr_gap_success" not in reward_terms:
                 reward_terms["pcr_gap_success"] = pcr_gap_success_reward
+            self.pcr_prev_row_index.copy_(torch.where(
+                pcr_current_row_valid,
+                pcr_current_row_index,
+                torch.full_like(pcr_current_row_index, -1),
+            ))
+            self.pcr_prev_row_valid.copy_(pcr_current_row_valid)
 
         # Add target centering / visibility shaping when explicitly enabled.
         use_target_view_reward = (
@@ -4316,6 +4359,10 @@ class HierarchicalHexapodEnv:
             self.pcr_follow_far_steps[done_any] = 0
             self.stable_follow_steps[done_any] = 0
             self.pcr_row_success_flags[done_any] = False
+            self.pcr_row_collision_flags[done_any] = False
+            self.pcr_row_band_fail_flags[done_any] = False
+            self.pcr_prev_row_index[done_any] = -1
+            self.pcr_prev_row_valid[done_any] = False
             self.episode_return_buf[done_any] = 0.0
             self.episode_len_buf[done_any] = 0
             self.prev_robot_pos[done_any] = self.env.root_states[done_any, :3]
@@ -5033,6 +5080,7 @@ def train(args):
     best_reward = float("-inf")
     best_success = float("-inf")
     best_progress = float("-inf")
+    best_pcr_success = float("-inf")
     best_pcr_target_finish = float("-inf")
     best_pcr_gap_success = float("-inf")
     best_pcr_collision = float("inf")
@@ -5071,6 +5119,7 @@ def train(args):
         if isinstance(ckpt, dict):
             best_success = float(ckpt.get("best_online_success", -float("inf")))
             best_progress = float(ckpt.get("best_online_progress", -float("inf")))
+            best_pcr_success = float(ckpt.get("best_online_success_rate", ckpt.get("best_online_target_finish", -float("inf"))))
             best_pcr_target_finish = float(ckpt.get("best_online_target_finish", -float("inf")))
             best_pcr_gap_success = float(ckpt.get("best_online_gap_success", -float("inf")))
             best_pcr_collision = float(ckpt.get("best_online_collision", float("inf")))
@@ -5363,6 +5412,7 @@ def train(args):
         follow_dist_sum = torch.zeros((), device=device)
         follow_lost_rate_sum = torch.zeros((), device=device)
         target_finish_rate_sum = torch.zeros((), device=device)
+        pcr_success_rate_sum = torch.zeros((), device=device)
         completed_episode_count_sum = torch.zeros((), device=device)
         pcr_gap_success_rate_sum = torch.zeros((), device=device)
         pcr_conflict_sum = torch.zeros((), device=device)
@@ -6002,6 +6052,9 @@ def train(args):
             target_line_finished = env_info.get('target_line_finished', None) if env_info is not None else None
             if torch.is_tensor(target_line_finished):
                 target_finish_rate_sum += target_line_finished.float().sum()
+            success_mask_step = env_info.get('success_mask', None) if env_info is not None else None
+            if is_pcr_output_task and torch.is_tensor(success_mask_step):
+                pcr_success_rate_sum += success_mask_step.float().sum()
             if torch.is_tensor(dones):
                 completed_episode_count_sum += dones.float().sum()
             reward_terms_info = env_info.get('reward_terms', None) if env_info is not None else None
@@ -6910,6 +6963,7 @@ def train(args):
         completed_episode_count = completed_episode_count_sum.clamp_min(1.0)
         follow_lost_rate_mean = (follow_lost_rate_sum / completed_episode_count).item()
         target_finish_rate_mean = (target_finish_rate_sum / completed_episode_count).item()
+        pcr_success_rate_mean = (pcr_success_rate_sum / completed_episode_count).item()
         pcr_gap_success_per_episode_mean = (pcr_gap_success_rate_sum / completed_episode_count).item()
         pcr_gap_success_step_rate_mean = (pcr_gap_success_rate_sum / total_samples).item()
         pcr_conflict_valid_count_clamped = pcr_conflict_valid_count.clamp_min(1.0)
@@ -7037,13 +7091,14 @@ def train(args):
             goal_dist_tb_name = 'Stats/FollowTargetDist'
             goal_dist_console_label = 'Follow dist / Cmd speed / Tgt speed:'
             online_selection_metric = (
+                float(pcr_success_rate_mean),
                 float(target_finish_rate_mean),
                 float(pcr_gap_success_per_episode_mean),
                 -float(collision_rate_mean),
                 -float(pcr_follow_dist_error_value),
                 float(mean_reward),
             )
-            online_selection_metric_name = 'pcr_target_finish_gap_collision_follow_reward_lexicographic'
+            online_selection_metric_name = 'pcr_success_gap_collision_follow_reward_lexicographic'
         episode_collision_rate_value = (
             float(np.mean(episode_collision_flags))
             if ((is_avoid_output_task or is_pcr_output_task) and episode_collision_flags)
@@ -7114,6 +7169,7 @@ def train(args):
         writer.add_scalar('Perf/FollowDistP95', follow_dist_p95, iteration)
         writer.add_scalar('Perf/FollowLostRate', follow_lost_rate_mean, iteration)
         writer.add_scalar('Perf/TargetFinishRate', target_finish_rate_mean, iteration)
+        writer.add_scalar('Perf/PCRSuccessRate', pcr_success_rate_mean, iteration)
         writer.add_scalar('Perf/PCRGapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
         writer.add_scalar('Perf/PCRGapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
         writer.add_scalar('Diag/PCRConflictMean', pcr_conflict_mean, iteration)
@@ -7219,6 +7275,7 @@ def train(args):
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_pcr_output_task:
             writer.add_scalar('PCR/Task/TargetFinishRate', target_finish_rate_mean, iteration)
+            writer.add_scalar('PCR/Task/SuccessRate', pcr_success_rate_mean, iteration)
             writer.add_scalar('PCR/Task/GapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
             writer.add_scalar('PCR/Task/GapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
             writer.add_scalar('PCR/Task/FollowDistMean', follow_dist_mean, iteration)
@@ -7407,6 +7464,19 @@ def train(args):
                     f"""{'Avoid band out/active:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {avoid_band_active_rate_mean:.3f}\n"""
                           f"""{'Avoid obs-hit cand/strict/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {strict_obstacle_contact_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
                 )
+            elif is_pcr_output_task:
+                avoid_line = (
+                    f"""{'PCR succ/finish/gap:':>{pad}} {pcr_success_rate_mean:.3f} / {target_finish_rate_mean:.3f} / {pcr_gap_success_per_episode_mean:.3f}\n"""
+                    f"""{'PCR coll(ep/step)/followErr:':>{pad}} {episode_collision_rate_value:.3f} / {collision_rate_mean:.3f} / {pcr_follow_dist_error_value:.3f}\n"""
+                    f"""{'PCR y low/high/corr:':>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
+                    f"""{'PCR conflict/gapStep:':>{pad}} {pcr_conflict_mean:.3f} / {pcr_gap_success_step_rate_mean:.3f}\n"""
+                    f"""{'PCR nearest obs dist:':>{pad}} {clearance_min:.3f}\n"""
+                    f"""{'PCR row success count:':>{pad}} {pcr_gap_success_per_episode_mean:.3f}\n"""
+                    f"""{'PCR target/follow lost:':>{pad}} {target_finish_rate_mean:.3f} / {follow_lost_rate_mean:.3f}\n"""
+                    f"""{'PCR gap-line/bandAct:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f} / {avoid_band_active_rate_mean:.3f}\n"""
+                    f"""{'PCR band out/near-miss:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {near_miss_ratio:.3f}\n"""
+                    f"""{'PCR obs-hit cand/strict/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {strict_obstacle_contact_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
+                )
             log_string = (f"""{'#' * width}\n"""
                           f"""{header.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (rollout {rollout_time:.3f}s, update {update_time:.3f}s)\n"""
@@ -7422,9 +7492,9 @@ def train(args):
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
                           f"""{'Follow dist mean/std/p95/lostEp:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_std:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
-                          f"""{'Target finish ep rate:':>{pad}} {target_finish_rate_mean:.3f}\n"""
-                          f"""{'PCR gapSuccEp/conflict/corr:':>{pad}} {pcr_gap_success_per_episode_mean:.3f} / {pcr_conflict_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
-                          f"""{'PCR y low/high conflict:':>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f}\n"""
+                          f"""{('Target finish ep rate:' if not is_pcr_output_task else 'PCR success/finish ep:'):>{pad}} {(target_finish_rate_mean if not is_pcr_output_task else pcr_success_rate_mean):.3f}{('' if not is_pcr_output_task else f' / {target_finish_rate_mean:.3f}')}\n"""
+                          f"""{('PCR gapSuccEp/conflict/corr:' if not is_pcr_output_task else 'PCR gap/conflict/corr:'):>{pad}} {pcr_gap_success_per_episode_mean:.3f} / {pcr_conflict_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
+                          f"""{('PCR y low/high conflict:' if not is_pcr_output_task else 'PCR y low/high/corr:'):>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f}{('' if not is_pcr_output_task else f' / {pcr_conflict_y_corr:.3f}')}\n"""
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
                           f"""{'Approx KL / Clip frac:':>{pad}} {approx_kl_sum / max(num_updates, 1):.4f} / {clip_frac_sum / max(num_updates, 1):.3f}\n"""
                           f"""{'Nonfinite skip/sanitize:':>{pad}} {skipped_nonfinite_updates} / {sanitized_param_count}\n"""
@@ -7480,6 +7550,7 @@ def train(args):
                 'best_online_reward': best_reward,
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
+                'best_online_success_rate': best_pcr_success,
                 'best_online_target_finish': best_pcr_target_finish,
                 'best_online_gap_success': best_pcr_gap_success,
                 'best_online_collision': best_pcr_collision,
@@ -7498,6 +7569,7 @@ def train(args):
             current_best_tuple = (best_success, best_progress, best_reward)
         elif is_pcr_output_task:
             current_best_tuple = (
+                best_pcr_success,
                 best_pcr_target_finish,
                 best_pcr_gap_success,
                 -best_pcr_collision,
@@ -7511,6 +7583,7 @@ def train(args):
                 best_success, best_progress, best_reward = online_selection_metric
             elif is_pcr_output_task:
                 (
+                    best_pcr_success,
                     best_pcr_target_finish,
                     best_pcr_gap_success,
                     best_pcr_collision_neg,
@@ -7531,6 +7604,7 @@ def train(args):
                 'best_online_reward': best_reward,
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
+                'best_online_success_rate': best_pcr_success,
                 'best_online_target_finish': best_pcr_target_finish,
                 'best_online_gap_success': best_pcr_gap_success,
                 'best_online_collision': best_pcr_collision,
@@ -7546,8 +7620,8 @@ def train(args):
                 )
             elif is_pcr_output_task:
                 dprint(
-                    f"  ★ New PCR best (finish/gap/coll/follow/reward): "
-                    f"{best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+                    f"  ★ New PCR best (succ/finish/gap/coll/follow/reward): "
+                    f"{best_pcr_success:.3f} / {best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
                     f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
                 )
             else:
@@ -7563,8 +7637,8 @@ def train(args):
         )
     elif is_pcr_output_task:
         print(
-            f"Best PCR Monitor (finish/gap/coll/follow/reward): "
-            f"{best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+            f"Best PCR Monitor (succ/finish/gap/coll/follow/reward): "
+            f"{best_pcr_success:.3f} / {best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
             f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
         )
     else:

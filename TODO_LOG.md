@@ -76,6 +76,16 @@
 - [x] ~~[P0] 修复 PCR 指标口径：`conflict/y_high/y_low/corr` 只统计当前 row 有效步骤；`TargetFinishRate/FollowLostRate` 改为按 episode 结束事件统计，避免短训验收被 step 平均静默污染~~
 - [x] ~~[P0] 将训练输出与 best checkpoint 选择从 `avoid` 口径中分流：`avoid` 保持原输出；`pcr` 切到独立 `PCR/*` 输出与 PCR 专属 online selection metric，避免 TensorBoard 与 best ckpt 被 `avoid` 指标误导~~
 
+## 2026-04-08 PCR 取消角度恢复机制
+
+- [x] ~~[P0] 在 `s_pcr_line_avoid_basic` 的训练与 `play` 共用高层逻辑中禁用 `rotate_only` 角度恢复接管，避免额外硬规则替 Gate 做仲裁；保留只读状态字段用于确认 PCR 下该机制恒不触发~~
+
+## 2026-04-08 PCR gap_success 记账改为上一行释放事件
+
+- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的 `R_gap_success` 从“直接使用当前动态 `current_row_idx` 记账”改为“基于上一行释放/切换事件记账”，继续沿用 avoid 的行几何定义，但避免当前行过早切换导致逐行里程碑长期为零~~
+- [x] ~~[P0] 将 PCR 的逐行成功拒绝条件从“释放瞬间无违规”收口为“整行生命周期内无 collision/band fail”，并新增 PCR 真正 success 指标用于 best checkpoint 选择，避免 `target_finish` 结束事件继续冒充任务成功~~
+- [x] ~~[P0] 将 PCR 的 train 终端输出收口为与 avoid 相同的版式与频率，只替换成 PCR 语义参数，避免后续短训读取体验和节奏与 avoid 分叉~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
