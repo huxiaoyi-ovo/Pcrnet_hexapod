@@ -3243,71 +3243,72 @@ def main():
                             hid_dz,
                         )
                     )
-                if (
-                    args.task == "s_avoid_basic"
-                    and teacher_dump_interval_steps > 0
-                    and raw_aff_map is not None
-                    and step_idx >= next_teacher_dump_step
-                ):
-                    local_map_2ch_dbg = obs.get("local_map_2ch", th.build_avoid_local_map_2ch(raw_aff_map))
-                    teacher_dump_dir = _prepare_teacher_dump_dir(args)
-                    teacher_save_path = os.path.join(teacher_dump_dir, f"teacher_step{step_idx:06d}.png")
-                    _save_s_avoid_teacher_snapshot(
-                        teacher_save_path,
-                        env,
-                        raw_aff_map[env_idx:env_idx + 1],
-                        local_map_2ch_dbg[env_idx:env_idx + 1],
-                        row_y_world=row_gap_row_y_dbg,
-                        gap_left_world=row_gap_left_dbg,
-                        gap_right_world=row_gap_right_dbg,
-                        gap_left_eff_world=row_gap_left_eff_dbg,
-                        gap_right_eff_world=row_gap_right_eff_dbg,
-                        gap_center_eff_world=row_gap_center_eff_dbg,
-                        row_lat_reward=row_lat_dbg,
-                        row_cmdx_reward=row_cmdx_dbg,
-                        x_err_now=row_x_err_now_dbg,
-                        x_err_prev=row_x_err_prev_dbg,
-                        robot_x_world=robot_x_dbg,
-                        x_dir_to_gap=x_dir_to_gap_dbg,
-                        cmd_x_signed_gap=cmd_x_signed_gap_dbg,
-                        cmd_exec=np.asarray(cmd_show, dtype=np.float32),
-                        band_dbg=_extract_s_avoid_band_debug(env, env_idx),
-                    )
-                    print(f"[PlayHigh] row-gap snapshot saved: {teacher_save_path}")
-                    next_teacher_dump_step += teacher_dump_interval_steps
-                print(
-                    "[PlayHigh][goal] raw={} rot={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
-                    "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} offset={:.3f}".format(
-                        "None" if goal_raw_dbg is None else np.array2string(goal_raw_dbg, precision=3, floatmode="fixed"),
-                        "None" if goal is None else np.array2string(goal, precision=3, floatmode="fixed"),
-                        goal_raw_bear_xy,
-                        goal_raw_bear_y,
-                        goal_world_bear_xy,
-                        goal_world_bear_y,
-                        bearing_y,
-                        heading_offset,
-                    )
-                )
-                if band_debug:
+                if not is_pcr_demo_task:
+                    if (
+                        args.task == "s_avoid_basic"
+                        and teacher_dump_interval_steps > 0
+                        and raw_aff_map is not None
+                        and step_idx >= next_teacher_dump_step
+                    ):
+                        local_map_2ch_dbg = obs.get("local_map_2ch", th.build_avoid_local_map_2ch(raw_aff_map))
+                        teacher_dump_dir = _prepare_teacher_dump_dir(args)
+                        teacher_save_path = os.path.join(teacher_dump_dir, f"teacher_step{step_idx:06d}.png")
+                        _save_s_avoid_teacher_snapshot(
+                            teacher_save_path,
+                            env,
+                            raw_aff_map[env_idx:env_idx + 1],
+                            local_map_2ch_dbg[env_idx:env_idx + 1],
+                            row_y_world=row_gap_row_y_dbg,
+                            gap_left_world=row_gap_left_dbg,
+                            gap_right_world=row_gap_right_dbg,
+                            gap_left_eff_world=row_gap_left_eff_dbg,
+                            gap_right_eff_world=row_gap_right_eff_dbg,
+                            gap_center_eff_world=row_gap_center_eff_dbg,
+                            row_lat_reward=row_lat_dbg,
+                            row_cmdx_reward=row_cmdx_dbg,
+                            x_err_now=row_x_err_now_dbg,
+                            x_err_prev=row_x_err_prev_dbg,
+                            robot_x_world=robot_x_dbg,
+                            x_dir_to_gap=x_dir_to_gap_dbg,
+                            cmd_x_signed_gap=cmd_x_signed_gap_dbg,
+                            cmd_exec=np.asarray(cmd_show, dtype=np.float32),
+                            band_dbg=_extract_s_avoid_band_debug(env, env_idx),
+                        )
+                        print(f"[PlayHigh] row-gap snapshot saved: {teacher_save_path}")
+                        next_teacher_dump_step += teacher_dump_interval_steps
                     print(
-                        "[PlayHigh][band] robot_xy=({:.3f},{:.3f}) band_x=[{:.3f},{:.3f}] dx_out={:.4f} inside_x={}".format(
-                            band_robot_x,
-                            band_robot_y,
-                            band_x_min_dbg,
-                            band_x_max_dbg,
-                            band_dx_out_dbg,
-                            band_inside_dbg,
+                        "[PlayHigh][goal] raw={} rot={} bear_raw_xy={:.3f} bear_raw_y={:.3f} "
+                        "bear_world_xy={:.3f} bear_world_y={:.3f} bear_policy={:.3f} offset={:.3f}".format(
+                            "None" if goal_raw_dbg is None else np.array2string(goal_raw_dbg, precision=3, floatmode="fixed"),
+                            "None" if goal is None else np.array2string(goal, precision=3, floatmode="fixed"),
+                            goal_raw_bear_xy,
+                            goal_raw_bear_y,
+                            goal_world_bear_xy,
+                            goal_world_bear_y,
+                            bearing_y,
+                            heading_offset,
                         )
                     )
-                if expert_cmd is not None:
-                    expert_cmd_np = expert_cmd[env_idx].detach().cpu().numpy()
-                    print(
-                        "[PlayHigh][expert] cmd_expert={} cmd_pred={} cmd_exec={}".format(
-                            np.array2string(expert_cmd_np, precision=3, floatmode="fixed"),
-                            np.array2string(cmd_pred, precision=3, floatmode="fixed"),
-                            cmd_str,
+                    if band_debug:
+                        print(
+                            "[PlayHigh][band] robot_xy=({:.3f},{:.3f}) band_x=[{:.3f},{:.3f}] dx_out={:.4f} inside_x={}".format(
+                                band_robot_x,
+                                band_robot_y,
+                                band_x_min_dbg,
+                                band_x_max_dbg,
+                                band_dx_out_dbg,
+                                band_inside_dbg,
+                            )
                         )
-                    )
+                    if expert_cmd is not None:
+                        expert_cmd_np = expert_cmd[env_idx].detach().cpu().numpy()
+                        print(
+                            "[PlayHigh][expert] cmd_expert={} cmd_pred={} cmd_exec={}".format(
+                                np.array2string(expert_cmd_np, precision=3, floatmode="fixed"),
+                                np.array2string(cmd_pred, precision=3, floatmode="fixed"),
+                                cmd_str,
+                            )
+                        )
                     if (
                         dircheck_alpha_pre is not None
                         and dircheck_x_pre is not None
