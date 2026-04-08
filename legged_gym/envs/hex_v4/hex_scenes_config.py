@@ -596,7 +596,7 @@ class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
         moving_target_enable = True
         moving_target_mode = "pcr_line_script"
         moving_target_pcr_line_x = -0.60
-        moving_target_pcr_line_speed = 0.55
+        moving_target_pcr_line_speed = 0.22
         moving_target_pcr_line_end_margin_y = 0.80
         moving_target_pcr_line_min_forward = 0.80
 
