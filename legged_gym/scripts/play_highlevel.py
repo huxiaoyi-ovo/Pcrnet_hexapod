@@ -1813,6 +1813,7 @@ def main():
         _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
         _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
+    is_pcr_demo_task = bool(getattr(env, "is_pcr_line_task", False))
     if args.camera_interval is None:
         args.camera_interval = int(getattr(getattr(env.env, "camera_cfg", None), "capture_interval", 1))
     if str(getattr(args, "task", "")).startswith("e_"):
@@ -1856,7 +1857,9 @@ def main():
         dprint("[PlayHigh] curriculum disabled; start at level 0")
     _maybe_apply_s_avoid_stage_override_runtime(args, env)
     if hasattr(env, "env") and hasattr(env.env, "debug_viz"):
-        env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug
+        env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug or is_pcr_demo_task
+    if is_pcr_demo_task and not args.headless:
+        print("[PlayHigh] PCR demo visualization enabled: moving target point + target/robot trajectories.")
     vision_model = None
     resolved_protocol_aux: Dict[str, Dict] = {}
     s0_expert_fn = s0_follow_expert_fn
@@ -2684,425 +2687,503 @@ def main():
                     crossable_gate = float(reward_terms.get("crossable_gate", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                     crossable_align = float(reward_terms.get("crossable_align", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                     crossable_width = float(reward_terms.get("crossable_width", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
-                band_robot_x = float(band_debug.get("robot_x", 0.0)) if band_debug else 0.0
-                band_robot_y = float(band_debug.get("robot_y", 0.0)) if band_debug else 0.0
-                band_x_min_dbg = float(band_debug.get("band_x_min", 0.0)) if band_debug else 0.0
-                band_x_max_dbg = float(band_debug.get("band_x_max", 0.0)) if band_debug else 0.0
-                band_dx_out_dbg = float(band_debug.get("dx_out", 0.0)) if band_debug else 0.0
-                band_inside_dbg = int(bool(band_debug.get("inside_band_x", False))) if band_debug else 0
                 if is_gate and gate_y is not None:
                     gate_val = float(gate_y[env_idx].detach().cpu())
                     if isinstance(gate_diag, dict):
                         gate_raw_val = float(gate_diag["gate_y_raw"][env_idx].detach().cpu())
                         gate_w_val = float(gate_diag["w"][env_idx].detach().cpu())
-                yaw_raw = 0.0
-                yaw_policy = 0.0
-                heading_err_pos = 0.0
-                heading_err_neg = 0.0
-                bearing_y = 0.0
-                goal_raw_dbg = None
-                goal_raw_bear_xy = 0.0
-                goal_raw_bear_y = 0.0
-                goal_world_bear_xy = 0.0
-                goal_world_bear_y = 0.0
-                if hasattr(env.env, "root_states"):
-                    quat = env.env.root_states[env_idx, 3:7].detach().cpu().numpy()
-                    x, y, z, w = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
-                    yaw_raw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-                    yaw_policy = math.atan2(math.sin(yaw_raw + heading_offset), math.cos(yaw_raw + heading_offset))
-                    if hasattr(env.env, "goal_world"):
-                        pos = env.env.root_states[env_idx, :2].detach().cpu().numpy()
-                        goal_w = env.env.goal_world[env_idx].detach().cpu().numpy()
-                        goal_dir = math.atan2(goal_w[1] - pos[1], goal_w[0] - pos[0])
-                        heading_err_pos = math.atan2(math.sin((yaw_raw + 0.5 * math.pi) - goal_dir),
-                                                    math.cos((yaw_raw + 0.5 * math.pi) - goal_dir))
-                        heading_err_neg = math.atan2(math.sin((yaw_raw - 0.5 * math.pi) - goal_dir),
-                                                    math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
-                        delta_x = goal_w[0] - pos[0]
-                        delta_y = goal_w[1] - pos[1]
-                        rel_x = math.cos(yaw_raw) * delta_x + math.sin(yaw_raw) * delta_y
-                        rel_y = -math.sin(yaw_raw) * delta_x + math.cos(yaw_raw) * delta_y
-                        goal_world_bear_xy = math.atan2(rel_y, rel_x)
-                        goal_world_bear_y = math.atan2(rel_x, rel_y)
-                if goal is not None:
-                    bearing_y = math.atan2(goal[0], goal[1])
-                yaw_err_deg = abs(yaw_policy) * (180.0 / math.pi)
-                if hasattr(env.env, "goal_buf"):
-                    goal_raw_dbg = env.env.goal_buf[env_idx].detach().cpu().numpy()
-                    goal_raw_bear_xy = math.atan2(goal_raw_dbg[1], goal_raw_dbg[0])
-                    goal_raw_bear_y = math.atan2(goal_raw_dbg[0], goal_raw_dbg[1])
-                goal_bearing = bearing_y
-                pass_bearing = 0.0
-                cross_bearing = 0.0
-                pass_goal_err = 0.0
-                cross_goal_err = 0.0
-                pass_dir_norm = 0.0
-                cross_dir_norm = 0.0
-                pass_side_dbg = 0.0
-                cmd_x_dbg = 0.0
-                cmd_x_dir_dbg = 0.0
-                row_lat_dbg = 0.0
-                row_gap_row_y_dbg = 0.0
-                row_gap_left_dbg = 0.0
-                row_gap_right_dbg = 0.0
-                row_gap_left_eff_dbg = 0.0
-                row_gap_right_eff_dbg = 0.0
-                row_x_err_now_dbg = 0.0
-                row_x_err_prev_dbg = 0.0
-                row_forward_dist_dbg = 0.0
-                row_gate_dbg = 0.0
-                row_push_err_dbg = 0.0
-                row_gate_active_dbg = 0
-                center_y_dbg = 0.0
-                cross_line_y_dbg = 0.0
-                cross_line_dist_dbg = 0.0
-                episode_progress_ratio_dbg = 0.0
-                episode_collision_dbg = 0
-                success_dbg = 0
-                pass_vis_mean = 0.0
-                pass_sector_mean = 0.0
-                low_vis_mean = 0.0
-                low_sector_mean = 0.0
-                vis_ratio = 0.0
-                sector_vis_ratio = 0.0
-                low_block_ratio = 0.0
-                pass_out_sector = 0
-                pass_dir_dbg = None
-                cross_dir_dbg = None
-                pass_gate_dbg = 0.0
-                pass_occ_dbg = 0.0
-                cross_gate_dbg = 0.0
-                cross_width_dbg = 0.0
-                debug_aff = None
-                if obs is not None:
-                    debug_aff = raw_aff_map
-                if debug_aff is not None:
-                    cross_dir, cross_gate_dbg, cross_width_dbg, low_block_mask = env._compute_low_obstacle_guidance(
-                        debug_aff
-                    )
-                    debug_goal = obs["goal"]
-                    pass_dir, pass_gate_dbg, pass_occ_dbg, pass_side = env._compute_passable_guidance(
-                        debug_aff,
-                        debug_goal,
-                        block_mask=low_block_mask,
-                    )
-                    pass_gate_dbg = float(pass_gate_dbg[env_idx].detach().cpu())
-                    pass_occ_dbg = float(pass_occ_dbg[env_idx].detach().cpu())
-                    pass_side_dbg = float(pass_side[env_idx].detach().cpu())
-                    cross_gate_dbg = float(cross_gate_dbg[env_idx].detach().cpu())
-                    cross_width_dbg = float(cross_width_dbg[env_idx].detach().cpu())
-                    pass_dir_dbg = pass_dir[env_idx].detach().cpu().numpy()
-                    cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
-                    pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
-                    cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
-                    robot_pos_dbg = env.env.root_states[:, :3]
-                    (
-                        _row_gap_center_t,
-                        row_gap_row_y_t,
-                        _row_gap_valid_t,
-                        row_gap_left_t,
-                        row_gap_right_t,
-                        row_gap_left_eff_t,
-                        row_gap_right_eff_t,
-                        row_gap_eff_valid_t,
-                    ) = env._compute_nearest_row_gap_target(
-                        robot_pos_dbg
-                    )
-                    row_forward_dist_t, row_forward_valid_t = env._compute_nearest_row_forward_distance(
-                        robot_pos_dbg
-                    )
-                    row_gap_row_y_dbg = float(row_gap_row_y_t[env_idx].detach().cpu())
-                    row_gap_left_dbg = float(row_gap_left_t[env_idx].detach().cpu())
-                    row_gap_right_dbg = float(row_gap_right_t[env_idx].detach().cpu())
-                    row_gap_left_eff_dbg = float(row_gap_left_eff_t[env_idx].detach().cpu())
-                    row_gap_right_eff_dbg = float(row_gap_right_eff_t[env_idx].detach().cpu())
-                    row_gap_center_eff_dbg = 0.5 * (row_gap_left_eff_dbg + row_gap_right_eff_dbg)
-                    robot_x_dbg = float(robot_pos_dbg[env_idx, 0].detach().cpu())
-                    robot_y_dbg = float(robot_pos_dbg[env_idx, 1].detach().cpu())
-                    robot_x_map_dbg, _robot_y_map_dbg = _world_point_to_map_xy(
-                        env,
-                        env_idx,
-                        robot_x_dbg,
-                        robot_y_dbg,
-                    )
-                    row_gap_row_y_map_dbg = float("nan")
-                    if bool(row_gap_eff_valid_t[env_idx].item()):
-                        _row_gap_center_map_dbg, row_gap_row_y_map_dbg = _world_point_to_map_xy(
-                            env,
-                            env_idx,
-                            row_gap_center_eff_dbg,
-                            row_gap_row_y_dbg,
-                        )
-                    if bool(row_gap_eff_valid_t[env_idx].item()):
-                        row_x_err_now_dbg = max(row_gap_left_eff_dbg - robot_x_dbg, 0.0) + max(robot_x_dbg - row_gap_right_eff_dbg, 0.0)
-                    else:
-                        row_x_err_now_dbg = 0.0
-                    prev_robot_x_dbg = robot_x_dbg
-                    if prev_track_pos_world is not None:
-                        prev_robot_x_dbg = float(prev_track_pos_world[0])
-                    if bool(row_gap_eff_valid_t[env_idx].item()):
-                        row_x_err_prev_dbg = max(row_gap_left_eff_dbg - prev_robot_x_dbg, 0.0) + max(prev_robot_x_dbg - row_gap_right_eff_dbg, 0.0)
-                    else:
-                        row_x_err_prev_dbg = 0.0
-                    row_gate_on_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_on", 1.0)) if env.reward_cfg is not None else 1.0
-                    row_gate_full_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_full", 0.4)) if env.reward_cfg is not None else 0.4
-                    row_push_margin_dbg = float(getattr(env.reward_cfg, "avoid_row_push_margin", 0.25)) if env.reward_cfg is not None else 0.25
-                    row_forward_dist_dbg = float(row_forward_dist_t[env_idx].detach().cpu())
-                    row_gate_dbg = float(
-                        torch.clamp(
-                            (row_gate_on_dbg - row_forward_dist_t[env_idx]) / max(row_gate_on_dbg - row_gate_full_dbg, 1e-6),
-                            min=0.0,
-                            max=1.0,
-                        ).detach().cpu()
-                    )
-                    row_push_err_dbg = float(
-                        torch.clamp(
-                            torch.tensor(row_x_err_now_dbg, device=row_forward_dist_t.device) / max(row_push_margin_dbg, 1e-6),
-                            min=0.0,
-                            max=1.0,
-                        ).detach().cpu()
-                    )
-                    row_gate_active_dbg = int(
-                        row_gate_dbg > 0.05
-                        and bool(row_forward_valid_t[env_idx].item())
-                        and bool(row_gap_eff_valid_t[env_idx].item())
-                    )
-                    map_support_dbg = {}
-                    if obs is not None and "local_map_2ch" in obs and raw_aff_map is not None:
-                        visible_dbg = getattr(env, "affordance_visible_mask", None)
-                        map_support_dbg = _summarize_local_map_support(
-                            raw_aff_map[env_idx],
-                            obs["local_map_2ch"][env_idx],
-                            visible_dbg,
-                            float(getattr(env, "affordance_map_extent", 0.0)),
-                            row_gap_row_y_map_dbg,
-                            robot_x_map_dbg,
-                        )
-                    if reward_terms is not None and "row_lat" in reward_terms:
-                        row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
-                    else:
-                        row_lat_dbg = 0.0
-                    if reward_terms is not None and "row_cmdx_reward" in reward_terms:
-                        row_cmdx_dbg = float(reward_terms["row_cmdx_reward"][env_idx].detach().cpu())
-                    else:
-                        row_cmdx_dbg = 0.0
+                if is_pcr_demo_task:
+                    follow_goal_dbg = obs.get("follow_goal", obs["goal"])[env_idx].detach().cpu().numpy()
+                    target_xy_dbg = np.zeros(2, dtype=np.float32)
+                    robot_xy_dbg = np.zeros(2, dtype=np.float32)
+                    if hasattr(env.env, "target_world"):
+                        target_xy_dbg = env.env.target_world[env_idx].detach().cpu().numpy()
+                    if hasattr(env.env, "root_states"):
+                        robot_xy_dbg = env.env.root_states[env_idx, :2].detach().cpu().numpy()
+                    follow_dist_dbg = float(np.linalg.norm(target_xy_dbg - robot_xy_dbg))
+                    pcr_core_dbg = 0.0
+                    pcr_gate_aux_dbg = 0.0
+                    pcr_gap_success_dbg = 0.0
+                    pcr_conflict_dbg = 0.0
+                    pcr_follow_err_dbg = 0.0
+                    pcr_follow_quality_dbg = 0.0
+                    target_finished_dbg = 0
+                    follow_lost_dbg = 0
+                    cmd_f_dbg = None
+                    cmd_a_dbg = None
+                    y_eff_dbg = gate_val
+                    if reward_terms is not None:
+                        pcr_core_dbg = float(reward_terms.get("pcr_core", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                        pcr_gate_aux_dbg = float(reward_terms.get("pcr_gate_aux", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                        pcr_gap_success_dbg = float(reward_terms.get("pcr_gap_success", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                        pcr_conflict_dbg = float(reward_terms.get("pcr_conflict", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                        pcr_follow_err_dbg = float(reward_terms.get("pcr_follow_err", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
+                        pcr_follow_quality_dbg = float(reward_terms.get("pcr_follow_quality", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
                     if isinstance(info, dict):
-                        center_y_t = info.get("center_y", info.get("rear_y", None))
-                        cross_line_y_t = info.get("cross_line_y", None)
-                        cross_line_dist_t = info.get("cross_line_dist", None)
-                        progress_ratio_t = info.get("s_avoid_progress_mask", None)
-                        episode_collision_t = info.get("s_avoid_episode_collision", None)
-                        success_t = info.get("success_mask", None)
-                        if torch.is_tensor(center_y_t):
-                            center_y_dbg = float(center_y_t[env_idx].detach().cpu())
-                        if torch.is_tensor(cross_line_y_t):
-                            cross_line_y_dbg = float(cross_line_y_t[env_idx].detach().cpu())
-                        if torch.is_tensor(cross_line_dist_t):
-                            cross_line_dist_dbg = float(cross_line_dist_t[env_idx].detach().cpu())
-                        if torch.is_tensor(progress_ratio_t):
-                            episode_progress_ratio_dbg = float(progress_ratio_t[env_idx].detach().cpu())
-                        if torch.is_tensor(episode_collision_t):
-                            episode_collision_dbg = int(bool(episode_collision_t[env_idx].item()))
-                        if torch.is_tensor(success_t):
-                            success_dbg = int(bool(success_t[env_idx].item()))
-                    if pass_dir_norm > 1e-6:
-                        pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
-                    if cross_dir_norm > 1e-6:
-                        cross_bearing = math.atan2(cross_dir_dbg[0], cross_dir_dbg[1])
-
-                    def _angle_diff(a, b):
-                        return math.atan2(math.sin(a - b), math.cos(a - b))
-
-                    pass_goal_err = _angle_diff(pass_bearing, goal_bearing)
-                    cross_goal_err = _angle_diff(cross_bearing, goal_bearing)
-
-                    passable = debug_aff[env_idx, 1]
-                    low_obs = debug_aff[env_idx, 2]
-                    visible = env.affordance_visible_mask
-                    if visible is None:
-                        visible = torch.ones_like(passable, dtype=torch.bool)
-                    if visible.device != passable.device:
-                        visible = visible.to(passable.device)
-                    vis_count = visible.float().sum().clamp_min(1.0)
-                    vis_ratio = float((vis_count / float(visible.numel())).detach().cpu())
-                    visible_f = visible.float()
-                    pass_vis_mean = float((passable * visible_f).sum().div(vis_count).detach().cpu())
-                    low_vis_mean = float((low_obs * visible_f).sum().div(vis_count).detach().cpu())
-                    x_map = env.affordance_x_map
-                    if x_map.device != passable.device:
-                        x_map = x_map.to(passable.device)
-                    right_mask = ((x_map > 0.0) & visible).float()
-                    left_mask = ((x_map < 0.0) & visible).float()
+                        target_finished_t = info.get("target_line_finished", None)
+                        follow_lost_t = info.get("follow_lost_mask", None)
+                        if torch.is_tensor(target_finished_t):
+                            target_finished_dbg = int(bool(target_finished_t[env_idx].item()))
+                        if torch.is_tensor(follow_lost_t):
+                            follow_lost_dbg = int(bool(follow_lost_t[env_idx].item()))
+                    if isinstance(post_info, dict):
+                        cmd_f_t = post_info.get("cmd_F", None)
+                        cmd_a_t = post_info.get("cmd_A", None)
+                        y_eff_t = post_info.get("y_eff", None)
+                        if torch.is_tensor(cmd_f_t):
+                            cmd_f_dbg = cmd_f_t[env_idx].detach().cpu().numpy()
+                        if torch.is_tensor(cmd_a_t):
+                            cmd_a_dbg = cmd_a_t[env_idx].detach().cpu().numpy()
+                        if torch.is_tensor(y_eff_t):
+                            y_eff_dbg = float(y_eff_t[env_idx].detach().cpu().item())
+                    cmd_f_str = "None" if cmd_f_dbg is None else np.array2string(cmd_f_dbg, precision=3, floatmode="fixed")
+                    cmd_a_str = "None" if cmd_a_dbg is None else np.array2string(cmd_a_dbg, precision=3, floatmode="fixed")
+                    print(
+                        "[PlayHigh][PCR] step={} follow_dist={:.3f} follow_goal={} target_xy={} robot_xy={} "
+                        "gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} conflict={:.3f} "
+                        "reward(core/gate/gap)={:.3f}/{:.3f}/{:.3f} follow(err/q)={:.3f}/{:.3f} "
+                        "flags(target_finish/follow_lost)={}/{}".format(
+                            step_idx,
+                            follow_dist_dbg,
+                            np.array2string(follow_goal_dbg, precision=3, floatmode="fixed"),
+                            np.array2string(target_xy_dbg, precision=3, floatmode="fixed"),
+                            np.array2string(robot_xy_dbg, precision=3, floatmode="fixed"),
+                            gate_raw_val,
+                            y_eff_dbg,
+                            gate_w_val,
+                            pcr_conflict_dbg,
+                            pcr_core_dbg,
+                            pcr_gate_aux_dbg,
+                            pcr_gap_success_dbg,
+                            pcr_follow_err_dbg,
+                            pcr_follow_quality_dbg,
+                            target_finished_dbg,
+                            follow_lost_dbg,
+                        )
+                    )
+                    print(
+                        "[PlayHigh][PCR-cmd] pred={} exec={} cmd_F={} cmd_A={}".format(
+                            np.array2string(cmd_pred, precision=3, floatmode="fixed"),
+                            cmd_str,
+                            cmd_f_str,
+                            cmd_a_str,
+                        )
+                    )
+                if not is_pcr_demo_task:
+                    band_robot_x = float(band_debug.get("robot_x", 0.0)) if band_debug else 0.0
+                    band_robot_y = float(band_debug.get("robot_y", 0.0)) if band_debug else 0.0
+                    band_x_min_dbg = float(band_debug.get("band_x_min", 0.0)) if band_debug else 0.0
+                    band_x_max_dbg = float(band_debug.get("band_x_max", 0.0)) if band_debug else 0.0
+                    band_dx_out_dbg = float(band_debug.get("dx_out", 0.0)) if band_debug else 0.0
+                    band_inside_dbg = int(bool(band_debug.get("inside_band_x", False))) if band_debug else 0
+                    yaw_raw = 0.0
+                    yaw_policy = 0.0
+                    heading_err_pos = 0.0
+                    heading_err_neg = 0.0
+                    bearing_y = 0.0
+                    goal_raw_dbg = None
+                    goal_raw_bear_xy = 0.0
+                    goal_raw_bear_y = 0.0
+                    goal_world_bear_xy = 0.0
+                    goal_world_bear_y = 0.0
+                    if hasattr(env.env, "root_states"):
+                        quat = env.env.root_states[env_idx, 3:7].detach().cpu().numpy()
+                        x, y, z, w = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+                        yaw_raw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+                        yaw_policy = math.atan2(math.sin(yaw_raw + heading_offset), math.cos(yaw_raw + heading_offset))
+                        if hasattr(env.env, "goal_world"):
+                            pos = env.env.root_states[env_idx, :2].detach().cpu().numpy()
+                            goal_w = env.env.goal_world[env_idx].detach().cpu().numpy()
+                            goal_dir = math.atan2(goal_w[1] - pos[1], goal_w[0] - pos[0])
+                            heading_err_pos = math.atan2(math.sin((yaw_raw + 0.5 * math.pi) - goal_dir),
+                                                        math.cos((yaw_raw + 0.5 * math.pi) - goal_dir))
+                            heading_err_neg = math.atan2(math.sin((yaw_raw - 0.5 * math.pi) - goal_dir),
+                                                        math.cos((yaw_raw - 0.5 * math.pi) - goal_dir))
+                            delta_x = goal_w[0] - pos[0]
+                            delta_y = goal_w[1] - pos[1]
+                            rel_x = math.cos(yaw_raw) * delta_x + math.sin(yaw_raw) * delta_y
+                            rel_y = -math.sin(yaw_raw) * delta_x + math.cos(yaw_raw) * delta_y
+                            goal_world_bear_xy = math.atan2(rel_y, rel_x)
+                            goal_world_bear_y = math.atan2(rel_x, rel_y)
+                    if goal is not None:
+                        bearing_y = math.atan2(goal[0], goal[1])
+                    yaw_err_deg = abs(yaw_policy) * (180.0 / math.pi)
+                    if hasattr(env.env, "goal_buf"):
+                        goal_raw_dbg = env.env.goal_buf[env_idx].detach().cpu().numpy()
+                        goal_raw_bear_xy = math.atan2(goal_raw_dbg[1], goal_raw_dbg[0])
+                        goal_raw_bear_y = math.atan2(goal_raw_dbg[0], goal_raw_dbg[1])
+                    goal_bearing = bearing_y
+                    pass_bearing = 0.0
+                    cross_bearing = 0.0
+                    pass_goal_err = 0.0
+                    cross_goal_err = 0.0
+                    pass_dir_norm = 0.0
+                    cross_dir_norm = 0.0
+                    pass_side_dbg = 0.0
                     cmd_x_dbg = 0.0
                     cmd_x_dir_dbg = 0.0
-                    if cmd_show is not None:
-                        cmd_x_dbg = float(cmd_show[0])
-                        cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
-                    x_dir_to_gap_dbg = 0.0
-                    cmd_x_signed_gap_dbg = 0.0
-                    if bool(row_gap_eff_valid_t[env_idx].item()):
-                        x_delta_to_gap = row_gap_center_eff_dbg - robot_x_dbg
-                        if x_delta_to_gap > 1e-6:
-                            x_dir_to_gap_dbg = 1.0
-                        elif x_delta_to_gap < -1e-6:
-                            x_dir_to_gap_dbg = -1.0
-                        if cmd_show is not None:
-                            cmd_x_signed_gap_dbg = cmd_x_dbg * x_dir_to_gap_dbg
-                    sector_deg = 0.0
-                    if env.reward_cfg is not None:
-                        sector_deg = float(getattr(env.reward_cfg, "passable_sector_deg", 0.0))
-                    sector_half = math.radians(sector_deg) * 0.5 if sector_deg > 0.0 else 0.0
-                    if sector_half > 0.0:
-                        bearing_map = env.affordance_bearing_map
-                        if bearing_map.device != passable.device:
-                            bearing_map = bearing_map.to(passable.device)
-                        angle = torch.atan2(
-                            torch.sin(bearing_map - goal_bearing),
-                            torch.cos(bearing_map - goal_bearing),
+                    row_lat_dbg = 0.0
+                    row_gap_row_y_dbg = 0.0
+                    row_gap_left_dbg = 0.0
+                    row_gap_right_dbg = 0.0
+                    row_gap_left_eff_dbg = 0.0
+                    row_gap_right_eff_dbg = 0.0
+                    row_x_err_now_dbg = 0.0
+                    row_x_err_prev_dbg = 0.0
+                    row_forward_dist_dbg = 0.0
+                    row_gate_dbg = 0.0
+                    row_push_err_dbg = 0.0
+                    row_gate_active_dbg = 0
+                    center_y_dbg = 0.0
+                    cross_line_y_dbg = 0.0
+                    cross_line_dist_dbg = 0.0
+                    episode_progress_ratio_dbg = 0.0
+                    episode_collision_dbg = 0
+                    success_dbg = 0
+                    pass_vis_mean = 0.0
+                    pass_sector_mean = 0.0
+                    low_vis_mean = 0.0
+                    low_sector_mean = 0.0
+                    vis_ratio = 0.0
+                    sector_vis_ratio = 0.0
+                    low_block_ratio = 0.0
+                    pass_out_sector = 0
+                    pass_dir_dbg = None
+                    cross_dir_dbg = None
+                    pass_gate_dbg = 0.0
+                    pass_occ_dbg = 0.0
+                    cross_gate_dbg = 0.0
+                    cross_width_dbg = 0.0
+                    debug_aff = None
+                    if obs is not None:
+                        debug_aff = raw_aff_map
+                    if debug_aff is not None:
+                        cross_dir, cross_gate_dbg, cross_width_dbg, low_block_mask = env._compute_low_obstacle_guidance(
+                            debug_aff
                         )
-                        sector_mask = (torch.abs(angle) <= sector_half) & visible
-                    else:
-                        sector_mask = visible
-                    sector_count = sector_mask.float().sum().clamp_min(1.0)
-                    sector_vis_ratio = float((sector_count / vis_count).detach().cpu())
-                    sector_f = sector_mask.float()
-                    pass_sector_mean = float((passable * sector_f).sum().div(sector_count).detach().cpu())
-                    low_sector_mean = float((low_obs * sector_f).sum().div(sector_count).detach().cpu())
-                    if low_block_mask is not None:
-                        low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
-                    if sector_half > 0.0:
-                        pass_out_sector = int(abs(pass_goal_err) > sector_half)
-                aff_delta = 0.0
-                aff_std = 0.0
-                aff_filled = float(aff_stack_fill[env_idx].item()) / max(aff_stack, 1)
-                if aff_stack > 1:
-                    base_channels = aff_map.shape[1]
-                    stack_h, stack_w = aff_map.shape[2], aff_map.shape[3]
-                    stack = aff_stack_buf[env_idx].reshape(aff_stack, base_channels, stack_h, stack_w)
-                    aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
-                    aff_std = stack.std(dim=0, unbiased=False).mean().item()
-                print(
-                    "[PlayHigh] step={} |cmd_xy|={:.3f} goal_dist_delta={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(fwdDist/gate/pushErr/active)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_toward_gap={:.3f} clearance={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} goal_dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} yaw_err_deg={:.1f} rotate_only={} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
-                        step_idx,
-                        cmd_speed,
-                        goal_dist_delta,
-                        gate_raw_val,
-                        gate_val,
-                        gate_w_val,
-                        reward_total,
-                        reward_approach,
-                        reward_heading,
-                        reward_time,
-                        reward_gate,
-                        reward_risk,
-                        row_gap_row_y_dbg,
-                        row_gap_left_dbg,
-                        row_gap_right_dbg,
-                        row_gap_left_eff_dbg,
-                        row_gap_right_eff_dbg,
-                        row_gap_center_eff_dbg,
-                        row_x_err_prev_dbg,
-                        row_x_err_now_dbg,
-                        row_lat_dbg,
-                        row_cmdx_dbg,
-                        row_forward_dist_dbg,
-                        row_gate_dbg,
-                        row_push_err_dbg,
-                        row_gate_active_dbg,
-                        x_dir_to_gap_dbg,
-                        cmd_x_signed_gap_dbg,
-                        clearance,
-                        risk_scale,
-                        aff_delta,
-                        aff_std,
-                        aff_filled,
-                        np.array2string(cmd_pred, precision=3, floatmode="fixed"),
-                        np.array2string(goal, precision=3, floatmode="fixed"),
-                        goal_dist,
-                        cmd_str,
-                        cmd_x_dbg,
-                        cmd_x_dir_dbg,
-                        yaw_raw,
-                        yaw_policy,
-                        yaw_err_deg,
-                        rotate_only_active_dbg,
-                        bearing_y,
-                        heading_err_pos,
-                        heading_err_neg,
-                    )
-                )
-                cmd_post_str = "None" if cmd_post is None else np.array2string(cmd_post, precision=3, floatmode="fixed")
-                cmd_override_str = "None" if cmd_override_final is None else np.array2string(
-                    cmd_override_final, precision=3, floatmode="fixed"
-                )
-                print(
-                    "[PlayHigh][cmd] postProcessor={} finalOverride={} execMean={}".format(
-                        cmd_post_str,
-                        cmd_override_str,
-                        cmd_str,
-                    )
-                )
-                print(
-                    "[PlayHigh][diag] goal_bearing={:.3f} row_gap_width={:.3f} row_x={:.3f} row_err={:.3f} "
-                    "row_fwdDist={:.3f} row_gate={:.3f} row_pushErr={:.3f} row_gateActive={} "
-                    "gap_center={:.3f} x_dir={:.1f} cmd_x_toward_gap={:.3f} row_cmdx={:.3f} "
-                    "pass_gate={:.3f} pass_occ={:.3f} cross_width={:.3f} vis_ratio={:.3f} "
-                    "pass_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f}".format(
-                        goal_bearing,
-                        max(row_gap_right_eff_dbg - row_gap_left_eff_dbg, 0.0),
-                        robot_x_dbg,
-                        row_x_err_now_dbg,
-                        row_forward_dist_dbg,
-                        row_gate_dbg,
-                        row_push_err_dbg,
-                        row_gate_active_dbg,
-                        row_gap_center_eff_dbg,
-                        x_dir_to_gap_dbg,
-                        cmd_x_signed_gap_dbg,
-                        row_cmdx_dbg,
-                        pass_gate_dbg,
-                        pass_occ_dbg,
-                        cross_width_dbg,
-                        vis_ratio,
-                        pass_vis_mean,
-                        pass_sector_mean,
-                        sector_vis_ratio,
-                    )
-                )
-                print(
-                    "[PlayHigh][term] center_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} episode_progress={:.3f} success={} episode_collision={}".format(
-                        center_y_dbg,
-                        cross_line_y_dbg,
-                        cross_line_dist_dbg,
-                        episode_progress_ratio_dbg,
-                        success_dbg,
-                        episode_collision_dbg,
-                    )
-                )
-                if map_support_dbg:
-                    map_occ_center = map_support_dbg.get("occupancy_center_map_xy", [0.0, 0.0])
-                    obs_xy_true = _extract_s_avoid_debug_meta(env).get("obstacle_xy_map", [0.0, 0.0])
-                    map_band_valid = int(bool(map_support_dbg.get("band_valid", False)))
-                    map_better_side = float(map_support_dbg.get("better_side", 0.0))
-                    map_row_side = float(map_support_dbg.get("row_side", 0.0))
-                    map_row_delta = float(map_support_dbg.get("row_delta_m", 0.0))
-                    map_robot_x = float(map_support_dbg.get("robot_x_map_m", 0.0))
+                        debug_goal = obs["goal"]
+                        pass_dir, pass_gate_dbg, pass_occ_dbg, pass_side = env._compute_passable_guidance(
+                            debug_aff,
+                            debug_goal,
+                            block_mask=low_block_mask,
+                        )
+                        pass_gate_dbg = float(pass_gate_dbg[env_idx].detach().cpu())
+                        pass_occ_dbg = float(pass_occ_dbg[env_idx].detach().cpu())
+                        pass_side_dbg = float(pass_side[env_idx].detach().cpu())
+                        cross_gate_dbg = float(cross_gate_dbg[env_idx].detach().cpu())
+                        cross_width_dbg = float(cross_width_dbg[env_idx].detach().cpu())
+                        pass_dir_dbg = pass_dir[env_idx].detach().cpu().numpy()
+                        cross_dir_dbg = cross_dir[env_idx].detach().cpu().numpy()
+                        pass_dir_norm = float(torch.norm(pass_dir[env_idx]).detach().cpu())
+                        cross_dir_norm = float(torch.norm(cross_dir[env_idx]).detach().cpu())
+                        robot_pos_dbg = env.env.root_states[:, :3]
+                        (
+                            _row_gap_center_t,
+                            row_gap_row_y_t,
+                            _row_gap_valid_t,
+                            row_gap_left_t,
+                            row_gap_right_t,
+                            row_gap_left_eff_t,
+                            row_gap_right_eff_t,
+                            row_gap_eff_valid_t,
+                        ) = env._compute_nearest_row_gap_target(
+                            robot_pos_dbg
+                        )
+                        row_forward_dist_t, row_forward_valid_t = env._compute_nearest_row_forward_distance(
+                            robot_pos_dbg
+                        )
+                        row_gap_row_y_dbg = float(row_gap_row_y_t[env_idx].detach().cpu())
+                        row_gap_left_dbg = float(row_gap_left_t[env_idx].detach().cpu())
+                        row_gap_right_dbg = float(row_gap_right_t[env_idx].detach().cpu())
+                        row_gap_left_eff_dbg = float(row_gap_left_eff_t[env_idx].detach().cpu())
+                        row_gap_right_eff_dbg = float(row_gap_right_eff_t[env_idx].detach().cpu())
+                        row_gap_center_eff_dbg = 0.5 * (row_gap_left_eff_dbg + row_gap_right_eff_dbg)
+                        robot_x_dbg = float(robot_pos_dbg[env_idx, 0].detach().cpu())
+                        robot_y_dbg = float(robot_pos_dbg[env_idx, 1].detach().cpu())
+                        robot_x_map_dbg, _robot_y_map_dbg = _world_point_to_map_xy(
+                            env,
+                            env_idx,
+                            robot_x_dbg,
+                            robot_y_dbg,
+                        )
+                        row_gap_row_y_map_dbg = float("nan")
+                        if bool(row_gap_eff_valid_t[env_idx].item()):
+                            _row_gap_center_map_dbg, row_gap_row_y_map_dbg = _world_point_to_map_xy(
+                                env,
+                                env_idx,
+                                row_gap_center_eff_dbg,
+                                row_gap_row_y_dbg,
+                            )
+                        if bool(row_gap_eff_valid_t[env_idx].item()):
+                            row_x_err_now_dbg = max(row_gap_left_eff_dbg - robot_x_dbg, 0.0) + max(robot_x_dbg - row_gap_right_eff_dbg, 0.0)
+                        else:
+                            row_x_err_now_dbg = 0.0
+                        prev_robot_x_dbg = robot_x_dbg
+                        if prev_track_pos_world is not None:
+                            prev_robot_x_dbg = float(prev_track_pos_world[0])
+                        if bool(row_gap_eff_valid_t[env_idx].item()):
+                            row_x_err_prev_dbg = max(row_gap_left_eff_dbg - prev_robot_x_dbg, 0.0) + max(prev_robot_x_dbg - row_gap_right_eff_dbg, 0.0)
+                        else:
+                            row_x_err_prev_dbg = 0.0
+                        row_gate_on_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_on", 1.0)) if env.reward_cfg is not None else 1.0
+                        row_gate_full_dbg = float(getattr(env.reward_cfg, "avoid_row_gate_full", 0.4)) if env.reward_cfg is not None else 0.4
+                        row_push_margin_dbg = float(getattr(env.reward_cfg, "avoid_row_push_margin", 0.25)) if env.reward_cfg is not None else 0.25
+                        row_forward_dist_dbg = float(row_forward_dist_t[env_idx].detach().cpu())
+                        row_gate_dbg = float(
+                            torch.clamp(
+                                (row_gate_on_dbg - row_forward_dist_t[env_idx]) / max(row_gate_on_dbg - row_gate_full_dbg, 1e-6),
+                                min=0.0,
+                                max=1.0,
+                            ).detach().cpu()
+                        )
+                        row_push_err_dbg = float(
+                            torch.clamp(
+                                torch.tensor(row_x_err_now_dbg, device=row_forward_dist_t.device) / max(row_push_margin_dbg, 1e-6),
+                                min=0.0,
+                                max=1.0,
+                            ).detach().cpu()
+                        )
+                        row_gate_active_dbg = int(
+                            row_gate_dbg > 0.05
+                            and bool(row_forward_valid_t[env_idx].item())
+                            and bool(row_gap_eff_valid_t[env_idx].item())
+                        )
+                        map_support_dbg = {}
+                        if obs is not None and "local_map_2ch" in obs and raw_aff_map is not None:
+                            visible_dbg = getattr(env, "affordance_visible_mask", None)
+                            map_support_dbg = _summarize_local_map_support(
+                                raw_aff_map[env_idx],
+                                obs["local_map_2ch"][env_idx],
+                                visible_dbg,
+                                float(getattr(env, "affordance_map_extent", 0.0)),
+                                row_gap_row_y_map_dbg,
+                                robot_x_map_dbg,
+                            )
+                        if reward_terms is not None and "row_lat" in reward_terms:
+                            row_lat_dbg = float(reward_terms["row_lat"][env_idx].detach().cpu())
+                        else:
+                            row_lat_dbg = 0.0
+                        if reward_terms is not None and "row_cmdx_reward" in reward_terms:
+                            row_cmdx_dbg = float(reward_terms["row_cmdx_reward"][env_idx].detach().cpu())
+                        else:
+                            row_cmdx_dbg = 0.0
+                        if isinstance(info, dict):
+                            center_y_t = info.get("center_y", info.get("rear_y", None))
+                            cross_line_y_t = info.get("cross_line_y", None)
+                            cross_line_dist_t = info.get("cross_line_dist", None)
+                            progress_ratio_t = info.get("s_avoid_progress_mask", None)
+                            episode_collision_t = info.get("s_avoid_episode_collision", None)
+                            success_t = info.get("success_mask", None)
+                            if torch.is_tensor(center_y_t):
+                                center_y_dbg = float(center_y_t[env_idx].detach().cpu())
+                            if torch.is_tensor(cross_line_y_t):
+                                cross_line_y_dbg = float(cross_line_y_t[env_idx].detach().cpu())
+                            if torch.is_tensor(cross_line_dist_t):
+                                cross_line_dist_dbg = float(cross_line_dist_t[env_idx].detach().cpu())
+                            if torch.is_tensor(progress_ratio_t):
+                                episode_progress_ratio_dbg = float(progress_ratio_t[env_idx].detach().cpu())
+                            if torch.is_tensor(episode_collision_t):
+                                episode_collision_dbg = int(bool(episode_collision_t[env_idx].item()))
+                            if torch.is_tensor(success_t):
+                                success_dbg = int(bool(success_t[env_idx].item()))
+                        if pass_dir_norm > 1e-6:
+                            pass_bearing = math.atan2(pass_dir_dbg[0], pass_dir_dbg[1])
+                        if cross_dir_norm > 1e-6:
+                            cross_bearing = math.atan2(cross_dir_dbg[0], cross_dir_dbg[1])
+
+                        def _angle_diff(a, b):
+                            return math.atan2(math.sin(a - b), math.cos(a - b))
+
+                        pass_goal_err = _angle_diff(pass_bearing, goal_bearing)
+                        cross_goal_err = _angle_diff(cross_bearing, goal_bearing)
+
+                        passable = debug_aff[env_idx, 1]
+                        low_obs = debug_aff[env_idx, 2]
+                        visible = env.affordance_visible_mask
+                        if visible is None:
+                            visible = torch.ones_like(passable, dtype=torch.bool)
+                        if visible.device != passable.device:
+                            visible = visible.to(passable.device)
+                        vis_count = visible.float().sum().clamp_min(1.0)
+                        vis_ratio = float((vis_count / float(visible.numel())).detach().cpu())
+                        visible_f = visible.float()
+                        pass_vis_mean = float((passable * visible_f).sum().div(vis_count).detach().cpu())
+                        low_vis_mean = float((low_obs * visible_f).sum().div(vis_count).detach().cpu())
+                        x_map = env.affordance_x_map
+                        if x_map.device != passable.device:
+                            x_map = x_map.to(passable.device)
+                        right_mask = ((x_map > 0.0) & visible).float()
+                        left_mask = ((x_map < 0.0) & visible).float()
+                        cmd_x_dbg = 0.0
+                        cmd_x_dir_dbg = 0.0
+                        if cmd_show is not None:
+                            cmd_x_dbg = float(cmd_show[0])
+                            cmd_x_dir_dbg = math.tanh(cmd_x_dbg / 0.3)
+                        x_dir_to_gap_dbg = 0.0
+                        cmd_x_signed_gap_dbg = 0.0
+                        if bool(row_gap_eff_valid_t[env_idx].item()):
+                            x_delta_to_gap = row_gap_center_eff_dbg - robot_x_dbg
+                            if x_delta_to_gap > 1e-6:
+                                x_dir_to_gap_dbg = 1.0
+                            elif x_delta_to_gap < -1e-6:
+                                x_dir_to_gap_dbg = -1.0
+                            if cmd_show is not None:
+                                cmd_x_signed_gap_dbg = cmd_x_dbg * x_dir_to_gap_dbg
+                        sector_deg = 0.0
+                        if env.reward_cfg is not None:
+                            sector_deg = float(getattr(env.reward_cfg, "passable_sector_deg", 0.0))
+                        sector_half = math.radians(sector_deg) * 0.5 if sector_deg > 0.0 else 0.0
+                        if sector_half > 0.0:
+                            bearing_map = env.affordance_bearing_map
+                            if bearing_map.device != passable.device:
+                                bearing_map = bearing_map.to(passable.device)
+                            angle = torch.atan2(
+                                torch.sin(bearing_map - goal_bearing),
+                                torch.cos(bearing_map - goal_bearing),
+                            )
+                            sector_mask = (torch.abs(angle) <= sector_half) & visible
+                        else:
+                            sector_mask = visible
+                        sector_count = sector_mask.float().sum().clamp_min(1.0)
+                        sector_vis_ratio = float((sector_count / vis_count).detach().cpu())
+                        sector_f = sector_mask.float()
+                        pass_sector_mean = float((passable * sector_f).sum().div(sector_count).detach().cpu())
+                        low_sector_mean = float((low_obs * sector_f).sum().div(sector_count).detach().cpu())
+                        if low_block_mask is not None:
+                            low_block_ratio = float(low_block_mask[env_idx].mean().detach().cpu())
+                        if sector_half > 0.0:
+                            pass_out_sector = int(abs(pass_goal_err) > sector_half)
+                    aff_delta = 0.0
+                    aff_std = 0.0
+                    aff_filled = float(aff_stack_fill[env_idx].item()) / max(aff_stack, 1)
+                    if aff_stack > 1:
+                        base_channels = aff_map.shape[1]
+                        stack_h, stack_w = aff_map.shape[2], aff_map.shape[3]
+                        stack = aff_stack_buf[env_idx].reshape(aff_stack, base_channels, stack_h, stack_w)
+                        aff_delta = (stack[1:] - stack[:-1]).abs().mean().item()
+                        aff_std = stack.std(dim=0, unbiased=False).mean().item()
                     print(
-                        "[PlayHigh][map-gt] occ_true=({:.3f},{:.3f}) occ_gt=({:.3f},{:.3f}) occ_min={:.3f} "
-                        "grid(size/cell)={} / {:.3f} row(mapIdx/centerY)={}/ {:.3f} "
-                        "band(valid/cnt/l/r/c/w)={}/{}/{:.3f}/{:.3f}/{:.3f}/{:.3f} "
-                        "row(robotX/bandDx)={:.3f}/{:.3f} "
-                        "side(rowGT/gt/cmd)={:.1f}/{:.1f}/{:.1f}".format(
-                            float(obs_xy_true[0]) if len(obs_xy_true) == 2 else 0.0,
-                            float(obs_xy_true[1]) if len(obs_xy_true) == 2 else 0.0,
-                            float(map_occ_center[0]) if len(map_occ_center) == 2 else 0.0,
-                            float(map_occ_center[1]) if len(map_occ_center) == 2 else 0.0,
-                            float(map_support_dbg.get("occupancy_min_distance_m", 0.0) or 0.0),
-                            map_support_dbg.get("grid_size_xy", [0, 0]),
-                            float(map_support_dbg.get("cell_size_m", 0.0)),
-                            int(map_support_dbg.get("row_idx", -1)),
-                            float(map_support_dbg.get("row_y_center_m", 0.0)),
-                            map_band_valid,
+                        "[PlayHigh] step={} |cmd_xy|={:.3f} goal_dist_delta={:.3f} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} reward={:.3f} (approach={:.3f}, heading={:.3f}, time={:.3f}, gate={:.3f}, risk={:.3f}) row(y/raw_l/raw_r/eff_l/eff_r/c)=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}) row_err(prev/now)={:.3f}/{:.3f} row_lat={:.3f} row_cmdx={:.3f} row(fwdDist/gate/pushErr/active)={:.3f}/{:.3f}/{:.3f}/{} x_dir={:.1f} cmd_x_toward_gap={:.3f} clearance={:.3f} risk_scale={:.3f} aff_stack(d/std/fill)={:.3f}/{:.3f}/{:.3f} cmd_pred={} goal={} goal_dist={:.3f} cmd_exec={} cmd_x={:.3f} cmd_x_dir={:.3f} yaw_raw={:.3f} yaw_policy={:.3f} yaw_err_deg={:.1f} rotate_only={} bear_y={:.3f} herr(+pi/2)={:.3f} herr(-pi/2)={:.3f}".format(
+                            step_idx,
+                            cmd_speed,
+                            goal_dist_delta,
+                            gate_raw_val,
+                            gate_val,
+                            gate_w_val,
+                            reward_total,
+                            reward_approach,
+                            reward_heading,
+                            reward_time,
+                            reward_gate,
+                            reward_risk,
+                            row_gap_row_y_dbg,
+                            row_gap_left_dbg,
+                            row_gap_right_dbg,
+                            row_gap_left_eff_dbg,
+                            row_gap_right_eff_dbg,
+                            row_gap_center_eff_dbg,
+                            row_x_err_prev_dbg,
+                            row_x_err_now_dbg,
+                            row_lat_dbg,
+                            row_cmdx_dbg,
+                            row_forward_dist_dbg,
+                            row_gate_dbg,
+                            row_push_err_dbg,
+                            row_gate_active_dbg,
+                            x_dir_to_gap_dbg,
+                            cmd_x_signed_gap_dbg,
+                            clearance,
+                            risk_scale,
+                            aff_delta,
+                            aff_std,
+                            aff_filled,
+                            np.array2string(cmd_pred, precision=3, floatmode="fixed"),
+                            np.array2string(goal, precision=3, floatmode="fixed"),
+                            goal_dist,
+                            cmd_str,
+                            cmd_x_dbg,
+                            cmd_x_dir_dbg,
+                            yaw_raw,
+                            yaw_policy,
+                            yaw_err_deg,
+                            rotate_only_active_dbg,
+                            bearing_y,
+                            heading_err_pos,
+                            heading_err_neg,
+                        )
+                    )
+                    cmd_post_str = "None" if cmd_post is None else np.array2string(cmd_post, precision=3, floatmode="fixed")
+                    cmd_override_str = "None" if cmd_override_final is None else np.array2string(
+                        cmd_override_final, precision=3, floatmode="fixed"
+                    )
+                    print(
+                        "[PlayHigh][cmd] postProcessor={} finalOverride={} execMean={}".format(
+                            cmd_post_str,
+                            cmd_override_str,
+                            cmd_str,
+                        )
+                    )
+                    print(
+                        "[PlayHigh][diag] goal_bearing={:.3f} row_gap_width={:.3f} row_x={:.3f} row_err={:.3f} "
+                        "row_fwdDist={:.3f} row_gate={:.3f} row_pushErr={:.3f} row_gateActive={} "
+                        "gap_center={:.3f} x_dir={:.1f} cmd_x_toward_gap={:.3f} row_cmdx={:.3f} "
+                        "pass_gate={:.3f} pass_occ={:.3f} cross_width={:.3f} vis_ratio={:.3f} "
+                        "pass_vis/sector={:.3f}/{:.3f} sector_vis_ratio={:.3f}".format(
+                            goal_bearing,
+                            max(row_gap_right_eff_dbg - row_gap_left_eff_dbg, 0.0),
+                            robot_x_dbg,
+                            row_x_err_now_dbg,
+                            row_forward_dist_dbg,
+                            row_gate_dbg,
+                            row_push_err_dbg,
+                            row_gate_active_dbg,
+                            row_gap_center_eff_dbg,
+                            x_dir_to_gap_dbg,
+                            cmd_x_signed_gap_dbg,
+                            row_cmdx_dbg,
+                            pass_gate_dbg,
+                            pass_occ_dbg,
+                            cross_width_dbg,
+                            vis_ratio,
+                            pass_vis_mean,
+                            pass_sector_mean,
+                            sector_vis_ratio,
+                        )
+                    )
+                    print(
+                        "[PlayHigh][term] center_y={:.3f} cross_line_y={:.3f} cross_line_dist={:.3f} episode_progress={:.3f} success={} episode_collision={}".format(
+                            center_y_dbg,
+                            cross_line_y_dbg,
+                            cross_line_dist_dbg,
+                            episode_progress_ratio_dbg,
+                            success_dbg,
+                            episode_collision_dbg,
+                        )
+                    )
+                    if map_support_dbg:
+                        map_occ_center = map_support_dbg.get("occupancy_center_map_xy", [0.0, 0.0])
+                        obs_xy_true = _extract_s_avoid_debug_meta(env).get("obstacle_xy_map", [0.0, 0.0])
+                        map_band_valid = int(bool(map_support_dbg.get("band_valid", False)))
+                        map_better_side = float(map_support_dbg.get("better_side", 0.0))
+                        map_row_side = float(map_support_dbg.get("row_side", 0.0))
+                        map_row_delta = float(map_support_dbg.get("row_delta_m", 0.0))
+                        map_robot_x = float(map_support_dbg.get("robot_x_map_m", 0.0))
+                        print(
+                            "[PlayHigh][map-gt] occ_true=({:.3f},{:.3f}) occ_gt=({:.3f},{:.3f}) occ_min={:.3f} "
+                            "grid(size/cell)={} / {:.3f} row(mapIdx/centerY)={}/ {:.3f} "
+                            "band(valid/cnt/l/r/c/w)={}/{}/{:.3f}/{:.3f}/{:.3f}/{:.3f} "
+                            "row(robotX/bandDx)={:.3f}/{:.3f} "
+                            "side(rowGT/gt/cmd)={:.1f}/{:.1f}/{:.1f}".format(
+                                float(obs_xy_true[0]) if len(obs_xy_true) == 2 else 0.0,
+                                float(obs_xy_true[1]) if len(obs_xy_true) == 2 else 0.0,
+                                float(map_occ_center[0]) if len(map_occ_center) == 2 else 0.0,
+                                float(map_occ_center[1]) if len(map_occ_center) == 2 else 0.0,
+                                float(map_support_dbg.get("occupancy_min_distance_m", 0.0) or 0.0),
+                                map_support_dbg.get("grid_size_xy", [0, 0]),
+                                float(map_support_dbg.get("cell_size_m", 0.0)),
+                                int(map_support_dbg.get("row_idx", -1)),
+                                float(map_support_dbg.get("row_y_center_m", 0.0)),
+                                map_band_valid,
                             int(map_support_dbg.get("band_count", 0)),
                             float(map_support_dbg.get("band_left_m", 0.0)),
                             float(map_support_dbg.get("band_right_m", 0.0)),
