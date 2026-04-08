@@ -1730,6 +1730,7 @@ def main():
     supported_tasks = (
         "s_follow_basic",
         "s_avoid_basic",
+        "s_pcr_line_avoid_basic",
         "s_cylinder",
         "s_narrow_passage",
         "s_step_field",
@@ -1740,7 +1741,7 @@ def main():
     if not (args.task in supported_tasks or args.task.startswith("e_")):
         raise ValueError(
             "play_highlevel.py supports only "
-            "--task s_follow_basic/s_avoid_basic/s_cylinder/"
+            "--task s_follow_basic/s_avoid_basic/s_pcr_line_avoid_basic/s_cylinder/"
             "s_narrow_passage/s_step_field/s_dense_obstacles/s_ood_holdout/s_calib "
             "or e_* paper scenes"
         )
