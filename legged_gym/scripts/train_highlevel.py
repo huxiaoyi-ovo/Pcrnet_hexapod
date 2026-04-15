@@ -472,6 +472,13 @@ def resolve_moe_gate_pcr(
     cmd_a: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
     gate_y = gate_y_raw.clone()
+    # In PCR, avoid is treated as a lateral-only local through expert.
+    # Keep its lateral proposal, but let follow/primary control own forward speed and yaw.
+    cmd_a = cmd_a.clone()
+    if cmd_a.shape[-1] >= 2:
+        cmd_a[:, 1] = 0.0
+    if cmd_a.shape[-1] >= 3:
+        cmd_a[:, 2] = 0.0
     safe_d, free_d = _get_effective_safe_free_dist(
         env,
         getattr(args, "beta", None),

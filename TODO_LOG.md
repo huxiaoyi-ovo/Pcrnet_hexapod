@@ -86,6 +86,10 @@
 - [x] ~~[P0] 将 PCR 的逐行成功拒绝条件从“释放瞬间无违规”收口为“整行生命周期内无 collision/band fail”，并新增 PCR 真正 success 指标用于 best checkpoint 选择，避免 `target_finish` 结束事件继续冒充任务成功~~
 - [x] ~~[P0] 将 PCR 的 train 终端输出收口为与 avoid 相同的版式与频率，只替换成 PCR 语义参数，避免后续短训读取体验和节奏与 avoid 分叉~~
 
+## 2026-04-15 PCR 融合口径收口：avoid 只提供横移
+
+- [x] ~~[P0] 在 PCR 的 `resolve_moe_gate_pcr()` 中将 `cmd_A` 收口为横移-only：保留 lateral，清零 forward 与 yaw，使 follow 重新主导目标距离与前向节奏，同时训练与 play 共用同一融合口径~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
