@@ -596,7 +596,7 @@ class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
         moving_target_enable = True
         moving_target_mode = "pcr_line_script"
         moving_target_pcr_line_x = -0.60
-        moving_target_pcr_line_speed = 0.22
+        moving_target_pcr_line_speed = 0.35
         moving_target_pcr_line_end_margin_y = 0.80
         moving_target_pcr_line_min_forward = 0.80
 
@@ -645,6 +645,7 @@ class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
         reward_cfg["crossable_gate_min_speed"] = 0.05
         reward_cfg["gate_smooth_penalty"] = 0.0
         reward_cfg["gate_max_change"] = 0.2
+        reward_cfg["pcr_yaw_suppress_scale"] = 0.2
         reward_cfg["risk_barrier_scale"] = 0.0
         reward_cfg["risk_barrier_safe"] = 0.32
         reward_cfg["risk_barrier_free"] = 0.65

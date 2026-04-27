@@ -4359,9 +4359,6 @@ class HexGround(LeggedRobot):
         dx = target_local[:, 0] - robot_local[:, 0]
         y_forward = torch.sqrt(torch.clamp(desired * desired - dx * dx, min=min_forward * min_forward))
         target_local[:, 1] = robot_local[:, 1] + y_forward
-        target_end_y = self._get_pcr_line_target_end_local_y(env_ids)
-        target_local[:, 1] = torch.minimum(target_local[:, 1], target_end_y)
-
         self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
         self.target_vel_world[env_ids].zero_()
         self.target_heading[env_ids] = 0.0
@@ -4372,7 +4369,7 @@ class HexGround(LeggedRobot):
         self.goal_world[env_ids] = self.target_world[env_ids]
 
     def _update_moving_target_pcr_line(self, dt: float):
-        """Advance straight-line target along +Y until it exits beyond the last row."""
+        """Advance straight-line target along +Y; the old end line is diagnostic only."""
         speed = float(getattr(self.nav_cfg, "moving_target_pcr_line_speed", 0.55))
         x_line = float(getattr(self.nav_cfg, "moving_target_pcr_line_x", -0.60))
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -4380,26 +4377,16 @@ class HexGround(LeggedRobot):
 
         pos_local = self.target_world - self.env_origins[:, :2]
         vel_local = torch.zeros_like(pos_local)
-        active = ~self.target_line_finished
         pos_local[:, 0] = x_line
-        pos_local[active, 1] += speed * float(dt)
-        vel_local[active, 1] = speed
-
-        reached_end = active & (pos_local[:, 1] >= end_local_y)
-        if reached_end.any():
-            pos_local[reached_end, 1] = end_local_y[reached_end]
-            vel_local[reached_end].zero_()
-        self.target_line_finished |= reached_end
+        pos_local[:, 1] += speed * float(dt)
+        vel_local[:, 1] = speed
+        self.target_line_finished |= pos_local[:, 1] >= end_local_y
 
         self.target_world[:] = self.env_origins[:, :2] + pos_local
         self.target_vel_world[:] = vel_local
         self.target_heading.zero_()
         self.target_heading_des.zero_()
-        self.target_speed[:] = torch.where(
-            self.target_line_finished,
-            torch.zeros_like(self.target_speed),
-            torch.full_like(self.target_speed, speed),
-        )
+        self.target_speed[:] = speed
         self.target_speed_des[:] = self.target_speed
         self.goal_world[:] = self.target_world
 

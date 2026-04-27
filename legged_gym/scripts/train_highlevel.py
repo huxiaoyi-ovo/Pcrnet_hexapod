@@ -48,6 +48,296 @@ def _debug_print(*args, **kwargs):
     if DEBUG_MODE:
         print(*args, **kwargs)
 
+
+class EpisodeMetricsTracker:
+    TARGET_FOV_HALF_ANGLE_RAD = 0.759
+
+    def __init__(
+        self,
+        num_envs: int,
+        device: torch.device,
+        follow_distance_desired: float,
+        success_distance_threshold: float,
+    ):
+        self.num_envs = int(num_envs)
+        self.device = device
+        self.follow_distance_desired = float(follow_distance_desired)
+        self.success_distance_threshold = float(success_distance_threshold)
+        self.reset()
+
+    def reset(self, env_ids: Optional[torch.Tensor] = None):
+        if env_ids is None:
+            self.total_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+            self.follow_dist_sum = torch.zeros_like(self.total_steps)
+            self.follow_dist_sq_sum = torch.zeros_like(self.total_steps)
+            self.follow_dist_err_sum = torch.zeros_like(self.total_steps)
+            self.follow_dist_err_lt_half_count = torch.zeros_like(self.total_steps)
+            self.follow_dist_count = torch.zeros_like(self.total_steps)
+            self.last_follow_dist = torch.full_like(self.total_steps, float("inf"))
+            self.gate_y_sum = torch.zeros_like(self.total_steps)
+            self.gate_y_sq_sum = torch.zeros_like(self.total_steps)
+            self.gate_y_count = torch.zeros_like(self.total_steps)
+            self.steps_with_y_lt_05 = torch.zeros_like(self.total_steps)
+            self.gate_cross_05_count = torch.zeros_like(self.total_steps)
+            self.prev_gate_y = torch.zeros_like(self.total_steps)
+            self.has_prev_gate_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            self.target_in_fov_count = torch.zeros_like(self.total_steps)
+            self.bearing_count = torch.zeros_like(self.total_steps)
+            self.dmin_sum = torch.zeros_like(self.total_steps)
+            self.dmin_count = torch.zeros_like(self.total_steps)
+            self.steps_with_dmin_lt_035 = torch.zeros_like(self.total_steps)
+            self.conflict_sum = torch.zeros_like(self.total_steps)
+            self.conflict_count = torch.zeros_like(self.total_steps)
+            self.cmd_jerk_sum = torch.zeros_like(self.total_steps)
+            self.cmd_jerk_count = torch.zeros_like(self.total_steps)
+            self.prev_cmd = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+            self.has_prev_cmd = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            self.cmd_f_cx_sum = torch.zeros_like(self.total_steps)
+            self.cmd_f_cx_count = torch.zeros_like(self.total_steps)
+            self.cmd_a_cy_cw_sum = torch.zeros_like(self.total_steps)
+            self.cmd_a_cy_cw_count = torch.zeros_like(self.total_steps)
+            self.w_corr_count = torch.zeros_like(self.total_steps)
+            self.w_sum = torch.zeros_like(self.total_steps)
+            self.w_sq_sum = torch.zeros_like(self.total_steps)
+            self.conflict_corr_sum = torch.zeros_like(self.total_steps)
+            self.conflict_sq_corr_sum = torch.zeros_like(self.total_steps)
+            self.w_conflict_cross_sum = torch.zeros_like(self.total_steps)
+            self.high_conflict_err_sum = torch.zeros_like(self.total_steps)
+            self.high_conflict_count = torch.zeros_like(self.total_steps)
+            self.episode_collision = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            self.episode_timeout = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            return
+
+        if not torch.is_tensor(env_ids):
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        env_ids = env_ids.to(device=self.device, dtype=torch.long).view(-1)
+        if env_ids.numel() == 0:
+            return
+        self.total_steps[env_ids] = 0.0
+        self.follow_dist_sum[env_ids] = 0.0
+        self.follow_dist_sq_sum[env_ids] = 0.0
+        self.follow_dist_err_sum[env_ids] = 0.0
+        self.follow_dist_err_lt_half_count[env_ids] = 0.0
+        self.follow_dist_count[env_ids] = 0.0
+        self.last_follow_dist[env_ids] = float("inf")
+        self.gate_y_sum[env_ids] = 0.0
+        self.gate_y_sq_sum[env_ids] = 0.0
+        self.gate_y_count[env_ids] = 0.0
+        self.steps_with_y_lt_05[env_ids] = 0.0
+        self.gate_cross_05_count[env_ids] = 0.0
+        self.prev_gate_y[env_ids] = 0.0
+        self.has_prev_gate_y[env_ids] = False
+        self.target_in_fov_count[env_ids] = 0.0
+        self.bearing_count[env_ids] = 0.0
+        self.dmin_sum[env_ids] = 0.0
+        self.dmin_count[env_ids] = 0.0
+        self.steps_with_dmin_lt_035[env_ids] = 0.0
+        self.conflict_sum[env_ids] = 0.0
+        self.conflict_count[env_ids] = 0.0
+        self.cmd_jerk_sum[env_ids] = 0.0
+        self.cmd_jerk_count[env_ids] = 0.0
+        self.prev_cmd[env_ids] = 0.0
+        self.has_prev_cmd[env_ids] = False
+        self.cmd_f_cx_sum[env_ids] = 0.0
+        self.cmd_f_cx_count[env_ids] = 0.0
+        self.cmd_a_cy_cw_sum[env_ids] = 0.0
+        self.cmd_a_cy_cw_count[env_ids] = 0.0
+        self.w_corr_count[env_ids] = 0.0
+        self.w_sum[env_ids] = 0.0
+        self.w_sq_sum[env_ids] = 0.0
+        self.conflict_corr_sum[env_ids] = 0.0
+        self.conflict_sq_corr_sum[env_ids] = 0.0
+        self.w_conflict_cross_sum[env_ids] = 0.0
+        self.high_conflict_err_sum[env_ids] = 0.0
+        self.high_conflict_count[env_ids] = 0.0
+        self.episode_collision[env_ids] = False
+        self.episode_timeout[env_ids] = False
+
+    def step(self, obs_dict: dict):
+        self.total_steps += 1.0
+        follow_err = None
+
+        follow_dist = obs_dict.get("follow_dist")
+        if torch.is_tensor(follow_dist):
+            follow_dist = follow_dist.to(device=self.device, dtype=torch.float32).view(-1)
+            follow_err = torch.abs(follow_dist - self.follow_distance_desired)
+            self.follow_dist_sum += follow_dist
+            self.follow_dist_sq_sum += torch.square(follow_dist)
+            self.follow_dist_err_sum += follow_err
+            self.follow_dist_err_lt_half_count += (follow_err < 0.5).float()
+            self.follow_dist_count += 1.0
+            self.last_follow_dist = follow_dist
+
+        gate_y = obs_dict.get("gate_y")
+        if torch.is_tensor(gate_y):
+            gate_y = gate_y.to(device=self.device, dtype=torch.float32).view(-1)
+            self.gate_y_sum += gate_y
+            self.gate_y_sq_sum += torch.square(gate_y)
+            self.gate_y_count += 1.0
+            self.steps_with_y_lt_05 += (gate_y < 0.5).float()
+            crossed = self.has_prev_gate_y & (((self.prev_gate_y < 0.5) & (gate_y >= 0.5)) | ((self.prev_gate_y >= 0.5) & (gate_y < 0.5)))
+            self.gate_cross_05_count += crossed.float()
+            self.prev_gate_y = gate_y
+            self.has_prev_gate_y.fill_(True)
+
+        conflict = obs_dict.get("conflict")
+        if torch.is_tensor(conflict):
+            conflict = conflict.to(device=self.device, dtype=torch.float32).view(-1)
+            self.conflict_sum += conflict
+            self.conflict_count += 1.0
+
+        w_value = obs_dict.get("w")
+        if torch.is_tensor(w_value) and torch.is_tensor(conflict):
+            w_value = w_value.to(device=self.device, dtype=torch.float32).view(-1)
+            self.w_corr_count += 1.0
+            self.w_sum += w_value
+            self.w_sq_sum += torch.square(w_value)
+            self.conflict_corr_sum += conflict
+            self.conflict_sq_corr_sum += torch.square(conflict)
+            self.w_conflict_cross_sum += w_value * conflict
+
+        collision = obs_dict.get("collision")
+        if torch.is_tensor(collision):
+            collision = collision.to(device=self.device).view(-1).bool()
+            self.episode_collision |= collision
+
+        timeout = obs_dict.get("timeout")
+        if torch.is_tensor(timeout):
+            timeout = timeout.to(device=self.device).view(-1).bool()
+            self.episode_timeout |= timeout
+
+        bearing = obs_dict.get("bearing")
+        if torch.is_tensor(bearing):
+            bearing = bearing.to(device=self.device, dtype=torch.float32).view(-1)
+            self.bearing_count += 1.0
+            self.target_in_fov_count += (torch.abs(bearing) < self.TARGET_FOV_HALF_ANGLE_RAD).float()
+
+        d_min = obs_dict.get("d_min")
+        if torch.is_tensor(d_min):
+            d_min = d_min.to(device=self.device, dtype=torch.float32).view(-1)
+            self.dmin_sum += d_min
+            self.dmin_count += 1.0
+            self.steps_with_dmin_lt_035 += (d_min < 0.35).float()
+
+        cmd_fused = obs_dict.get("cmd_fused")
+        if torch.is_tensor(cmd_fused):
+            cmd_fused = cmd_fused.to(device=self.device, dtype=torch.float32).view(self.num_envs, 3)
+            delta = cmd_fused - self.prev_cmd
+            jerk = torch.norm(delta, dim=1)
+            self.cmd_jerk_sum += jerk * self.has_prev_cmd.float()
+            self.cmd_jerk_count += self.has_prev_cmd.float()
+            self.prev_cmd = cmd_fused
+            self.has_prev_cmd.fill_(True)
+
+        cmd_f = obs_dict.get("cmd_F")
+        if torch.is_tensor(cmd_f):
+            cmd_f = cmd_f.to(device=self.device, dtype=torch.float32).view(self.num_envs, 3)
+            self.cmd_f_cx_sum += torch.abs(cmd_f[:, 0])
+            self.cmd_f_cx_count += 1.0
+
+        cmd_a = obs_dict.get("cmd_A")
+        if torch.is_tensor(cmd_a):
+            cmd_a = cmd_a.to(device=self.device, dtype=torch.float32).view(self.num_envs, 3)
+            self.cmd_a_cy_cw_sum += torch.norm(cmd_a[:, 1:3], dim=1)
+            self.cmd_a_cy_cw_count += 1.0
+
+        if follow_err is not None and torch.is_tensor(conflict):
+            high_conflict_mask = conflict > 0.7
+            self.high_conflict_err_sum += follow_err * high_conflict_mask.float()
+            self.high_conflict_count += high_conflict_mask.float()
+
+    def summarize(self, env_id: int) -> dict:
+        env_idx = int(env_id)
+        total_steps = max(float(self.total_steps[env_idx].item()), 1.0)
+        has_follow = bool((self.follow_dist_count[env_idx] > 0).item())
+        follow_count = max(float(self.follow_dist_count[env_idx].item()), 1.0)
+        gate_count = max(float(self.gate_y_count[env_idx].item()), 1.0)
+        conflict_count = max(float(self.conflict_count[env_idx].item()), 1.0)
+
+        if has_follow:
+            follow_dist_mean = float((self.follow_dist_sum[env_idx] / follow_count).item())
+            follow_var = float((self.follow_dist_sq_sum[env_idx] / follow_count).item()) - follow_dist_mean ** 2
+            follow_dist_std = math.sqrt(max(follow_var, 0.0))
+            follow_dist_error = float((self.follow_dist_err_sum[env_idx] / follow_count).item())
+        else:
+            follow_dist_mean = float("nan")
+            follow_dist_std = float("nan")
+            follow_dist_error = float("nan")
+        gate_y_mean = float((self.gate_y_sum[env_idx] / gate_count).item())
+        gate_var = float((self.gate_y_sq_sum[env_idx] / gate_count).item()) - gate_y_mean ** 2
+        gate_y_std = math.sqrt(max(gate_var, 0.0))
+        target_in_fov_rate = float(
+            (self.target_in_fov_count[env_idx] / max(float(self.bearing_count[env_idx].item()), 1.0)).item()
+        ) if self.bearing_count[env_idx] > 0 else 0.0
+        near_miss_rate = float(
+            (self.steps_with_dmin_lt_035[env_idx] / max(float(self.dmin_count[env_idx].item()), 1.0)).item()
+        ) if self.dmin_count[env_idx] > 0 else 0.0
+        min_clearance_mean = float((self.dmin_sum[env_idx] / max(float(self.dmin_count[env_idx].item()), 1.0)).item()) if self.dmin_count[env_idx] > 0 else 0.0
+        conflict_mean = float((self.conflict_sum[env_idx] / conflict_count).item())
+        lateral_dominant_ratio = float((self.steps_with_y_lt_05[env_idx] / gate_count).item()) if self.gate_y_count[env_idx] > 0 else 0.0
+        episode_collision = bool(self.episode_collision[env_idx].item())
+        episode_timeout = bool(self.episode_timeout[env_idx].item())
+        episode_follow_success = bool(
+            (not episode_collision)
+            and has_follow
+            and (float(self.last_follow_dist[env_idx].item()) < self.success_distance_threshold)
+        )
+        within_band_ratio = (
+            float((self.follow_dist_err_lt_half_count[env_idx] / follow_count).item())
+            if has_follow else float("nan")
+        )
+        episode_joint_success = bool((not episode_collision) and has_follow and (within_band_ratio > 0.8))
+        cmd_jerk_mean = float((self.cmd_jerk_sum[env_idx] / max(float(self.cmd_jerk_count[env_idx].item()), 1.0)).item()) if self.cmd_jerk_count[env_idx] > 0 else 0.0
+        gate_oscillation_rate = float((self.gate_cross_05_count[env_idx] / total_steps).item())
+        if self.high_conflict_count[env_idx] > 0 and math.isfinite(follow_dist_error):
+            high_conflict_err = float(
+                (self.high_conflict_err_sum[env_idx] / self.high_conflict_count[env_idx]).item()
+            )
+            high_conflict_follow_degradation = high_conflict_err / max(follow_dist_error, 0.05)
+        else:
+            high_conflict_follow_degradation = float("nan")
+        cmd_f_cx_leakage = float((self.cmd_f_cx_sum[env_idx] / max(float(self.cmd_f_cx_count[env_idx].item()), 1.0)).item()) if self.cmd_f_cx_count[env_idx] > 0 else 0.0
+        cmd_a_cy_cw_leakage = float((self.cmd_a_cy_cw_sum[env_idx] / max(float(self.cmd_a_cy_cw_count[env_idx].item()), 1.0)).item()) if self.cmd_a_cy_cw_count[env_idx] > 0 else 0.0
+        corr_n = float(self.w_corr_count[env_idx].item())
+        if corr_n > 1.0:
+            sum_x = float(self.w_sum[env_idx].item())
+            sum_y = float(self.conflict_corr_sum[env_idx].item())
+            sum_x2 = float(self.w_sq_sum[env_idx].item())
+            sum_y2 = float(self.conflict_sq_corr_sum[env_idx].item())
+            sum_xy = float(self.w_conflict_cross_sum[env_idx].item())
+            num = corr_n * sum_xy - sum_x * sum_y
+            den_x = corr_n * sum_x2 - sum_x * sum_x
+            den_y = corr_n * sum_y2 - sum_y * sum_y
+            den = math.sqrt(max(den_x * den_y, 0.0))
+            w_conflict_pearson = num / den if den > 1e-12 else 0.0
+        else:
+            w_conflict_pearson = 0.0
+
+        return {
+            "follow_dist_mean": follow_dist_mean,
+            "follow_dist_std": follow_dist_std,
+            "follow_dist_error": follow_dist_error,
+            "gate_y_mean": gate_y_mean,
+            "gate_y_std": gate_y_std,
+            "target_in_fov_rate": target_in_fov_rate,
+            "near_miss_rate": near_miss_rate,
+            "min_clearance_mean": min_clearance_mean,
+            "conflict_mean": conflict_mean,
+            "lateral_dominant_ratio": lateral_dominant_ratio,
+            "episode_success": episode_follow_success,
+            "episode_follow_success": episode_follow_success,
+            "episode_joint_success": episode_joint_success,
+            "episode_collision": episode_collision,
+            "episode_timeout": episode_timeout,
+            "episode_steps": int(self.total_steps[env_idx].item()),
+            "cmd_jerk_mean": cmd_jerk_mean,
+            "gate_oscillation_rate": gate_oscillation_rate,
+            "high_conflict_follow_degradation": high_conflict_follow_degradation,
+            "cmd_f_cx_leakage": cmd_f_cx_leakage,
+            "cmd_a_cy_cw_leakage": cmd_a_cy_cw_leakage,
+            "w_conflict_pearson": float(w_conflict_pearson),
+        }
+
 # 添加项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
@@ -3847,7 +4137,30 @@ class HierarchicalHexapodEnv:
                     reward_dict['pcr_gap_width'] = pcr_gap_width * current_row_valid.float()
                     reward_dict['pcr_gate_target'] = pcr_gate_target * current_row_valid.float()
                     reward_dict['pcr_gate_aux'] = pcr_gate_aux
-                    reward_dict['total'] = reward_dict['total'] + pcr_core_reward + pcr_gate_aux
+
+                    pcr_yaw_suppress_scale = float(self.reward_cfg_raw.get("pcr_yaw_suppress_scale", 0.0))
+                    pcr_yaw_suppress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+                    if pcr_yaw_suppress_scale != 0.0:
+                        if front_half_nearest_obs is not None:
+                            safe_d = float(getattr(self.reward_cfg, "risk_barrier_safe", 0.32))
+                            free_d = float(getattr(self.reward_cfg, "risk_barrier_free", 0.65))
+                            obstacle_risk = torch.clamp(
+                                (free_d - front_half_nearest_obs) / max(free_d - safe_d, 1e-6),
+                                min=0.0,
+                                max=1.0,
+                            )
+                        else:
+                            obstacle_risk = pcr_conflict
+                        pcr_yaw_suppress = (
+                            -pcr_yaw_suppress_scale
+                            * obstacle_risk
+                            * torch.abs(cmd_exec_mean[:, 2])
+                        )
+                    else:
+                        obstacle_risk = torch.zeros_like(pcr_conflict)
+                    reward_dict["pcr_obstacle_risk"] = obstacle_risk
+                    reward_dict["pcr_yaw_suppress"] = pcr_yaw_suppress
+                    reward_dict['total'] = reward_dict['total'] + pcr_core_reward + pcr_gate_aux + pcr_yaw_suppress
             total_reward = reward_dict['total']
 
             # reach_bonus 只在每个 episode 内生效一次
@@ -4081,6 +4394,8 @@ class HierarchicalHexapodEnv:
         target_line_finished_snapshot = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        pcr_robot_crossed_final_row = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        pcr_follow_band_ok = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         cross_line_dist_snapshot = None
         center_y_snapshot = None
         cross_line_y_snapshot = None
@@ -4169,15 +4484,19 @@ class HierarchicalHexapodEnv:
                         if s_avoid_episode_collision_snapshot is not None
                         else torch.zeros_like(target_finished)
                     )
+                    pcr_robot_crossed_final_row = s_avoid_progress_mask >= 0.999
+                    pcr_follow_band_ok = (
+                        (dist_to_target >= float(self.s0_follow_d_min))
+                        & (dist_to_target <= float(self.s0_follow_d_max))
+                    )
                     success_mask = (
-                        target_finished
-                        & (s_avoid_progress_mask >= 0.999)
+                        pcr_robot_crossed_final_row
+                        & pcr_follow_band_ok
                         & (~episode_collision_for_finish)
                     )
-                    target_finish_fail_mask = target_finished & (~success_mask)
-                    if target_finished.any():
-                        done_any |= target_finished
-                        manual_reset_mask |= target_finished
+                    if success_mask.any():
+                        done_any |= success_mask
+                        manual_reset_mask |= success_mask
             collision_reset_mask = collision_mask.clone()
             done_any |= collision_reset_mask
             manual_reset_mask |= collision_reset_mask
@@ -4414,6 +4733,8 @@ class HierarchicalHexapodEnv:
             'success_mask': success_mask,
             'follow_lost_mask': follow_lost_reset_mask,
             'target_line_finished': target_line_finished_snapshot,
+            'pcr_robot_crossed_final_row': pcr_robot_crossed_final_row,
+            'pcr_follow_band_ok': pcr_follow_band_ok,
             's_avoid_progress_mask': s_avoid_progress_mask,
             'cross_line_dist': cross_line_dist_snapshot,
             'center_y': center_y_snapshot,
@@ -5088,7 +5409,7 @@ def train(args):
     best_success = float("-inf")
     best_progress = float("-inf")
     best_pcr_success = float("-inf")
-    best_pcr_target_finish = float("-inf")
+    best_pcr_robot_crossed = float("-inf")
     best_pcr_gap_success = float("-inf")
     best_pcr_collision = float("inf")
     best_pcr_follow_dist_error = float("inf")
@@ -5127,7 +5448,9 @@ def train(args):
             best_success = float(ckpt.get("best_online_success", -float("inf")))
             best_progress = float(ckpt.get("best_online_progress", -float("inf")))
             best_pcr_success = float(ckpt.get("best_online_success_rate", ckpt.get("best_online_target_finish", -float("inf"))))
-            best_pcr_target_finish = float(ckpt.get("best_online_target_finish", -float("inf")))
+            best_pcr_robot_crossed = float(
+                ckpt.get("best_online_robot_crossed", ckpt.get("best_online_target_finish", -float("inf")))
+            )
             best_pcr_gap_success = float(ckpt.get("best_online_gap_success", -float("inf")))
             best_pcr_collision = float(ckpt.get("best_online_collision", float("inf")))
             best_pcr_follow_dist_error = float(
@@ -5252,6 +5575,19 @@ def train(args):
     episode_lengths = deque(maxlen=100)
     goal_change_counts = deque(maxlen=100)
     episode_collision_flags = deque(maxlen=100)
+    _window_success = deque(maxlen=100)
+    _window_joint_success = deque(maxlen=100)
+    _window_collision = deque(maxlen=100)
+    _window_timeout = deque(maxlen=100)
+    _window_follow_dist_error = deque(maxlen=100)
+    _window_success_steps = deque(maxlen=100)
+    eval_episode_count = 0
+    eval_tracker = EpisodeMetricsTracker(
+        num_envs=env.num_envs,
+        device=device,
+        follow_distance_desired=float(getattr(env, "s0_follow_d_des", 1.5)),
+        success_distance_threshold=float(getattr(env, "s0_follow_d_max", 2.5)),
+    )
     if not resume_path:
         best_reward = float("-inf")
     
@@ -5419,6 +5755,7 @@ def train(args):
         follow_dist_sum = torch.zeros((), device=device)
         follow_lost_rate_sum = torch.zeros((), device=device)
         target_finish_rate_sum = torch.zeros((), device=device)
+        pcr_robot_crossed_rate_sum = torch.zeros((), device=device)
         pcr_success_rate_sum = torch.zeros((), device=device)
         completed_episode_count_sum = torch.zeros((), device=device)
         pcr_gap_success_rate_sum = torch.zeros((), device=device)
@@ -6049,6 +6386,7 @@ def train(args):
 
             # 统计分量与行为
             goal_dist_sum += torch.norm(goal, dim=1).sum()
+            follow_dist = None
             if bool(getattr(env, "moving_target_enable", False)) and hasattr(env.env, "target_world"):
                 follow_dist = torch.norm(env.env.target_world - env.env.root_states[:, :2], dim=1)
                 follow_dist_sum += follow_dist.sum()
@@ -6056,15 +6394,27 @@ def train(args):
             follow_lost_mask = env_info.get('follow_lost_mask', None) if env_info is not None else None
             if torch.is_tensor(follow_lost_mask):
                 follow_lost_rate_sum += follow_lost_mask.float().sum()
+            done_metric_ids = dones.nonzero(as_tuple=False).flatten() if torch.is_tensor(dones) else None
             target_line_finished = env_info.get('target_line_finished', None) if env_info is not None else None
             if torch.is_tensor(target_line_finished):
-                target_finish_rate_sum += target_line_finished.float().sum()
+                if is_pcr_output_task and done_metric_ids is not None:
+                    if done_metric_ids.numel() > 0:
+                        target_finish_rate_sum += target_line_finished[done_metric_ids].float().sum()
+                else:
+                    target_finish_rate_sum += target_line_finished.float().sum()
+            pcr_robot_crossed_step = (
+                env_info.get('pcr_robot_crossed_final_row', None) if env_info is not None else None
+            )
+            if is_pcr_output_task and torch.is_tensor(pcr_robot_crossed_step) and done_metric_ids is not None:
+                if done_metric_ids.numel() > 0:
+                    pcr_robot_crossed_rate_sum += pcr_robot_crossed_step[done_metric_ids].float().sum()
             success_mask_step = env_info.get('success_mask', None) if env_info is not None else None
             if is_pcr_output_task and torch.is_tensor(success_mask_step):
                 pcr_success_rate_sum += success_mask_step.float().sum()
             if torch.is_tensor(dones):
                 completed_episode_count_sum += dones.float().sum()
             reward_terms_info = env_info.get('reward_terms', None) if env_info is not None else None
+            pcr_conflict_step = None
             if isinstance(reward_terms_info, dict):
                 pcr_conflict_step = reward_terms_info.get('pcr_conflict', None)
                 pcr_conflict_valid_step = reward_terms_info.get('pcr_conflict_valid', None)
@@ -6408,6 +6758,50 @@ def train(args):
                     avoid_stage4_shrink_to_width_value = float(
                         extras.get("avoid_stage4_shrink_to_width", avoid_stage4_shrink_to_width_value)
                     )
+
+            cmd_fused_eval = None
+            cmd_f_eval = None
+            cmd_a_eval = None
+            w_eval = None
+            d_min_eval = None
+            if post_info is not None and isinstance(post_info, dict):
+                cmd_fused_eval = post_info.get("cmd_gate_fused", None)
+                cmd_f_eval = post_info.get("cmd_F", None)
+                cmd_a_eval = post_info.get("cmd_A", None)
+                w_eval = post_info.get("w", None)
+                d_min_eval = post_info.get("clearance_pp", None)
+            if cmd_fused_eval is None:
+                cmd_fused_eval = cmd_used
+            if cmd_fused_eval is not None and not torch.is_tensor(cmd_fused_eval):
+                cmd_fused_eval = torch.as_tensor(cmd_fused_eval, device=device)
+            if cmd_f_eval is not None and not torch.is_tensor(cmd_f_eval):
+                cmd_f_eval = torch.as_tensor(cmd_f_eval, device=device)
+            if cmd_a_eval is not None and not torch.is_tensor(cmd_a_eval):
+                cmd_a_eval = torch.as_tensor(cmd_a_eval, device=device)
+            if w_eval is not None and not torch.is_tensor(w_eval):
+                w_eval = torch.as_tensor(w_eval, device=device)
+            if d_min_eval is not None and not torch.is_tensor(d_min_eval):
+                d_min_eval = torch.as_tensor(d_min_eval, device=device)
+            timeout_eval = env_info.get("timeout", None) if env_info is not None else None
+            if timeout_eval is not None and not torch.is_tensor(timeout_eval):
+                timeout_eval = torch.as_tensor(timeout_eval, device=device)
+            tracker_step_obs = {
+                "follow_dist": follow_dist if torch.is_tensor(follow_dist) else None,
+                "gate_y": y_eff if is_gate and y_eff is not None else None,
+                "conflict": pcr_conflict_step if torch.is_tensor(pcr_conflict_step) else None,
+                "cmd_fused": cmd_fused_eval if torch.is_tensor(cmd_fused_eval) else None,
+                "cmd_F": cmd_f_eval if torch.is_tensor(cmd_f_eval) else None,
+                "cmd_A": cmd_a_eval if torch.is_tensor(cmd_a_eval) else None,
+                "w": w_eval if torch.is_tensor(w_eval) else None,
+                "collision": collision_mask if torch.is_tensor(collision_mask) else None,
+                "timeout": timeout_eval if torch.is_tensor(timeout_eval) else None,
+                "bearing": (
+                    torch.atan2(goal[:, 0], goal[:, 1])
+                    if torch.is_tensor(goal) and goal.shape[1] >= 2 else None
+                ),
+                "d_min": d_min_eval if torch.is_tensor(d_min_eval) else None,
+            }
+            eval_tracker.step(tracker_step_obs)
             reset_mask_prev = dones.clone()
 
             # 统计完成的 episode（优先使用高层累计的 episode_return）
@@ -6434,6 +6828,68 @@ def train(args):
                         episode_collision_flags.extend(
                             episode_collision[done_ids].detach().to(dtype=torch.float32).cpu().tolist()
                         )
+                task_success_done = env_info.get("success_mask", None) if env_info is not None else None
+                done_ids_cpu = done_ids.detach().cpu().tolist()
+                for done_id in done_ids_cpu:
+                    summary = eval_tracker.summarize(done_id)
+                    task_success_flag = bool(summary["episode_success"])
+                    if torch.is_tensor(task_success_done):
+                        task_success_flag = bool(task_success_done[done_id].detach().item())
+                    summary["episode_task_success"] = task_success_flag
+                    summary["episode_success"] = task_success_flag
+                    collision_flag = bool(summary["episode_collision"])
+                    timeout_flag = bool(summary["episode_timeout"])
+
+                    _window_success.append(task_success_flag)
+                    _window_joint_success.append(bool(summary["episode_joint_success"]))
+                    _window_collision.append(collision_flag)
+                    _window_timeout.append(timeout_flag)
+                    follow_error_value = float(summary["follow_dist_error"])
+                    if math.isfinite(follow_error_value):
+                        _window_follow_dist_error.append(follow_error_value)
+                    if task_success_flag:
+                        _window_success_steps.append(int(summary["episode_steps"]))
+
+                    collision_rate_now = (
+                        sum(_window_collision) / len(_window_collision)
+                        if _window_collision else 0.0
+                    )
+                    summary["collision_rate"] = collision_rate_now
+                    summary["success_rate"] = (
+                        sum(_window_success) / len(_window_success)
+                        if _window_success else 0.0
+                    )
+                    summary["joint_success_rate"] = (
+                        sum(_window_joint_success) / len(_window_joint_success)
+                        if _window_joint_success else 0.0
+                    )
+                    summary["timeout_rate"] = (
+                        sum(_window_timeout) / len(_window_timeout)
+                        if _window_timeout else 0.0
+                    )
+                    summary["avg_steps_to_success"] = (
+                        sum(_window_success_steps) / len(_window_success_steps)
+                        if _window_success_steps else 0.0
+                    )
+                    summary["follow_dist_error_rate"] = (
+                        sum(_window_follow_dist_error) / len(_window_follow_dist_error)
+                        if _window_follow_dist_error else float("nan")
+                    )
+                    summary["task_tradeoff_index"] = (
+                        collision_rate_now * float(summary["follow_dist_error_rate"])
+                        if math.isfinite(float(summary["follow_dist_error_rate"])) else float("nan")
+                    )
+
+                    eval_episode_count += 1
+                    for metric, value in summary.items():
+                        if metric in ("episode_success", "episode_joint_success"):
+                            continue
+                        if isinstance(value, bool):
+                            value = float(value)
+                        if value != value:
+                            continue
+                        writer.add_scalar(f"eval/{metric}", value, eval_episode_count)
+                eval_tracker.reset(done_ids)
             else:
                 running_returns += rewards
             
@@ -6970,6 +7426,7 @@ def train(args):
         completed_episode_count = completed_episode_count_sum.clamp_min(1.0)
         follow_lost_rate_mean = (follow_lost_rate_sum / completed_episode_count).item()
         target_finish_rate_mean = (target_finish_rate_sum / completed_episode_count).item()
+        pcr_robot_crossed_rate_mean = (pcr_robot_crossed_rate_sum / completed_episode_count).item()
         pcr_success_rate_mean = (pcr_success_rate_sum / completed_episode_count).item()
         pcr_gap_success_per_episode_mean = (pcr_gap_success_rate_sum / completed_episode_count).item()
         pcr_gap_success_step_rate_mean = (pcr_gap_success_rate_sum / total_samples).item()
@@ -7099,13 +7556,13 @@ def train(args):
             goal_dist_console_label = 'Follow dist / Cmd speed / Tgt speed:'
             online_selection_metric = (
                 float(pcr_success_rate_mean),
-                float(target_finish_rate_mean),
+                float(pcr_robot_crossed_rate_mean),
                 float(pcr_gap_success_per_episode_mean),
                 -float(collision_rate_mean),
                 -float(pcr_follow_dist_error_value),
                 float(mean_reward),
             )
-            online_selection_metric_name = 'pcr_success_gap_collision_follow_reward_lexicographic'
+            online_selection_metric_name = 'pcr_success_robot_cross_gap_collision_follow_reward_lexicographic'
         episode_collision_rate_value = (
             float(np.mean(episode_collision_flags))
             if ((is_avoid_output_task or is_pcr_output_task) and episode_collision_flags)
@@ -7177,6 +7634,7 @@ def train(args):
         writer.add_scalar('Perf/FollowLostRate', follow_lost_rate_mean, iteration)
         writer.add_scalar('Perf/TargetFinishRate', target_finish_rate_mean, iteration)
         writer.add_scalar('Perf/PCRSuccessRate', pcr_success_rate_mean, iteration)
+        writer.add_scalar('Perf/PCRRobotCrossedRate', pcr_robot_crossed_rate_mean, iteration)
         writer.add_scalar('Perf/PCRGapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
         writer.add_scalar('Perf/PCRGapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
         writer.add_scalar('Diag/PCRConflictMean', pcr_conflict_mean, iteration)
@@ -7282,6 +7740,7 @@ def train(args):
             writer.add_scalar('Avoid/StuckRatio', stuck_ratio, iteration)
         if is_pcr_output_task:
             writer.add_scalar('PCR/Task/TargetFinishRate', target_finish_rate_mean, iteration)
+            writer.add_scalar('PCR/Task/RobotCrossedRate', pcr_robot_crossed_rate_mean, iteration)
             writer.add_scalar('PCR/Task/SuccessRate', pcr_success_rate_mean, iteration)
             writer.add_scalar('PCR/Task/GapSuccessPerEpisode', pcr_gap_success_per_episode_mean, iteration)
             writer.add_scalar('PCR/Task/GapSuccessStepRate', pcr_gap_success_step_rate_mean, iteration)
@@ -7311,6 +7770,8 @@ def train(args):
             writer.add_scalar('PCR/Reward/HardCollision', reward_term_means.get('collision', 0.0), iteration)
             writer.add_scalar('PCR/Reward/HardTerminal', reward_term_means.get('terminal_penalty', 0.0), iteration)
             writer.add_scalar('PCR/Reward/HardTime', reward_term_means.get('time', 0.0), iteration)
+            writer.add_scalar('PCR/Reward/YawSuppress', reward_term_means.get('pcr_yaw_suppress', 0.0), iteration)
+            writer.add_scalar('PCR/Diag/ObstacleRisk', reward_term_means.get('pcr_obstacle_risk', 0.0), iteration)
         if is_gate:
             writer.add_scalar('Stats/GateYEff', gate_y_mean, iteration)
             writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
@@ -7473,13 +7934,13 @@ def train(args):
                 )
             elif is_pcr_output_task:
                 avoid_line = (
-                    f"""{'PCR succ/finish/gap:':>{pad}} {pcr_success_rate_mean:.3f} / {target_finish_rate_mean:.3f} / {pcr_gap_success_per_episode_mean:.3f}\n"""
+                    f"""{'PCR succ/cross/gap:':>{pad}} {pcr_success_rate_mean:.3f} / {pcr_robot_crossed_rate_mean:.3f} / {pcr_gap_success_per_episode_mean:.3f}\n"""
                     f"""{'PCR coll(ep/step)/followErr:':>{pad}} {episode_collision_rate_value:.3f} / {collision_rate_mean:.3f} / {pcr_follow_dist_error_value:.3f}\n"""
                     f"""{'PCR y low/high/corr:':>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
                     f"""{'PCR conflict/gapStep:':>{pad}} {pcr_conflict_mean:.3f} / {pcr_gap_success_step_rate_mean:.3f}\n"""
                     f"""{'PCR nearest obs dist:':>{pad}} {clearance_min:.3f}\n"""
                     f"""{'PCR row success count:':>{pad}} {pcr_gap_success_per_episode_mean:.3f}\n"""
-                    f"""{'PCR target/follow lost:':>{pad}} {target_finish_rate_mean:.3f} / {follow_lost_rate_mean:.3f}\n"""
+                    f"""{'PCR targetDiag/follow lost:':>{pad}} {target_finish_rate_mean:.3f} / {follow_lost_rate_mean:.3f}\n"""
                     f"""{'PCR gap-line/bandAct:':>{pad}} {reward_term_means.get('cross_line_dist', 0.0):.3f} / {avoid_band_active_rate_mean:.3f}\n"""
                     f"""{'PCR band out/near-miss:':>{pad}} {avoid_band_outside_dist_mean:.3f} / {near_miss_ratio:.3f}\n"""
                     f"""{'PCR obs-hit cand/strict/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {strict_obstacle_contact_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
@@ -7499,7 +7960,7 @@ def train(args):
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
                           f"""{'Follow dist mean/std/p95/lostEp:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_std:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
-                          f"""{('Target finish ep rate:' if not is_pcr_output_task else 'PCR success/finish ep:'):>{pad}} {(target_finish_rate_mean if not is_pcr_output_task else pcr_success_rate_mean):.3f}{('' if not is_pcr_output_task else f' / {target_finish_rate_mean:.3f}')}\n"""
+                          f"""{('Target finish ep rate:' if not is_pcr_output_task else 'PCR success/cross ep:'):>{pad}} {(target_finish_rate_mean if not is_pcr_output_task else pcr_success_rate_mean):.3f}{('' if not is_pcr_output_task else f' / {pcr_robot_crossed_rate_mean:.3f}')}\n"""
                           f"""{('PCR gapSuccEp/conflict/corr:' if not is_pcr_output_task else 'PCR gap/conflict/corr:'):>{pad}} {pcr_gap_success_per_episode_mean:.3f} / {pcr_conflict_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
                           f"""{('PCR y low/high conflict:' if not is_pcr_output_task else 'PCR y low/high/corr:'):>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f}{('' if not is_pcr_output_task else f' / {pcr_conflict_y_corr:.3f}')}\n"""
                           f"""{'Curriculum level:':>{pad}} {terrain_level_str}\n"""
@@ -7528,7 +7989,8 @@ def train(args):
                           f"""{('Collision step/episode/stage:' if is_avoid_output_task else 'Collision step/episode:'):>{pad}} {collision_rate_mean:.3f} / {episode_collision_rate_value:.3f}{(f' / {avoid_collision_rate100_value:.3f}' if is_avoid_output_task else '')}\n"""
                           f"""{'Collision force mean/p95/th:':>{pad}} {collision_force_mean:.3f} / {collision_force_p95:.3f} / {collision_threshold_str} ({collision_threshold_src_str}, idx {collision_indices_src_str})\n"""
                           f"""{'-' * width}\n"""
-                          f"""{'Reward(PCR core/gate/gapSucc):':>{pad}} {reward_term_means.get('pcr_core', 0.0):.3f} / {reward_term_means.get('pcr_gate_aux', 0.0):.3f} / {reward_term_means.get('pcr_gap_success', 0.0):.3f}\n"""
+                          f"""{'Reward(PCR core/gate/gap/yaw):':>{pad}} {reward_term_means.get('pcr_core', 0.0):.3f} / {reward_term_means.get('pcr_gate_aux', 0.0):.3f} / {reward_term_means.get('pcr_gap_success', 0.0):.3f} / {reward_term_means.get('pcr_yaw_suppress', 0.0):.3f}\n"""
+                          f"""{'PCR yaw/risk:':>{pad}} {reward_term_means.get('pcr_yaw_suppress', 0.0):.3f} / {reward_term_means.get('pcr_obstacle_risk', 0.0):.3f}\n"""
                           f"""{'Diag(PCR conflict mean):':>{pad}} {pcr_conflict_mean:.3f}\n"""
                           f"""{'Reward(rowLat/rowGap/rowPush/rowCmdX):':>{pad}} {reward_term_means.get('row_lat', 0.0):.3f} / {reward_term_means.get('row_gap', 0.0):.3f} / {reward_term_means.get('row_push_penalty', 0.0):.3f} / {reward_term_means.get('row_cmdx_reward', 0.0):.3f}\n"""
                           f"""{'Reward(smooth/earlyNext/head):':>{pad}} {reward_term_means.get('avoid_smooth_penalty', 0.0):.3f} / {reward_term_means.get('early_next_gap_penalty', 0.0):.3f} / {reward_term_means.get('heading_keep', 0.0):.3f}\n"""
@@ -7558,7 +8020,8 @@ def train(args):
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
                 'best_online_success_rate': best_pcr_success,
-                'best_online_target_finish': best_pcr_target_finish,
+                'best_online_robot_crossed': best_pcr_robot_crossed,
+                'best_online_target_finish': best_pcr_robot_crossed,
                 'best_online_gap_success': best_pcr_gap_success,
                 'best_online_collision': best_pcr_collision,
                 'best_online_follow_dist_error': best_pcr_follow_dist_error,
@@ -7577,7 +8040,7 @@ def train(args):
         elif is_pcr_output_task:
             current_best_tuple = (
                 best_pcr_success,
-                best_pcr_target_finish,
+                best_pcr_robot_crossed,
                 best_pcr_gap_success,
                 -best_pcr_collision,
                 -best_pcr_follow_dist_error,
@@ -7591,7 +8054,7 @@ def train(args):
             elif is_pcr_output_task:
                 (
                     best_pcr_success,
-                    best_pcr_target_finish,
+                    best_pcr_robot_crossed,
                     best_pcr_gap_success,
                     best_pcr_collision_neg,
                     best_pcr_follow_dist_error_neg,
@@ -7612,7 +8075,8 @@ def train(args):
                 'best_online_success': best_success,
                 'best_online_progress': best_progress,
                 'best_online_success_rate': best_pcr_success,
-                'best_online_target_finish': best_pcr_target_finish,
+                'best_online_robot_crossed': best_pcr_robot_crossed,
+                'best_online_target_finish': best_pcr_robot_crossed,
                 'best_online_gap_success': best_pcr_gap_success,
                 'best_online_collision': best_pcr_collision,
                 'best_online_follow_dist_error': best_pcr_follow_dist_error,
@@ -7627,8 +8091,8 @@ def train(args):
                 )
             elif is_pcr_output_task:
                 dprint(
-                    f"  ★ New PCR best (succ/finish/gap/coll/follow/reward): "
-                    f"{best_pcr_success:.3f} / {best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+                    f"  ★ New PCR best (succ/cross/gap/coll/follow/reward): "
+                    f"{best_pcr_success:.3f} / {best_pcr_robot_crossed:.3f} / {best_pcr_gap_success:.3f} / "
                     f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
                 )
             else:
@@ -7644,8 +8108,8 @@ def train(args):
         )
     elif is_pcr_output_task:
         print(
-            f"Best PCR Monitor (succ/finish/gap/coll/follow/reward): "
-            f"{best_pcr_success:.3f} / {best_pcr_target_finish:.3f} / {best_pcr_gap_success:.3f} / "
+            f"Best PCR Monitor (succ/cross/gap/coll/follow/reward): "
+            f"{best_pcr_success:.3f} / {best_pcr_robot_crossed:.3f} / {best_pcr_gap_success:.3f} / "
             f"{best_pcr_collision:.3f} / {best_pcr_follow_dist_error:.3f} / {best_reward:.2f}"
         )
     else:

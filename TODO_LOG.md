@@ -90,6 +90,23 @@
 
 - [x] ~~[P0] 在 PCR 的 `resolve_moe_gate_pcr()` 中将 `cmd_A` 收口为横移-only：保留 lateral，清零 forward 与 yaw，使 follow 重新主导目标距离与前向节奏，同时训练与 play 共用同一融合口径~~
 
+## 2026-04-22 episode 级 eval 指标统一收口
+
+- [x] ~~[P0] 在 `train_highlevel.py` 中新增 `EpisodeMetricsTracker` 与 `eval/` 日志统一汇总口径：基于现有 rollout 字段按 episode 统计跟随稳定性、碰撞安全、任务成功、软融合质量与 PCR 核心贡献验证指标，用于后续 baseline、论文结果表与实机前诊断统一对齐~~
+- [x] ~~[P0] 将 `EpisodeMetricsTracker` 的接线从“每步逐 env Python 循环 + .item()”收口为“张量累计 + done 时按 env 汇总”，避免在 `2048/4096 env` 下静默拖慢训练吞吐，并同步去掉 `locals()` 字段检测与 `scipy` 额外依赖~~
+
+## 2026-04-24 PCR eval 统计口径最终收口
+
+- [x] ~~[P0] 将 `eval/` episode 统计收口为训练成功语义优先：`success_rate` 优先读取环境 `success_mask`，跟随距离达标仅作为独立诊断项，同时避免 `follow_dist` 缺失继续写入假低误差或污染 tradeoff 指标~~
+
+## 2026-04-24 PCR 成功与终止口径改为机器人主导
+
+- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的回合成功从”目标到终点触发结束后检查机器人进度”改为”机器人越过最后一行 + 无碰撞 + 跟随距离在 band 内”才成功；移动目标继续沿直线前进，不再因目标到线提前切断回合~~
+
+## 2026-04-27 PCR 目标速度与近障 yaw 抑制
+
+- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的移动目标速度提高到 `0.35m/s`，并在 PCR 冲突/近障阶段加入轻量 `pcr_yaw_suppress` 奖励：基于前半平面最近障碍距离生成 `obstacle_risk`，只惩罚近障时过大的 yaw，减少为了朝向目标而侧身撞障碍~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~
