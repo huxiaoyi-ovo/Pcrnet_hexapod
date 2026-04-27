@@ -4141,13 +4141,33 @@ class HierarchicalHexapodEnv:
                     pcr_yaw_suppress_scale = float(self.reward_cfg_raw.get("pcr_yaw_suppress_scale", 0.0))
                     pcr_yaw_suppress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
                     if pcr_yaw_suppress_scale != 0.0:
-                        if front_half_nearest_obs is not None:
+                        if forward_clearance is not None:
                             safe_d = float(getattr(self.reward_cfg, "risk_barrier_safe", 0.32))
                             free_d = float(getattr(self.reward_cfg, "risk_barrier_free", 0.65))
-                            obstacle_risk = torch.clamp(
-                                (free_d - front_half_nearest_obs) / max(free_d - safe_d, 1e-6),
-                                min=0.0,
-                                max=1.0,
+                            forward_clearance_clean = torch.nan_to_num(
+                                forward_clearance,
+                                nan=free_d,
+                                posinf=free_d,
+                                neginf=0.0,
+                            )
+                            obstacle_risk = self._risk_from_clearance(
+                                forward_clearance_clean,
+                                safe_d,
+                                free_d,
+                            )
+                        elif front_half_nearest_obs is not None:
+                            safe_d = float(getattr(self.reward_cfg, "risk_barrier_safe", 0.32))
+                            free_d = float(getattr(self.reward_cfg, "risk_barrier_free", 0.65))
+                            front_half_nearest_obs_clean = torch.nan_to_num(
+                                front_half_nearest_obs,
+                                nan=free_d,
+                                posinf=free_d,
+                                neginf=0.0,
+                            )
+                            obstacle_risk = self._risk_from_clearance(
+                                front_half_nearest_obs_clean,
+                                safe_d,
+                                free_d,
                             )
                         else:
                             obstacle_risk = pcr_conflict
@@ -5713,6 +5733,8 @@ def train(args):
             'pcr_gap_width',
             'pcr_gate_target',
             'pcr_gate_aux',
+            'pcr_obstacle_risk',
+            'pcr_yaw_suppress',
             'pcr_gap_success',
             'timeout_bootstrap_bonus',
             'turn_penalty',
