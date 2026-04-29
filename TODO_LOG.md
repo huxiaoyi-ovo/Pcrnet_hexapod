@@ -105,7 +105,7 @@
 
 ## 2026-04-27 PCR 目标速度与近障 yaw 抑制
 
-- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的移动目标速度提高到 `0.35m/s`，并在 PCR 冲突/近障阶段加入轻量 `pcr_yaw_suppress` 奖励：基于前半平面最近障碍距离生成 `obstacle_risk`，只惩罚近障时过大的 yaw，减少为了朝向目标而侧身撞障碍~~
+- [x] ~~[P0] 将 `s_pcr_line_avoid_basic` 的移动目标速度提高到 `0.35m/s`，并在 PCR 冲突/近障阶段加入轻量 `pcr_yaw_suppress` 奖励：`obstacle_risk` 优先使用 moe 路径传入的 `gate_diag["risk_F"]`（跟随专家命令方向的风险），fallback 依次为 `forward_clearance`、`front_half_nearest_obs`、`pcr_conflict`，只惩罚近障时过大的 yaw，减少为了朝向目标而侧身撞障碍~~
 
 ## 2026-03-30 avoid 连续避障收口阶段
 

@@ -3449,6 +3449,7 @@ class HierarchicalHexapodEnv:
         gate_y: Optional[torch.Tensor] = None,
         *,
         gate_y_raw: Optional[torch.Tensor] = None,
+        pcr_obstacle_risk_override: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict]:
         """
         高层步进 (10Hz)
@@ -3472,6 +3473,10 @@ class HierarchicalHexapodEnv:
             cmd_vel[:, 1] = float(v)
         gate_y_exec = None if gate_y is None else gate_y.to(self.device)
         gate_y_raw_curr = gate_y_exec if gate_y_raw is None else gate_y_raw.to(self.device)
+        if pcr_obstacle_risk_override is not None:
+            self._pcr_obstacle_risk_override = pcr_obstacle_risk_override.to(self.device)
+        else:
+            self._pcr_obstacle_risk_override = None
 
         # 1. Command Post-Processor
         clearance_pp = None
@@ -4141,7 +4146,9 @@ class HierarchicalHexapodEnv:
                     pcr_yaw_suppress_scale = float(self.reward_cfg_raw.get("pcr_yaw_suppress_scale", 0.0))
                     pcr_yaw_suppress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
                     if pcr_yaw_suppress_scale != 0.0:
-                        if forward_clearance is not None:
+                        if self._pcr_obstacle_risk_override is not None:
+                            obstacle_risk = self._pcr_obstacle_risk_override
+                        elif forward_clearance is not None:
                             safe_d = float(getattr(self.reward_cfg, "risk_barrier_safe", 0.32))
                             free_d = float(getattr(self.reward_cfg, "risk_barrier_free", 0.65))
                             forward_clearance_clean = torch.nan_to_num(
@@ -6159,7 +6166,10 @@ def train(args):
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
                     cmd = gate_diag["cmd"]
-                    next_obs, rewards, dones, env_info = env.step(cmd, y_eff, gate_y_raw=gate_y_raw)
+                    next_obs, rewards, dones, env_info = env.step(
+                        cmd, y_eff, gate_y_raw=gate_y_raw,
+                        pcr_obstacle_risk_override=gate_diag.get("risk_F", None),
+                    )
                     timeout_mask = env_info.get("timeout", None) if env_info is not None else None
                     timeout_bootstrap_obs = env_info.get("timeout_bootstrap_obs", None) if env_info is not None else None
                     if (
