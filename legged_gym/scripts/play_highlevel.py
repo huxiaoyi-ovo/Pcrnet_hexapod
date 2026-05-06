@@ -1138,7 +1138,7 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
 
 
 def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
-    if str(getattr(args, "task", "")) != "s_avoid_basic":
+    if str(getattr(args, "task", "")) not in ("s_avoid_basic", "s_pcr_line_avoid_basic"):
         return
     stage_override = getattr(args, "avoid_stage_override", None)
     if stage_override is None:
