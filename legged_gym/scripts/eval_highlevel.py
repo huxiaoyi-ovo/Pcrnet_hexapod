@@ -69,6 +69,21 @@ def _quantile(values: List[float], q: float) -> float:
     return float(np.quantile(arr, q))
 
 
+def _pearson_corr(xs: List[float], ys: List[float]) -> float:
+    if len(xs) < 2 or len(ys) < 2 or len(xs) != len(ys):
+        return float("nan")
+    x = np.asarray(xs, dtype=np.float64)
+    y = np.asarray(ys, dtype=np.float64)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if int(mask.sum()) < 2:
+        return float("nan")
+    x = x[mask]
+    y = y[mask]
+    if float(np.std(x)) < 1e-12 or float(np.std(y)) < 1e-12:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
 def _difficulty_list(s: str) -> List[float]:
     if not s:
         return [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -142,8 +157,14 @@ class EpisodeAccumulator:
     cmd_jerk_lin_sum: float = 0.0
     cmd_jerk_ang_sum: float = 0.0
     rotate_only_steps: int = 0
+    w_trigger_step: int = -1
+    w_trigger_progress: float = float("nan")
+    gate_region_steps: int = 0
+    gate_region_y_eff_sum: float = 0.0
+    gate_region_near_miss_steps: int = 0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
+    timeseries: list = field(default_factory=list)
     cmd_f_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
     cmd_a_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
     cmd_final_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -503,6 +524,12 @@ class EvalRunner:
 
         latency_ms_samples: List[float] = []
         episode_rows: List[Dict] = []
+        timeseries_rows: List[Dict] = []
+        dump_timeseries = bool(getattr(self.args, "dump_timeseries", False))
+        timeseries_limit = max(0, int(getattr(self.args, "timeseries_episodes", 8)))
+        timeseries_stride = max(1, int(getattr(self.args, "timeseries_stride", 1)))
+        w_trigger_threshold = float(getattr(self.args, "w_trigger_threshold", 0.5))
+        gate_region_risk_threshold = float(getattr(self.args, "gate_region_risk_threshold", 0.5))
 
         global_episode_idx = 0
 
@@ -645,10 +672,11 @@ class EvalRunner:
                     ai = acc[i]
                     ai.step_hl += 1
 
+                    follow_err_step = float("nan")
                     if bool(valid_follow[i].item()):
-                        e = _safe_float(err[i].item(), default=0.0)
-                        ai.follow_err_sum += e
-                        ai.follow_err_sq_sum += e * e
+                        follow_err_step = _safe_float(err[i].item(), default=0.0)
+                        ai.follow_err_sum += follow_err_step
+                        ai.follow_err_sq_sum += follow_err_step * follow_err_step
                         ai.follow_err_count += 1
 
                     ai.energy_j += _safe_float((pwr[i] * float(self.env.high_level_dt)).item(), default=0.0)
@@ -705,6 +733,18 @@ class EvalRunner:
                         clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
                         risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
+                        clr_pp_v = float("nan")
+                        safe_thr_v = float("nan")
+                        near_miss_now = False
+                        if torch.is_tensor(clearance_pp_t):
+                            clr_pp_v = _safe_float(clearance_pp_t[i].item(), default=float("inf"))
+                        if safe_thr_t is not None:
+                            safe_thr_v = _safe_float(
+                                safe_thr_t[i].item() if torch.is_tensor(safe_thr_t) and safe_thr_t.ndim > 0 else float(safe_thr_t),
+                                default=float("nan"),
+                            )
+                        if math.isfinite(clr_pp_v) and math.isfinite(safe_thr_v):
+                            near_miss_now = bool(clr_pp_v < safe_thr_v)
                         ai.gate_y_raw_sum += gate_raw_v
                         ai.y_eff_sum += y_eff_v
                         ai.w_sum += w_v
@@ -715,7 +755,17 @@ class EvalRunner:
                         if ai.prev_y_eff is not None and abs(y_eff_v - ai.prev_y_eff) > th.GATE_SWITCH_DY_DEFAULT:
                             ai.gate_switch_count += 1
                         ai.prev_y_eff = y_eff_v
+                        if ai.w_trigger_step < 0 and w_v >= w_trigger_threshold:
+                            ai.w_trigger_step = int(ai.step_hl)
+                            ai.w_trigger_progress = float(progress_val)
+                        if risk_f_v >= gate_region_risk_threshold:
+                            ai.gate_region_steps += 1
+                            ai.gate_region_y_eff_sum += y_eff_v
+                            if near_miss_now:
+                                ai.gate_region_near_miss_steps += 1
 
+                        cmd_f_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_a_v = [float("nan"), float("nan"), float("nan")]
                         if torch.is_tensor(cmd_f_t):
                             cmd_f_v = [float(x) for x in cmd_f_t[i].detach().cpu().tolist()[:3]]
                             for j in range(3):
@@ -724,14 +774,39 @@ class EvalRunner:
                             cmd_a_v = [float(x) for x in cmd_a_t[i].detach().cpu().tolist()[:3]]
                             for j in range(3):
                                 ai.cmd_a_sum[j] += cmd_a_v[j]
-                        if torch.is_tensor(clearance_pp_t) and safe_thr_t is not None:
-                            safe_thr_v = _safe_float(
-                                safe_thr_t[i].item() if torch.is_tensor(safe_thr_t) and safe_thr_t.ndim > 0 else float(safe_thr_t),
-                                default=0.0,
+                        if near_miss_now:
+                            ai.near_miss_steps += 1
+
+                        if dump_timeseries and ai.step_hl % timeseries_stride == 0:
+                            cmd_final_v = ai.prev_cmd_final if ai.prev_cmd_final is not None else [float("nan"), float("nan"), float("nan")]
+                            ai.timeseries.append(
+                                {
+                                    "step_hl": int(ai.step_hl),
+                                    "time_s": float(ai.step_hl) * float(self.env.high_level_dt),
+                                    "progress": float(progress_val),
+                                    "follow_err_m": follow_err_step,
+                                    "gate_y_raw": gate_raw_v,
+                                    "y_eff": y_eff_v,
+                                    "w": w_v,
+                                    "clearance_f": clr_f_v,
+                                    "clearance_a": clr_a_v,
+                                    "risk_f": risk_f_v,
+                                    "risk_a": risk_a_v,
+                                    "risk_delta": risk_f_v - risk_a_v,
+                                    "clearance_pp": clr_pp_v,
+                                    "near_miss": int(near_miss_now),
+                                    "episode_collision": int(ai.episode_collision),
+                                    "cmd_f_x": cmd_f_v[0],
+                                    "cmd_f_y": cmd_f_v[1],
+                                    "cmd_f_w": cmd_f_v[2],
+                                    "cmd_a_x": cmd_a_v[0],
+                                    "cmd_a_y": cmd_a_v[1],
+                                    "cmd_a_w": cmd_a_v[2],
+                                    "cmd_final_x": cmd_final_v[0],
+                                    "cmd_final_y": cmd_final_v[1],
+                                    "cmd_final_w": cmd_final_v[2],
+                                }
                             )
-                            clr_pp_v = _safe_float(clearance_pp_t[i].item(), default=float("inf"))
-                            if clr_pp_v < safe_thr_v:
-                                ai.near_miss_steps += 1
 
                     if (not ai.success) and bool(success_step[i].item()):
                         ai.success = True
@@ -755,6 +830,17 @@ class EvalRunner:
                     final_success = bool(success_step[i].item())
 
                     denom_steps = float(max(ai.step_hl, 1))
+                    gate_region_denom = float(max(ai.gate_region_steps, 1))
+                    gate_region_y_eff_mean = (
+                        ai.gate_region_y_eff_sum / gate_region_denom
+                        if ai.gate_region_steps > 0
+                        else float("nan")
+                    )
+                    gate_region_near_miss_rate = (
+                        float(ai.gate_region_near_miss_steps) / gate_region_denom
+                        if ai.gate_region_steps > 0
+                        else float("nan")
+                    )
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
@@ -779,9 +865,15 @@ class EvalRunner:
                             "clearance_a_mean": ai.clearance_a_sum / denom_steps,
                             "risk_f_mean": ai.risk_f_sum / denom_steps,
                             "risk_a_mean": ai.risk_a_sum / denom_steps,
+                            "risk_delta_mean": (ai.risk_f_sum - ai.risk_a_sum) / denom_steps,
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
                             "rotate_only_rate": ai.rotate_only_steps / denom_steps,
+                            "w_trigger_step": ai.w_trigger_step,
+                            "w_trigger_progress": ai.w_trigger_progress,
+                            "gate_region_steps": ai.gate_region_steps,
+                            "gate_region_y_eff_mean": gate_region_y_eff_mean,
+                            "gate_region_near_miss_rate": gate_region_near_miss_rate,
                             "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
                             "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
                             "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
@@ -795,6 +887,13 @@ class EvalRunner:
                             "cmd_final_mean_w": ai.cmd_final_sum[2] / denom_steps,
                         }
                     )
+                    if dump_timeseries and len(timeseries_rows) < max(1, timeseries_limit) * 100000:
+                        if global_episode_idx < timeseries_limit:
+                            for ts_row in ai.timeseries:
+                                ts_row = dict(ts_row)
+                                ts_row["episode_id"] = global_episode_idx
+                                ts_row["difficulty"] = float(d)
+                                timeseries_rows.append(ts_row)
                     global_episode_idx += 1
                     done_episodes += 1
 
@@ -807,6 +906,8 @@ class EvalRunner:
         episode_rows = episode_rows[:episodes_total]
 
         metrics = self._aggregate_metrics(episode_rows, latency_ms_samples)
+        if dump_timeseries:
+            metrics["timeseries"] = timeseries_rows
         return metrics
 
     def _aggregate_metrics(self, rows: List[Dict], latency_ms_samples: List[float]) -> Dict:
@@ -834,12 +935,35 @@ class EvalRunner:
         y_eff_vals = _clean([r.get("y_eff_mean", float("nan")) for r in rows])
         w_vals = _clean([r.get("w_mean", float("nan")) for r in rows])
         clearance_f_vals = _clean([r.get("clearance_f_mean", float("nan")) for r in rows])
+        clearance_a_vals = _clean([r.get("clearance_a_mean", float("nan")) for r in rows])
         risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
+        risk_a_vals = _clean([r.get("risk_a_mean", float("nan")) for r in rows])
+        risk_delta_vals = _clean([r.get("risk_delta_mean", float("nan")) for r in rows])
         switch_vals = _clean([r.get("switch_rate", float("nan")) for r in rows])
         near_miss_vals = _clean([r.get("near_miss_rate", float("nan")) for r in rows])
         rotate_only_vals = _clean([r.get("rotate_only_rate", float("nan")) for r in rows])
+        w_trigger_steps = _clean([
+            r.get("w_trigger_step", float("nan"))
+            for r in rows
+            if int(r.get("w_trigger_step", -1)) >= 0
+        ])
+        w_trigger_progress = _clean([r.get("w_trigger_progress", float("nan")) for r in rows])
+        gate_region_y_eff = _clean([r.get("gate_region_y_eff_mean", float("nan")) for r in rows])
+        gate_region_near_miss = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in rows])
         cmd_jerk_lin_vals = _clean([r.get("cmd_jerk_lin_mean", float("nan")) for r in rows])
         cmd_jerk_ang_vals = _clean([r.get("cmd_jerk_ang_mean", float("nan")) for r in rows])
+        w_clearance_f_corr = _pearson_corr(
+            [float(r.get("w_mean", float("nan"))) for r in rows],
+            [float(r.get("clearance_f_mean", float("nan"))) for r in rows],
+        )
+        w_risk_f_corr = _pearson_corr(
+            [float(r.get("w_mean", float("nan"))) for r in rows],
+            [float(r.get("risk_f_mean", float("nan"))) for r in rows],
+        )
+        w_risk_delta_corr = _pearson_corr(
+            [float(r.get("w_mean", float("nan"))) for r in rows],
+            [float(r.get("risk_delta_mean", float("nan"))) for r in rows],
+        )
 
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
@@ -868,7 +992,26 @@ class EvalRunner:
             "y_eff_mean": float(np.mean(y_eff_vals)) if y_eff_vals else float("nan"),
             "w_mean": float(np.mean(w_vals)) if w_vals else float("nan"),
             "clearance_f_mean": float(np.mean(clearance_f_vals)) if clearance_f_vals else float("nan"),
+            "clearance_a_mean": float(np.mean(clearance_a_vals)) if clearance_a_vals else float("nan"),
             "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
+            "risk_a_mean": float(np.mean(risk_a_vals)) if risk_a_vals else float("nan"),
+            "risk_delta_mean": float(np.mean(risk_delta_vals)) if risk_delta_vals else float("nan"),
+            "w_clearance_f_corr": w_clearance_f_corr,
+            "w_risk_f_corr": w_risk_f_corr,
+            "w_risk_delta_corr": w_risk_delta_corr,
+            "w_degen_clearance_like": bool(
+                math.isfinite(w_clearance_f_corr)
+                and abs(w_clearance_f_corr) > 0.90
+                and (
+                    (not math.isfinite(w_risk_delta_corr))
+                    or abs(w_risk_delta_corr) < abs(w_clearance_f_corr)
+                )
+            ),
+            "w_trigger_rate": float(len(w_trigger_steps) / max(1, total_eps)),
+            "w_trigger_step_mean": float(np.mean(w_trigger_steps)) if w_trigger_steps else float("nan"),
+            "w_trigger_progress_mean": float(np.mean(w_trigger_progress)) if w_trigger_progress else float("nan"),
+            "gate_region_y_eff_mean": float(np.mean(gate_region_y_eff)) if gate_region_y_eff else float("nan"),
+            "gate_region_near_miss_rate_mean": float(np.mean(gate_region_near_miss)) if gate_region_near_miss else float("nan"),
             "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
             "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
             "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
@@ -896,10 +1039,15 @@ class EvalRunner:
             y_eff_d = _clean([r.get("y_eff_mean", float("nan")) for r in sub])
             w_d = _clean([r.get("w_mean", float("nan")) for r in sub])
             clearance_f_d = _clean([r.get("clearance_f_mean", float("nan")) for r in sub])
+            clearance_a_d = _clean([r.get("clearance_a_mean", float("nan")) for r in sub])
             risk_f_d = _clean([r.get("risk_f_mean", float("nan")) for r in sub])
+            risk_a_d = _clean([r.get("risk_a_mean", float("nan")) for r in sub])
+            risk_delta_d = _clean([r.get("risk_delta_mean", float("nan")) for r in sub])
             switch_d = _clean([r.get("switch_rate", float("nan")) for r in sub])
             near_miss_d = _clean([r.get("near_miss_rate", float("nan")) for r in sub])
             rotate_only_d = _clean([r.get("rotate_only_rate", float("nan")) for r in sub])
+            gate_region_y_eff_d = _clean([r.get("gate_region_y_eff_mean", float("nan")) for r in sub])
+            gate_region_near_miss_d = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in sub])
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
@@ -924,7 +1072,22 @@ class EvalRunner:
                 "y_eff_mean": float(np.mean(y_eff_d)) if y_eff_d else float("nan"),
                 "w_mean": float(np.mean(w_d)) if w_d else float("nan"),
                 "clearance_f_mean": float(np.mean(clearance_f_d)) if clearance_f_d else float("nan"),
+                "clearance_a_mean": float(np.mean(clearance_a_d)) if clearance_a_d else float("nan"),
                 "risk_f_mean": float(np.mean(risk_f_d)) if risk_f_d else float("nan"),
+                "risk_a_mean": float(np.mean(risk_a_d)) if risk_a_d else float("nan"),
+                "risk_delta_mean": float(np.mean(risk_delta_d)) if risk_delta_d else float("nan"),
+                "w_clearance_f_corr": _pearson_corr(
+                    [float(r.get("w_mean", float("nan"))) for r in sub],
+                    [float(r.get("clearance_f_mean", float("nan"))) for r in sub],
+                ),
+                "w_risk_delta_corr": _pearson_corr(
+                    [float(r.get("w_mean", float("nan"))) for r in sub],
+                    [float(r.get("risk_delta_mean", float("nan"))) for r in sub],
+                ),
+                "gate_region_y_eff_mean": float(np.mean(gate_region_y_eff_d)) if gate_region_y_eff_d else float("nan"),
+                "gate_region_near_miss_rate_mean": (
+                    float(np.mean(gate_region_near_miss_d)) if gate_region_near_miss_d else float("nan")
+                ),
                 "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
                 "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
@@ -944,11 +1107,20 @@ class EvalRunner:
                 "aff_stack": int(self.args.aff_stack),
                 "gate_use_difficulty": bool(self.args.gate_use_difficulty),
                 "beta": None if self.args.beta is None else float(self.args.beta),
+                "w_mode": str(self.args.w_mode),
+                "w_tau": float(self.args.w_tau),
+                "w_blend_mode": str(self.args.w_blend_mode),
+                "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
                 "cmd_slew_lin": float(self.args.cmd_slew_lin),
                 "cmd_slew_ang": float(self.args.cmd_slew_ang),
                 "cmd_safe_dist": None if self.args.cmd_safe_dist is None else float(self.args.cmd_safe_dist),
                 "cmd_free_dist": None if self.args.cmd_free_dist is None else float(self.args.cmd_free_dist),
                 "disable_risk_scale": bool(self.args.disable_risk_scale),
+                "dump_timeseries": bool(getattr(self.args, "dump_timeseries", False)),
+                "timeseries_episodes": int(getattr(self.args, "timeseries_episodes", 8)),
+                "timeseries_stride": int(getattr(self.args, "timeseries_stride", 1)),
+                "w_trigger_threshold": float(getattr(self.args, "w_trigger_threshold", 0.5)),
+                "gate_region_risk_threshold": float(getattr(self.args, "gate_region_risk_threshold", 0.5)),
                 "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
                 "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
                 "avoid_ckpt": os.path.abspath(self.args.avoid_ckpt) if getattr(self.args, "avoid_ckpt", None) else None,
@@ -970,6 +1142,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
     json_path = os.path.join(out_dir, "metrics.json")
     csv_path = os.path.join(out_dir, "metrics.csv")
+    timeseries_path = os.path.join(out_dir, "timeseries.csv")
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
@@ -1004,9 +1177,15 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "clearance_a_mean",
         "risk_f_mean",
         "risk_a_mean",
+        "risk_delta_mean",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
+        "w_trigger_step",
+        "w_trigger_progress",
+        "gate_region_steps",
+        "gate_region_y_eff_mean",
+        "gate_region_near_miss_rate",
         "cmd_jerk_lin_mean",
         "cmd_jerk_ang_mean",
         "cmd_f_mean_x",
@@ -1024,6 +1203,42 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+    timeseries_rows = metrics.get("timeseries", [])
+    if timeseries_rows:
+        ts_fieldnames = [
+            "episode_id",
+            "difficulty",
+            "step_hl",
+            "time_s",
+            "progress",
+            "follow_err_m",
+            "gate_y_raw",
+            "y_eff",
+            "w",
+            "clearance_f",
+            "clearance_a",
+            "risk_f",
+            "risk_a",
+            "risk_delta",
+            "clearance_pp",
+            "near_miss",
+            "episode_collision",
+            "cmd_f_x",
+            "cmd_f_y",
+            "cmd_f_w",
+            "cmd_a_x",
+            "cmd_a_y",
+            "cmd_a_w",
+            "cmd_final_x",
+            "cmd_final_y",
+            "cmd_final_w",
+        ]
+        with open(timeseries_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=ts_fieldnames)
+            writer.writeheader()
+            for row in timeseries_rows:
+                writer.writerow(row)
 
 
 def parse_args():
@@ -1059,6 +1274,16 @@ def parse_args():
     parser.add_argument("--cmd_safe_dist", type=float, default=None)
     parser.add_argument("--cmd_free_dist", type=float, default=None)
     parser.add_argument("--disable_risk_scale", action="store_true")
+    parser.add_argument("--dump_timeseries", action="store_true", help="write step-level mechanism traces")
+    parser.add_argument("--timeseries_episodes", type=int, default=8, help="number of completed episodes to trace")
+    parser.add_argument("--timeseries_stride", type=int, default=1, help="record one trace row every N high-level steps")
+    parser.add_argument("--w_trigger_threshold", type=float, default=0.5, help="threshold for w trigger timing metrics")
+    parser.add_argument(
+        "--gate_region_risk_threshold",
+        type=float,
+        default=0.5,
+        help="risk_F threshold used for narrow-gap/high-conflict region summaries",
+    )
 
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")

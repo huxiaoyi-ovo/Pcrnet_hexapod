@@ -1196,6 +1196,7 @@ def validate_checkpoint_contract_compatibility(
     if not isinstance(reference_meta, dict) or not isinstance(candidate_meta, dict):
         return
     mismatch_msgs = []
+    path_hint_msgs = []
     for key_path in key_paths:
         ref_value = _get_nested_meta_value(reference_meta, key_path)
         cand_value = _get_nested_meta_value(candidate_meta, key_path)
@@ -1204,7 +1205,18 @@ def validate_checkpoint_contract_compatibility(
         ref_value = _normalize_contract_compare_value(key_path, ref_value)
         cand_value = _normalize_contract_compare_value(key_path, cand_value)
         if ref_value != cand_value:
+            if key_path == "low_level_ckpt":
+                path_hint_msgs.append(
+                    f"{key_path}: {reference_name}={ref_value}, {candidate_name}={cand_value}"
+                )
+                continue
             mismatch_msgs.append(f"{key_path}: {reference_name}={ref_value}, {candidate_name}={cand_value}")
+    if path_hint_msgs:
+        print(
+            "[Warn] low_level_ckpt 加载路径与 checkpoint 记录路径不同，本次不强制停止；"
+            "请确认两者对应同一份底层权重："
+            + " | ".join(path_hint_msgs)
+        )
     if mismatch_msgs:
         msg = (
             f"{candidate_name} 与 {reference_name} 的训练口径不一致，继续运行会污染实验归因："
