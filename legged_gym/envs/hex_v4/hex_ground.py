@@ -1952,6 +1952,12 @@ class HexGround(LeggedRobot):
             )
         return base_row_y
 
+    def _get_s_avoid_fixed_stage_last_row_y(self, stage: int) -> float:
+        row_y = self._get_s_avoid_fixed_stage_row_y(stage)
+        if len(row_y) > 0:
+            return float(row_y[-1])
+        return float(getattr(self.cfg.terrain, f"avoid_stage{int(stage)}_last_row_y", 2.0))
+
     def _get_s_avoid_fixed_stage_row_counts(self, stage: int):
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
         if int(stage) == 1:
@@ -2964,10 +2970,10 @@ class HexGround(LeggedRobot):
         robot_center_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
         cross_line_y = torch.full_like(
             robot_center_local_y,
-            float(getattr(self.cfg.terrain, "avoid_stage4_last_row_y", 3.80)),
+            float(self._get_s_avoid_fixed_stage_last_row_y(4)),
         )
         for stage_v in (1, 2, 3, 4):
-            stage_last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_v}_last_row_y", 2.0))
+            stage_last_row_y = float(self._get_s_avoid_fixed_stage_last_row_y(stage_v))
             cross_line_y = torch.where(
                 stage_ids.to(device=self.device) == stage_v,
                 torch.full_like(robot_center_local_y, stage_last_row_y),
@@ -4340,7 +4346,7 @@ class HexGround(LeggedRobot):
         end_local_y = torch.zeros(env_ids.numel(), device=self.device, dtype=torch.float32)
         for stage_value in torch.unique(stage_ids).tolist():
             stage_id = int(stage_value)
-            last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0))
+            last_row_y = float(self._get_s_avoid_fixed_stage_last_row_y(stage_id))
             end_local_y[stage_ids == stage_id] = last_row_y + margin
         return end_local_y
 

@@ -3871,11 +3871,15 @@ class HierarchicalHexapodEnv:
                 else:
                     stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
                 cross_line_local_y = torch.zeros(self.num_envs, device=self.device)
+                get_last_row_y = getattr(self.env, "_get_s_avoid_fixed_stage_last_row_y", None)
                 for stage_value in torch.unique(stage_ids).tolist():
                     stage_id = int(stage_value)
-                    last_row_y = float(
-                        getattr(self.env.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0)
-                    )
+                    if callable(get_last_row_y):
+                        last_row_y = float(get_last_row_y(stage_id))
+                    else:
+                        last_row_y = float(
+                            getattr(self.env.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0)
+                        )
                     cross_line_local_y[stage_ids == stage_id] = last_row_y
                 cross_line_world_y = self.env.env_origins[:, 1] + cross_line_local_y
                 curr_center_y = robot_pos[:, 1]
@@ -5620,6 +5624,7 @@ def train(args):
     _window_timeout = deque(maxlen=100)
     _window_follow_dist_error = deque(maxlen=100)
     _window_success_steps = deque(maxlen=100)
+    _window_success_follow_dist_mean = deque(maxlen=100)
     eval_episode_count = 0
     eval_tracker = EpisodeMetricsTracker(
         num_envs=env.num_envs,
@@ -6893,6 +6898,9 @@ def train(args):
                         _window_follow_dist_error.append(follow_error_value)
                     if task_success_flag:
                         _window_success_steps.append(int(summary["episode_steps"]))
+                        success_follow_dist_mean = float(summary["follow_dist_mean"])
+                        if math.isfinite(success_follow_dist_mean):
+                            _window_success_follow_dist_mean.append(success_follow_dist_mean)
 
                     collision_rate_now = (
                         sum(_window_collision) / len(_window_collision)
@@ -6914,6 +6922,10 @@ def train(args):
                     summary["avg_steps_to_success"] = (
                         sum(_window_success_steps) / len(_window_success_steps)
                         if _window_success_steps else 0.0
+                    )
+                    summary["successful_follow_dist_mean"] = (
+                        sum(_window_success_follow_dist_mean) / len(_window_success_follow_dist_mean)
+                        if _window_success_follow_dist_mean else float("nan")
                     )
                     summary["follow_dist_error_rate"] = (
                         sum(_window_follow_dist_error) / len(_window_follow_dist_error)
@@ -7467,6 +7479,10 @@ def train(args):
         body_forward_speed_mean = (body_forward_speed_sum / total_samples).item()
         body_backward_speed_mean = (body_backward_speed_sum / total_samples).item()
         follow_dist_mean = (follow_dist_sum / total_samples).item()
+        successful_follow_dist_mean_value = (
+            sum(_window_success_follow_dist_mean) / len(_window_success_follow_dist_mean)
+            if _window_success_follow_dist_mean else float("nan")
+        )
         completed_episode_count = completed_episode_count_sum.clamp_min(1.0)
         follow_lost_rate_mean = (follow_lost_rate_sum / completed_episode_count).item()
         target_finish_rate_mean = (target_finish_rate_sum / completed_episode_count).item()
@@ -7676,6 +7692,8 @@ def train(args):
         writer.add_scalar('Perf/FollowDistStd', follow_dist_std, iteration)
         writer.add_scalar('Perf/FollowDistP95', follow_dist_p95, iteration)
         writer.add_scalar('Perf/FollowLostRate', follow_lost_rate_mean, iteration)
+        if math.isfinite(float(successful_follow_dist_mean_value)):
+            writer.add_scalar('Perf/SuccessfulFollowDistMean', successful_follow_dist_mean_value, iteration)
         writer.add_scalar('Perf/TargetFinishRate', target_finish_rate_mean, iteration)
         writer.add_scalar('Perf/PCRSuccessRate', pcr_success_rate_mean, iteration)
         writer.add_scalar('Perf/PCRRobotCrossedRate', pcr_robot_crossed_rate_mean, iteration)
@@ -8003,7 +8021,7 @@ def train(args):
                           f"""{'Rollout step reward:':>{pad}} {rollout_mean_step_reward:.3f} (resid {resid_rollout:.3f})\n"""
                           f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
                           f"""{'Goal change count:':>{pad}} {mean_goal_changes:.2f}\n"""
-                          f"""{'Follow dist mean/std/p95/lostEp:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_std:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f}\n"""
+                          f"""{'Follow dist mean/std/p95/lostEp/succMean:':>{pad}} {follow_dist_mean:.3f} / {follow_dist_std:.3f} / {follow_dist_p95:.3f} / {follow_lost_rate_mean:.3f} / {successful_follow_dist_mean_value:.3f}\n"""
                           f"""{('Target finish ep rate:' if not is_pcr_output_task else 'PCR success/cross ep:'):>{pad}} {(target_finish_rate_mean if not is_pcr_output_task else pcr_success_rate_mean):.3f}{('' if not is_pcr_output_task else f' / {pcr_robot_crossed_rate_mean:.3f}')}\n"""
                           f"""{('PCR gapSuccEp/conflict/corr:' if not is_pcr_output_task else 'PCR gap/conflict/corr:'):>{pad}} {pcr_gap_success_per_episode_mean:.3f} / {pcr_conflict_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""
                           f"""{('PCR y low/high conflict:' if not is_pcr_output_task else 'PCR y low/high/corr:'):>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f}{('' if not is_pcr_output_task else f' / {pcr_conflict_y_corr:.3f}')}\n"""
