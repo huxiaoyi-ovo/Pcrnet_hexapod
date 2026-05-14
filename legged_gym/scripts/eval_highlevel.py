@@ -109,9 +109,9 @@ def _compute_moe_follow_cmd_from_goal(
         raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
     if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
         raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
-    robot_pos_world_xy = state_tensor[:, :2]
-    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-    target_world_xy = th.get_follow_target_world_xy(env_ref, state_tensor, goal_tensor)
+    robot_pos_world_xy, robot_heading, target_world_xy = th.get_follow_expert_world_inputs(
+        env_ref, state_tensor, goal_tensor
+    )
     return s0_follow_expert_fn(
         robot_pos_world_xy=robot_pos_world_xy,
         robot_heading=robot_heading,
@@ -202,6 +202,8 @@ class EvalRunner:
         self.vision_model = None
         self.policy_meta = None
         self.aux_checkpoint_meta: Dict[str, Dict] = {}
+        self.gate_state_dim: Optional[int] = None
+        self.avoid_state_dim: Optional[int] = None
 
         self._load_models()
 
@@ -289,13 +291,14 @@ class EvalRunner:
             if not self.args.avoid_ckpt:
                 raise ValueError("MoE mode requires --avoid_ckpt; follow side uses analytic expert")
 
-            self.policy = th.GatePolicy(
-                affordance_channels=aff_channels,
-                state_dim=state_dim,
-                goal_dim=goal_dim,
-            ).to(self.device)
             gate_ckpt = torch.load(self.args.ckpt, map_location=self.device)
             self.policy_meta = self._ckpt_meta(gate_ckpt)
+            self.gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or state_dim
+            self.policy = th.GatePolicy(
+                affordance_channels=aff_channels,
+                state_dim=self.gate_state_dim,
+                goal_dim=goal_dim,
+            ).to(self.device)
             self._validate_ckpt_meta(self.policy_meta, expected_skill="moe", source_name="gate ckpt")
             th.validate_checkpoint_contract_compatibility(
                 th.build_runtime_contract_meta(self.args, self.env),
@@ -307,15 +310,16 @@ class EvalRunner:
             th.load_high_level_state_dict_compat(self.policy, _to_state_dict(gate_ckpt), label="eval_gate")
             self.policy.eval()
 
+            avoid_ckpt = torch.load(self.args.avoid_ckpt, map_location=self.device)
+            avoid_meta = self._ckpt_meta(avoid_ckpt)
+            self.avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or state_dim
             avoid_aff_channels = int(obs["local_map_2ch"].shape[1] * self.aff_stack)
             self.avoid_model = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
-                state_dim=state_dim,
+                state_dim=self.avoid_state_dim,
                 goal_dim=goal_dim,
                 cmd_scale=cmd_scale,
             ).to(self.device)
-            avoid_ckpt = torch.load(self.args.avoid_ckpt, map_location=self.device)
-            avoid_meta = self._ckpt_meta(avoid_ckpt)
             self._validate_ckpt_meta(avoid_meta, expected_skill="avoid", source_name="avoid expert ckpt")
             th.validate_checkpoint_contract_compatibility(
                 self.policy_meta,
@@ -461,7 +465,12 @@ class EvalRunner:
         if self.args.skill == "moe":
             if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:
                 raise ValueError("MoE eval requires avoid affordance inputs and gate affordance map.")
-            expert_state = th.get_moe_expert_state_inputs(state)
+            target_avoid_state_dim = self.avoid_state_dim or int(state.shape[1])
+            target_gate_state_dim = self.gate_state_dim or int(state.shape[1])
+            expert_state = th.get_moe_expert_state_inputs(
+                th.match_state_dim(state, target_avoid_state_dim, label="eval_expert_state")
+            )
+            gate_state = th.match_state_dim(state, target_gate_state_dim, label="eval_gate_state")
             with torch.no_grad():
                 cmd_f = _compute_moe_follow_cmd_from_goal(
                     expert_state,
@@ -480,7 +489,7 @@ class EvalRunner:
                 gate_difficulty = difficulty if self.args.gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_y_raw, _ = self.policy.get_action(
                     aff_stack,
-                    state,
+                    gate_state,
                     goal,
                     gate_difficulty,
                     deterministic=not self.args.stochastic,

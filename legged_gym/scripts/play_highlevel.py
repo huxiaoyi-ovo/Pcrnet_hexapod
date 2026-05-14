@@ -75,9 +75,9 @@ def _compute_moe_follow_cmd_from_goal(
         raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
     if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
         raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
-    robot_pos_world_xy = state_tensor[:, :2]
-    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-    target_world_xy = th.get_follow_target_world_xy(env_ref, state_tensor, goal_tensor)
+    robot_pos_world_xy, robot_heading, target_world_xy = th.get_follow_expert_world_inputs(
+        env_ref, state_tensor, goal_tensor
+    )
     return s0_follow_expert_fn(
         robot_pos_world_xy=robot_pos_world_xy,
         robot_heading=robot_heading,
@@ -2011,6 +2011,8 @@ def main():
     policy = None
     avoid_policy = None
     avoid_aff_stack_buf = None
+    gate_state_dim = int(obs["state"].shape[1])
+    avoid_state_dim = int(obs["state"].shape[1])
     if use_follow_expert:
         print("[PlayHigh] cmd_source=follow_expert (--use_follow_expert)")
     elif static_avoid_debug:
@@ -2024,20 +2026,24 @@ def main():
         if is_gate:
             if not args.avoid_ckpt:
                 raise ValueError("moe 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
+            gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            gate_meta = _ckpt_meta_from_obj(gate_ckpt)
+            gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
             policy = th.GatePolicy(
                 affordance_channels=aff_channels,
-                state_dim=obs["state"].shape[1],
+                state_dim=gate_state_dim,
                 goal_dim=obs["goal"].shape[1],
             ).to(device)
+            ckpt = torch.load(args.avoid_ckpt, map_location=device)
+            ckpt_meta = _ckpt_meta_from_obj(ckpt)
+            avoid_state_dim = th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim
             avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
             avoid_policy = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
-                state_dim=obs["state"].shape[1],
+                state_dim=avoid_state_dim,
                 goal_dim=obs["goal"].shape[1],
                 cmd_scale=cmd_scale,
             ).to(device)
-            gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
-            gate_meta = _ckpt_meta_from_obj(gate_ckpt)
             _validate_expected_ckpt_meta(
                 gate_meta,
                 source_name="gate ckpt",
@@ -2057,8 +2063,6 @@ def main():
                 "path": os.path.abspath(args.teacher_ckpt),
                 "experiment_meta": gate_meta,
             }
-            ckpt = torch.load(args.avoid_ckpt, map_location=device)
-            ckpt_meta = _ckpt_meta_from_obj(ckpt)
             _validate_expected_ckpt_meta(
                 ckpt_meta,
                 source_name="avoid ckpt",
@@ -2277,7 +2281,10 @@ def main():
                             if bool(getattr(args, "zero_local_map", False))
                             else aff_bundle["avoid_difficulty"]
                         )
-                        expert_state = th.get_moe_expert_state_inputs(obs["state"])
+                        expert_state = th.get_moe_expert_state_inputs(
+                            th.match_state_dim(obs["state"], avoid_state_dim, label="play_expert_state")
+                        )
+                        gate_state = th.match_state_dim(obs["state"], gate_state_dim, label="play_gate_state")
                         cmd_f = _compute_moe_follow_cmd_from_goal(
                             expert_state,
                             goal_input,
@@ -2294,7 +2301,7 @@ def main():
                         )
                         gate_y_raw, _ = policy.get_action(
                             aff_input,
-                            obs["state"],
+                            gate_state,
                             goal_input,
                             gate_difficulty,
                             deterministic=deterministic,

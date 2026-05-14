@@ -1973,3 +1973,8 @@
 
 - [x] Must: 将 through 阶段惩罚从“朝下一行 gap 提前准备”改成“当前行未 release 时逆当前 gap 方向的大横移”
 - [x] Must: 触发门槛收成 `cmd_x_toward_gap < -0.20`，优先直接打中 stage3/4 里的侧擦碰坏样本
+
+## 2026-05-09 e_L_conflict 直角墙面实验场景
+
+- [x] Must: 将 `e_L_conflict` 从单圆柱拐角改成受几何约束的 L 型墙面走廊，优先服务 MoE 策略直角转弯泛化演示
+- [x] Must: 同步物理墙体、目标轨迹和 `gt_affordance` 障碍图，避免仿真里有墙但策略输入里看不到墙

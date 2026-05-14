@@ -228,17 +228,14 @@ class HexELConflictCfg(HexS0FollowCfg):
         terrain_length = 12.0
         terrain_width = 12.0
 
-        # L-corner geometry in local frame (x_right / y_forward):
-        # leg-1: x = corner_x, leg-2: y = corner_y.
+        # L-corner corridor geometry in local frame (x_right / y_forward).
+        # The target follows the corridor centerline: +Y approach, then +X exit.
         e_l_conflict_corner_x = 0.0
         e_l_conflict_corner_y = 4.0
-        # Single tangent cylinder: diameter = 0.30 m (radius = 0.15 m).
-        # Center is computed as (corner_x + r, corner_y - r) when inner_tangent=True.
-        e_l_conflict_obstacle_inner_tangent = True
-        e_l_conflict_obstacle_x = 0.15
-        e_l_conflict_obstacle_y = 3.85
-        e_l_conflict_obstacle_radius = 0.15
-        e_l_conflict_obstacle_height = 0.45
+        e_l_conflict_corridor_width = 2.80
+        e_l_conflict_wall_thickness = 0.16
+        e_l_conflict_wall_height = 0.55
+        e_l_conflict_wall_extension = 0.80
 
     class navigation(HexS0FollowCfg.navigation):
         # Scripted target trajectory: straight then sharp right turn.
@@ -247,17 +244,17 @@ class HexELConflictCfg(HexS0FollowCfg):
         moving_target_lturn_start_x = 0.0
         moving_target_lturn_start_y = 1.0
         # Extend the pre-turn straight segment by this extra length (meters).
-        moving_target_lturn_straight_extra = 1.5
+        moving_target_lturn_straight_extra = 0.75
         moving_target_lturn_corner_y = 4.0
-        moving_target_lturn_end_x = 3.0
+        moving_target_lturn_end_x = 6.0
         # Slow down by one-third from previous 0.85 m/s.
-        moving_target_lturn_speed = 0.567
+        moving_target_lturn_speed = 0.30
         # Keep going straight until 10 cm beyond obstacle outer edge, then turn.
         moving_target_lturn_turn_after_obstacle = 0.10
         # Extra radius over obstacle boundary for a visible绕障圆角（避免与圆柱边界重合）
         moving_target_lturn_clearance = 0.05
-        # Spawn contract: robot starts behind target by fixed 0.5 m.
-        moving_target_lturn_spawn_gap = 0.5
+        # Spawn contract: robot starts behind target near the desired follow distance.
+        moving_target_lturn_spawn_gap = 1.0
         moving_target_lturn_hold_s = 0.0
         moving_target_lturn_loop = True
 

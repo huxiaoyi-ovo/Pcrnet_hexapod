@@ -543,6 +543,37 @@ def get_follow_target_world_xy(
     delta_world_y = sin_heading * goal_x + cos_heading * goal_y
     return robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
 
+
+def get_follow_expert_world_inputs(
+    env_like: Any,
+    state_tensor: torch.Tensor,
+    goal_tensor: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if state_tensor.ndim != 2 or state_tensor.shape[1] < 3:
+        raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
+    if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
+        raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
+
+    robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
+    base_env = getattr(env_like, "env", env_like)
+    root_states = getattr(base_env, "root_states", None)
+    target_world_xy = getattr(base_env, "target_world", None)
+    if (
+        torch.is_tensor(root_states)
+        and root_states.ndim == 2
+        and root_states.shape[1] >= 2
+        and root_states.shape[0] == state_tensor.shape[0]
+        and torch.is_tensor(target_world_xy)
+        and target_world_xy.ndim == 2
+        and target_world_xy.shape[1] >= 2
+        and target_world_xy.shape[0] == state_tensor.shape[0]
+    ):
+        return root_states[:, :2], robot_heading, target_world_xy[:, :2]
+
+    robot_pos_world_xy = state_tensor[:, :2]
+    target_world_xy = get_follow_target_world_xy(env_like, state_tensor, goal_tensor)
+    return robot_pos_world_xy, robot_heading, target_world_xy
+
 # 延迟导入占位（便于静态检查）
 task_registry: Any = None
 TerrainAdaptivePlanner: Any = None
@@ -635,6 +666,38 @@ def resize_affordance_map(
         size=(target_size, target_size),
         mode="bilinear",
         align_corners=False,
+    )
+
+
+def infer_checkpoint_state_dim(ckpt_obj) -> Optional[int]:
+    state = ckpt_obj.get("model_state_dict", ckpt_obj) if isinstance(ckpt_obj, dict) else ckpt_obj
+    if not isinstance(state, dict):
+        return None
+    for key in ("state_encoder.mlp.0.weight", "module.state_encoder.mlp.0.weight"):
+        value = state.get(key, None)
+        if torch.is_tensor(value) and value.ndim == 2:
+            return int(value.shape[1])
+    return None
+
+
+def match_state_dim(state_tensor: torch.Tensor, target_dim: int, *, label: str = "state") -> torch.Tensor:
+    if state_tensor.dim() != 2:
+        raise ValueError(f"{label} shape invalid: {tuple(state_tensor.shape)}")
+    current_dim = int(state_tensor.shape[1])
+    target_dim = int(target_dim)
+    if current_dim == target_dim:
+        return state_tensor
+    if current_dim < target_dim:
+        pad = torch.zeros(
+            state_tensor.shape[0],
+            target_dim - current_dim,
+            device=state_tensor.device,
+            dtype=state_tensor.dtype,
+        )
+        return torch.cat([state_tensor, pad], dim=1)
+    raise ValueError(
+        f"{label} dim mismatch: runtime={current_dim}, checkpoint={target_dim}; "
+        "refuse to truncate state features."
     )
 
 
@@ -1654,8 +1717,9 @@ class HierarchicalHexapodEnv:
         self.camera_height_m = max(1e-3, base_height_m)
         self.camera_near = 0.0
         self.camera_far = self.affordance_map_extent
+        skill_name = str(getattr(args, "skill", "")).lower()
         use_camera_origin = (
-            str(getattr(args, "skill", "")).lower() == "avoid"
+            skill_name in ("avoid", "moe")
             or str(getattr(getattr(env_cfg, "terrain", None), "terrain_type", "")).lower() == "s_avoid_basic"
         )
         if cam_cfg is not None:
@@ -2298,6 +2362,20 @@ class HierarchicalHexapodEnv:
                     center_x = float(origin[0].item() + spec_pos[0])
                     center_y = float(origin[1].item() + spec_pos[1])
                     rasterize(env_id, center_x, center_y, spec_size[0], spec_size[1])
+
+        if hasattr(self.env, "e_conflict_wall_specs_local") and self.env.e_conflict_wall_specs_local is not None:
+            for env_id in range(self.num_envs):
+                origin = self.env.env_origins[env_id]
+                for spec in self.env.e_conflict_wall_specs_local:
+                    center_x = float(origin[0].item() + float(spec["center_x"]))
+                    center_y = float(origin[1].item() + float(spec["center_y"]))
+                    rasterize(
+                        env_id,
+                        center_x,
+                        center_y,
+                        float(spec["size_x"]),
+                        float(spec["size_y"]),
+                    )
 
         if hasattr(self.env, "dynamic_active") and self.env.dynamic_active is not None:
             dyn_size = float(getattr(self.env.cfg.terrain, "scene_dynamic_size", 0.4))
@@ -5116,9 +5194,9 @@ def train(args):
             raise ValueError(f"state_tensor shape invalid for analytic follow expert: {tuple(state_tensor.shape)}")
         if goal_tensor.ndim != 2 or goal_tensor.shape[1] < 2:
             raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
-        robot_pos_world_xy = state_tensor[:, :2]
-        robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-        target_world_xy = get_follow_target_world_xy(env, state_tensor, goal_tensor)
+        robot_pos_world_xy, robot_heading, target_world_xy = get_follow_expert_world_inputs(
+            env, state_tensor, goal_tensor
+        )
         return compute_s0_follow_expert_cmd(
             robot_pos_world_xy=robot_pos_world_xy,
             robot_heading=robot_heading,

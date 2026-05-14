@@ -69,13 +69,13 @@ class HexGround(LeggedRobot):
             print(
                 "[Scene] e_L_conflict active: "
                 f"straight x={geom['x_line']:.3f}, y:{geom['start_y']:.3f}->{geom['turn_entry_y']:.3f}, "
-                f"arc_r={geom['turn_r']:.3f}, then y={geom['y_line']:.3f}, x:{geom['obs_x']:.3f}->{geom['end_x']:.3f}, "
+                f"arc_r={geom['turn_r']:.3f}, then y={geom['y_line']:.3f}, x:{geom['inner_x']:.3f}->{geom['end_x']:.3f}, "
                 f"speed={geom['speed']:.3f}, straight_len={geom['straight_len']:.3f}, spawn_gap={geom['spawn_gap']:.3f}"
             )
             print(
-                "[Scene] e_L_conflict obstacle spec: "
-                f"center_local=({geom['obs_x']:.3f},{geom['obs_y']:.3f}), radius={geom['obs_r']:.3f}, "
-                f"clearance={max(0.0, geom['turn_r'] - geom['obs_r']):.3f}"
+                "[Scene] e_L_conflict wall spec: "
+                f"corridor_width={geom['corridor_width']:.3f}, wall_thickness={geom['wall_thickness']:.3f}, "
+                f"wall_height={geom['wall_height']:.3f}, extension={geom['wall_extension']:.3f}"
             )
         if terrain_type == "e_s_corridor" and self.nav_cfg is not None:
             moving_mode = str(getattr(self.nav_cfg, "moving_target_mode", "")).strip().lower()
@@ -364,6 +364,10 @@ class HexGround(LeggedRobot):
         self.e_conflict_static_shape = None
         self.e_conflict_capsule_half_height = None
         self.e_conflict_obstacle_pose_local = None
+        self.e_conflict_wall_assets = None
+        self.e_conflict_wall_specs_local = None
+        self.e_conflict_wall_handles = None
+        self.e_conflict_wall_indices = None
         self.e_s_corridor_wall_asset = None
         self.e_s_corridor_wall_pose_local = None
         self.e_s_corridor_wall_handles = None
@@ -392,41 +396,34 @@ class HexGround(LeggedRobot):
 
         terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
         if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
-            obs_x, obs_y, obs_r, obs_h = self._get_e_l_conflict_obstacle_local()
+            wall_specs = self._get_e_l_conflict_wall_specs_local()
 
             asset_options = gymapi.AssetOptions()
             asset_options.fix_base_link = True
             asset_options.disable_gravity = True
             asset_options.collapse_fixed_joints = True
 
-            # Prefer capsule (closest built-in primitive to a cylinder), fallback to box.
-            self.e_conflict_static_asset = None
-            if hasattr(self.gym, "create_capsule"):
-                try:
-                    half_height = max(1e-3, 0.5 * obs_h - obs_r)
-                    self.e_conflict_capsule_half_height = float(half_height)
-                    self.e_conflict_static_asset = self.gym.create_capsule(
-                        self.sim, obs_r, half_height, asset_options
+            self.e_conflict_wall_specs_local = wall_specs
+            self.e_conflict_wall_assets = []
+            for spec in wall_specs:
+                self.e_conflict_wall_assets.append(
+                    self.gym.create_box(
+                        self.sim,
+                        max(1e-3, float(spec["size_x"])),
+                        max(1e-3, float(spec["size_y"])),
+                        max(1e-3, float(spec["size_z"])),
+                        asset_options,
                     )
-                    self.e_conflict_static_shape = "capsule"
-                except Exception:
-                    self.e_conflict_static_asset = None
-                    self.e_conflict_capsule_half_height = None
-            if self.e_conflict_static_asset is None:
-                dia = max(1e-3, 2.0 * obs_r)
-                self.e_conflict_static_asset = self.gym.create_box(
-                    self.sim, dia, dia, max(1e-3, obs_h), asset_options
                 )
-                self.e_conflict_static_shape = "box"
-                self.e_conflict_capsule_half_height = None
-
-            self.e_conflict_obstacle_pose_local = (float(obs_x), float(obs_y), float(0.5 * obs_h))
-            self.static_scene_actor_handles = [None for _ in range(self.num_envs)]
-            self.static_scene_actor_indices = np.zeros((self.num_envs,), dtype=np.int32)
+            wall_count = len(wall_specs)
+            self.e_conflict_wall_handles = [[None for _ in range(wall_count)] for _ in range(self.num_envs)]
+            self.e_conflict_wall_indices = np.zeros((self.num_envs, wall_count), dtype=np.int32)
+            self.static_scene_actor_handles = self.e_conflict_wall_handles
+            self.static_scene_actor_indices = self.e_conflict_wall_indices
             print(
-                "[Scene] e_L_conflict obstacle actor: "
-                f"shape={self.e_conflict_static_shape}, center_local=({obs_x:.3f},{obs_y:.3f}), "
-                f"radius={obs_r:.3f}, height={obs_h:.3f}"
+                "[Scene] e_L_conflict wall actors: "
+                f"count={wall_count}, corridor_width={float(self._get_e_l_conflict_turn_path()['corridor_width']):.3f}, "
+                f"wall_height={float(self._get_e_l_conflict_turn_path()['wall_height']):.3f}"
             )
 
         if terrain_type == "e_s_corridor" and str(getattr(self.cfg.terrain, "mesh_type", "")).lower() in ("plane", "none"):
@@ -826,6 +823,37 @@ class HexGround(LeggedRobot):
         group_id = self._scene_group_id(env_id)
         scene_filter = self._scene_collision_filter()
         create_filter = scene_filter
+
+        if self.e_conflict_wall_assets is not None and self.e_conflict_wall_specs_local is not None:
+            env_origin = self.env_origins[env_id]
+            for slot, spec in enumerate(self.e_conflict_wall_specs_local):
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(
+                    float(env_origin[0].item() + float(spec["center_x"])),
+                    float(env_origin[1].item() + float(spec["center_y"])),
+                    float(env_origin[2].item() + float(spec["center_z"])),
+                )
+                pose.r = gymapi.Quat.from_axis_angle(
+                    gymapi.Vec3(0.0, 0.0, 1.0),
+                    float(spec.get("yaw", 0.0)),
+                )
+                wall_handle = self.gym.create_actor(
+                    env_handle,
+                    self.e_conflict_wall_assets[slot],
+                    pose,
+                    f"e_l_wall_{slot}",
+                    group_id,
+                    create_filter,
+                    0,
+                )
+                self._apply_actor_collision_filter(
+                    env_handle, wall_handle, create_filter, env_id, debug_tag=f"e_l_wall_{slot}"
+                )
+                if self.e_conflict_wall_handles is not None:
+                    self.e_conflict_wall_handles[env_id][slot] = wall_handle
+                if self.e_conflict_wall_indices is not None:
+                    wall_index = self.gym.get_actor_index(env_handle, wall_handle, gymapi.DOMAIN_SIM)
+                    self.e_conflict_wall_indices[env_id, slot] = wall_index
 
         if self.e_conflict_static_asset is not None and self.e_conflict_obstacle_pose_local is not None:
             ox, oy, oz = self.e_conflict_obstacle_pose_local
@@ -4119,33 +4147,19 @@ class HexGround(LeggedRobot):
         self.target_preturn_events.zero_()
         self.target_reflect_events.zero_()
 
-    def _get_e_l_conflict_obstacle_local(self):
-        obs_r = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_radius", 0.15))
-        obs_h = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_height", 0.45))
-        use_inner_tangent = bool(getattr(self.cfg.terrain, "e_l_conflict_obstacle_inner_tangent", True))
-        if use_inner_tangent:
-            corner_x = float(getattr(self.cfg.terrain, "e_l_conflict_corner_x", 0.0))
-            corner_y = float(getattr(self.cfg.terrain, "e_l_conflict_corner_y", 4.0))
-            obs_x = corner_x + obs_r
-            obs_y = corner_y - obs_r
-        else:
-            obs_x = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_x", 0.15))
-            obs_y = float(getattr(self.cfg.terrain, "e_l_conflict_obstacle_y", 3.85))
-
-        # Keep obstacle inside local tile bounds.
-        half_len = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
-        half_wid = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
-        margin = 0.05
-        x_min = -half_wid + obs_r + margin
-        x_max = half_wid - obs_r - margin
-        y_min = -half_len + obs_r + margin
-        y_max = half_len - obs_r - margin
-        obs_x = float(np.clip(obs_x, x_min, x_max))
-        obs_y = float(np.clip(obs_y, y_min, y_max))
-        return obs_x, obs_y, obs_r, obs_h
-
     def _get_e_l_conflict_turn_path(self):
-        obs_x, obs_y, obs_r, _ = self._get_e_l_conflict_obstacle_local()
+        corner_x = float(getattr(self.cfg.terrain, "e_l_conflict_corner_x", 0.0))
+        corner_y = float(getattr(self.cfg.terrain, "e_l_conflict_corner_y", 4.0))
+        nav_corner_y = float(getattr(self.nav_cfg, "moving_target_lturn_corner_y", corner_y))
+        corridor_width = float(getattr(self.cfg.terrain, "e_l_conflict_corridor_width", 1.40))
+        wall_thickness = float(getattr(self.cfg.terrain, "e_l_conflict_wall_thickness", 0.16))
+        wall_height = float(getattr(self.cfg.terrain, "e_l_conflict_wall_height", 0.55))
+        wall_extension = float(getattr(self.cfg.terrain, "e_l_conflict_wall_extension", 0.80))
+        corridor_width = max(0.90, corridor_width)
+        half_width = 0.5 * corridor_width
+        wall_thickness = max(0.05, wall_thickness)
+        wall_height = max(0.05, wall_height)
+        wall_extension = max(0.0, wall_extension)
         start_y_base = float(getattr(self.nav_cfg, "moving_target_lturn_start_y", 1.0))
         straight_extra = float(getattr(self.nav_cfg, "moving_target_lturn_straight_extra", 0.0))
         start_y = start_y_base - max(0.0, straight_extra)
@@ -4153,29 +4167,33 @@ class HexGround(LeggedRobot):
         speed = float(getattr(self.nav_cfg, "moving_target_lturn_speed", 0.85))
         hold_s = float(getattr(self.nav_cfg, "moving_target_lturn_hold_s", 0.0))
         loop = bool(getattr(self.nav_cfg, "moving_target_lturn_loop", True))
-        clear_m = float(getattr(self.nav_cfg, "moving_target_lturn_clearance", 0.05))
-        turn_after = float(getattr(self.nav_cfg, "moving_target_lturn_turn_after_obstacle", 0.10))
         spawn_gap = float(getattr(self.nav_cfg, "moving_target_lturn_spawn_gap", 0.5))
-        turn_r = max(obs_r + clear_m, obs_r + 1e-3)
-        x_line = obs_x - turn_r
-        turn_entry_y = obs_y + obs_r + max(0.0, turn_after)
+        turn_r = half_width
+        x_line = corner_x
+        inner_x = corner_x + half_width
+        turn_entry_y = nav_corner_y
 
         # Keep path inside tile bounds.
         half_len = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
         half_wid = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
         margin = float(getattr(self.nav_cfg, "moving_target_margin", 0.3))
-        x_line = float(np.clip(x_line, -half_wid + margin, half_wid - margin))
+        x_line = float(np.clip(x_line, -half_wid + margin + half_width, half_wid - margin - half_width))
+        inner_x = x_line + half_width
         turn_center_y = float(
             np.clip(turn_entry_y, -half_len + margin + turn_r, half_len - margin - turn_r)
         )
         y_line = turn_center_y + turn_r
-        end_x = float(np.clip(end_x, x_line + 0.2, half_wid - margin))
+        end_x = float(np.clip(end_x, inner_x + 0.2, half_wid - margin))
         start_y = float(np.clip(start_y, -half_len + margin, turn_center_y - 0.2))
 
         return {
-            "obs_x": obs_x,
-            "obs_y": obs_y,
-            "obs_r": obs_r,
+            "inner_x": inner_x,
+            "corner_y": turn_center_y,
+            "corridor_width": corridor_width,
+            "half_width": half_width,
+            "wall_thickness": wall_thickness,
+            "wall_height": wall_height,
+            "wall_extension": wall_extension,
             "turn_r": turn_r,
             "x_line": x_line,
             "turn_center_y": turn_center_y,
@@ -4189,6 +4207,57 @@ class HexGround(LeggedRobot):
             "spawn_gap": max(0.0, spawn_gap),
             "straight_len": max(0.0, turn_center_y - start_y),
         }
+
+    def _get_e_l_conflict_wall_specs_local(self):
+        geom = self._get_e_l_conflict_turn_path()
+        half = float(geom["half_width"])
+        thick = float(geom["wall_thickness"])
+        height = float(geom["wall_height"])
+        ext = float(geom["wall_extension"])
+        x_line = float(geom["x_line"])
+        inner_x = float(geom["inner_x"])
+        corner_y = float(geom["corner_y"])
+        y_line = float(geom["y_line"])
+        start_y = float(geom["start_y"])
+        end_x = float(geom["end_x"])
+        spawn_gap = float(geom["spawn_gap"])
+
+        half_len = 0.5 * float(getattr(self.cfg.terrain, "terrain_length", 12.0))
+        half_wid = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 12.0))
+        tile_margin = 0.05
+        y_min = max(-half_len + tile_margin, start_y - spawn_gap - ext)
+        y_top = min(half_len - tile_margin, y_line + half)
+        x_min = max(-half_wid + tile_margin, x_line - half)
+        x_end = min(half_wid - tile_margin, end_x + ext)
+        z = 0.5 * height
+
+        def box(name: str, cx: float, cy: float, sx: float, sy: float):
+            return {
+                "name": name,
+                "center_x": float(cx),
+                "center_y": float(cy),
+                "center_z": float(z),
+                "size_x": float(max(0.05, sx)),
+                "size_y": float(max(0.05, sy)),
+                "size_z": float(height),
+                "yaw": 0.0,
+            }
+
+        left_wall_x = x_line - half - 0.5 * thick
+        right_wall_x = x_line + half + 0.5 * thick
+        lower_wall_y = corner_y - 0.5 * thick
+        upper_wall_y = y_line + half + 0.5 * thick
+        vertical_len = max(0.05, y_top - y_min)
+        right_vertical_len = max(0.05, corner_y - y_min)
+        lower_len = max(0.05, x_end - inner_x)
+        upper_len = max(0.05, x_end - x_min)
+
+        return [
+            box("left_outer_wall", left_wall_x, 0.5 * (y_min + y_top), thick, vertical_len),
+            box("right_inner_wall", right_wall_x, 0.5 * (y_min + corner_y), thick, right_vertical_len),
+            box("lower_inner_wall", 0.5 * (inner_x + x_end), lower_wall_y, lower_len, thick),
+            box("upper_outer_wall", 0.5 * (x_min + x_end), upper_wall_y, upper_len, thick),
+        ]
 
     def _reset_moving_target_e_l_conflict(self, env_ids: torch.Tensor):
         """Reset scripted L-turn moving target used by e_L_conflict scene."""
@@ -4238,7 +4307,7 @@ class HexGround(LeggedRobot):
         speed = float(geom["speed"])
         hold_s = float(geom["hold_s"])
         loop = bool(geom["loop"])
-        obs_x = float(geom["obs_x"])
+        inner_x = float(geom["inner_x"])
         turn_center_y = float(geom["turn_center_y"])
         turn_entry_y = float(geom["turn_entry_y"])
         turn_r = float(geom["turn_r"])
@@ -4267,7 +4336,7 @@ class HexGround(LeggedRobot):
                 self.target_lturn_theta[reached_entry] = math.pi
                 self.target_turn_events[reached_entry] = 1.0
 
-        # Stage 1: quarter-circle right turn around obstacle center.
+        # Stage 1: quarter-circle right turn around the L-corner center.
         m1 = stage == 1
         if m1.any():
             w_arc = speed / max(turn_r, 1e-6)
@@ -4275,7 +4344,7 @@ class HexGround(LeggedRobot):
             theta_next = torch.clamp(theta_curr - w_arc * dt, min=0.5 * math.pi, max=math.pi)
             self.target_lturn_theta[m1] = theta_next
 
-            pos_local[m1, 0] = obs_x + turn_r * torch.cos(theta_next)
+            pos_local[m1, 0] = inner_x + turn_r * torch.cos(theta_next)
             pos_local[m1, 1] = turn_center_y + turn_r * torch.sin(theta_next)
             vel_local[m1, 0] = speed * torch.sin(theta_next)
             vel_local[m1, 1] = -speed * torch.cos(theta_next)
@@ -4284,7 +4353,7 @@ class HexGround(LeggedRobot):
             finished_arc_local = theta_next <= (0.5 * math.pi + 1e-4)
             if finished_arc_local.any():
                 finished_idx = torch.nonzero(m1, as_tuple=False).flatten()[finished_arc_local]
-                pos_local[finished_idx, 0] = obs_x
+                pos_local[finished_idx, 0] = inner_x
                 pos_local[finished_idx, 1] = y_line
                 vel_local[finished_idx, 0] = speed
                 vel_local[finished_idx, 1] = 0.0
