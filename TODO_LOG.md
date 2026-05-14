@@ -1982,3 +1982,8 @@
 ## 2026-05-14 PCR eval 口径对齐
 
 - [x] Must: 将 `eval_highlevel.py` 的 PCR 运行口径收回到 `s_pcr_line_avoid_basic` 训练末期与 `play_highlevel.py` 可视化口径，保留 difficulty sweep，同时避免论文指标混入冷启动状态量或不一致的 viewer/debug 规则
+
+## 2026-05-14 PCR w 仲裁证据与机制图
+
+- [x] Must: 在 `eval_highlevel.py` 中补出高风险区间统计和 `risk_f` 分桶数据，用于直接证明 `geom-w` 在冲突区域降低 follow 权重并改善成功/碰撞结果
+- [x] Must: 新增论文级 `MoE-y` vs `MoE-y+geom-w` 机制图脚本，等两组 eval 输出完成后统一生成同图对比曲线与任务收益柱状图

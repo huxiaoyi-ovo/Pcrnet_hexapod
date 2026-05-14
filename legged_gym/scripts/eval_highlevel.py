@@ -172,6 +172,41 @@ def _apply_pcr_train_runtime_alignment(args, env) -> None:
         pass
 
 
+RISK_BIN_EDGES = (0.0, 0.25, 0.5, 0.75, 1.000001)
+RISK_BIN_LABELS = ("0.00-0.25", "0.25-0.50", "0.50-0.75", "0.75-1.00")
+
+
+def _risk_bin_index(risk_f: float) -> Optional[int]:
+    if not math.isfinite(risk_f):
+        return None
+    risk_v = float(np.clip(risk_f, 0.0, 1.0))
+    for idx in range(len(RISK_BIN_EDGES) - 1):
+        if RISK_BIN_EDGES[idx] <= risk_v < RISK_BIN_EDGES[idx + 1]:
+            return idx
+    return len(RISK_BIN_LABELS) - 1
+
+
+def _empty_risk_bin_state() -> list:
+    return [
+        {
+            "steps": 0,
+            "gate_y_raw_sum": 0.0,
+            "gate_y_raw_sq_sum": 0.0,
+            "y_eff_sum": 0.0,
+            "y_eff_sq_sum": 0.0,
+            "suppression_sum": 0.0,
+            "suppression_sq_sum": 0.0,
+            "w_sum": 0.0,
+            "w_sq_sum": 0.0,
+            "risk_f_sum": 0.0,
+            "risk_a_sum": 0.0,
+            "risk_delta_sum": 0.0,
+            "near_miss_steps": 0,
+        }
+        for _ in RISK_BIN_LABELS
+    ]
+
+
 def _compute_moe_follow_cmd_from_goal(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
@@ -236,6 +271,12 @@ class EpisodeAccumulator:
     gate_region_steps: int = 0
     gate_region_y_eff_sum: float = 0.0
     gate_region_near_miss_steps: int = 0
+    high_risk_y_eff_sum: float = 0.0
+    high_risk_w_sum: float = 0.0
+    high_risk_risk_f_sum: float = 0.0
+    high_risk_risk_a_sum: float = 0.0
+    high_risk_near_miss_steps: int = 0
+    risk_bin_stats: list = field(default_factory=_empty_risk_bin_state)
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -862,8 +903,32 @@ class EvalRunner:
                         if risk_f_v >= gate_region_risk_threshold:
                             ai.gate_region_steps += 1
                             ai.gate_region_y_eff_sum += y_eff_v
+                            ai.high_risk_y_eff_sum += y_eff_v
+                            ai.high_risk_w_sum += w_v
+                            ai.high_risk_risk_f_sum += risk_f_v
+                            ai.high_risk_risk_a_sum += risk_a_v
                             if near_miss_now:
                                 ai.gate_region_near_miss_steps += 1
+                                ai.high_risk_near_miss_steps += 1
+
+                        risk_bin_idx = _risk_bin_index(risk_f_v)
+                        if risk_bin_idx is not None:
+                            bin_state = ai.risk_bin_stats[risk_bin_idx]
+                            suppression_v = gate_raw_v - y_eff_v
+                            bin_state["steps"] += 1
+                            bin_state["gate_y_raw_sum"] += gate_raw_v
+                            bin_state["gate_y_raw_sq_sum"] += gate_raw_v * gate_raw_v
+                            bin_state["y_eff_sum"] += y_eff_v
+                            bin_state["y_eff_sq_sum"] += y_eff_v * y_eff_v
+                            bin_state["suppression_sum"] += suppression_v
+                            bin_state["suppression_sq_sum"] += suppression_v * suppression_v
+                            bin_state["w_sum"] += w_v
+                            bin_state["w_sq_sum"] += w_v * w_v
+                            bin_state["risk_f_sum"] += risk_f_v
+                            bin_state["risk_a_sum"] += risk_a_v
+                            bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
+                            if near_miss_now:
+                                bin_state["near_miss_steps"] += 1
 
                         cmd_f_v = [float("nan"), float("nan"), float("nan")]
                         cmd_a_v = [float("nan"), float("nan"), float("nan")]
@@ -942,6 +1007,39 @@ class EvalRunner:
                         if ai.gate_region_steps > 0
                         else float("nan")
                     )
+                    high_risk_steps = int(ai.gate_region_steps)
+                    high_risk_denom = float(max(high_risk_steps, 1))
+                    high_risk_ratio = float(high_risk_steps) / denom_steps
+                    high_risk_y_eff_mean = (
+                        ai.high_risk_y_eff_sum / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
+                    high_risk_w_mean = (
+                        ai.high_risk_w_sum / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
+                    high_risk_risk_f_mean = (
+                        ai.high_risk_risk_f_sum / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
+                    high_risk_risk_a_mean = (
+                        ai.high_risk_risk_a_sum / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
+                    high_risk_risk_delta_mean = (
+                        (ai.high_risk_risk_f_sum - ai.high_risk_risk_a_sum) / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
+                    high_risk_near_miss_rate = (
+                        float(ai.high_risk_near_miss_steps) / high_risk_denom
+                        if high_risk_steps > 0
+                        else float("nan")
+                    )
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
@@ -975,6 +1073,15 @@ class EvalRunner:
                             "gate_region_steps": ai.gate_region_steps,
                             "gate_region_y_eff_mean": gate_region_y_eff_mean,
                             "gate_region_near_miss_rate": gate_region_near_miss_rate,
+                            "high_risk_steps": high_risk_steps,
+                            "high_risk_ratio": high_risk_ratio,
+                            "high_risk_y_eff_mean": high_risk_y_eff_mean,
+                            "high_risk_w_mean": high_risk_w_mean,
+                            "high_risk_risk_f_mean": high_risk_risk_f_mean,
+                            "high_risk_risk_a_mean": high_risk_risk_a_mean,
+                            "high_risk_risk_delta_mean": high_risk_risk_delta_mean,
+                            "high_risk_near_miss_rate": high_risk_near_miss_rate,
+                            "risk_bin_stats": [dict(bin_state) for bin_state in ai.risk_bin_stats],
                             "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
                             "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
                             "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
@@ -1036,6 +1143,152 @@ class EvalRunner:
                     out.append(vv)
             return out
 
+        def _high_risk_summary(sub_rows: List[Dict]) -> Dict:
+            high_rows = [r for r in sub_rows if int(r.get("high_risk_steps", 0)) > 0]
+            n_high = len(high_rows)
+            return {
+                "high_risk_episode_rate": float(n_high / max(1, len(sub_rows))),
+                "high_risk_success_rate": (
+                    float(sum(int(r.get("success", 0)) for r in high_rows) / max(1, n_high))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_collision_rate": (
+                    float(sum(int(r.get("episode_collision", 0)) for r in high_rows) / max(1, n_high))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_progress_rate": (
+                    float(sum(int(r.get("progress_reached", 0)) for r in high_rows) / max(1, n_high))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_y_eff_mean": (
+                    float(np.mean(_clean([r.get("high_risk_y_eff_mean", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_w_mean": (
+                    float(np.mean(_clean([r.get("high_risk_w_mean", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_risk_f_mean": (
+                    float(np.mean(_clean([r.get("high_risk_risk_f_mean", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_risk_a_mean": (
+                    float(np.mean(_clean([r.get("high_risk_risk_a_mean", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_risk_delta_mean": (
+                    float(np.mean(_clean([r.get("high_risk_risk_delta_mean", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+                "high_risk_near_miss_rate_mean": (
+                    float(np.mean(_clean([r.get("high_risk_near_miss_rate", float("nan")) for r in high_rows])))
+                    if n_high > 0
+                    else float("nan")
+                ),
+            }
+
+        def _risk_bins_summary(sub_rows: List[Dict]) -> List[Dict]:
+            bins = _empty_risk_bin_state()
+            episode_sets = [
+                {"episodes": set(), "success": set(), "collision": set(), "progress": set()}
+                for _ in RISK_BIN_LABELS
+            ]
+            for row_idx, row in enumerate(sub_rows):
+                row_bins = row.get("risk_bin_stats", [])
+                if not isinstance(row_bins, list):
+                    continue
+                for idx, row_bin in enumerate(row_bins[:len(RISK_BIN_LABELS)]):
+                    if not isinstance(row_bin, dict):
+                        continue
+                    steps = int(row_bin.get("steps", 0) or 0)
+                    if steps <= 0:
+                        continue
+                    bins[idx]["steps"] += steps
+                    for key in (
+                        "gate_y_raw_sum",
+                        "gate_y_raw_sq_sum",
+                        "y_eff_sum",
+                        "y_eff_sq_sum",
+                        "suppression_sum",
+                        "suppression_sq_sum",
+                        "w_sum",
+                        "w_sq_sum",
+                        "risk_f_sum",
+                        "risk_a_sum",
+                        "risk_delta_sum",
+                        "near_miss_steps",
+                    ):
+                        bins[idx][key] += float(row_bin.get(key, 0.0) or 0.0)
+                    episode_sets[idx]["episodes"].add(row_idx)
+                    if int(row.get("success", 0)):
+                        episode_sets[idx]["success"].add(row_idx)
+                    if int(row.get("episode_collision", 0)):
+                        episode_sets[idx]["collision"].add(row_idx)
+                    if int(row.get("progress_reached", 0)):
+                        episode_sets[idx]["progress"].add(row_idx)
+            out = []
+            for idx, label in enumerate(RISK_BIN_LABELS):
+                steps = int(bins[idx]["steps"])
+                episode_count = len(episode_sets[idx]["episodes"])
+                gate_y_raw_mean = bins[idx]["gate_y_raw_sum"] / float(steps) if steps > 0 else float("nan")
+                y_eff_mean = bins[idx]["y_eff_sum"] / float(steps) if steps > 0 else float("nan")
+                suppression_mean = (
+                    bins[idx]["suppression_sum"] / float(steps)
+                    if bins[idx].get("suppression_sum", 0.0) != 0.0 or bins[idx].get("suppression_sq_sum", 0.0) != 0.0
+                    else gate_y_raw_mean - y_eff_mean
+                ) if steps > 0 else float("nan")
+
+                def _sem_from_sums(sum_v: float, sq_sum_v: float) -> float:
+                    if steps <= 1:
+                        return float("nan")
+                    mean_v = sum_v / float(steps)
+                    var_v = max(0.0, sq_sum_v / float(steps) - mean_v * mean_v)
+                    return math.sqrt(var_v / float(steps))
+
+                out.append({
+                    "bin": label,
+                    "low": float(RISK_BIN_EDGES[idx]),
+                    "high": float(min(RISK_BIN_EDGES[idx + 1], 1.0)),
+                    "steps": steps,
+                    "episode_count": episode_count,
+                    "gate_y_raw_mean": gate_y_raw_mean,
+                    "gate_y_raw_sem": _sem_from_sums(bins[idx]["gate_y_raw_sum"], bins[idx]["gate_y_raw_sq_sum"]),
+                    "y_eff_mean": y_eff_mean,
+                    "y_eff_sem": _sem_from_sums(bins[idx]["y_eff_sum"], bins[idx]["y_eff_sq_sum"]),
+                    "suppression_mean": suppression_mean,
+                    "suppression_sem": _sem_from_sums(bins[idx]["suppression_sum"], bins[idx]["suppression_sq_sum"]),
+                    "w_mean": bins[idx]["w_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "w_sem": _sem_from_sums(bins[idx]["w_sum"], bins[idx]["w_sq_sum"]),
+                    "risk_f_mean": bins[idx]["risk_f_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "risk_a_mean": bins[idx]["risk_a_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "risk_delta_mean": bins[idx]["risk_delta_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "near_miss_rate": bins[idx]["near_miss_steps"] / float(steps) if steps > 0 else float("nan"),
+                    "success_episode_rate": (
+                        len(episode_sets[idx]["success"]) / float(episode_count)
+                        if episode_count > 0
+                        else float("nan")
+                    ),
+                    "collision_episode_rate": (
+                        len(episode_sets[idx]["collision"]) / float(episode_count)
+                        if episode_count > 0
+                        else float("nan")
+                    ),
+                    "progress_episode_rate": (
+                        len(episode_sets[idx]["progress"]) / float(episode_count)
+                        if episode_count > 0
+                        else float("nan")
+                    ),
+                })
+            return out
+
         success_flags = [int(r["success"]) for r in rows]
         follow_mae = _clean([r["follow_mae_m"] for r in rows])
         follow_rmse = _clean([r["follow_rmse_m"] for r in rows])
@@ -1083,6 +1336,8 @@ class EvalRunner:
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
         success_rate = float(succ_eps / max(1, total_eps))
+        high_risk_overall = _high_risk_summary(rows)
+        risk_bins_overall = _risk_bins_summary(rows)
 
         overall = {
             "episodes": total_eps,
@@ -1127,6 +1382,7 @@ class EvalRunner:
             "w_trigger_progress_mean": float(np.mean(w_trigger_progress)) if w_trigger_progress else float("nan"),
             "gate_region_y_eff_mean": float(np.mean(gate_region_y_eff)) if gate_region_y_eff else float("nan"),
             "gate_region_near_miss_rate_mean": float(np.mean(gate_region_near_miss)) if gate_region_near_miss else float("nan"),
+            **high_risk_overall,
             "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
             "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
             "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
@@ -1163,6 +1419,7 @@ class EvalRunner:
             rotate_only_d = _clean([r.get("rotate_only_rate", float("nan")) for r in sub])
             gate_region_y_eff_d = _clean([r.get("gate_region_y_eff_mean", float("nan")) for r in sub])
             gate_region_near_miss_d = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in sub])
+            high_risk_d = _high_risk_summary(sub)
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
@@ -1203,6 +1460,7 @@ class EvalRunner:
                 "gate_region_near_miss_rate_mean": (
                     float(np.mean(gate_region_near_miss_d)) if gate_region_near_miss_d else float("nan")
                 ),
+                **high_risk_d,
                 "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
                 "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
@@ -1257,8 +1515,12 @@ class EvalRunner:
             "params": self.param_info,
             "overall": overall,
             "by_difficulty": by_diff,
+            "risk_bins": risk_bins_overall,
             "resolved_protocol": self.resolved_protocol,
-            "per_episode": rows,
+            "per_episode": [
+                {k: v for k, v in row.items() if k != "risk_bin_stats"}
+                for row in rows
+            ],
         }
         return result
 
@@ -1311,6 +1573,14 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "gate_region_steps",
         "gate_region_y_eff_mean",
         "gate_region_near_miss_rate",
+        "high_risk_steps",
+        "high_risk_ratio",
+        "high_risk_y_eff_mean",
+        "high_risk_w_mean",
+        "high_risk_risk_f_mean",
+        "high_risk_risk_a_mean",
+        "high_risk_risk_delta_mean",
+        "high_risk_near_miss_rate",
         "cmd_jerk_lin_mean",
         "cmd_jerk_ang_mean",
         "cmd_f_mean_x",
@@ -1323,10 +1593,15 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "cmd_final_mean_y",
         "cmd_final_mean_w",
     ]
+    csv_rows = []
+    for row in rows:
+        row_out = dict(row)
+        row_out.pop("risk_bin_stats", None)
+        csv_rows.append(row_out)
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for row in rows:
+        for row in csv_rows:
             writer.writerow(row)
 
     timeseries_rows = metrics.get("timeseries", [])
@@ -1364,6 +1639,74 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             writer.writeheader()
             for row in timeseries_rows:
                 writer.writerow(row)
+    _write_mechanism_plots(metrics, out_dir)
+
+
+def _write_mechanism_plots(metrics: Dict, out_dir: str) -> None:
+    risk_bins = metrics.get("risk_bins", [])
+    if not isinstance(risk_bins, list) or len(risk_bins) == 0:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[Eval] mechanism plot skipped: matplotlib unavailable ({exc})", flush=True)
+        return
+
+    labels = [str(b.get("bin", "")) for b in risk_bins]
+    xs = np.arange(len(labels), dtype=np.float32)
+
+    def vals(key: str) -> List[float]:
+        out = []
+        for item in risk_bins:
+            v = _safe_float(item.get(key, float("nan")), default=float("nan"))
+            out.append(v)
+        return out
+
+    y_eff = vals("y_eff_mean")
+    w_vals = vals("w_mean")
+    success = vals("success_episode_rate")
+    collision = vals("collision_episode_rate")
+    steps = vals("steps")
+    episodes = vals("episode_count")
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.2), constrained_layout=True)
+    fig.suptitle("PCR Conflict Arbitration Mechanism by Follow-Risk Bin", fontsize=13)
+
+    axes[0, 0].plot(xs, y_eff, marker="o", linewidth=2.0, color="#1f77b4")
+    axes[0, 0].set_title("Executed Follow Weight")
+    axes[0, 0].set_ylabel("y_eff mean")
+    axes[0, 0].set_ylim(0.0, 1.0)
+
+    axes[0, 1].plot(xs, w_vals, marker="o", linewidth=2.0, color="#ff7f0e")
+    axes[0, 1].set_title("Conflict Prior")
+    axes[0, 1].set_ylabel("w mean")
+    axes[0, 1].set_ylim(0.0, 1.0)
+
+    axes[1, 0].plot(xs, success, marker="o", linewidth=2.0, color="#2ca02c", label="success")
+    axes[1, 0].plot(xs, collision, marker="s", linewidth=2.0, color="#d62728", label="collision")
+    axes[1, 0].set_title("Episode Outcome")
+    axes[1, 0].set_ylabel("rate")
+    axes[1, 0].set_ylim(0.0, 1.0)
+    axes[1, 0].legend(loc="best", frameon=False)
+
+    axes[1, 1].bar(xs - 0.18, steps, width=0.36, color="#9467bd", label="steps")
+    axes[1, 1].bar(xs + 0.18, episodes, width=0.36, color="#8c564b", label="episodes")
+    axes[1, 1].set_title("Bin Support")
+    axes[1, 1].set_ylabel("count")
+    axes[1, 1].legend(loc="best", frameon=False)
+
+    for ax in axes.reshape(-1):
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=20, ha="right")
+        ax.grid(True, alpha=0.25)
+        ax.set_xlabel("risk_f bin")
+
+    fig_path = os.path.join(out_dir, "mechanism_risk_bins.png")
+    fig.savefig(fig_path, dpi=220)
+    plt.close(fig)
+    print(f"[Eval] mechanism plot: {fig_path}", flush=True)
 
 
 def parse_args():
