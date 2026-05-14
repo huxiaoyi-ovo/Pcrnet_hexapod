@@ -1978,3 +1978,7 @@
 
 - [x] Must: 将 `e_L_conflict` 从单圆柱拐角改成受几何约束的 L 型墙面走廊，优先服务 MoE 策略直角转弯泛化演示
 - [x] Must: 同步物理墙体、目标轨迹和 `gt_affordance` 障碍图，避免仿真里有墙但策略输入里看不到墙
+
+## 2026-05-14 PCR eval 口径对齐
+
+- [x] Must: 将 `eval_highlevel.py` 的 PCR 运行口径收回到 `s_pcr_line_avoid_basic` 训练末期与 `play_highlevel.py` 可视化口径，保留 difficulty sweep，同时避免论文指标混入冷启动状态量或不一致的 viewer/debug 规则

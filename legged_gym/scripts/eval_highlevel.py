@@ -15,6 +15,7 @@ import json
 import math
 import time
 import argparse
+import types
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -96,6 +97,79 @@ def _difficulty_list(s: str) -> List[float]:
     if not out:
         out = [0.0, 0.25, 0.5, 0.75, 1.0]
     return out
+
+
+def _is_pcr_eval_task(args) -> bool:
+    return th.is_pcr_line_task_name(str(getattr(args, "task", "")))
+
+
+def _apply_pcr_play_env_alignment(args, env) -> None:
+    """Match the fixed PCR scene view used by play_highlevel."""
+    if not _is_pcr_eval_task(args):
+        return
+    if not hasattr(env, "env") or env.env is None:
+        return
+    env_impl = env.env
+    if hasattr(env_impl, "cfg") and hasattr(env_impl.cfg, "terrain"):
+        env_impl.cfg.terrain.curriculum = False
+    if hasattr(env_impl, "_update_terrain_curriculum"):
+        def _no_terrain_update(self, env_ids):
+            return
+        env_impl._update_terrain_curriculum = types.MethodType(_no_terrain_update, env_impl)
+    if hasattr(env_impl, "terrain_levels"):
+        env_impl.terrain_levels.fill_(0)
+        if hasattr(env_impl, "terrain_origins") and hasattr(env_impl, "terrain_types") and hasattr(env_impl, "env_origins"):
+            env_impl.env_origins[:] = env_impl.terrain_origins[env_impl.terrain_levels, env_impl.terrain_types]
+    freeze_stage = bool(getattr(args, "freeze_avoid_stage", False)) or (
+        getattr(args, "avoid_stage_override", None) is not None
+    )
+    if freeze_stage and hasattr(env_impl, "_advance_s_avoid_stage"):
+        def _no_stage_advance(self, next_stage):
+            return
+        env_impl._advance_s_avoid_stage = types.MethodType(_no_stage_advance, env_impl)
+    _apply_eval_avoid_stage_override(args, env, verbose=False)
+    if hasattr(env_impl, "debug_viz"):
+        env_impl.debug_viz = bool(getattr(args, "debug", False)) or (
+            _is_pcr_eval_task(args) and not bool(getattr(args, "headless", True))
+        )
+
+
+def _apply_eval_avoid_stage_override(args, env, *, verbose: bool = True) -> None:
+    if not _is_pcr_eval_task(args):
+        return
+    stage_override = getattr(args, "avoid_stage_override", None)
+    if stage_override is None:
+        return
+    if not hasattr(env, "env") or env.env is None:
+        return
+    env_impl = env.env
+    if not hasattr(env_impl, "s_avoid_stage") or not hasattr(env_impl, "s_avoid_stage_per_env"):
+        return
+    stage_value = int(stage_override)
+    env_impl.s_avoid_stage = stage_value
+    env_impl.s_avoid_stage_per_env.fill_(stage_value)
+    if hasattr(env_impl, "extras") and isinstance(env_impl.extras, dict):
+        env_impl.extras["avoid_stage"] = int(stage_value)
+    if verbose:
+        print(f"[Eval] s_avoid stage override -> {stage_value}", flush=True)
+
+
+def _apply_pcr_train_runtime_alignment(args, env) -> None:
+    """Use PCR train steady-state values for state fields that the policy observes."""
+    if not _is_pcr_eval_task(args):
+        return
+    if not hasattr(env, "forced_forward_speed"):
+        return
+    env.forced_forward_train_warmup_ratio = 1.0
+    env.forced_forward_stage_start_iter = 0
+    env.forced_forward_current_iter = 200
+    if hasattr(env, "env"):
+        env.forced_forward_stage_last = int(getattr(env.env, "s_avoid_stage", 1))
+    try:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        env._resample_forced_forward_speed(env_ids)
+    except Exception:
+        pass
 
 
 def _compute_moe_follow_cmd_from_goal(
@@ -187,6 +261,8 @@ class EvalRunner:
         env_cfg.seed = int(args.seed)
         th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="EvalHigh")
         self.env = th.HierarchicalHexapodEnv(args, self.device, env_cfg=env_cfg, train_cfg=train_cfg)
+        _apply_pcr_play_env_alignment(self.args, self.env)
+        _apply_pcr_train_runtime_alignment(self.args, self.env)
 
         self.aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
         self.aff_stack_buf = None
@@ -556,6 +632,8 @@ class EvalRunner:
 
             self.env.set_scene_difficulty_target(float(d))
             self.env._apply_scene_difficulty_for_resets(None)
+            _apply_eval_avoid_stage_override(self.args, self.env, verbose=False)
+            _apply_pcr_train_runtime_alignment(self.args, self.env)
             obs = self.env.reset()
             self.aff_stack_buf = None
             self.follow_aff_stack_buf = None
@@ -629,7 +707,13 @@ class EvalRunner:
                 self.env.clearance_override = None
                 self.env.reward_affordance_override = None
                 gate_y_raw = gate_diag["gate_y_raw"] if isinstance(gate_diag, dict) else None
-                next_obs, rewards, dones, info = self.env.step(cmd_raw, gate_y, gate_y_raw=gate_y_raw)
+                pcr_risk_override = gate_diag.get("risk_F", None) if isinstance(gate_diag, dict) else None
+                next_obs, rewards, dones, info = self.env.step(
+                    cmd_raw,
+                    gate_y,
+                    gate_y_raw=gate_y_raw,
+                    pcr_obstacle_risk_override=pcr_risk_override,
+                )
                 post_info = info.get("post_info", None) if isinstance(info, dict) else None
                 if isinstance(post_info, dict) and isinstance(gate_diag, dict):
                     post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
@@ -1133,10 +1217,20 @@ class EvalRunner:
                 "difficulty_levels": _difficulty_list(self.args.difficulty_levels),
                 "episodes": int(self.args.episodes),
                 "num_envs": int(self.args.num_envs),
+                "pcr_play_env_alignment": bool(_is_pcr_eval_task(self.args)),
+                "avoid_stage_override": None if getattr(self.args, "avoid_stage_override", None) is None else int(self.args.avoid_stage_override),
+                "freeze_avoid_stage": bool(getattr(self.args, "freeze_avoid_stage", False)) or (
+                    getattr(self.args, "avoid_stage_override", None) is not None
+                ),
+                "pcr_forced_forward_train_warmup_ratio": float(getattr(self.env, "forced_forward_train_warmup_ratio", float("nan"))),
                 "deterministic_policy": bool(not self.args.stochastic),
                 "mass_kg_for_cot": float(self.mass_kg),
                 "aff_stack": int(self.args.aff_stack),
+                "camera_enable": bool(getattr(self.args, "camera_enable", False)),
+                "camera_interval": None if getattr(self.args, "camera_interval", None) is None else int(self.args.camera_interval),
                 "gate_use_difficulty": bool(self.args.gate_use_difficulty),
+                "gate_safe_clamp": bool(getattr(self.args, "gate_safe_clamp", False)),
+                "gate_safe_max": float(getattr(self.args, "gate_safe_max", 0.3)),
                 "beta": None if self.args.beta is None else float(self.args.beta),
                 "w_mode": str(self.args.w_mode),
                 "w_tau": float(self.args.w_tau),
@@ -1289,12 +1383,28 @@ def parse_args():
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--decimation", type=int, default=5)
     parser.add_argument("--aff_stack", type=int, default=1)
+    parser.add_argument("--camera_enable", action="store_true", default=False)
+    parser.add_argument("--camera_interval", type=int, default=None)
 
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
     parser.add_argument("--stochastic", action="store_true", help="use stochastic policy sampling")
+    parser.add_argument(
+        "--avoid_stage_override",
+        type=int,
+        default=None,
+        choices=[1, 2, 3, 4],
+        help="fix PCR obstacle stage, matching play_highlevel override semantics",
+    )
+    parser.add_argument(
+        "--freeze_avoid_stage",
+        action="store_true",
+        help="freeze s_avoid stage during eval; implied by --avoid_stage_override",
+    )
 
     parser.add_argument("--gate_use_difficulty", action="store_true")
+    parser.add_argument("--gate_safe_clamp", action="store_true")
+    parser.add_argument("--gate_safe_max", type=float, default=0.3)
     parser.add_argument("--beta", type=float, default=None)
     parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom"])
     parser.add_argument("--w_tau", type=float, default=0.25)
@@ -1323,6 +1433,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if args.camera_interval is not None and args.camera_interval < 1:
+        args.camera_interval = 1
     if bool(getattr(args, "viewer", False)):
         args.headless = False
     th.capture_cli_explicit_arg_values(args, parser)
