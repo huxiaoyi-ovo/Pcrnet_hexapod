@@ -539,12 +539,20 @@ class EvalRunner:
         timeseries_stride = max(1, int(getattr(self.args, "timeseries_stride", 1)))
         w_trigger_threshold = float(getattr(self.args, "w_trigger_threshold", 0.5))
         gate_region_risk_threshold = float(getattr(self.args, "gate_region_risk_threshold", 0.5))
+        progress_interval_s = max(0.0, float(getattr(self.args, "progress_interval_s", 5.0)))
 
         global_episode_idx = 0
+        eval_start_t = time.perf_counter()
+        last_progress_t = eval_start_t
 
         for level_idx, d in enumerate(difficulty_levels):
             seed_level = int(self.args.seed + level_idx)
             _setup_seed(seed_level)
+            print(
+                f"[Eval] level {level_idx + 1}/{len(difficulty_levels)} "
+                f"difficulty={float(d):.3f} target_episodes={per_level_target}",
+                flush=True,
+            )
 
             self.env.set_scene_difficulty_target(float(d))
             self.env._apply_scene_difficulty_for_resets(None)
@@ -907,6 +915,20 @@ class EvalRunner:
                     done_episodes += 1
 
                     acc[i] = EpisodeAccumulator()
+
+                now_t = time.perf_counter()
+                if progress_interval_s > 0.0 and (now_t - last_progress_t) >= progress_interval_s:
+                    elapsed = now_t - eval_start_t
+                    overall_done = min(global_episode_idx, episodes_total)
+                    print(
+                        f"[Eval] progress level={level_idx + 1}/{len(difficulty_levels)} "
+                        f"difficulty={float(d):.3f} "
+                        f"level_eps={done_episodes}/{per_level_target} "
+                        f"total_eps={overall_done}/{episodes_total} "
+                        f"elapsed={elapsed:.1f}s",
+                        flush=True,
+                    )
+                    last_progress_t = now_t
 
                 self.done_prev = dones.clone()
                 obs = next_obs
@@ -1286,6 +1308,7 @@ def parse_args():
     parser.add_argument("--dump_timeseries", action="store_true", help="write step-level mechanism traces")
     parser.add_argument("--timeseries_episodes", type=int, default=8, help="number of completed episodes to trace")
     parser.add_argument("--timeseries_stride", type=int, default=1, help="record one trace row every N high-level steps")
+    parser.add_argument("--progress_interval_s", type=float, default=5.0, help="print eval progress every N seconds; <=0 disables")
     parser.add_argument("--w_trigger_threshold", type=float, default=0.5, help="threshold for w trigger timing metrics")
     parser.add_argument(
         "--gate_region_risk_threshold",
@@ -1295,9 +1318,13 @@ def parse_args():
     )
 
     parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument("--viewer", action="store_true", help="open Isaac Gym viewer during eval")
+    parser.add_argument("--debug", action="store_true", help="enable debug prints and scene visualization")
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if bool(getattr(args, "viewer", False)):
+        args.headless = False
     th.capture_cli_explicit_arg_values(args, parser)
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
