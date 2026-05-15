@@ -24,6 +24,13 @@ METHOD_STYLE = {
 }
 
 
+OUTCOME_FIELDS = [
+    ("success_rate", "Success", "#2A9D8F"),
+    ("collision_only_rate", "Collision", "#D95F02"),
+    ("timeout_or_other_rate", "Timeout / other", "#8D99AE"),
+]
+
+
 def _load_metrics(eval_dir: str) -> Dict:
     path = os.path.join(eval_dir, "metrics.json")
     if not os.path.exists(path):
@@ -36,7 +43,18 @@ def _load_metrics(eval_dir: str) -> Dict:
             f"{path} has no risk_bins. Re-run eval_highlevel.py with the latest code "
             "before drawing the publication mechanism figure."
         )
+    _validate_outcome_fields(metrics, path)
     return metrics
+
+
+def _validate_outcome_fields(metrics: Dict, path: str) -> None:
+    overall = metrics.get("overall", {})
+    missing = [key for key, _, _ in OUTCOME_FIELDS if key not in overall]
+    if missing:
+        raise ValueError(
+            f"{path} misses mutually exclusive outcome fields {missing}. "
+            "Re-run eval_highlevel.py after the outcome-stat fix."
+        )
 
 
 def _finite_float(v, default=float("nan")) -> float:
@@ -75,17 +93,6 @@ def _series(metrics: Dict, key: str, sem_key: str, min_steps: int) -> Tuple[np.n
 
 def _overall_rate(metrics: Dict, key: str) -> float:
     return _finite_float(metrics.get("overall", {}).get(key, float("nan")))
-
-
-def _task_success_rate(metrics: Dict) -> float:
-    overall = metrics.get("overall", {})
-    return _finite_float(overall.get("task_success_rate", overall.get("success_rate", float("nan"))))
-
-
-def _binomial_sem(rate: float, n: float) -> float:
-    if not math.isfinite(rate) or n <= 1:
-        return float("nan")
-    return math.sqrt(max(0.0, rate * (1.0 - rate)) / float(n))
 
 
 def _write_plot_data(
@@ -195,60 +202,42 @@ def draw_figure(args) -> Tuple[str, str]:
     axes[1].set_xlabel(r"Follow-command risk $r_F$")
     axes[1].set_ylim(args.suppression_ymin, args.suppression_ymax)
 
-    metric_names = ["Success", "Collision"]
-    bar_x = np.arange(len(metric_names), dtype=np.float64)
-    width = 0.32
-    episodes_y = _finite_float(yonly.get("overall", {}).get("episodes", float("nan")))
-    episodes_w = _finite_float(geomw.get("overall", {}).get("episodes", float("nan")))
-    y_rates = np.asarray([
-        _task_success_rate(yonly),
-        _overall_rate(yonly, "episode_collision_rate"),
-    ])
-    w_rates = np.asarray([
-        _task_success_rate(geomw),
-        _overall_rate(geomw, "episode_collision_rate"),
-    ])
-    y_err = np.asarray([_binomial_sem(v, episodes_y) for v in y_rates])
-    w_err = np.asarray([_binomial_sem(v, episodes_w) for v in w_rates])
-
-    bars_y = axes[2].bar(
-        bar_x - width / 2.0,
-        y_rates,
-        width,
-        yerr=y_err,
-        color=METHOD_STYLE["yonly"]["color"],
-        alpha=0.88,
-        capsize=2.5,
-        label=args.yonly_label or METHOD_STYLE["yonly"]["label"],
-    )
-    bars_w = axes[2].bar(
-        bar_x + width / 2.0,
-        w_rates,
-        width,
-        yerr=w_err,
-        color=METHOD_STYLE["geomw"]["color"],
-        alpha=0.88,
-        capsize=2.5,
-        label=args.geomw_label or METHOD_STYLE["geomw"]["label"],
-    )
-    axes[2].set_title("C. Task outcome")
-    axes[2].set_ylabel("Episode rate")
-    axes[2].set_xticks(bar_x)
-    axes[2].set_xticklabels(metric_names)
-    axes[2].set_ylim(0.0, max(args.rate_ymax, float(np.nanmax([np.nanmax(y_rates), np.nanmax(w_rates)]) + 0.08)))
-
-    for bars in (bars_y, bars_w):
-        for bar in bars:
-            h = bar.get_height()
-            if math.isfinite(h):
+    outcome_methods = [
+        (args.yonly_label or METHOD_STYLE["yonly"]["label"], yonly),
+        (args.geomw_label or METHOD_STYLE["geomw"]["label"], geomw),
+    ]
+    outcome_x = np.arange(len(outcome_methods), dtype=np.float64)
+    bottoms = np.zeros(len(outcome_methods), dtype=np.float64)
+    for key, label, color in OUTCOME_FIELDS:
+        values = np.asarray([_overall_rate(metrics, key) for _, metrics in outcome_methods], dtype=np.float64)
+        axes[2].bar(
+            outcome_x,
+            values,
+            width=0.48,
+            bottom=bottoms,
+            color=color,
+            edgecolor="white",
+            linewidth=0.7,
+            label=label,
+        )
+        for xi, bottom, value in zip(outcome_x, bottoms, values):
+            if math.isfinite(value) and value >= args.outcome_label_min:
                 axes[2].text(
-                    bar.get_x() + bar.get_width() / 2.0,
-                    h + 0.012,
-                    f"{h:.2f}",
+                    xi,
+                    bottom + value / 2.0,
+                    f"{value:.2f}",
                     ha="center",
-                    va="bottom",
+                    va="center",
                     fontsize=7,
+                    color="white" if value >= 0.12 else "black",
                 )
+        bottoms = bottoms + np.nan_to_num(values, nan=0.0)
+
+    axes[2].set_title("C. Episode outcome")
+    axes[2].set_ylabel("Episode rate")
+    axes[2].set_xticks(outcome_x)
+    axes[2].set_xticklabels([name for name, _ in outcome_methods], rotation=18, ha="right")
+    axes[2].set_ylim(0.0, 1.0)
 
     for ax in axes[:2]:
         ax.set_xticks(x)
@@ -257,7 +246,7 @@ def draw_figure(args) -> Tuple[str, str]:
         ax.legend(frameon=False, loc="best")
 
     axes[2].grid(axis="y", color="#D8D8D8", linewidth=0.7, alpha=0.8)
-    axes[2].legend(frameon=False, loc="best")
+    axes[2].legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
 
     if args.title:
         fig.suptitle(args.title, fontsize=11, y=1.03)
@@ -287,6 +276,7 @@ def parse_args():
     parser.add_argument("--suppression_ymin", type=float, default=0.0)
     parser.add_argument("--suppression_ymax", type=float, default=0.45)
     parser.add_argument("--rate_ymax", type=float, default=0.5)
+    parser.add_argument("--outcome_label_min", type=float, default=0.055, help="Hide tiny stacked-bar labels below this rate.")
     parser.add_argument("--title", default="", help="Optional figure title.")
     return parser.parse_args()
 

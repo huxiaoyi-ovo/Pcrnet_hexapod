@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
+from isaacgym import gymapi
 import numpy as np
 import torch
 
@@ -27,6 +28,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, PROJECT_ROOT)
 
 from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
+from legged_gym.scripts import play_highlevel as ph
 from legged_gym.scripts import train_highlevel as th
 
 
@@ -290,23 +292,14 @@ class EvalRunner:
     def __init__(self, args):
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        th.import_modules()
         _setup_seed(args.seed)
+        if not hasattr(self.args, "teacher_ckpt") or getattr(self.args, "teacher_ckpt", None) is None:
+            self.args.teacher_ckpt = getattr(self.args, "ckpt", None)
+        runtime = ph.build_play_runtime_for_eval(self.args, self.device)
+        self.args = runtime.args
+        self.env = runtime.env
 
-        primary_meta = _load_experiment_meta_from_ckpt(getattr(args, "ckpt", None), self.device)
-        self.primary_meta = primary_meta
-        th.apply_experiment_meta_to_args(self.args, primary_meta, context="EvalHigh")
-        th.apply_runtime_ablation_cli_overrides(self.args, primary_meta, context="EvalHigh")
-        self.args.camera_enable = bool(getattr(self.args, "camera_enable", False)) or (self.args.mode == "student")
-
-        env_cfg, train_cfg = th.task_registry.get_cfgs(name=args.task)
-        env_cfg.seed = int(args.seed)
-        th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="EvalHigh")
-        self.env = th.HierarchicalHexapodEnv(args, self.device, env_cfg=env_cfg, train_cfg=train_cfg)
-        _apply_pcr_play_env_alignment(self.args, self.env)
-        _apply_pcr_train_runtime_alignment(self.args, self.env)
-
-        self.aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
+        self.aff_stack = max(int(getattr(self.args, "aff_stack", 1)), 1)
         self.aff_stack_buf = None
         self.follow_aff_stack_buf = None
         self.avoid_aff_stack_buf = None
@@ -315,21 +308,20 @@ class EvalRunner:
         self.mass_kg = self._estimate_robot_mass_kg()
         self.g = 9.81
 
-        self.policy = None
-        self.avoid_model = None
-        self.vision_model = None
-        self.policy_meta = None
-        self.aux_checkpoint_meta: Dict[str, Dict] = {}
-        self.gate_state_dim: Optional[int] = None
-        self.avoid_state_dim: Optional[int] = None
-
-        self._load_models()
+        self.policy = runtime.policy
+        self.avoid_model = runtime.avoid_policy
+        self.vision_model = runtime.vision_model
+        self.primary_meta = runtime.primary_meta
+        self.policy_meta = runtime.policy_meta
+        self.aux_checkpoint_meta = runtime.aux_checkpoint_meta
+        self.gate_state_dim = runtime.gate_state_dim
+        self.avoid_state_dim = runtime.avoid_state_dim
 
         self.param_info = self._build_param_info()
         self.resolved_protocol = th.build_resolved_protocol(
             self.args,
             self.env,
-            primary_ckpt_path=getattr(self.args, "ckpt", None),
+            primary_ckpt_path=getattr(self.args, "teacher_ckpt", getattr(self.args, "ckpt", None)),
             primary_meta=self.policy_meta if isinstance(self.policy_meta, dict) else self.primary_meta,
             aux_sources=self.aux_checkpoint_meta,
         )
@@ -510,44 +502,7 @@ class EvalRunner:
         return info
 
     def _build_affordance_bundle(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        mode = getattr(self.args, "mode", "teacher")
-        if mode == "student":
-            with torch.no_grad():
-                vis_out = self.vision_model(obs_dict["depth"], normalize=True)
-            follow_aff = torch.stack(
-                [vis_out["occupancy"], vis_out["passable_gap"], vis_out["low_obstacle"]],
-                dim=1,
-            )
-            follow_aff = th.resize_affordance_map(follow_aff, self.env.affordance_map_size)
-            avoid_aff = th.build_avoid_local_map_2ch(
-                follow_aff,
-                visible_mask=getattr(self.env, "affordance_visible_mask", None),
-            )
-            follow_difficulty = th.difficulty_from_gap(follow_aff)
-            avoid_difficulty = self.env._compute_objective_difficulty_from_local_map(avoid_aff)
-        else:
-            follow_aff = obs_dict["gt_affordance"]
-            avoid_aff = obs_dict.get(
-                "local_map_2ch",
-                th.build_avoid_local_map_2ch(
-                    follow_aff,
-                    visible_mask=getattr(self.env, "affordance_visible_mask", None),
-                ),
-            )
-            follow_difficulty = obs_dict.get("gt_difficulty", th.difficulty_from_gap(follow_aff))
-            if "actor_difficulty" in obs_dict:
-                avoid_difficulty = obs_dict["actor_difficulty"]
-            else:
-                avoid_difficulty = self.env._compute_objective_difficulty_from_local_map(avoid_aff)
-
-        return {
-            "follow_aff": follow_aff,
-            "follow_difficulty": follow_difficulty,
-            "avoid_aff": avoid_aff,
-            "avoid_difficulty": avoid_difficulty,
-            "gate_aff": avoid_aff,
-            "gate_difficulty": avoid_difficulty,
-        }
+        return ph.compute_play_affordance_bundle(self.args, self.env, obs_dict, self.vision_model)
 
     def _roll_aff_stack(
         self,
@@ -577,12 +532,30 @@ class EvalRunner:
         gate_aff_map: Optional[torch.Tensor] = None,
     ):
         state = obs_dict["state"]
-        goal = th.get_policy_goal_tensor(obs_dict, self.args.skill)
-        avoid_goal = obs_dict["goal"]
+        policy_goal = th.get_policy_goal_tensor(obs_dict, self.args.skill)
+        goal = torch.zeros_like(policy_goal) if bool(getattr(self.args, "zero_goal", False)) else policy_goal
+        avoid_goal = torch.zeros_like(obs_dict["goal"]) if bool(getattr(self.args, "zero_goal", False)) else obs_dict["goal"]
+        policy_aff_stack = torch.zeros_like(aff_stack) if bool(getattr(self.args, "zero_local_map", False)) else aff_stack
+        difficulty_input = torch.zeros_like(difficulty) if bool(getattr(self.args, "zero_local_map", False)) else difficulty
 
         if self.args.skill == "moe":
             if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:
                 raise ValueError("MoE eval requires avoid affordance inputs and gate affordance map.")
+            avoid_aff_input = (
+                torch.zeros_like(avoid_aff_stack)
+                if bool(getattr(self.args, "zero_local_map", False))
+                else avoid_aff_stack
+            )
+            gate_aff_input = (
+                torch.zeros_like(gate_aff_map)
+                if bool(getattr(self.args, "zero_local_map", False))
+                else gate_aff_map
+            )
+            avoid_difficulty_input = (
+                torch.zeros_like(avoid_difficulty)
+                if bool(getattr(self.args, "zero_local_map", False))
+                else avoid_difficulty
+            )
             target_avoid_state_dim = self.avoid_state_dim or int(state.shape[1])
             target_gate_state_dim = self.gate_state_dim or int(state.shape[1])
             expert_state = th.get_moe_expert_state_inputs(
@@ -590,7 +563,7 @@ class EvalRunner:
             )
             gate_state = th.match_state_dim(state, target_gate_state_dim, label="eval_gate_state")
             with torch.no_grad():
-                cmd_f = _compute_moe_follow_cmd_from_goal(
+                cmd_f = ph._compute_moe_follow_cmd_from_goal(
                     expert_state,
                     goal,
                     self.done_prev,
@@ -598,29 +571,31 @@ class EvalRunner:
                     env_ref=self.env,
                 )
                 cmd_a, _ = self.avoid_model.get_action(
-                    avoid_aff_stack,
+                    avoid_aff_input,
                     expert_state,
                     avoid_goal,
-                    avoid_difficulty,
-                    deterministic=not self.args.stochastic,
+                    avoid_difficulty_input,
+                    deterministic=True,
                 )
                 gate_difficulty = difficulty if self.args.gate_use_difficulty else torch.zeros_like(difficulty)
+                if bool(getattr(self.args, "zero_local_map", False)):
+                    gate_difficulty = torch.zeros_like(gate_difficulty)
                 gate_y_raw, _ = self.policy.get_action(
-                    aff_stack,
+                    policy_aff_stack,
                     gate_state,
                     goal,
                     gate_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, gate_aff_map, gate_y_raw, cmd_f, cmd_a)
+                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, gate_aff_input, gate_y_raw, cmd_f, cmd_a)
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
             cmd, _ = self.policy.get_action(
-                aff_stack,
+                policy_aff_stack,
                 state,
                 goal,
-                difficulty,
+                difficulty_input,
                 deterministic=not self.args.stochastic,
             )
         return cmd, None, None
@@ -674,8 +649,7 @@ class EvalRunner:
 
             self.env.set_scene_difficulty_target(float(d))
             self.env._apply_scene_difficulty_for_resets(None)
-            _apply_eval_avoid_stage_override(self.args, self.env, verbose=False)
-            _apply_pcr_train_runtime_alignment(self.args, self.env)
+            ph._maybe_apply_s_avoid_stage_override_runtime(self.args, self.env)
             obs = self.env.reset()
             self.aff_stack_buf = None
             self.follow_aff_stack_buf = None
@@ -747,7 +721,7 @@ class EvalRunner:
                 aff_for_post = aff_bundle["gate_aff"] if self.args.skill == "moe" else actor_aff_map
                 self.env.clearance_affordance_override = aff_for_post
                 self.env.clearance_override = None
-                self.env.reward_affordance_override = None
+                self.env.reward_affordance_override = aff_for_post
                 gate_y_raw = gate_diag["gate_y_raw"] if isinstance(gate_diag, dict) else None
                 pcr_risk_override = gate_diag.get("risk_F", None) if isinstance(gate_diag, dict) else None
                 next_obs, rewards, dones, info = self.env.step(
@@ -997,17 +971,16 @@ class EvalRunner:
                     cot = float("nan")
                     if ai.distance_m > 1e-6:
                         cot = ai.energy_j / (self.mass_kg * self.g * ai.distance_m)
+                    final_success = bool(success_step[i].item())
                     success_event = bool(ai.success)
                     final_collision = bool(ai.episode_collision)
-                    task_success = bool(success_event and not final_collision)
-                    success_and_collision = bool(success_event and final_collision)
-                    timeout_or_other = bool((not success_event) and (not final_collision))
+                    task_success = final_success
+                    collision_only = bool(final_collision and not task_success)
+                    timeout_or_other = bool((not task_success) and (not final_collision))
                     if task_success:
                         outcome = "success"
-                    elif final_collision and not success_event:
+                    elif collision_only:
                         outcome = "collision"
-                    elif success_and_collision:
-                        outcome = "success_and_collision"
                     else:
                         outcome = "timeout_or_other"
 
@@ -1062,11 +1035,16 @@ class EvalRunner:
                             "difficulty": float(d),
                             "success": int(task_success),
                             "success_event": int(success_event),
-                            "time_to_success_s": float(ai.t_success_s) if task_success else float("nan"),
+                            "time_to_success_s": (
+                                float(ai.t_success_s)
+                                if task_success and math.isfinite(float(ai.t_success_s))
+                                else (float(ai.step_hl) * float(self.env.high_level_dt) if task_success else float("nan"))
+                            ),
                             "success_event_time_s": float(ai.t_success_s) if success_event else float("nan"),
                             "episode_collision": int(final_collision),
                             "collision_time_s": float(ai.t_collision_s) if final_collision else float("nan"),
-                            "success_and_collision": int(success_and_collision),
+                            "collision_only": int(collision_only),
+                            "success_and_collision": 0,
                             "timeout_or_other": int(timeout_or_other),
                             "outcome": outcome,
                             "follow_mae_m": follow_mae,
@@ -1320,7 +1298,7 @@ class EvalRunner:
 
         success_flags = [int(r["success"]) for r in rows]
         success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
-        success_and_collision_flags = [int(r.get("success_and_collision", 0)) for r in rows]
+        collision_only_flags = [int(r.get("collision_only", 0)) for r in rows]
         timeout_or_other_flags = [int(r.get("timeout_or_other", 0)) for r in rows]
         follow_mae = _clean([r["follow_mae_m"] for r in rows])
         follow_rmse = _clean([r["follow_rmse_m"] for r in rows])
@@ -1373,19 +1351,16 @@ class EvalRunner:
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
         success_event_eps = int(sum(success_event_flags))
-        success_and_collision_eps = int(sum(success_and_collision_flags))
+        collision_only_eps = int(sum(collision_only_flags))
         timeout_or_other_eps = int(sum(timeout_or_other_flags))
         collision_eps = int(sum(episode_collision))
-        collision_only_eps = int(sum(
-            int(c) and not int(s)
-            for c, s in zip(episode_collision, success_event_flags)
-        ))
         success_rate = float(succ_eps / max(1, total_eps))
         success_event_rate = float(success_event_eps / max(1, total_eps))
         collision_rate = float(collision_eps / max(1, total_eps))
-        success_and_collision_rate = float(success_and_collision_eps / max(1, total_eps))
+        success_and_collision_rate = 0.0
         timeout_or_other_rate = float(timeout_or_other_eps / max(1, total_eps))
         collision_only_rate = float(collision_only_eps / max(1, total_eps))
+        outcome_total_rate = success_rate + collision_only_rate + timeout_or_other_rate
         high_risk_overall = _high_risk_summary(rows)
         risk_bins_overall = _risk_bins_summary(rows)
 
@@ -1394,7 +1369,7 @@ class EvalRunner:
             "success_episodes": succ_eps,
             "task_success_episodes": succ_eps,
             "success_event_episodes": success_event_eps,
-            "success_and_collision_episodes": success_and_collision_eps,
+            "success_and_collision_episodes": 0,
             "timeout_or_other_episodes": timeout_or_other_eps,
             "collision_only_episodes": collision_only_eps,
             "success_rate": success_rate,
@@ -1403,6 +1378,7 @@ class EvalRunner:
             "success_and_collision_rate": success_and_collision_rate,
             "timeout_or_other_rate": timeout_or_other_rate,
             "collision_only_rate": collision_only_rate,
+            "outcome_total_rate": outcome_total_rate,
             "fail_ratio": float(1.0 - success_rate),
             "follow_mae_m_mean": float(np.mean(follow_mae)) if follow_mae else float("nan"),
             "follow_rmse_m_mean": float(np.mean(follow_rmse)) if follow_rmse else float("nan"),
@@ -1461,7 +1437,7 @@ class EvalRunner:
             sub = [r for r in rows if float(r["difficulty"]) == float(d)]
             succ = [int(r["success"]) for r in sub]
             success_event_d = [int(r.get("success_event", r["success"])) for r in sub]
-            success_and_collision_d = [int(r.get("success_and_collision", 0)) for r in sub]
+            collision_only_d = [int(r.get("collision_only", 0)) for r in sub]
             timeout_or_other_d = [int(r.get("timeout_or_other", 0)) for r in sub]
             mae = _clean([r["follow_mae_m"] for r in sub])
             rmse = _clean([r["follow_rmse_m"] for r in sub])
@@ -1494,20 +1470,17 @@ class EvalRunner:
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             success_event_rate_d = float(sum(success_event_d) / max(1, n))
-            success_and_collision_rate_d = float(sum(success_and_collision_d) / max(1, n))
             timeout_or_other_rate_d = float(sum(timeout_or_other_d) / max(1, n))
-            collision_only_rate_d = float(sum(
-                int(c) and not int(s)
-                for c, s in zip(collision_d, success_event_d)
-            ) / max(1, n))
+            collision_only_rate_d = float(sum(collision_only_d) / max(1, n))
             by_diff[f"{d:.3f}"] = {
                 "episodes": n,
                 "success_rate": sr,
                 "task_success_rate": sr,
                 "success_event_rate": success_event_rate_d,
-                "success_and_collision_rate": success_and_collision_rate_d,
+                "success_and_collision_rate": 0.0,
                 "timeout_or_other_rate": timeout_or_other_rate_d,
                 "collision_only_rate": collision_only_rate_d,
+                "outcome_total_rate": sr + collision_only_rate_d + timeout_or_other_rate_d,
                 "fail_ratio": float(1.0 - sr),
                 "follow_mae_m_mean": float(np.mean(mae)) if mae else float("nan"),
                 "follow_rmse_m_mean": float(np.mean(rmse)) if rmse else float("nan"),
@@ -1569,9 +1542,9 @@ class EvalRunner:
                 "pcr_forced_forward_train_warmup_ratio": float(getattr(self.env, "forced_forward_train_warmup_ratio", float("nan"))),
                 "deterministic_policy": bool(not self.args.stochastic),
                 "mass_kg_for_cot": float(self.mass_kg),
-                "success_definition": "task_success = success_event and not episode_collision",
+                "success_definition": "env/play success_mask on done episodes",
                 "success_event_source": "info.success_mask > s_avoid_episode_success_flags > success_bonus",
-                "outcome_categories": ["success", "collision", "success_and_collision", "timeout_or_other"],
+                "outcome_categories": ["success", "collision", "timeout_or_other"],
                 "aff_stack": int(self.args.aff_stack),
                 "camera_enable": bool(getattr(self.args, "camera_enable", False)),
                 "camera_interval": None if getattr(self.args, "camera_interval", None) is None else int(self.args.camera_interval),
@@ -1639,6 +1612,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "success_event_time_s",
         "episode_collision",
         "collision_time_s",
+        "collision_only",
         "success_and_collision",
         "timeout_or_other",
         "outcome",
@@ -1876,6 +1850,26 @@ def parse_args():
     if bool(getattr(args, "viewer", False)):
         args.headless = False
     th.capture_cli_explicit_arg_values(args, parser)
+    if not hasattr(args, "physics_engine"):
+        args.physics_engine = gymapi.SIM_PHYSX
+    if not hasattr(args, "sim_device_type"):
+        args.sim_device_type = "cuda"
+    if not hasattr(args, "compute_device_id"):
+        args.compute_device_id = 0
+    if not hasattr(args, "sim_device_id"):
+        args.sim_device_id = args.compute_device_id
+    if not hasattr(args, "sim_device"):
+        args.sim_device = f"cuda:{args.sim_device_id}" if args.sim_device_type == "cuda" else "cpu"
+    if not hasattr(args, "use_gpu"):
+        args.use_gpu = args.sim_device_type == "cuda"
+    if not hasattr(args, "use_gpu_pipeline"):
+        args.use_gpu_pipeline = args.sim_device_type == "cuda"
+    if not hasattr(args, "subscenes"):
+        args.subscenes = 0
+    if not hasattr(args, "num_threads"):
+        args.num_threads = 0
+    if not hasattr(args, "rl_device"):
+        args.rl_device = args.sim_device
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
     args._unknown_cli = list(unknown)
@@ -1899,9 +1893,10 @@ def main():
     print("-" * 72)
     print(f"Success rate: {overall['success_rate']:.4f} (fail={overall['fail_ratio']:.4f})")
     print(
-        "Outcome rates success_event/collision/success+collision/timeout: "
-        f"{overall['success_event_rate']:.4f} / {overall['episode_collision_rate']:.4f} / "
-        f"{overall['success_and_collision_rate']:.4f} / {overall['timeout_or_other_rate']:.4f}"
+        "Outcome rates success/collision/timeout (event/collision_all): "
+        f"{overall['success_rate']:.4f} / {overall['collision_only_rate']:.4f} / "
+        f"{overall['timeout_or_other_rate']:.4f} "
+        f"(event={overall['success_event_rate']:.4f}, collision_all={overall['episode_collision_rate']:.4f})"
     )
     print(f"Follow MAE/RMSE [m]: {overall['follow_mae_m_mean']:.4f} / {overall['follow_rmse_m_mean']:.4f}")
     print(

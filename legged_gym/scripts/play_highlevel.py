@@ -89,6 +89,319 @@ def _compute_moe_follow_cmd_from_goal(
     )
 
 
+def compute_play_affordance_bundle(args, env, obs, vision_model=None):
+    """Build the same affordance inputs used by play_highlevel."""
+    if obs is None:
+        raise ValueError("obs is None when building affordance map.")
+    skill = getattr(args, "skill", "follow")
+    if args.mode == "student":
+        if vision_model is None:
+            raise RuntimeError("vision_model is not initialized in student mode.")
+        with torch.no_grad():
+            vis_out = vision_model(obs["depth"], normalize=True)
+            raw_aff = torch.stack([
+                vis_out["occupancy"],
+                vis_out["passable_gap"],
+                vis_out["low_obstacle"],
+            ], dim=1)
+            raw_aff = th.resize_affordance_map(raw_aff, env.affordance_map_size)
+        avoid_aff = th.build_avoid_local_map_2ch(
+            raw_aff,
+            visible_mask=getattr(env, "affordance_visible_mask", None),
+        )
+        follow_difficulty = th.difficulty_from_gap(raw_aff)
+        avoid_difficulty = env._compute_objective_difficulty_from_local_map(avoid_aff)
+    else:
+        raw_aff = obs["gt_affordance"]
+        avoid_aff = obs.get(
+            "local_map_2ch",
+            th.build_avoid_local_map_2ch(
+                raw_aff,
+                visible_mask=getattr(env, "affordance_visible_mask", None),
+            ),
+        )
+        follow_difficulty = obs.get("gt_difficulty", th.difficulty_from_gap(raw_aff))
+        if "actor_difficulty" in obs:
+            avoid_difficulty = obs["actor_difficulty"]
+        else:
+            avoid_difficulty = env._compute_objective_difficulty_from_local_map(avoid_aff)
+    if skill == "avoid":
+        policy_aff = avoid_aff
+        policy_difficulty = avoid_difficulty
+    elif skill == "moe":
+        policy_aff = avoid_aff
+        policy_difficulty = avoid_difficulty
+    else:
+        policy_aff = raw_aff
+        policy_difficulty = follow_difficulty
+    return {
+        "raw_aff": raw_aff,
+        "policy_aff": policy_aff,
+        "policy_difficulty": policy_difficulty,
+        "follow_aff": raw_aff,
+        "follow_difficulty": follow_difficulty,
+        "avoid_aff": avoid_aff,
+        "avoid_difficulty": avoid_difficulty,
+        "gate_aff": avoid_aff,
+        "gate_difficulty": avoid_difficulty,
+    }
+
+
+def _ensure_play_runtime_arg_defaults(args) -> None:
+    defaults = {
+        "teacher_ckpt": getattr(args, "ckpt", None),
+        "camera_show": False,
+        "camera_save": False,
+        "camera_dir": "outputs/play_highlevel_camera",
+        "camera_env": 0,
+        "debug_cmd": False,
+        "debug_interval": 10,
+        "metrics_dir": None,
+        "avoid_map_debug_case": "",
+        "dump_teacher_every_s": 0.0,
+        "avoid_spawn_body_plus_y_deg": None,
+        "avoid_direct_single_obstacle": False,
+        "e_s_corridor_width": None,
+        "e_s_corridor_wall_thickness": None,
+        "e_s_corridor_curvature": None,
+        "expert_k_yaw": None,
+        "expert_heading_lock": None,
+        "expert_heading_release": None,
+        "disable_success_reset": False,
+        "keep_success_reset": False,
+        "show_expert_cmd": False,
+        "use_expert_cmd": False,
+        "use_follow_expert": False,
+        "force_cmd": None,
+        "heading_offset_override": None,
+        "heading_offset_flip": False,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    if getattr(args, "teacher_ckpt", None) is None and hasattr(args, "ckpt"):
+        args.teacher_ckpt = args.ckpt
+
+
+def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
+    """Create env/models with play_highlevel runtime semantics for eval statistics."""
+    _ensure_play_runtime_arg_defaults(args)
+    if args.task == "hex_terrain":
+        raise RuntimeError("hex_terrain 已移除，请改用当前 s_/e_ 任务")
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_follow_expert = bool(getattr(args, "use_follow_expert", False)) or bool(getattr(args, "use_expert_cmd", False))
+    avoid_map_debug_case = str(getattr(args, "avoid_map_debug_case", "")).strip().lower()
+    static_avoid_debug = args.task == "s_avoid_basic" and avoid_map_debug_case != ""
+    if use_follow_expert and getattr(args, "skill", "follow") != "follow":
+        raise ValueError("--use_follow_expert 仅支持 --skill follow")
+
+    primary_contract_ckpt = None
+    if not (use_follow_expert or static_avoid_debug or (getattr(args, "force_cmd", None) is not None)):
+        primary_contract_ckpt = getattr(args, "teacher_ckpt", None)
+    primary_meta = _load_experiment_meta_from_ckpt(primary_contract_ckpt, device)
+    th.apply_experiment_meta_to_args(args, primary_meta, context="PlayHigh")
+    th.apply_runtime_ablation_cli_overrides(args, primary_meta, context="PlayHigh")
+
+    th.import_modules()
+    if args.mode == "student" and not args.vision_ckpt:
+        raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
+    if args.mode == "student" and getattr(args, "skill", "follow") == "moe":
+        raise ValueError("当前未实现 Gate 的 student 回放契约，禁止使用 --mode student --skill moe。")
+    if getattr(args, "camera_show", False) and getattr(args, "headless", False):
+        print("[PlayHigh] ⚠ camera_show requested but headless=True. Disabling.")
+        args.camera_show = False
+    if getattr(args, "camera_show", False) or getattr(args, "camera_save", False):
+        args.camera_enable = True
+    if args.mode == "student":
+        args.camera_enable = True
+
+    env_cfg, train_cfg = th.task_registry.get_cfgs(name=args.task)
+    if getattr(args, "seed", None) is not None:
+        env_cfg.seed = int(args.seed)
+    th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="PlayHigh")
+    _maybe_apply_e_s_corridor_overrides(args, env_cfg)
+    _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
+    _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
+
+    env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
+    is_pcr_demo_task = bool(getattr(env, "is_pcr_line_task", False))
+    if getattr(args, "camera_interval", None) is None:
+        args.camera_interval = int(getattr(getattr(env.env, "camera_cfg", None), "capture_interval", 1))
+    if hasattr(env, "env") and hasattr(env.env, "cfg") and hasattr(env.env.cfg, "terrain"):
+        env.env.cfg.terrain.curriculum = False
+    if hasattr(env.env, "_update_terrain_curriculum"):
+        def _no_update(self, env_ids):
+            return
+        env.env._update_terrain_curriculum = types.MethodType(_no_update, env.env)
+    if hasattr(env.env, "terrain_levels"):
+        env.env.terrain_levels.fill_(0)
+        if hasattr(env.env, "terrain_origins") and hasattr(env.env, "terrain_types") and hasattr(env.env, "env_origins"):
+            env.env.env_origins[:] = env.env.terrain_origins[env.env.terrain_levels, env.env.terrain_types]
+    _maybe_apply_s_avoid_stage_override_runtime(args, env)
+    if hasattr(env, "env") and hasattr(env.env, "debug_viz"):
+        env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug or is_pcr_demo_task
+
+    vision_model = None
+    resolved_protocol_aux: Dict[str, Dict] = {}
+    if args.mode == "student":
+        vision_model = th.AffordanceEstimator(
+            depth_channels=1,
+            output_size=th.get_vision_native_output_size(),
+            max_depth_range=5.0
+        ).to(device)
+        ckpt = torch.load(args.vision_ckpt, map_location=device)
+        vision_meta = _ckpt_meta_from_obj(ckpt)
+        th.validate_vision_runtime_contract(
+            args,
+            env,
+            source_name="PlayHigh vision checkpoint",
+            ckpt_meta=vision_meta,
+            strict_meta=True,
+        )
+        state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+        vision_model.load_state_dict(state_dict)
+        vision_model.eval()
+        resolved_protocol_aux["vision_ckpt"] = {
+            "path": os.path.abspath(args.vision_ckpt),
+            "experiment_meta": vision_meta,
+        }
+
+    if getattr(args, "camera_env", 0) < 0:
+        args.camera_env = 0
+    if args.camera_env >= env.num_envs:
+        print(f"[PlayHigh] ⚠ camera_env={args.camera_env} out of range; clamping to {env.num_envs - 1}.")
+        args.camera_env = env.num_envs - 1
+
+    heading_offset = 0.0
+    if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
+        heading_offset = float(getattr(env.reward_cfg, "heading_offset_rad", 0.0))
+    if args.heading_offset_override is not None:
+        heading_offset = float(args.heading_offset_override)
+    elif args.heading_offset_flip:
+        heading_offset = -heading_offset
+    if hasattr(env, "reward_cfg") and env.reward_cfg is not None:
+        env.reward_cfg.heading_offset_rad = heading_offset
+    if hasattr(env, "env") and hasattr(env.env, "nav_cfg") and env.env.nav_cfg is not None:
+        env.env.nav_cfg.heading_offset_rad = heading_offset
+
+    obs = env.reset()
+    aff_bundle = compute_play_affordance_bundle(args, env, obs, vision_model)
+    aff_map = aff_bundle["policy_aff"]
+    aff_shape = aff_map.shape[1:]
+    aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
+    aff_channels = aff_shape[0] * aff_stack
+    cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
+    skill = getattr(args, "skill", "follow")
+    is_gate = skill == "moe"
+    expert_only_mode = use_follow_expert or static_avoid_debug or (getattr(args, "force_cmd", None) is not None)
+    policy = None
+    avoid_policy = None
+    gate_state_dim = int(obs["state"].shape[1])
+    avoid_state_dim = int(obs["state"].shape[1])
+    if not expert_only_mode:
+        if not args.teacher_ckpt:
+            raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
+        if is_gate:
+            if not args.avoid_ckpt:
+                raise ValueError("moe 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
+            gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            gate_meta = _ckpt_meta_from_obj(gate_ckpt)
+            gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
+            policy = th.GatePolicy(
+                affordance_channels=aff_channels,
+                state_dim=gate_state_dim,
+                goal_dim=obs["goal"].shape[1],
+            ).to(device)
+            avoid_ckpt = torch.load(args.avoid_ckpt, map_location=device)
+            avoid_meta = _ckpt_meta_from_obj(avoid_ckpt)
+            avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim
+            avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
+            avoid_policy = th.CmdVelExpert(
+                affordance_channels=avoid_aff_channels,
+                state_dim=avoid_state_dim,
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            _validate_expected_ckpt_meta(gate_meta, source_name="gate ckpt", expected_skill="moe", expected_mode=args.mode)
+            th.validate_checkpoint_contract_compatibility(
+                th.build_runtime_contract_meta(args, env),
+                gate_meta,
+                reference_name="current play runtime",
+                candidate_name="gate ckpt",
+                strict=True,
+            )
+            gate_state = gate_ckpt["model_state_dict"] if isinstance(gate_ckpt, dict) and "model_state_dict" in gate_ckpt else gate_ckpt
+            th.load_high_level_state_dict_compat(policy, gate_state, label="play_gate")
+            _validate_expected_ckpt_meta(avoid_meta, source_name="avoid ckpt", expected_skill="avoid", expected_mode=args.mode)
+            th.validate_checkpoint_contract_compatibility(
+                gate_meta,
+                avoid_meta,
+                reference_name="gate ckpt",
+                candidate_name="avoid ckpt",
+                strict=True,
+            )
+            avoid_state = avoid_ckpt["model_state_dict"] if isinstance(avoid_ckpt, dict) and "model_state_dict" in avoid_ckpt else avoid_ckpt
+            th.load_high_level_state_dict_compat(avoid_policy, avoid_state, label=f"play_expert:{os.path.basename(args.avoid_ckpt)}")
+            policy.eval()
+            avoid_policy.eval()
+            policy_meta = gate_meta
+            resolved_protocol_aux["teacher_ckpt"] = {
+                "path": os.path.abspath(args.teacher_ckpt),
+                "experiment_meta": gate_meta,
+            }
+            resolved_protocol_aux["avoid_ckpt"] = {
+                "path": os.path.abspath(args.avoid_ckpt),
+                "experiment_meta": avoid_meta,
+            }
+        else:
+            policy = th.CmdVelExpert(
+                affordance_channels=aff_channels,
+                state_dim=obs["state"].shape[1],
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            policy_meta = _ckpt_meta_from_obj(ckpt)
+            _validate_expected_ckpt_meta(policy_meta, source_name="policy ckpt", expected_skill=skill, expected_mode=args.mode)
+            th.validate_checkpoint_contract_compatibility(
+                th.build_runtime_contract_meta(args, env),
+                policy_meta,
+                reference_name="current play runtime",
+                candidate_name="policy ckpt",
+                strict=True,
+            )
+            state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+            th.load_high_level_state_dict_compat(policy, state_dict, label="play_policy")
+            policy.eval()
+            resolved_protocol_aux["teacher_ckpt"] = {
+                "path": os.path.abspath(args.teacher_ckpt),
+                "experiment_meta": policy_meta,
+            }
+    else:
+        policy_meta = primary_meta
+
+    return types.SimpleNamespace(
+        args=args,
+        device=device,
+        env=env,
+        obs=obs,
+        policy=policy,
+        avoid_policy=avoid_policy,
+        vision_model=vision_model,
+        primary_meta=primary_meta,
+        policy_meta=policy_meta,
+        aux_checkpoint_meta=resolved_protocol_aux,
+        gate_state_dim=gate_state_dim,
+        avoid_state_dim=avoid_state_dim,
+        aff_bundle=aff_bundle,
+        heading_offset=heading_offset,
+        use_follow_expert=use_follow_expert,
+        static_avoid_debug=static_avoid_debug,
+        expert_only_mode=expert_only_mode,
+    )
+
+
 def _prepare_metrics_dir(args) -> str:
     base = args.metrics_dir
     if base is None or str(base).strip() == "":
@@ -1941,61 +2254,7 @@ def main():
     skill = getattr(args, "skill", "follow")
 
     def _get_aff_bundle(current_obs):
-        if current_obs is None:
-            raise ValueError("obs is None when building affordance map.")
-        if args.mode == "student":
-            if vision_model is None:
-                raise RuntimeError("vision_model is not initialized in student mode.")
-            with torch.no_grad():
-                vis_out = vision_model(current_obs["depth"], normalize=True)
-                raw_aff = torch.stack([
-                    vis_out["occupancy"],
-                    vis_out["passable_gap"],
-                    vis_out["low_obstacle"],
-                ], dim=1)
-                raw_aff = th.resize_affordance_map(raw_aff, env.affordance_map_size)
-        else:
-            raw_aff = current_obs["gt_affordance"]
-        if args.mode == "student":
-            avoid_aff = th.build_avoid_local_map_2ch(
-                raw_aff,
-                visible_mask=getattr(env, "affordance_visible_mask", None),
-            )
-            follow_difficulty = th.difficulty_from_gap(raw_aff)
-            avoid_difficulty = env._compute_objective_difficulty_from_local_map(avoid_aff)
-        else:
-            avoid_aff = current_obs.get(
-                "local_map_2ch",
-                th.build_avoid_local_map_2ch(
-                    raw_aff,
-                    visible_mask=getattr(env, "affordance_visible_mask", None),
-                ),
-            )
-            follow_difficulty = current_obs.get("gt_difficulty", th.difficulty_from_gap(raw_aff))
-            if "actor_difficulty" in current_obs:
-                avoid_difficulty = current_obs["actor_difficulty"]
-            else:
-                avoid_difficulty = env._compute_objective_difficulty_from_local_map(avoid_aff)
-        if skill == "avoid":
-            policy_aff = avoid_aff
-            policy_difficulty = avoid_difficulty
-        elif skill == "moe":
-            policy_aff = avoid_aff
-            policy_difficulty = avoid_difficulty
-        else:
-            policy_aff = raw_aff
-            policy_difficulty = follow_difficulty
-        return {
-            "raw_aff": raw_aff,
-            "policy_aff": policy_aff,
-            "policy_difficulty": policy_difficulty,
-            "follow_aff": raw_aff,
-            "follow_difficulty": follow_difficulty,
-            "avoid_aff": avoid_aff,
-            "avoid_difficulty": avoid_difficulty,
-            "gate_aff": avoid_aff,
-            "gate_difficulty": avoid_difficulty,
-        }
+        return compute_play_affordance_bundle(args, env, current_obs, vision_model)
 
     _maybe_apply_s_avoid_stage_override_runtime(args, env)
     obs = env.reset()
@@ -2440,10 +2699,17 @@ def main():
                 cmd = torch.zeros_like(cmd)
             if force_cmd_tensor is not None:
                 cmd = force_cmd_tensor.expand(env.num_envs, -1)
-            env.clearance_override = env._compute_clearance_from_affordance(aff_map)
+            env.clearance_affordance_override = aff_map
+            env.clearance_override = None
             env.reward_affordance_override = aff_map
             gate_y_raw_step = gate_diag["gate_y_raw"] if (is_gate and isinstance(gate_diag, dict)) else None
-            obs, rewards, dones, info = env.step(cmd, gate_y if is_gate else None, gate_y_raw=gate_y_raw_step)
+            pcr_risk_override = gate_diag.get("risk_F", None) if isinstance(gate_diag, dict) else None
+            obs, rewards, dones, info = env.step(
+                cmd,
+                gate_y if is_gate else None,
+                gate_y_raw=gate_y_raw_step,
+                pcr_obstacle_risk_override=pcr_risk_override,
+            )
             post_info = info.get("post_info", None) if isinstance(info, dict) else None
             if isinstance(post_info, dict) and isinstance(gate_diag, dict):
                 post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
