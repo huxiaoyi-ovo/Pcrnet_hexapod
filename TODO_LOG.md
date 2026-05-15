@@ -1987,3 +1987,4 @@
 
 - [x] Must: 在 `eval_highlevel.py` 中补出高风险区间统计和 `risk_f` 分桶数据，用于直接证明 `geom-w` 在冲突区域降低 follow 权重并改善成功/碰撞结果
 - [x] Must: 新增论文级 `MoE-y` vs `MoE-y+geom-w` 机制图脚本，等两组 eval 输出完成后统一生成同图对比曲线与任务收益柱状图
+- [x] Must: 修复 `eval_highlevel.py` 的 PCR success 统计口径：episode 内累计成功事件，论文主成功必须同时满足成功事件与无碰撞，并显式输出互斥 outcome 诊断项

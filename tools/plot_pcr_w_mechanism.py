@@ -77,6 +77,11 @@ def _overall_rate(metrics: Dict, key: str) -> float:
     return _finite_float(metrics.get("overall", {}).get(key, float("nan")))
 
 
+def _task_success_rate(metrics: Dict) -> float:
+    overall = metrics.get("overall", {})
+    return _finite_float(overall.get("task_success_rate", overall.get("success_rate", float("nan"))))
+
+
 def _binomial_sem(rate: float, n: float) -> float:
     if not math.isfinite(rate) or n <= 1:
         return float("nan")
@@ -106,6 +111,7 @@ def _write_plot_data(
                 "suppression_mean": _finite_float(item.get("suppression_mean", float("nan"))),
                 "w_mean": _finite_float(item.get("w_mean", float("nan"))),
                 "success_episode_rate": _finite_float(item.get("success_episode_rate", float("nan"))),
+                "success_event_episode_rate": _finite_float(item.get("success_event_episode_rate", float("nan"))),
                 "collision_episode_rate": _finite_float(item.get("collision_episode_rate", float("nan"))),
             })
     out_path = os.path.join(out_dir, "pcr_w_mechanism_plot_data.json")
@@ -195,11 +201,11 @@ def draw_figure(args) -> Tuple[str, str]:
     episodes_y = _finite_float(yonly.get("overall", {}).get("episodes", float("nan")))
     episodes_w = _finite_float(geomw.get("overall", {}).get("episodes", float("nan")))
     y_rates = np.asarray([
-        _overall_rate(yonly, "success_rate"),
+        _task_success_rate(yonly),
         _overall_rate(yonly, "episode_collision_rate"),
     ])
     w_rates = np.asarray([
-        _overall_rate(geomw, "success_rate"),
+        _task_success_rate(geomw),
         _overall_rate(geomw, "episode_collision_rate"),
     ])
     y_err = np.asarray([_binomial_sem(v, episodes_y) for v in y_rates])

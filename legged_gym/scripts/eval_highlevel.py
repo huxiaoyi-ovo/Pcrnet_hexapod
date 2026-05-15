@@ -244,6 +244,7 @@ class EpisodeAccumulator:
     step_hl: int = 0
     success: bool = False
     t_success_s: float = float("nan")
+    t_collision_s: float = float("nan")
     follow_err_sum: float = 0.0
     follow_err_sq_sum: float = 0.0
     follow_err_count: int = 0
@@ -827,7 +828,10 @@ class EvalRunner:
                     progress_val = float(np.clip(progress_val, 0.0, 1.0))
                     ai.progress_ratio_best = max(ai.progress_ratio_best, progress_val)
                     ai.progress_reached = ai.progress_reached or (progress_val > 0.0)
-                    ai.episode_collision = ai.episode_collision or bool(episode_collision[i].item())
+                    collision_now = bool(episode_collision[i].item())
+                    if collision_now and not ai.episode_collision:
+                        ai.t_collision_s = float(ai.step_hl) * float(self.env.high_level_dt)
+                    ai.episode_collision = ai.episode_collision or collision_now
                     cross_line_val = _safe_float(cross_line_dist[i].item(), default=float("nan"))
                     ai.cross_line_dist_end = cross_line_val
                     if math.isfinite(cross_line_val):
@@ -993,7 +997,19 @@ class EvalRunner:
                     cot = float("nan")
                     if ai.distance_m > 1e-6:
                         cot = ai.energy_j / (self.mass_kg * self.g * ai.distance_m)
-                    final_success = bool(success_step[i].item())
+                    success_event = bool(ai.success)
+                    final_collision = bool(ai.episode_collision)
+                    task_success = bool(success_event and not final_collision)
+                    success_and_collision = bool(success_event and final_collision)
+                    timeout_or_other = bool((not success_event) and (not final_collision))
+                    if task_success:
+                        outcome = "success"
+                    elif final_collision and not success_event:
+                        outcome = "collision"
+                    elif success_and_collision:
+                        outcome = "success_and_collision"
+                    else:
+                        outcome = "timeout_or_other"
 
                     denom_steps = float(max(ai.step_hl, 1))
                     gate_region_denom = float(max(ai.gate_region_steps, 1))
@@ -1044,8 +1060,15 @@ class EvalRunner:
                         {
                             "episode_id": global_episode_idx,
                             "difficulty": float(d),
-                            "success": int(final_success),
-                            "time_to_success_s": float(ai.t_success_s) if final_success else float("nan"),
+                            "success": int(task_success),
+                            "success_event": int(success_event),
+                            "time_to_success_s": float(ai.t_success_s) if task_success else float("nan"),
+                            "success_event_time_s": float(ai.t_success_s) if success_event else float("nan"),
+                            "episode_collision": int(final_collision),
+                            "collision_time_s": float(ai.t_collision_s) if final_collision else float("nan"),
+                            "success_and_collision": int(success_and_collision),
+                            "timeout_or_other": int(timeout_or_other),
+                            "outcome": outcome,
                             "follow_mae_m": follow_mae,
                             "follow_rmse_m": follow_rmse,
                             "cot": cot,
@@ -1054,7 +1077,6 @@ class EvalRunner:
                             "steps_hl": ai.step_hl,
                             "cross_line_dist_end": ai.cross_line_dist_end,
                             "cross_line_dist_min": ai.cross_line_dist_min if math.isfinite(ai.cross_line_dist_min) else float("nan"),
-                            "episode_collision": int(ai.episode_collision),
                             "progress_reached": int(ai.progress_reached),
                             "progress_ratio_best": ai.progress_ratio_best,
                             "gate_y_raw_mean": ai.gate_y_raw_sum / denom_steps,
@@ -1198,7 +1220,7 @@ class EvalRunner:
         def _risk_bins_summary(sub_rows: List[Dict]) -> List[Dict]:
             bins = _empty_risk_bin_state()
             episode_sets = [
-                {"episodes": set(), "success": set(), "collision": set(), "progress": set()}
+                {"episodes": set(), "success": set(), "success_event": set(), "collision": set(), "progress": set()}
                 for _ in RISK_BIN_LABELS
             ]
             for row_idx, row in enumerate(sub_rows):
@@ -1230,6 +1252,8 @@ class EvalRunner:
                     episode_sets[idx]["episodes"].add(row_idx)
                     if int(row.get("success", 0)):
                         episode_sets[idx]["success"].add(row_idx)
+                    if int(row.get("success_event", 0)):
+                        episode_sets[idx]["success_event"].add(row_idx)
                     if int(row.get("episode_collision", 0)):
                         episode_sets[idx]["collision"].add(row_idx)
                     if int(row.get("progress_reached", 0)):
@@ -1276,6 +1300,11 @@ class EvalRunner:
                         if episode_count > 0
                         else float("nan")
                     ),
+                    "success_event_episode_rate": (
+                        len(episode_sets[idx]["success_event"]) / float(episode_count)
+                        if episode_count > 0
+                        else float("nan")
+                    ),
                     "collision_episode_rate": (
                         len(episode_sets[idx]["collision"]) / float(episode_count)
                         if episode_count > 0
@@ -1290,10 +1319,18 @@ class EvalRunner:
             return out
 
         success_flags = [int(r["success"]) for r in rows]
+        success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
+        success_and_collision_flags = [int(r.get("success_and_collision", 0)) for r in rows]
+        timeout_or_other_flags = [int(r.get("timeout_or_other", 0)) for r in rows]
         follow_mae = _clean([r["follow_mae_m"] for r in rows])
         follow_rmse = _clean([r["follow_rmse_m"] for r in rows])
         cot_vals = _clean([r["cot"] for r in rows])
         tts = _clean([r["time_to_success_s"] for r in rows if int(r["success"]) == 1])
+        success_event_tts = _clean([
+            r.get("success_event_time_s", float("nan"))
+            for r in rows
+            if int(r.get("success_event", 0)) == 1
+        ])
         cross_line_end = _clean([r.get("cross_line_dist_end", float("nan")) for r in rows])
         cross_line_min = _clean([r.get("cross_line_dist_min", float("nan")) for r in rows])
         episode_collision = [int(r.get("episode_collision", 0)) for r in rows]
@@ -1335,26 +1372,52 @@ class EvalRunner:
 
         total_eps = len(rows)
         succ_eps = int(sum(success_flags))
+        success_event_eps = int(sum(success_event_flags))
+        success_and_collision_eps = int(sum(success_and_collision_flags))
+        timeout_or_other_eps = int(sum(timeout_or_other_flags))
+        collision_eps = int(sum(episode_collision))
+        collision_only_eps = int(sum(
+            int(c) and not int(s)
+            for c, s in zip(episode_collision, success_event_flags)
+        ))
         success_rate = float(succ_eps / max(1, total_eps))
+        success_event_rate = float(success_event_eps / max(1, total_eps))
+        collision_rate = float(collision_eps / max(1, total_eps))
+        success_and_collision_rate = float(success_and_collision_eps / max(1, total_eps))
+        timeout_or_other_rate = float(timeout_or_other_eps / max(1, total_eps))
+        collision_only_rate = float(collision_only_eps / max(1, total_eps))
         high_risk_overall = _high_risk_summary(rows)
         risk_bins_overall = _risk_bins_summary(rows)
 
         overall = {
             "episodes": total_eps,
             "success_episodes": succ_eps,
+            "task_success_episodes": succ_eps,
+            "success_event_episodes": success_event_eps,
+            "success_and_collision_episodes": success_and_collision_eps,
+            "timeout_or_other_episodes": timeout_or_other_eps,
+            "collision_only_episodes": collision_only_eps,
             "success_rate": success_rate,
+            "task_success_rate": success_rate,
+            "success_event_rate": success_event_rate,
+            "success_and_collision_rate": success_and_collision_rate,
+            "timeout_or_other_rate": timeout_or_other_rate,
+            "collision_only_rate": collision_only_rate,
             "fail_ratio": float(1.0 - success_rate),
             "follow_mae_m_mean": float(np.mean(follow_mae)) if follow_mae else float("nan"),
             "follow_rmse_m_mean": float(np.mean(follow_rmse)) if follow_rmse else float("nan"),
             "time_to_success_s_mean": float(np.mean(tts)) if tts else float("nan"),
             "time_to_success_s_median": float(np.median(tts)) if tts else float("nan"),
             "time_to_success_s_p95": _quantile(tts, 0.95),
+            "success_event_time_s_mean": float(np.mean(success_event_tts)) if success_event_tts else float("nan"),
+            "success_event_time_s_median": float(np.median(success_event_tts)) if success_event_tts else float("nan"),
+            "success_event_time_s_p95": _quantile(success_event_tts, 0.95),
             "cot_mean": float(np.mean(cot_vals)) if cot_vals else float("nan"),
             "cot_median": float(np.median(cot_vals)) if cot_vals else float("nan"),
             "cot_p95": _quantile(cot_vals, 0.95),
             "cross_line_dist_end_mean": float(np.mean(cross_line_end)) if cross_line_end else float("nan"),
             "cross_line_dist_min_mean": float(np.mean(cross_line_min)) if cross_line_min else float("nan"),
-            "episode_collision_rate": float(sum(episode_collision) / max(1, total_eps)),
+            "episode_collision_rate": collision_rate,
             "progress_rate": float(sum(progress_flags) / max(1, total_eps)),
             "progress_ratio_mean": float(np.mean(progress_ratio)) if progress_ratio else 0.0,
             "progress_any_rate": float(sum(progress_flags) / max(1, total_eps)),
@@ -1397,10 +1460,18 @@ class EvalRunner:
         for d in unique_d:
             sub = [r for r in rows if float(r["difficulty"]) == float(d)]
             succ = [int(r["success"]) for r in sub]
+            success_event_d = [int(r.get("success_event", r["success"])) for r in sub]
+            success_and_collision_d = [int(r.get("success_and_collision", 0)) for r in sub]
+            timeout_or_other_d = [int(r.get("timeout_or_other", 0)) for r in sub]
             mae = _clean([r["follow_mae_m"] for r in sub])
             rmse = _clean([r["follow_rmse_m"] for r in sub])
             cot = _clean([r["cot"] for r in sub])
             tts_d = _clean([r["time_to_success_s"] for r in sub if int(r["success"]) == 1])
+            success_event_tts_d = _clean([
+                r.get("success_event_time_s", float("nan"))
+                for r in sub
+                if int(r.get("success_event", 0)) == 1
+            ])
             cross_line_end_d = _clean([r.get("cross_line_dist_end", float("nan")) for r in sub])
             cross_line_min_d = _clean([r.get("cross_line_dist_min", float("nan")) for r in sub])
             collision_d = [int(r.get("episode_collision", 0)) for r in sub]
@@ -1422,15 +1493,30 @@ class EvalRunner:
             high_risk_d = _high_risk_summary(sub)
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
+            success_event_rate_d = float(sum(success_event_d) / max(1, n))
+            success_and_collision_rate_d = float(sum(success_and_collision_d) / max(1, n))
+            timeout_or_other_rate_d = float(sum(timeout_or_other_d) / max(1, n))
+            collision_only_rate_d = float(sum(
+                int(c) and not int(s)
+                for c, s in zip(collision_d, success_event_d)
+            ) / max(1, n))
             by_diff[f"{d:.3f}"] = {
                 "episodes": n,
                 "success_rate": sr,
+                "task_success_rate": sr,
+                "success_event_rate": success_event_rate_d,
+                "success_and_collision_rate": success_and_collision_rate_d,
+                "timeout_or_other_rate": timeout_or_other_rate_d,
+                "collision_only_rate": collision_only_rate_d,
                 "fail_ratio": float(1.0 - sr),
                 "follow_mae_m_mean": float(np.mean(mae)) if mae else float("nan"),
                 "follow_rmse_m_mean": float(np.mean(rmse)) if rmse else float("nan"),
                 "time_to_success_s_mean": float(np.mean(tts_d)) if tts_d else float("nan"),
                 "time_to_success_s_median": float(np.median(tts_d)) if tts_d else float("nan"),
                 "time_to_success_s_p95": _quantile(tts_d, 0.95),
+                "success_event_time_s_mean": float(np.mean(success_event_tts_d)) if success_event_tts_d else float("nan"),
+                "success_event_time_s_median": float(np.median(success_event_tts_d)) if success_event_tts_d else float("nan"),
+                "success_event_time_s_p95": _quantile(success_event_tts_d, 0.95),
                 "cot_mean": float(np.mean(cot)) if cot else float("nan"),
                 "cot_median": float(np.median(cot)) if cot else float("nan"),
                 "cot_p95": _quantile(cot, 0.95),
@@ -1483,6 +1569,9 @@ class EvalRunner:
                 "pcr_forced_forward_train_warmup_ratio": float(getattr(self.env, "forced_forward_train_warmup_ratio", float("nan"))),
                 "deterministic_policy": bool(not self.args.stochastic),
                 "mass_kg_for_cot": float(self.mass_kg),
+                "success_definition": "task_success = success_event and not episode_collision",
+                "success_event_source": "info.success_mask > s_avoid_episode_success_flags > success_bonus",
+                "outcome_categories": ["success", "collision", "success_and_collision", "timeout_or_other"],
                 "aff_stack": int(self.args.aff_stack),
                 "camera_enable": bool(getattr(self.args, "camera_enable", False)),
                 "camera_interval": None if getattr(self.args, "camera_interval", None) is None else int(self.args.camera_interval),
@@ -1545,7 +1634,14 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "episode_id",
         "difficulty",
         "success",
+        "success_event",
         "time_to_success_s",
+        "success_event_time_s",
+        "episode_collision",
+        "collision_time_s",
+        "success_and_collision",
+        "timeout_or_other",
+        "outcome",
         "follow_mae_m",
         "follow_rmse_m",
         "cot",
@@ -1554,7 +1650,6 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "steps_hl",
         "cross_line_dist_end",
         "cross_line_dist_min",
-        "episode_collision",
         "progress_reached",
         "progress_ratio_best",
         "gate_y_raw_mean",
@@ -1803,6 +1898,11 @@ def main():
     print(f"Output: {out_dir}")
     print("-" * 72)
     print(f"Success rate: {overall['success_rate']:.4f} (fail={overall['fail_ratio']:.4f})")
+    print(
+        "Outcome rates success_event/collision/success+collision/timeout: "
+        f"{overall['success_event_rate']:.4f} / {overall['episode_collision_rate']:.4f} / "
+        f"{overall['success_and_collision_rate']:.4f} / {overall['timeout_or_other_rate']:.4f}"
+    )
     print(f"Follow MAE/RMSE [m]: {overall['follow_mae_m_mean']:.4f} / {overall['follow_rmse_m_mean']:.4f}")
     print(
         "Time-to-success [s] mean/med/p95: "
