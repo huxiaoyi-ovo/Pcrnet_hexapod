@@ -321,7 +321,7 @@ class EvalRunner:
         self.resolved_protocol = th.build_resolved_protocol(
             self.args,
             self.env,
-            primary_ckpt_path=getattr(self.args, "teacher_ckpt", getattr(self.args, "ckpt", None)),
+            primary_ckpt_path=getattr(self.args, "teacher_ckpt", getattr(self.args, "pcr_ckpt", None)),
             primary_meta=self.policy_meta if isinstance(self.policy_meta, dict) else self.primary_meta,
             aux_sources=self.aux_checkpoint_meta,
         )
@@ -1566,10 +1566,12 @@ class EvalRunner:
                 "timeseries_stride": int(getattr(self.args, "timeseries_stride", 1)),
                 "w_trigger_threshold": float(getattr(self.args, "w_trigger_threshold", 0.5)),
                 "gate_region_risk_threshold": float(getattr(self.args, "gate_region_risk_threshold", 0.5)),
+                "pcr_ckpt": os.path.abspath(self.args.pcr_ckpt) if getattr(self.args, "pcr_ckpt", None) else None,
                 "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
                 "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
                 "avoid_ckpt": os.path.abspath(self.args.avoid_ckpt) if getattr(self.args, "avoid_ckpt", None) else None,
                 "vision_ckpt": os.path.abspath(self.args.vision_ckpt) if getattr(self.args, "vision_ckpt", None) else None,
+                "lowlevel_ckpt": os.path.abspath(self.args.lowlevel_ckpt) if getattr(self.args, "lowlevel_ckpt", None) else None,
                 "low_level_ckpt": os.path.abspath(self.args.low_level_ckpt) if getattr(self.args, "low_level_ckpt", None) else None,
                 "unknown_cli_args": list(getattr(self.args, "_unknown_cli", [])),
                 "policy_experiment_meta": self.policy_meta,
@@ -1785,11 +1787,11 @@ def parse_args():
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--skill", type=str, default="follow", choices=["follow", "avoid", "moe"])
 
-    parser.add_argument("--ckpt", type=str, required=True, help="policy checkpoint (follow/avoid or gate for moe)")
+    parser.add_argument("--pcr_ckpt", type=str, required=True, help="PCR gate policy checkpoint")
     parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
-    parser.add_argument("--avoid_ckpt", type=str, default=None, help="avoid checkpoint for moe")
+    parser.add_argument("--avoid_ckpt", type=str, required=True, help="avoid checkpoint for moe")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="vision checkpoint for student mode")
-    parser.add_argument("--low_level_ckpt", type=str, required=True)
+    parser.add_argument("--lowlevel_ckpt", type=str, required=True, help="low-level locomotion checkpoint")
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_envs", type=int, default=256)
@@ -1818,7 +1820,11 @@ def parse_args():
     parser.add_argument("--gate_safe_clamp", action="store_true")
     parser.add_argument("--gate_safe_max", type=float, default=0.3)
     parser.add_argument("--beta", type=float, default=None)
-    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom"])
+    w_group = parser.add_mutually_exclusive_group(required=True)
+    w_group.add_argument("--yonly", action="store_true", help="evaluate MoE-y without w")
+    w_group.add_argument("--wgeom", action="store_true", help="evaluate MoE-y with geometric w")
+    w_group.add_argument("--wlearned", action="store_true", help="evaluate MoE-y with learned w")
+    parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "learned"])
     parser.add_argument("--w_tau", type=float, default=0.25)
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
@@ -1845,6 +1851,25 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if args.yonly:
+        selected_w_mode = "none"
+    elif args.wgeom:
+        selected_w_mode = "geom"
+    elif args.wlearned:
+        selected_w_mode = "learned"
+    else:
+        parser.error("必须指定策略模式：--yonly / --wgeom / --wlearned 三选一")
+    if args.w_mode is not None and args.w_mode != selected_w_mode:
+        parser.error(
+            f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned'}[selected_w_mode] } 不一致"
+        )
+    args.w_mode = selected_w_mode
+    for opt_name in ("pcr_ckpt", "avoid_ckpt", "lowlevel_ckpt"):
+        if not str(getattr(args, opt_name, "") or "").strip():
+            parser.error(f"缺少必须的 checkpoint 路径：--{opt_name}")
+    args.ckpt = args.pcr_ckpt
+    args.teacher_ckpt = args.pcr_ckpt
+    args.low_level_ckpt = args.lowlevel_ckpt
     if args.camera_interval is not None and args.camera_interval < 1:
         args.camera_interval = 1
     if bool(getattr(args, "viewer", False)):
