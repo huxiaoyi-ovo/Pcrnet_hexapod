@@ -112,6 +112,10 @@
 - [x] ~~[P0] 将 `s_pcr_line_avoid_basic` / `s_avoid_basic` 的 final cross line 与 PCR target end diagnostic 统一到实际 scaled row_y 的最后一行，避免 `avoid_fixed_row_y_spacing_scale=1.5` 后仍使用 raw `avoid_stage*_last_row_y` 导致提前判定越过最后一行~~
 - [x] ~~[P0] 新增 PCR 成功回合平均跟随距离指标，区分全 rollout `FollowDistMean` 与成功 episode 内部的平均距离，避免失败样本拉高后误判演示距离~~
 
+## 2026-05-18 PCR learned-w command-conflict 主线
+
+- [x] ~~[P0] 新增 `w_mode=learned` 作为第三个 PCR 对照：GatePolicy 输出 `y` 与 `w` 两维，`w` 的输入显式包含 follow/avoid 命令、`risk_F/risk_A`、命令夹角与 `conflict_score`，并与 `yonly / geom-w` 共用同一套 PCR 融合公式和 eval/play 口径~~
+
 ## 2026-03-30 avoid 连续避障收口阶段
 
 - [x] ~~[P0] 在 `s_avoid_basic` 中加入“过缝后收横移 + 小范围回正”的最小奖励：gap 内抑制 `cmd_x` 高频切换，开放小 `omega`，并按 world `+Y` 增加轻量 heading keep，优先解决连续多排行间穿出~~

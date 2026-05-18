@@ -21,6 +21,11 @@ METHOD_STYLE = {
         "marker": "s",
         "label": "MoE-y + geom-w",
     },
+    "learnedw": {
+        "color": "#7570B3",
+        "marker": "^",
+        "label": "MoE-y + learned-w",
+    },
 }
 
 
@@ -64,9 +69,9 @@ def _finite_float(v, default=float("nan")) -> float:
     return out if math.isfinite(out) else default
 
 
-def _bin_labels(metrics: Dict) -> List[str]:
+def _bin_labels(metrics: Dict, bin_key: str = "risk_bins") -> List[str]:
     labels = []
-    for item in metrics["risk_bins"]:
+    for item in metrics[bin_key]:
         label = str(item.get("bin", ""))
         if not label:
             low = _finite_float(item.get("low", float("nan")))
@@ -76,10 +81,16 @@ def _bin_labels(metrics: Dict) -> List[str]:
     return labels
 
 
-def _series(metrics: Dict, key: str, sem_key: str, min_steps: int) -> Tuple[np.ndarray, np.ndarray]:
+def _series(
+    metrics: Dict,
+    key: str,
+    sem_key: str,
+    min_steps: int,
+    bin_key: str = "risk_bins",
+) -> Tuple[np.ndarray, np.ndarray]:
     values = []
     sems = []
-    for item in metrics["risk_bins"]:
+    for item in metrics.get(bin_key, []):
         steps = int(_finite_float(item.get("steps", 0), 0.0))
         if steps < min_steps:
             values.append(float("nan"))
@@ -97,18 +108,18 @@ def _overall_rate(metrics: Dict, key: str) -> float:
 def _write_plot_data(
     out_dir: str,
     labels: List[str],
-    yonly: Dict,
-    geomw: Dict,
+    methods: List[Tuple[str, str, Dict]],
     min_steps: int,
 ) -> None:
     rows = []
-    for method_name, metrics in (("MoE-y", yonly), ("MoE-y+geom-w", geomw)):
+    for method_key, metrics, method_name in methods:
         for label, item in zip(labels, metrics["risk_bins"]):
             steps = int(_finite_float(item.get("steps", 0), 0.0))
             if steps < min_steps:
                 continue
             rows.append({
                 "method": method_name,
+                "method_key": method_key,
                 "risk_bin": label,
                 "steps": steps,
                 "episode_count": int(_finite_float(item.get("episode_count", 0), 0.0)),
@@ -134,11 +145,16 @@ def draw_figure(args) -> Tuple[str, str]:
 
     yonly = _load_metrics(args.yonly_dir)
     geomw = _load_metrics(args.geomw_dir)
+    learnedw = _load_metrics(args.learnedw_dir) if args.learnedw_dir else None
 
     labels = _bin_labels(yonly)
     geomw_labels = _bin_labels(geomw)
     if labels != geomw_labels:
         raise ValueError(f"risk bin mismatch: y-only={labels}, geom-w={geomw_labels}")
+    if learnedw is not None:
+        learnedw_labels = _bin_labels(learnedw)
+        if labels != learnedw_labels:
+            raise ValueError(f"risk bin mismatch: y-only={labels}, learned-w={learnedw_labels}")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -157,19 +173,28 @@ def draw_figure(args) -> Tuple[str, str]:
     })
 
     x = np.arange(len(labels), dtype=np.float64)
-    fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.15), constrained_layout=True)
+    if learnedw is None:
+        fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.15), constrained_layout=True)
+        axes = np.asarray(axes).reshape(1, 3)
+        ax_y, ax_supp, ax_outcome = axes[0, 0], axes[0, 1], axes[0, 2]
+        ax_conflict = None
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(8.3, 6.2), constrained_layout=True)
+        ax_y, ax_supp, ax_conflict, ax_outcome = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
     methods = [
         ("yonly", yonly, args.yonly_label or METHOD_STYLE["yonly"]["label"]),
         ("geomw", geomw, args.geomw_label or METHOD_STYLE["geomw"]["label"]),
     ]
+    if learnedw is not None:
+        methods.append(("learnedw", learnedw, args.learnedw_label or METHOD_STYLE["learnedw"]["label"]))
 
     for method_key, metrics, label in methods:
         style = METHOD_STYLE[method_key]
         y_eff, y_eff_sem = _series(metrics, "y_eff_mean", "y_eff_sem", args.min_steps)
         suppression, suppression_sem = _series(metrics, "suppression_mean", "suppression_sem", args.min_steps)
 
-        axes[0].errorbar(
+        ax_y.errorbar(
             x,
             y_eff,
             yerr=y_eff_sem,
@@ -180,7 +205,7 @@ def draw_figure(args) -> Tuple[str, str]:
             markersize=5.0,
             capsize=2.5,
         )
-        axes[1].errorbar(
+        ax_supp.errorbar(
             x,
             suppression,
             yerr=suppression_sem,
@@ -192,20 +217,49 @@ def draw_figure(args) -> Tuple[str, str]:
             capsize=2.5,
         )
 
-    axes[0].set_title("A. Executed follow weight")
-    axes[0].set_ylabel(r"$y_{\mathrm{eff}}$")
-    axes[0].set_xlabel(r"Follow-command risk $r_F$")
-    axes[0].set_ylim(args.ymin, args.ymax)
+    ax_y.set_title("A. Executed follow weight")
+    ax_y.set_ylabel(r"$y_{\mathrm{eff}}$")
+    ax_y.set_xlabel(r"Follow-command risk $r_F$")
+    ax_y.set_ylim(args.ymin, args.ymax)
 
-    axes[1].set_title("B. Follow suppression")
-    axes[1].set_ylabel(r"$\Delta y = y_{\mathrm{raw}} - y_{\mathrm{eff}}$")
-    axes[1].set_xlabel(r"Follow-command risk $r_F$")
-    axes[1].set_ylim(args.suppression_ymin, args.suppression_ymax)
+    ax_supp.set_title("B. Follow suppression")
+    ax_supp.set_ylabel(r"$\Delta y = y_{\mathrm{raw}} - y_{\mathrm{eff}}$")
+    ax_supp.set_xlabel(r"Follow-command risk $r_F$")
+    ax_supp.set_ylim(args.suppression_ymin, args.suppression_ymax)
+
+    if ax_conflict is not None:
+        conflict_labels = _bin_labels(yonly, "conflict_bins")
+        for _, metrics, _ in methods:
+            if _bin_labels(metrics, "conflict_bins") != conflict_labels:
+                raise ValueError("conflict bin mismatch across methods")
+        conflict_x = np.arange(len(conflict_labels), dtype=np.float64)
+        for method_key, metrics, label in methods:
+            style = METHOD_STYLE[method_key]
+            w_mean, w_sem = _series(metrics, "w_mean", "w_sem", args.min_steps, bin_key="conflict_bins")
+            ax_conflict.errorbar(
+                conflict_x,
+                w_mean,
+                yerr=w_sem,
+                label=label,
+                color=style["color"],
+                marker=style["marker"],
+                linewidth=2.0,
+                markersize=5.0,
+                capsize=2.5,
+            )
+        ax_conflict.set_title("C. Conflict-conditioned weight")
+        ax_conflict.set_ylabel(r"$w$")
+        ax_conflict.set_xlabel(r"Command conflict score")
+        ax_conflict.set_ylim(args.w_ymin, args.w_ymax)
+        ax_conflict.set_xticks(conflict_x)
+        ax_conflict.set_xticklabels(conflict_labels, rotation=25, ha="right")
 
     outcome_methods = [
         (args.yonly_label or METHOD_STYLE["yonly"]["label"], yonly),
         (args.geomw_label or METHOD_STYLE["geomw"]["label"], geomw),
     ]
+    if learnedw is not None:
+        outcome_methods.append((args.learnedw_label or METHOD_STYLE["learnedw"]["label"], learnedw))
     outcome_x = np.arange(len(outcome_methods), dtype=np.float64)
     bar_width = 0.34
     offsets = (
@@ -213,7 +267,7 @@ def draw_figure(args) -> Tuple[str, str]:
     ) * bar_width
     for field_idx, (key, label, color) in enumerate(OUTCOME_FIELDS):
         values = np.asarray([_overall_rate(metrics, key) for _, metrics in outcome_methods], dtype=np.float64)
-        axes[2].bar(
+        ax_outcome.bar(
             outcome_x + offsets[field_idx],
             values,
             width=bar_width,
@@ -224,7 +278,7 @@ def draw_figure(args) -> Tuple[str, str]:
         )
         for xi, value in zip(outcome_x + offsets[field_idx], values):
             if math.isfinite(value) and value >= args.outcome_label_min:
-                axes[2].text(
+                ax_outcome.text(
                     xi,
                     min(0.98, value + 0.025),
                     f"{value:.2f}",
@@ -234,20 +288,25 @@ def draw_figure(args) -> Tuple[str, str]:
                     color="#202020",
                 )
 
-    axes[2].set_title("C. Row-progress task score")
-    axes[2].set_ylabel("Episode-level score / rate")
-    axes[2].set_xticks(outcome_x)
-    axes[2].set_xticklabels([name for name, _ in outcome_methods], rotation=18, ha="right")
-    axes[2].set_ylim(0.0, 1.0)
+    ax_outcome.set_title("D. Row-progress task score" if learnedw is not None else "C. Row-progress task score")
+    ax_outcome.set_ylabel("Episode-level score / rate")
+    ax_outcome.set_xticks(outcome_x)
+    ax_outcome.set_xticklabels([name for name, _ in outcome_methods], rotation=18, ha="right")
+    ax_outcome.set_ylim(0.0, 1.0)
 
-    for ax in axes[:2]:
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=25, ha="right")
+    line_axes = [ax_y, ax_supp] + ([ax_conflict] if ax_conflict is not None else [])
+    for ax in line_axes:
+        if ax is ax_conflict:
+            ax.set_xticks(conflict_x)
+            ax.set_xticklabels(conflict_labels, rotation=25, ha="right")
+        else:
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=25, ha="right")
         ax.grid(axis="y", color="#D8D8D8", linewidth=0.7, alpha=0.8)
         ax.legend(frameon=False, loc="best")
 
-    axes[2].grid(axis="y", color="#D8D8D8", linewidth=0.7, alpha=0.8)
-    axes[2].legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+    ax_outcome.grid(axis="y", color="#D8D8D8", linewidth=0.7, alpha=0.8)
+    ax_outcome.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
 
     if args.title:
         fig.suptitle(args.title, fontsize=11, y=1.03)
@@ -258,7 +317,7 @@ def draw_figure(args) -> Tuple[str, str]:
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
 
-    _write_plot_data(args.out_dir, labels, yonly, geomw, args.min_steps)
+    _write_plot_data(args.out_dir, labels, methods, args.min_steps)
     return png_path, pdf_path
 
 
@@ -266,16 +325,20 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Draw PCR w mechanism figure from eval outputs.")
     parser.add_argument("--yonly_dir", required=True, help="Eval output dir for MoE-y.")
     parser.add_argument("--geomw_dir", required=True, help="Eval output dir for MoE-y + geom-w.")
+    parser.add_argument("--learnedw_dir", default=None, help="Optional eval output dir for MoE-y + learned-w.")
     parser.add_argument("--out_dir", default="figures", help="Output directory for paper figures.")
     parser.add_argument("--name", default="pcr_w_mechanism", help="Output file stem.")
     parser.add_argument("--yonly_label", default="MoE-y", help="Legend label for y-only.")
     parser.add_argument("--geomw_label", default="MoE-y + geom-w", help="Legend label for geom-w.")
+    parser.add_argument("--learnedw_label", default="MoE-y + learned-w", help="Legend label for learned-w.")
     parser.add_argument("--min_steps", type=int, default=50, help="Hide risk bins with fewer steps.")
     parser.add_argument("--dpi", type=int, default=400, help="PNG resolution.")
     parser.add_argument("--ymin", type=float, default=0.0)
     parser.add_argument("--ymax", type=float, default=1.0)
     parser.add_argument("--suppression_ymin", type=float, default=0.0)
     parser.add_argument("--suppression_ymax", type=float, default=0.45)
+    parser.add_argument("--w_ymin", type=float, default=0.0)
+    parser.add_argument("--w_ymax", type=float, default=1.0)
     parser.add_argument("--rate_ymax", type=float, default=0.5)
     parser.add_argument("--outcome_label_min", type=float, default=0.055, help="Hide tiny stacked-bar labels below this rate.")
     parser.add_argument("--title", default="", help="Optional figure title.")

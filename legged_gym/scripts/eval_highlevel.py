@@ -280,6 +280,7 @@ class EpisodeAccumulator:
     high_risk_risk_a_sum: float = 0.0
     high_risk_near_miss_steps: int = 0
     risk_bin_stats: list = field(default_factory=_empty_risk_bin_state)
+    conflict_bin_stats: list = field(default_factory=_empty_risk_bin_state)
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -315,6 +316,7 @@ class EvalRunner:
         self.policy_meta = runtime.policy_meta
         self.aux_checkpoint_meta = runtime.aux_checkpoint_meta
         self.gate_state_dim = runtime.gate_state_dim
+        self.gate_goal_dim = getattr(runtime, "gate_goal_dim", None)
         self.avoid_state_dim = runtime.avoid_state_dim
 
         self.param_info = self._build_param_info()
@@ -404,10 +406,21 @@ class EvalRunner:
             gate_ckpt = torch.load(self.args.ckpt, map_location=self.device)
             self.policy_meta = self._ckpt_meta(gate_ckpt)
             self.gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or state_dim
+            gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, self.policy_meta)
+            expected_action_dim = 2 if str(self.args.w_mode).lower() == "learned" else 1
+            if gate_action_dim is not None and int(gate_action_dim) != expected_action_dim:
+                raise ValueError(
+                    f"gate ckpt actor_output_dim 与当前 eval_w_mode 不一致: "
+                    f"checkpoint={gate_action_dim}, expected={expected_action_dim}, w_mode={self.args.w_mode}"
+                )
+            self.gate_goal_dim = th.infer_checkpoint_goal_dim(gate_ckpt) or (
+                goal_dim + (th.LEARNED_W_FEATURE_DIM if expected_action_dim == 2 else 0)
+            )
             self.policy = th.GatePolicy(
                 affordance_channels=aff_channels,
                 state_dim=self.gate_state_dim,
-                goal_dim=goal_dim,
+                goal_dim=self.gate_goal_dim,
+                learned_w=expected_action_dim == 2,
             ).to(self.device)
             self._validate_ckpt_meta(self.policy_meta, expected_skill="moe", source_name="gate ckpt")
             th.validate_checkpoint_contract_compatibility(
@@ -580,14 +593,44 @@ class EvalRunner:
                 gate_difficulty = difficulty if self.args.gate_use_difficulty else torch.zeros_like(difficulty)
                 if bool(getattr(self.args, "zero_local_map", False)):
                     gate_difficulty = torch.zeros_like(gate_difficulty)
-                gate_y_raw, _ = self.policy.get_action(
+                gate_policy_goal = goal
+                if str(self.args.w_mode).lower() == "learned":
+                    gate_policy_goal, _ = th.build_learned_w_gate_goal(
+                        self.env,
+                        self.args,
+                        goal,
+                        gate_aff_input,
+                        cmd_f,
+                        cmd_a,
+                    )
+                if getattr(self, "gate_goal_dim", None) is not None:
+                    gate_policy_goal = th.match_goal_dim(
+                        gate_policy_goal,
+                        int(self.gate_goal_dim),
+                        label="eval_gate_goal",
+                    )
+                gate_action, _ = self.policy.get_action(
                     policy_aff_stack,
                     gate_state,
-                    goal,
+                    gate_policy_goal,
                     gate_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-                gate_diag = th.resolve_moe_gate_pcr(self.env, self.args, gate_aff_input, gate_y_raw, cmd_f, cmd_a)
+                if str(self.args.w_mode).lower() == "learned":
+                    gate_y_raw = gate_action[:, 0]
+                    learned_w = gate_action[:, 1]
+                else:
+                    gate_y_raw = gate_action
+                    learned_w = None
+                gate_diag = th.resolve_moe_gate_pcr(
+                    self.env,
+                    self.args,
+                    gate_aff_input,
+                    gate_y_raw,
+                    cmd_f,
+                    cmd_a,
+                    learned_w=learned_w,
+                )
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
@@ -743,6 +786,8 @@ class EvalRunner:
                     post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                     post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                     post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                    post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
+                    post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
 
                 # Step-level energy and distance proxies.
                 torques = getattr(self.env.env, "torques", None)
@@ -851,6 +896,7 @@ class EvalRunner:
                         clr_a_t = post_info.get("clearance_A", None)
                         risk_f_t = post_info.get("risk_F", None)
                         risk_a_t = post_info.get("risk_A", None)
+                        conflict_t = post_info.get("conflict_score", None)
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
                         clearance_pp_t = post_info.get("clearance_pp", None)
@@ -863,6 +909,7 @@ class EvalRunner:
                         clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
                         risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
+                        conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
                         clr_pp_v = float("nan")
                         safe_thr_v = float("nan")
                         near_miss_now = False
@@ -917,6 +964,24 @@ class EvalRunner:
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
                             if near_miss_now:
                                 bin_state["near_miss_steps"] += 1
+                        conflict_bin_idx = _risk_bin_index(conflict_v)
+                        if conflict_bin_idx is not None:
+                            bin_state = ai.conflict_bin_stats[conflict_bin_idx]
+                            suppression_v = gate_raw_v - y_eff_v
+                            bin_state["steps"] += 1
+                            bin_state["gate_y_raw_sum"] += gate_raw_v
+                            bin_state["gate_y_raw_sq_sum"] += gate_raw_v * gate_raw_v
+                            bin_state["y_eff_sum"] += y_eff_v
+                            bin_state["y_eff_sq_sum"] += y_eff_v * y_eff_v
+                            bin_state["suppression_sum"] += suppression_v
+                            bin_state["suppression_sq_sum"] += suppression_v * suppression_v
+                            bin_state["w_sum"] += w_v
+                            bin_state["w_sq_sum"] += w_v * w_v
+                            bin_state["risk_f_sum"] += risk_f_v
+                            bin_state["risk_a_sum"] += risk_a_v
+                            bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
+                            if near_miss_now:
+                                bin_state["near_miss_steps"] += 1
 
                         cmd_f_v = [float("nan"), float("nan"), float("nan")]
                         cmd_a_v = [float("nan"), float("nan"), float("nan")]
@@ -947,6 +1012,7 @@ class EvalRunner:
                                     "risk_f": risk_f_v,
                                     "risk_a": risk_a_v,
                                     "risk_delta": risk_f_v - risk_a_v,
+                                    "conflict_score": conflict_v,
                                     "clearance_pp": clr_pp_v,
                                     "near_miss": int(near_miss_now),
                                     "episode_collision": int(ai.episode_collision),
@@ -1096,6 +1162,7 @@ class EvalRunner:
                             "high_risk_risk_delta_mean": high_risk_risk_delta_mean,
                             "high_risk_near_miss_rate": high_risk_near_miss_rate,
                             "risk_bin_stats": [dict(bin_state) for bin_state in ai.risk_bin_stats],
+                            "conflict_bin_stats": [dict(bin_state) for bin_state in ai.conflict_bin_stats],
                             "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
                             "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
                             "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
@@ -1209,7 +1276,7 @@ class EvalRunner:
                 ),
             }
 
-        def _risk_bins_summary(sub_rows: List[Dict]) -> List[Dict]:
+        def _risk_bins_summary(sub_rows: List[Dict], stats_key: str = "risk_bin_stats") -> List[Dict]:
             bins = _empty_risk_bin_state()
             episode_sets = [
                 {
@@ -1223,7 +1290,7 @@ class EvalRunner:
                 for _ in RISK_BIN_LABELS
             ]
             for row_idx, row in enumerate(sub_rows):
-                row_bins = row.get("risk_bin_stats", [])
+                row_bins = row.get(stats_key, [])
                 if not isinstance(row_bins, list):
                     continue
                 for idx, row_bin in enumerate(row_bins[:len(RISK_BIN_LABELS)]):
@@ -1387,6 +1454,7 @@ class EvalRunner:
         outcome_total_rate = float("nan")
         high_risk_overall = _high_risk_summary(rows)
         risk_bins_overall = _risk_bins_summary(rows)
+        conflict_bins_overall = _risk_bins_summary(rows, "conflict_bin_stats")
 
         overall = {
             "episodes": total_eps,
@@ -1588,6 +1656,24 @@ class EvalRunner:
                 "gate_safe_max": float(getattr(self.args, "gate_safe_max", 0.3)),
                 "beta": None if self.args.beta is None else float(self.args.beta),
                 "w_mode": str(self.args.w_mode),
+                "policy_variant": {"none": "yonly", "geom": "geomw", "learned": "learnedw"}.get(str(self.args.w_mode), str(self.args.w_mode)),
+                "eval_w_mode": str(self.args.w_mode),
+                "trained_w_mode": (
+                    self.policy_meta.get("trained_w_mode", self.policy_meta.get("w_mode", None))
+                    if isinstance(self.policy_meta, dict) else None
+                ),
+                "actor_output_dim": (
+                    self.policy_meta.get("actor_output_dim", None)
+                    if isinstance(self.policy_meta, dict) else None
+                ),
+                "obs_contract_version": (
+                    self.policy_meta.get("obs_contract_version", None)
+                    if isinstance(self.policy_meta, dict) else None
+                ),
+                "fusion_formula_version": (
+                    self.policy_meta.get("fusion_formula_version", None)
+                    if isinstance(self.policy_meta, dict) else None
+                ),
                 "w_tau": float(self.args.w_tau),
                 "w_blend_mode": str(self.args.w_blend_mode),
                 "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
@@ -1615,9 +1701,10 @@ class EvalRunner:
             "overall": overall,
             "by_difficulty": by_diff,
             "risk_bins": risk_bins_overall,
+            "conflict_bins": conflict_bins_overall,
             "resolved_protocol": self.resolved_protocol,
             "per_episode": [
-                {k: v for k, v in row.items() if k != "risk_bin_stats"}
+                {k: v for k, v in row.items() if k not in ("risk_bin_stats", "conflict_bin_stats")}
                 for row in rows
             ],
         }
@@ -1705,6 +1792,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
     for row in rows:
         row_out = dict(row)
         row_out.pop("risk_bin_stats", None)
+        row_out.pop("conflict_bin_stats", None)
         csv_rows.append(row_out)
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1729,6 +1817,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_f",
             "risk_a",
             "risk_delta",
+            "conflict_score",
             "clearance_pp",
             "near_miss",
             "episode_collision",

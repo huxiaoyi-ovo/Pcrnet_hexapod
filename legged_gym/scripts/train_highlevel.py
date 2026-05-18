@@ -680,6 +680,35 @@ def infer_checkpoint_state_dim(ckpt_obj) -> Optional[int]:
     return None
 
 
+def infer_checkpoint_goal_dim(ckpt_obj) -> Optional[int]:
+    state = ckpt_obj.get("model_state_dict", ckpt_obj) if isinstance(ckpt_obj, dict) else ckpt_obj
+    if not isinstance(state, dict):
+        return None
+    for key in ("goal_encoder.mlp.0.weight", "module.goal_encoder.mlp.0.weight"):
+        value = state.get(key, None)
+        if torch.is_tensor(value) and value.ndim == 2:
+            return int(value.shape[1])
+    return None
+
+
+def infer_checkpoint_gate_action_dim(ckpt_obj, meta: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    if isinstance(meta, dict):
+        dim = meta.get("actor_output_dim", None)
+        if dim is not None:
+            return int(dim)
+    state = ckpt_obj.get("model_state_dict", ckpt_obj) if isinstance(ckpt_obj, dict) else ckpt_obj
+    if isinstance(state, dict):
+        for key in ("w_alpha_head.2.weight", "module.w_alpha_head.2.weight"):
+            value = state.get(key, None)
+            if torch.is_tensor(value):
+                return 2
+        for key in ("y_alpha_head.2.weight", "module.y_alpha_head.2.weight"):
+            value = state.get(key, None)
+            if torch.is_tensor(value):
+                return 1
+    return None
+
+
 def match_state_dim(state_tensor: torch.Tensor, target_dim: int, *, label: str = "state") -> torch.Tensor:
     if state_tensor.dim() != 2:
         raise ValueError(f"{label} shape invalid: {tuple(state_tensor.shape)}")
@@ -698,6 +727,27 @@ def match_state_dim(state_tensor: torch.Tensor, target_dim: int, *, label: str =
     raise ValueError(
         f"{label} dim mismatch: runtime={current_dim}, checkpoint={target_dim}; "
         "refuse to truncate state features."
+    )
+
+
+def match_goal_dim(goal_tensor: torch.Tensor, target_dim: int, *, label: str = "goal") -> torch.Tensor:
+    if goal_tensor.dim() != 2:
+        raise ValueError(f"{label} shape invalid: {tuple(goal_tensor.shape)}")
+    current_dim = int(goal_tensor.shape[1])
+    target_dim = int(target_dim)
+    if current_dim == target_dim:
+        return goal_tensor
+    if current_dim < target_dim:
+        pad = torch.zeros(
+            goal_tensor.shape[0],
+            target_dim - current_dim,
+            device=goal_tensor.device,
+            dtype=goal_tensor.dtype,
+        )
+        return torch.cat([goal_tensor, pad], dim=1)
+    raise ValueError(
+        f"{label} dim mismatch: runtime={current_dim}, checkpoint={target_dim}; "
+        "refuse to truncate goal features."
     )
 
 
@@ -806,6 +856,79 @@ def _get_effective_safe_free_dist(
     return float(safe_t[0].detach().cpu().item()), float(free_t[0].detach().cpu().item())
 
 
+def _pcr_gate_command_conflict_diag(
+    env,
+    args,
+    aff_map: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    cmd_a_eff = cmd_a.clone()
+    if cmd_a_eff.shape[-1] >= 2:
+        cmd_a_eff[:, 1] = 0.0
+    if cmd_a_eff.shape[-1] >= 3:
+        cmd_a_eff[:, 2] = 0.0
+    safe_d, free_d = _get_effective_safe_free_dist(
+        env,
+        getattr(args, "beta", None),
+        device=cmd_f.device,
+        dtype=cmd_f.dtype,
+    )
+    clearance_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
+    clearance_a = env._compute_clearance_along_cmd(aff_map, cmd_a_eff[:, :2])
+    risk_f = env._risk_from_clearance(clearance_f, safe_d, free_d)
+    risk_a = env._risk_from_clearance(clearance_a, safe_d, free_d)
+    lin_f = cmd_f[:, :2]
+    lin_a = cmd_a_eff[:, :2]
+    norm_f = torch.norm(lin_f, dim=1)
+    norm_a = torch.norm(lin_a, dim=1)
+    denom = torch.clamp(norm_f * norm_a, min=1e-6)
+    cmd_cos = torch.sum(lin_f * lin_a, dim=1) / denom
+    cmd_cos = torch.where((norm_f > 1e-6) & (norm_a > 1e-6), cmd_cos, torch.ones_like(cmd_cos))
+    cmd_cos = torch.clamp(cmd_cos, -1.0, 1.0)
+    conflict_score = torch.clamp(risk_f - risk_a, min=0.0) * (1.0 - cmd_cos) * 0.5
+    return {
+        "cmd_a_eff": cmd_a_eff,
+        "clearance_F": clearance_f,
+        "clearance_A": clearance_a,
+        "risk_F": risk_f,
+        "risk_A": risk_a,
+        "cmd_cos": cmd_cos,
+        "conflict_score": torch.clamp(conflict_score, 0.0, 1.0),
+        "post_safe_distance": torch.full_like(risk_f, safe_d),
+        "post_free_distance": torch.full_like(risk_f, free_d),
+    }
+
+
+def build_learned_w_gate_goal(
+    env,
+    args,
+    base_goal: torch.Tensor,
+    aff_map: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    diag = _pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
+    cmd_a_eff = diag["cmd_a_eff"]
+    clearance_scale = max(float(getattr(env, "affordance_map_extent", 3.0)), 1e-6)
+    clearance_f = torch.clamp(diag["clearance_F"], 0.0, clearance_scale) / clearance_scale
+    clearance_a = torch.clamp(diag["clearance_A"], 0.0, clearance_scale) / clearance_scale
+    features = torch.cat([
+        cmd_f[:, :3],
+        cmd_a_eff[:, :3],
+        cmd_f[:, :3] - cmd_a_eff[:, :3],
+        diag["risk_F"].unsqueeze(-1),
+        diag["risk_A"].unsqueeze(-1),
+        diag["cmd_cos"].unsqueeze(-1),
+        diag["conflict_score"].unsqueeze(-1),
+        clearance_f.unsqueeze(-1),
+        clearance_a.unsqueeze(-1),
+    ], dim=-1)
+    if features.shape[-1] != LEARNED_W_FEATURE_DIM:
+        raise RuntimeError(f"learned-w feature dim mismatch: {features.shape[-1]}")
+    return torch.cat([base_goal, features], dim=-1), diag
+
+
 def get_moe_expert_state_inputs(state_tensor: torch.Tensor) -> torch.Tensor:
     # Standalone follow/avoid experts were trained with prev_gate_y fixed to 0.
     # Keep the same state contract when they are reused under MoE gating.
@@ -823,31 +946,29 @@ def resolve_moe_gate_pcr(
     gate_y_raw: torch.Tensor,
     cmd_f: torch.Tensor,
     cmd_a: torch.Tensor,
+    learned_w: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
+    if gate_y_raw.dim() == 2 and gate_y_raw.shape[-1] == 1:
+        gate_y_raw = gate_y_raw.squeeze(-1)
     gate_y = gate_y_raw.clone()
-    # In PCR, avoid is treated as a lateral-only local through expert.
-    # Keep its lateral proposal, but let follow/primary control own forward speed and yaw.
-    cmd_a = cmd_a.clone()
-    if cmd_a.shape[-1] >= 2:
-        cmd_a[:, 1] = 0.0
-    if cmd_a.shape[-1] >= 3:
-        cmd_a[:, 2] = 0.0
-    safe_d, free_d = _get_effective_safe_free_dist(
-        env,
-        getattr(args, "beta", None),
-        device=gate_y_raw.device,
-        dtype=gate_y_raw.dtype,
-    )
-    clearance_f = env._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
-    clearance_a = env._compute_clearance_along_cmd(aff_map, cmd_a[:, :2])
-    risk_f = env._risk_from_clearance(clearance_f, safe_d, free_d)
-    risk_a = env._risk_from_clearance(clearance_a, safe_d, free_d)
+    diag = _pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
+    cmd_a = diag["cmd_a_eff"]
+    clearance_f = diag["clearance_F"]
+    clearance_a = diag["clearance_A"]
+    risk_f = diag["risk_F"]
+    risk_a = diag["risk_A"]
 
     w_mode = str(getattr(args, "w_mode", "none")).lower()
     w_tau = max(float(getattr(args, "w_tau", 0.25)), 1e-6)
     if w_mode == "geom":
         w = torch.exp(-torch.clamp(clearance_f, min=0.0) / w_tau)
         w = torch.clamp(w, 0.0, 1.0)
+    elif w_mode == "learned":
+        if learned_w is None:
+            raise ValueError("w_mode=learned requires learned_w action")
+        if learned_w.dim() == 2 and learned_w.shape[-1] == 1:
+            learned_w = learned_w.squeeze(-1)
+        w = torch.clamp(learned_w.to(device=gate_y_raw.device, dtype=gate_y_raw.dtype), 0.0, 1.0)
     else:
         w = torch.zeros_like(gate_y_raw)
 
@@ -887,8 +1008,10 @@ def resolve_moe_gate_pcr(
         "clearance_A": clearance_a,
         "risk_F": risk_f,
         "risk_A": risk_a,
-        "post_safe_distance": torch.full_like(gate_y_raw, safe_d),
-        "post_free_distance": torch.full_like(gate_y_raw, free_d),
+        "cmd_cos": diag["cmd_cos"],
+        "conflict_score": diag["conflict_score"],
+        "post_safe_distance": diag["post_safe_distance"],
+        "post_free_distance": diag["post_free_distance"],
         "gate_safe_clamp_mask": clamp_mask,
     }
 
@@ -984,6 +1107,9 @@ RUNTIME_ABLATION_ARG_KEYS = (
     "w_blend_mode",
     "w_disable_gate_safe_clamp",
 )
+LEARNED_W_FEATURE_DIM = 15
+LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_v1"
+FUSION_FORMULA_VERSION = "pcr_shared_w_multiply_v1"
 CHECKPOINT_CONTRACT_KEY_PATHS = (
     "aff_stack",
     "decimation",
@@ -1000,6 +1126,8 @@ CHECKPOINT_CONTRACT_KEY_PATHS = (
     "observation_contract.camera_near_m",
     "observation_contract.camera_far_m",
     "observation_contract.camera_fps_cfg",
+    "observation_contract.gate_learned_w_feature_dim",
+    "observation_contract.gate_learned_w_contract_version",
 )
 RESOLVED_PROTOCOL_ARG_KEYS = (
     "task",
@@ -1213,8 +1341,17 @@ def collect_runtime_observation_contract(
     if low_level_dt > 0.0:
         effective_depth_hz = 1.0 / (low_level_dt * float(capture_interval))
     high_level_dt = float(getattr(env, "high_level_dt", 0.0))
+    w_mode = str(getattr(args, "w_mode", "none")).lower()
+    learned_w_enabled = bool(w_mode == "learned" and getattr(args, "skill", "follow") == "moe")
     return {
         "use_avoid_local_map": bool(getattr(args, "skill", "follow") in ("avoid", "moe")),
+        "gate_learned_w_feature_dim": LEARNED_W_FEATURE_DIM if learned_w_enabled else 0,
+        "gate_learned_w_contract_version": LEARNED_W_OBS_CONTRACT_VERSION if learned_w_enabled else "none",
+        "gate_uses_cmd_features": learned_w_enabled,
+        "gate_uses_riskF": learned_w_enabled,
+        "gate_uses_riskA": learned_w_enabled,
+        "gate_uses_cmd_cos": learned_w_enabled,
+        "gate_uses_conflict_score": learned_w_enabled,
         "affordance_map_size": int(getattr(env, "affordance_map_size", get_vision_native_output_size())),
         "affordance_map_extent_m": float(getattr(env, "affordance_map_extent", 0.0)),
         "affordance_origin_mode": str(getattr(env, "affordance_origin_mode", "base_center")),
@@ -5158,7 +5295,9 @@ def train(args):
     # 创建 Policy (V5)
     is_gate = skill == "moe"
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
-    action_dim = 1 if is_gate else 3
+    gate_learned_w_enabled = bool(is_gate and str(getattr(args, "w_mode", "none")).lower() == "learned")
+    action_dim = (2 if gate_learned_w_enabled else 1) if is_gate else 3
+    policy_goal_dim = goal_dim + (LEARNED_W_FEATURE_DIM if gate_learned_w_enabled else 0)
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
     use_follow_expert = bool(getattr(args, "use_follow_expert", False))
@@ -5283,6 +5422,18 @@ def train(args):
                 meta[key] = os.path.abspath(str(meta[key]))
         meta["sim2real_sensor_target"] = "Intel RealSense D435i"
         meta["observation_contract"] = collect_runtime_observation_contract(args, env)
+        meta["trained_w_mode"] = str(getattr(args, "w_mode", "none")).lower()
+        meta["actor_output_dim"] = int(action_dim)
+        meta["policy_goal_dim"] = int(policy_goal_dim)
+        meta["obs_contract_version"] = (
+            LEARNED_W_OBS_CONTRACT_VERSION if gate_learned_w_enabled else "base_gate_v1"
+        )
+        meta["fusion_formula_version"] = FUSION_FORMULA_VERSION
+        meta["uses_cmd_features"] = bool(gate_learned_w_enabled)
+        meta["uses_riskF"] = bool(gate_learned_w_enabled)
+        meta["uses_riskA"] = bool(gate_learned_w_enabled)
+        meta["uses_cmd_cos"] = bool(gate_learned_w_enabled)
+        meta["uses_conflict_score"] = bool(gate_learned_w_enabled)
         meta["run_mode_tag"] = run_mode_tag
         meta["online_best_metric"] = "online_mean_reward_monitor_only"
         meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
@@ -5329,6 +5480,15 @@ def train(args):
                 raise ValueError(
                     f"{source_name} 与当前运行的 {key} 不一致：checkpoint={prev_v}, current={curr_v}。"
                 )
+        for key in ("trained_w_mode", "actor_output_dim", "policy_goal_dim", "obs_contract_version", "fusion_formula_version"):
+            prev_v = ckpt_meta.get(key, None)
+            curr_v = current_meta.get(key, None)
+            if prev_v is None or curr_v is None:
+                continue
+            if prev_v != curr_v:
+                raise ValueError(
+                    f"{source_name} 与当前运行的 {key} 不一致：checkpoint={prev_v}, current={curr_v}。"
+                )
         source_keys = ("teacher_ckpt", "vision_ckpt", "follow_ckpt", "avoid_ckpt", "low_level_ckpt")
         mismatch_msgs = []
         for key in source_keys:
@@ -5372,7 +5532,8 @@ def train(args):
         policy = GatePolicy(
             affordance_channels=aff_channels,
             state_dim=state_dim,
-            goal_dim=goal_dim,
+            goal_dim=policy_goal_dim,
+            learned_w=gate_learned_w_enabled,
         ).to(device)
     else:
         policy = CmdVelExpert(
@@ -5627,7 +5788,7 @@ def train(args):
     
     # 创建 Rollout Buffer
     aff_map_shape = (aff_channels, aff_shape[1], aff_shape[2])
-    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, goal_dim, aff_map_shape, action_dim, device)
+    buffer = RolloutBuffer(env.num_envs, args.num_steps, state_dim, policy_goal_dim, aff_map_shape, action_dim, device)
 
     def _build_next_aff_stacks(
         current_actor_stack: Optional[torch.Tensor],
@@ -5678,14 +5839,37 @@ def train(args):
                     bootstrap_critic_difficulty
                     if gate_use_difficulty else torch.zeros_like(bootstrap_critic_difficulty)
                 )
+                bootstrap_policy_goal = bootstrap_goal
+                if gate_learned_w_enabled:
+                    bootstrap_expert_state = _get_moe_expert_state_inputs(bootstrap_state)
+                    bootstrap_cmd_f = _compute_moe_follow_cmd_from_goal(
+                        bootstrap_expert_state,
+                        bootstrap_goal,
+                        None,
+                    )
+                    bootstrap_cmd_a, _ = avoid_model.get_action(
+                        bootstrap_aff_stack,
+                        bootstrap_expert_state,
+                        bootstrap_obs['goal'],
+                        bootstrap_difficulty,
+                        deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                    )
+                    bootstrap_policy_goal, _ = build_learned_w_gate_goal(
+                        env,
+                        args,
+                        bootstrap_goal,
+                        bootstrap_aff_map,
+                        bootstrap_cmd_f,
+                        bootstrap_cmd_a,
+                    )
                 out = policy(
                     bootstrap_aff_stack,
                     bootstrap_state,
-                    bootstrap_goal,
+                    bootstrap_policy_goal,
                     gate_difficulty,
                     critic_affordance_map=bootstrap_critic_stack,
                     critic_robot_state=bootstrap_state,
-                    critic_goal=bootstrap_goal,
+                    critic_goal=bootstrap_policy_goal,
                     critic_terrain_difficulty=gate_critic_difficulty,
                 )
             else:
@@ -5866,6 +6050,16 @@ def train(args):
         gate_y_gap_sum = torch.zeros((), device=device)
         gate_clearance_f_sum = torch.zeros((), device=device)
         gate_risk_f_sum = torch.zeros((), device=device)
+        gate_conflict_score_sum = torch.zeros((), device=device)
+        gate_w_conflict_cross_sum = torch.zeros((), device=device)
+        gate_w_sq_sum = torch.zeros((), device=device)
+        gate_conflict_sq_sum = torch.zeros((), device=device)
+        gate_high_conflict_w_sum = torch.zeros((), device=device)
+        gate_high_conflict_supp_sum = torch.zeros((), device=device)
+        gate_high_conflict_count = torch.zeros((), device=device)
+        gate_low_conflict_w_sum = torch.zeros((), device=device)
+        gate_low_conflict_supp_sum = torch.zeros((), device=device)
+        gate_low_conflict_count = torch.zeros((), device=device)
         gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
         cmd_pred_x_sum = torch.zeros((), device=device)
@@ -6207,6 +6401,7 @@ def train(args):
             expert_action = None
             gate_y = None
             cmd_used = None
+            policy_goal_for_buffer = goal
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
@@ -6233,41 +6428,79 @@ def train(args):
                     )
                     expert_nonfinite_action_count += int(cmd_f_bad.sum().item()) + int(cmd_a_bad.sum().item())
                     action_valid = action_valid & (~cmd_f_bad) & (~cmd_a_bad)
+                    gate_policy_goal = goal
+                    gate_goal_diag = None
+                    if gate_learned_w_enabled:
+                        gate_policy_goal, gate_goal_diag = build_learned_w_gate_goal(
+                            env,
+                            args,
+                            goal,
+                            aff_map,
+                            cmd_f,
+                            cmd_a,
+                        )
+                        gate_policy_goal = torch.nan_to_num(
+                            gate_policy_goal,
+                            nan=0.0,
+                            posinf=0.0,
+                            neginf=0.0,
+                        )
+                        action_valid = action_valid & _row_finite_mask(gate_policy_goal)
+                    policy_goal_for_buffer = gate_policy_goal
                 with torch.no_grad():
-                    gate_y, _ = policy.get_action(
+                    gate_action, _ = policy.get_action(
                         aff_stack_buf,
                         state,
-                        goal,
+                        gate_policy_goal,
                         gate_difficulty,
                         deterministic=False,
                         critic_affordance_map=critic_aff_stack_buf,
                         critic_robot_state=state,
-                        critic_goal=goal,
+                        critic_goal=gate_policy_goal,
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
-                    gate_y, gate_y_bad = _sanitize_or_fail_action_tensor(
+                    gate_action, gate_action_bad = _sanitize_or_fail_action_tensor(
                         "gate_action",
-                        gate_y.detach(),
+                        gate_action.detach(),
                         allow_recovery=allow_nonfinite_recovery,
                     )
-                    policy_nonfinite_action_count += int(gate_y_bad.sum().item())
-                    action_valid = action_valid & (~gate_y_bad)
+                    policy_nonfinite_action_count += int(gate_action_bad.sum().item())
+                    action_valid = action_valid & (~gate_action_bad)
+                    if gate_learned_w_enabled:
+                        gate_y = gate_action[:, 0]
+                        gate_learned_w = gate_action[:, 1]
+                    else:
+                        gate_y = gate_action
+                        gate_learned_w = None
                     gate_y_raw = gate_y.clone()
                     gate_y_prev = prev_y_eff.clone()
-                    gate_diag = resolve_moe_gate_pcr(env, args, aff_map, gate_y_raw, cmd_f, cmd_a)
+                    gate_diag = resolve_moe_gate_pcr(
+                        env,
+                        args,
+                        aff_map,
+                        gate_y_raw,
+                        cmd_f,
+                        cmd_a,
+                        learned_w=gate_learned_w,
+                    )
                     gate_y = gate_diag["gate_y"]
                     y_eff = gate_diag["y_eff"]
                     if bool(gate_diag["gate_safe_clamp_mask"].any().item()):
                         action_valid = action_valid & torch.isclose(gate_y, gate_y_raw, atol=1e-6, rtol=0.0)
+                    gate_eval_action = (
+                        torch.stack([gate_y, gate_diag["w"]], dim=-1)
+                        if gate_learned_w_enabled
+                        else gate_y
+                    )
                     log_prob, value, _, _ = policy.evaluate_actions(
                         aff_stack_buf,
                         state,
-                        goal,
+                        gate_policy_goal,
                         gate_difficulty,
-                        gate_y,
+                        gate_eval_action,
                         critic_affordance_map=critic_aff_stack_buf,
                         critic_robot_state=state,
-                        critic_goal=goal,
+                        critic_goal=gate_policy_goal,
                         critic_terrain_difficulty=gate_critic_difficulty,
                     )
                     cmd = gate_diag["cmd"]
@@ -6315,9 +6548,11 @@ def train(args):
                             post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                             post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                             post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                            post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
+                            post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
                             post_info["post_safe_distance"] = gate_diag["post_safe_distance"].detach().clone()
                             post_info["post_free_distance"] = gate_diag["post_free_distance"].detach().clone()
-                action = gate_y.unsqueeze(-1)
+                action = gate_eval_action if gate_learned_w_enabled else gate_y.unsqueeze(-1)
                 cmd_used = cmd
             else:
                 with torch.no_grad():
@@ -6506,7 +6741,7 @@ def train(args):
             # 存储数据
             buffer.add(
                 state.detach(),
-                goal.detach(),
+                policy_goal_for_buffer.detach(),
                 aff_stack_buf.detach(),
                 difficulty.detach(),
                 critic_aff_stack_buf.detach(),
@@ -6595,6 +6830,22 @@ def train(args):
                     gate_y_gap_sum += torch.abs(gate_diag["y_eff"] - gate_diag["gate_y_raw"]).sum()
                     gate_clearance_f_sum += gate_diag["clearance_F"].sum()
                     gate_risk_f_sum += gate_diag["risk_F"].sum()
+                    conflict_score = gate_diag.get("conflict_score", torch.zeros_like(gate_diag["w"]))
+                    gate_conflict_score_sum += conflict_score.sum()
+                    gate_w_conflict_cross_sum += (gate_diag["w"] * conflict_score).sum()
+                    gate_w_sq_sum += torch.square(gate_diag["w"]).sum()
+                    gate_conflict_sq_sum += torch.square(conflict_score).sum()
+                    supp = gate_diag["gate_y_raw"] - gate_diag["y_eff"]
+                    high_conflict_w_mask = conflict_score > 0.5
+                    low_conflict_w_mask = conflict_score < 0.1
+                    if high_conflict_w_mask.any():
+                        gate_high_conflict_w_sum += gate_diag["w"][high_conflict_w_mask].sum()
+                        gate_high_conflict_supp_sum += supp[high_conflict_w_mask].sum()
+                        gate_high_conflict_count += high_conflict_w_mask.float().sum()
+                    if low_conflict_w_mask.any():
+                        gate_low_conflict_w_sum += gate_diag["w"][low_conflict_w_mask].sum()
+                        gate_low_conflict_supp_sum += supp[low_conflict_w_mask].sum()
+                        gate_low_conflict_count += low_conflict_w_mask.float().sum()
                 if gate_y_prev is not None:
                     delta_gate = y_eff - gate_y_prev
                     if reset_mask_prev.any():
@@ -7139,14 +7390,37 @@ def train(args):
                 gate_critic_difficulty = (
                     critic_difficulty_next if gate_use_difficulty else torch.zeros_like(critic_difficulty_next)
                 )
+                policy_goal_next = goal
+                if gate_learned_w_enabled:
+                    moe_expert_state_next = _get_moe_expert_state_inputs(state)
+                    cmd_f_next = _compute_moe_follow_cmd_from_goal(
+                        moe_expert_state_next,
+                        goal,
+                        reset_mask_prev,
+                    )
+                    cmd_a_next, _ = avoid_model.get_action(
+                        aff_stack_bootstrap,
+                        moe_expert_state_next,
+                        obs_dict['goal'],
+                        difficulty,
+                        deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                    )
+                    policy_goal_next, _ = build_learned_w_gate_goal(
+                        env,
+                        args,
+                        goal,
+                        aff_map_next,
+                        cmd_f_next,
+                        cmd_a_next,
+                    )
                 out = policy(
                     aff_stack_bootstrap,
                     state,
-                    goal,
+                    policy_goal_next,
                     gate_difficulty,
                     critic_affordance_map=critic_aff_stack_bootstrap,
                     critic_robot_state=state,
-                    critic_goal=goal,
+                    critic_goal=policy_goal_next,
                     critic_terrain_difficulty=gate_critic_difficulty,
                 )
             else:
@@ -7610,6 +7884,34 @@ def train(args):
         gate_y_gap_mean = (gate_y_gap_sum / total_samples).item() if is_gate else 0.0
         gate_clearance_f_mean = (gate_clearance_f_sum / total_samples).item() if is_gate else 0.0
         gate_risk_f_mean = (gate_risk_f_sum / total_samples).item() if is_gate else 0.0
+        gate_conflict_score_mean = (gate_conflict_score_sum / total_samples).item() if is_gate else 0.0
+        gate_w_std = 0.0
+        gate_conflict_w_corr = 0.0
+        gate_high_conflict_w_mean = 0.0
+        gate_low_conflict_w_mean = 0.0
+        gate_high_conflict_supp_mean = 0.0
+        gate_low_conflict_supp_mean = 0.0
+        if is_gate:
+            mean_w_t = gate_w_sum / total_samples
+            mean_conflict_t = gate_conflict_score_sum / total_samples
+            var_w_t = (gate_w_sq_sum / total_samples) - torch.square(mean_w_t)
+            var_conflict_t = (gate_conflict_sq_sum / total_samples) - torch.square(mean_conflict_t)
+            cov_wc_t = (gate_w_conflict_cross_sum / total_samples) - (mean_w_t * mean_conflict_t)
+            gate_w_std = torch.sqrt(torch.clamp(var_w_t, min=0.0)).item()
+            corr_denom_t = torch.sqrt(torch.clamp(var_w_t * var_conflict_t, min=1e-12))
+            gate_conflict_w_corr = (cov_wc_t / corr_denom_t).item()
+            gate_high_conflict_w_mean = (
+                gate_high_conflict_w_sum / torch.clamp(gate_high_conflict_count, min=1.0)
+            ).item()
+            gate_low_conflict_w_mean = (
+                gate_low_conflict_w_sum / torch.clamp(gate_low_conflict_count, min=1.0)
+            ).item()
+            gate_high_conflict_supp_mean = (
+                gate_high_conflict_supp_sum / torch.clamp(gate_high_conflict_count, min=1.0)
+            ).item()
+            gate_low_conflict_supp_mean = (
+                gate_low_conflict_supp_sum / torch.clamp(gate_low_conflict_count, min=1.0)
+            ).item()
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
@@ -7904,6 +8206,14 @@ def train(args):
                 writer.add_scalar('PCR/Gate/YHighConflictMean', pcr_high_conflict_y_mean, iteration)
                 writer.add_scalar('PCR/Gate/YLowConflictMean', pcr_low_conflict_y_mean, iteration)
                 writer.add_scalar('PCR/Gate/YEffChange', gate_y_change_mean, iteration)
+                writer.add_scalar('PCR/Gate/WMean', gate_w_mean, iteration)
+                writer.add_scalar('PCR/Gate/WStd', gate_w_std, iteration)
+                writer.add_scalar('PCR/Gate/ConflictScoreMean', gate_conflict_score_mean, iteration)
+                writer.add_scalar('PCR/Gate/ConflictWCorr', gate_conflict_w_corr, iteration)
+                writer.add_scalar('PCR/Gate/WHighConflictMean', gate_high_conflict_w_mean, iteration)
+                writer.add_scalar('PCR/Gate/WLowConflictMean', gate_low_conflict_w_mean, iteration)
+                writer.add_scalar('PCR/Gate/SuppHighConflictMean', gate_high_conflict_supp_mean, iteration)
+                writer.add_scalar('PCR/Gate/SuppLowConflictMean', gate_low_conflict_supp_mean, iteration)
             writer.add_scalar('PCR/Gate/ConflictMean', pcr_conflict_mean, iteration)
             writer.add_scalar('PCR/Gate/ConflictYCorr', pcr_conflict_y_corr, iteration)
             writer.add_scalar('PCR/Reward/Core', reward_term_means.get('pcr_core', 0.0), iteration)
@@ -7927,6 +8237,13 @@ def train(args):
             writer.add_scalar('Stats/GateYRaw', gate_y_raw_mean, iteration)
             writer.add_scalar('Stats/GateYSafe', gate_y_safe_mean, iteration)
             writer.add_scalar('Stats/GateW', gate_w_mean, iteration)
+            writer.add_scalar('Stats/GateWStd', gate_w_std, iteration)
+            writer.add_scalar('Stats/GateConflictScore', gate_conflict_score_mean, iteration)
+            writer.add_scalar('Stats/GateConflictWCorr', gate_conflict_w_corr, iteration)
+            writer.add_scalar('Stats/GateWHighConflict', gate_high_conflict_w_mean, iteration)
+            writer.add_scalar('Stats/GateWLowConflict', gate_low_conflict_w_mean, iteration)
+            writer.add_scalar('Stats/GateSuppHighConflict', gate_high_conflict_supp_mean, iteration)
+            writer.add_scalar('Stats/GateSuppLowConflict', gate_low_conflict_supp_mean, iteration)
             writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
@@ -8361,8 +8678,8 @@ if __name__ == "__main__":
                         help='Gate 训练早期启用安全 clamp')
     parser.add_argument('--gate_safe_max', type=float, default=0.3,
                         help='安全 clamp 的最大 y 值')
-    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom'],
-                        help='PCR 冲突先验模式：none=y-only，geom=基于 follow 方向 clearance 的解析 w')
+    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned'],
+                        help='PCR 冲突先验模式：none=y-only，geom=解析 w，learned=策略输出 w')
     parser.add_argument('--w_tau', type=float, default=0.25,
                         help='w_geom 衰减尺度（米）；越小表示更早把近障碍判为高冲突')
     parser.add_argument('--w_blend_mode', type=str, default='multiply', choices=['multiply', 'mix'],

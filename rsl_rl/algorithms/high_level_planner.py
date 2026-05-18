@@ -710,6 +710,8 @@ class GateOutput(NamedTuple):
     y_alpha: torch.Tensor
     y_beta: torch.Tensor
     value: torch.Tensor
+    w_alpha: Optional[torch.Tensor] = None
+    w_beta: Optional[torch.Tensor] = None
 
 
 class GatePolicy(nn.Module):
@@ -722,8 +724,10 @@ class GatePolicy(nn.Module):
         state_dim: int = 9,
         goal_dim: int = 2,
         hidden_dim: int = 256,
+        learned_w: bool = False,
     ):
         super().__init__()
+        self.learned_w = bool(learned_w)
         self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
         self.state_encoder = StateEncoder(state_dim, 64)
         self.goal_encoder = GoalEncoder(goal_dim, 32)
@@ -757,6 +761,19 @@ class GatePolicy(nn.Module):
             nn.Linear(64, 1),
             nn.Softplus()
         )
+        if self.learned_w:
+            self.w_alpha_head = nn.Sequential(
+                nn.Linear(hidden_dim, 64),
+                nn.ELU(),
+                nn.Linear(64, 1),
+                nn.Softplus()
+            )
+            self.w_beta_head = nn.Sequential(
+                nn.Linear(hidden_dim, 64),
+                nn.ELU(),
+                nn.Linear(64, 1),
+                nn.Softplus()
+            )
 
         self.value_head = nn.Sequential(
             nn.Linear(hidden_dim, 64),
@@ -773,6 +790,9 @@ class GatePolicy(nn.Module):
                     nn.init.constant_(m.bias, 0)
         nn.init.orthogonal_(self.y_alpha_head[-2].weight, gain=0.01)
         nn.init.orthogonal_(self.y_beta_head[-2].weight, gain=0.01)
+        if self.learned_w:
+            nn.init.orthogonal_(self.w_alpha_head[-2].weight, gain=0.01)
+            nn.init.orthogonal_(self.w_beta_head[-2].weight, gain=0.01)
 
     @staticmethod
     def _format_difficulty(terrain_difficulty: torch.Tensor) -> torch.Tensor:
@@ -838,8 +858,10 @@ class GatePolicy(nn.Module):
 
         y_alpha = self.y_alpha_head(actor_hidden) + 1.0
         y_beta = self.y_beta_head(actor_hidden) + 1.0
+        w_alpha = self.w_alpha_head(actor_hidden) + 1.0 if self.learned_w else None
+        w_beta = self.w_beta_head(actor_hidden) + 1.0 if self.learned_w else None
         value = self.value_head(critic_hidden)
-        return GateOutput(y_alpha=y_alpha, y_beta=y_beta, value=value)
+        return GateOutput(y_alpha=y_alpha, y_beta=y_beta, value=value, w_alpha=w_alpha, w_beta=w_beta)
 
     def get_action(
         self,
@@ -865,16 +887,29 @@ class GatePolicy(nn.Module):
         )
         if deterministic:
             y = out.y_alpha / (out.y_alpha + out.y_beta)
-            y = y.squeeze(-1)
         else:
             y_dist = Beta(out.y_alpha, out.y_beta)
-            y = y_dist.sample().squeeze(-1)
+            y = y_dist.sample()
+        if self.learned_w:
+            if out.w_alpha is None or out.w_beta is None:
+                raise RuntimeError("learned_w enabled but w distribution was not produced")
+            if deterministic:
+                w = out.w_alpha / (out.w_alpha + out.w_beta)
+            else:
+                w_dist = Beta(out.w_alpha, out.w_beta)
+                w = w_dist.sample()
+            action = torch.cat([y, w], dim=-1)
+        else:
+            action = y.squeeze(-1)
         info = {
             "value": out.value,
             "y_alpha": out.y_alpha,
             "y_beta": out.y_beta,
         }
-        return y, info
+        if self.learned_w:
+            info["w_alpha"] = out.w_alpha
+            info["w_beta"] = out.w_beta
+        return action, info
 
     def evaluate_actions(
         self,
@@ -898,13 +933,35 @@ class GatePolicy(nn.Module):
             critic_goal=critic_goal,
             critic_terrain_difficulty=critic_terrain_difficulty,
         )
-        y_dist = Beta(out.y_alpha, out.y_beta)
         eps = 1e-6
-        y_clamped = torch.clamp(y_action, eps, 1.0 - eps)
-        if y_clamped.dim() == 1:
+        action = y_action
+        if action.dim() == 1:
+            if self.learned_w:
+                raise ValueError("learned_w gate expects action shape (B, 2)")
+            y_clamped = torch.clamp(action, eps, 1.0 - eps)
             y_clamped = y_clamped.unsqueeze(-1)
+            w_clamped = None
+        else:
+            if self.learned_w:
+                if action.shape[-1] != 2:
+                    raise ValueError(f"learned_w gate expects 2 action dims, got {tuple(action.shape)}")
+                y_clamped = torch.clamp(action[:, 0:1], eps, 1.0 - eps)
+                w_clamped = torch.clamp(action[:, 1:2], eps, 1.0 - eps)
+            else:
+                if action.shape[-1] != 1:
+                    raise ValueError(f"gate expects 1 action dim, got {tuple(action.shape)}")
+                y_clamped = torch.clamp(action, eps, 1.0 - eps)
+                w_clamped = None
+        y_dist = Beta(out.y_alpha, out.y_beta)
         y_log_prob = y_dist.log_prob(y_clamped).sum(dim=-1)
         y_entropy = y_dist.entropy().sum(dim=-1)
+        if self.learned_w:
+            if out.w_alpha is None or out.w_beta is None or w_clamped is None:
+                raise RuntimeError("learned_w enabled but w action/distribution is missing")
+            w_dist = Beta(out.w_alpha, out.w_beta)
+            w_log_prob = w_dist.log_prob(w_clamped).sum(dim=-1)
+            w_entropy = w_dist.entropy().sum(dim=-1)
+            return y_log_prob + w_log_prob, out.value, y_entropy + w_entropy, None
         return y_log_prob, out.value, y_entropy, None
 
 

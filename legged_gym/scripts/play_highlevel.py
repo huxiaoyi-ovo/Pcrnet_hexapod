@@ -298,6 +298,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     policy = None
     avoid_policy = None
     gate_state_dim = int(obs["state"].shape[1])
+    gate_goal_dim = int(obs["goal"].shape[1])
     avoid_state_dim = int(obs["state"].shape[1])
     if not expert_only_mode:
         if not args.teacher_ckpt:
@@ -308,10 +309,21 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
             gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
             gate_meta = _ckpt_meta_from_obj(gate_ckpt)
             gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
+            gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, gate_meta)
+            expected_gate_action_dim = 2 if str(getattr(args, "w_mode", "none")).lower() == "learned" else 1
+            if gate_action_dim is not None and int(gate_action_dim) != expected_gate_action_dim:
+                raise ValueError(
+                    f"gate ckpt actor_output_dim 与当前 play_w_mode 不一致: "
+                    f"checkpoint={gate_action_dim}, expected={expected_gate_action_dim}, w_mode={args.w_mode}"
+                )
+            gate_goal_dim = th.infer_checkpoint_goal_dim(gate_ckpt) or (
+                int(obs["goal"].shape[1]) + (th.LEARNED_W_FEATURE_DIM if expected_gate_action_dim == 2 else 0)
+            )
             policy = th.GatePolicy(
                 affordance_channels=aff_channels,
                 state_dim=gate_state_dim,
-                goal_dim=obs["goal"].shape[1],
+                goal_dim=gate_goal_dim,
+                learned_w=expected_gate_action_dim == 2,
             ).to(device)
             avoid_ckpt = torch.load(args.avoid_ckpt, map_location=device)
             avoid_meta = _ckpt_meta_from_obj(avoid_ckpt)
@@ -393,6 +405,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
         policy_meta=policy_meta,
         aux_checkpoint_meta=resolved_protocol_aux,
         gate_state_dim=gate_state_dim,
+        gate_goal_dim=gate_goal_dim,
         avoid_state_dim=avoid_state_dim,
         aff_bundle=aff_bundle,
         heading_offset=heading_offset,
@@ -1852,7 +1865,7 @@ def parse_args():
         default=None,
         help="(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）",
     )
-    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom"], help="PCR 冲突先验模式")
+    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom", "learned"], help="PCR 冲突先验模式")
     parser.add_argument("--w_tau", type=float, default=0.25, help="w_geom 衰减尺度（米）")
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"], help="w 与 gate_y 的融合方式")
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true", help="当 w_mode!=none 时关闭旧 gate_safe_clamp")
@@ -2271,6 +2284,7 @@ def main():
     avoid_policy = None
     avoid_aff_stack_buf = None
     gate_state_dim = int(obs["state"].shape[1])
+    gate_goal_dim = int(obs["goal"].shape[1])
     avoid_state_dim = int(obs["state"].shape[1])
     if use_follow_expert:
         print("[PlayHigh] cmd_source=follow_expert (--use_follow_expert)")
@@ -2288,10 +2302,21 @@ def main():
             gate_ckpt = torch.load(args.teacher_ckpt, map_location=device)
             gate_meta = _ckpt_meta_from_obj(gate_ckpt)
             gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
+            gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, gate_meta)
+            expected_gate_action_dim = 2 if str(getattr(args, "w_mode", "none")).lower() == "learned" else 1
+            if gate_action_dim is not None and int(gate_action_dim) != expected_gate_action_dim:
+                raise ValueError(
+                    f"gate ckpt actor_output_dim 与当前 play_w_mode 不一致: "
+                    f"checkpoint={gate_action_dim}, expected={expected_gate_action_dim}, w_mode={args.w_mode}"
+                )
+            gate_goal_dim = th.infer_checkpoint_goal_dim(gate_ckpt) or (
+                int(obs["goal"].shape[1]) + (th.LEARNED_W_FEATURE_DIM if expected_gate_action_dim == 2 else 0)
+            )
             policy = th.GatePolicy(
                 affordance_channels=aff_channels,
                 state_dim=gate_state_dim,
-                goal_dim=obs["goal"].shape[1],
+                goal_dim=gate_goal_dim,
+                learned_w=expected_gate_action_dim == 2,
             ).to(device)
             ckpt = torch.load(args.avoid_ckpt, map_location=device)
             ckpt_meta = _ckpt_meta_from_obj(ckpt)
@@ -2558,14 +2583,43 @@ def main():
                             avoid_difficulty_input,
                             deterministic=True,
                         )
-                        gate_y_raw, _ = policy.get_action(
+                        gate_policy_goal = goal_input
+                        if str(getattr(args, "w_mode", "none")).lower() == "learned":
+                            gate_policy_goal, _ = th.build_learned_w_gate_goal(
+                                env,
+                                args,
+                                goal_input,
+                                gate_aff_input,
+                                cmd_f,
+                                cmd_a,
+                            )
+                        gate_policy_goal = th.match_goal_dim(
+                            gate_policy_goal,
+                            int(gate_goal_dim),
+                            label="play_gate_goal",
+                        )
+                        gate_action, _ = policy.get_action(
                             aff_input,
                             gate_state,
-                            goal_input,
+                            gate_policy_goal,
                             gate_difficulty,
                             deterministic=deterministic,
                         )
-                        gate_diag = th.resolve_moe_gate_pcr(env, args, gate_aff_input, gate_y_raw, cmd_f, cmd_a)
+                        if str(getattr(args, "w_mode", "none")).lower() == "learned":
+                            gate_y_raw = gate_action[:, 0]
+                            learned_w = gate_action[:, 1]
+                        else:
+                            gate_y_raw = gate_action
+                            learned_w = None
+                        gate_diag = th.resolve_moe_gate_pcr(
+                            env,
+                            args,
+                            gate_aff_input,
+                            gate_y_raw,
+                            cmd_f,
+                            cmd_a,
+                            learned_w=learned_w,
+                        )
                         gate_y = gate_diag["y_eff"]
                         cmd = gate_diag["cmd"]
                     else:
