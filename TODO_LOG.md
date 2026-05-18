@@ -1989,3 +1989,8 @@
 - [x] Must: 新增论文级 `MoE-y` vs `MoE-y+geom-w` 机制图脚本，等两组 eval 输出完成后统一生成同图对比曲线与任务收益柱状图
 - [x] Must: 修复 `eval_highlevel.py` 的 PCR success 统计口径：episode 内累计成功事件，论文主成功必须同时满足成功事件与无碰撞，并显式输出互斥 outcome 诊断项
 - [x] Must: 将 `eval_highlevel.py` 收回为 `play_highlevel.py` 的统计版：复用 play 的环境创建、配置覆盖、affordance 输入和 checkpoint 加载口径，只保留 difficulty sweep、批量 episode 与 metrics 输出为 eval 特有能力
+
+## 2026-05-18 PCR eval 逐行进度主指标
+
+- [x] Must: 将 `eval_highlevel.py` 的论文主成功指标改为“无碰撞逐行通过进度得分”：通过 1 行记 `1/总行数`，通过多行累加；严格整回合成功仅保留为诊断字段
+- [x] Must: 同步修改 PCR w 机制图脚本，图 C 不再画互斥 success/collision 堆叠，而是画逐行进度得分与碰撞率，避免误导论文结论

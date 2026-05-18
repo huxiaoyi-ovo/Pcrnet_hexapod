@@ -4515,6 +4515,7 @@ class HierarchicalHexapodEnv:
         target_line_finished_snapshot = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         s_avoid_progress_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        s_avoid_row_success_mask = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         pcr_robot_crossed_final_row = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         pcr_follow_band_ok = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         cross_line_dist_snapshot = None
@@ -4528,6 +4529,8 @@ class HierarchicalHexapodEnv:
                 s_avoid_episode_collision_snapshot = self.env.s_avoid_episode_collision.clone()
             if hasattr(self.env, "_get_s_avoid_episode_progress_flags"):
                 s_avoid_progress_mask = self.env._get_s_avoid_episode_progress_flags(env_ids)
+            if hasattr(self.env, "_get_s_avoid_episode_row_success_ratios"):
+                s_avoid_row_success_mask = self.env._get_s_avoid_episode_row_success_ratios(env_ids)
             if hasattr(self.env, "_get_s_avoid_cross_line_terms"):
                 cross_line_dist_snapshot, center_y_snapshot, cross_line_y_snapshot = (
                     self.env._get_s_avoid_cross_line_terms(env_ids)
@@ -4546,6 +4549,12 @@ class HierarchicalHexapodEnv:
                             terminal_mask,
                             self.env.s_avoid_terminal_progress_ratio,
                             s_avoid_progress_mask,
+                        )
+                    if hasattr(self.env, "s_avoid_terminal_row_success_ratio"):
+                        s_avoid_row_success_mask = torch.where(
+                            terminal_mask,
+                            self.env.s_avoid_terminal_row_success_ratio,
+                            s_avoid_row_success_mask,
                         )
                     if hasattr(self.env, "s_avoid_terminal_success"):
                         success_mask = torch.where(
@@ -4857,6 +4866,7 @@ class HierarchicalHexapodEnv:
             'pcr_robot_crossed_final_row': pcr_robot_crossed_final_row,
             'pcr_follow_band_ok': pcr_follow_band_ok,
             's_avoid_progress_mask': s_avoid_progress_mask,
+            's_avoid_row_success_mask': s_avoid_row_success_mask,
             'cross_line_dist': cross_line_dist_snapshot,
             'center_y': center_y_snapshot,
             'cross_line_y': cross_line_y_snapshot,

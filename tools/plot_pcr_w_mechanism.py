@@ -25,9 +25,8 @@ METHOD_STYLE = {
 
 
 OUTCOME_FIELDS = [
-    ("success_rate", "Success", "#2A9D8F"),
-    ("collision_only_rate", "Collision", "#D95F02"),
-    ("timeout_or_other_rate", "Timeout / other", "#8D99AE"),
+    ("row_progress_success_mean", "Row-progress score", "#2A9D8F"),
+    ("episode_collision_rate", "Collision rate", "#D95F02"),
 ]
 
 
@@ -52,8 +51,8 @@ def _validate_outcome_fields(metrics: Dict, path: str) -> None:
     missing = [key for key, _, _ in OUTCOME_FIELDS if key not in overall]
     if missing:
         raise ValueError(
-            f"{path} misses mutually exclusive outcome fields {missing}. "
-            "Re-run eval_highlevel.py after the outcome-stat fix."
+            f"{path} misses row-progress/collision fields {missing}. "
+            "Re-run eval_highlevel.py after the row-progress score fix."
         )
 
 
@@ -117,6 +116,7 @@ def _write_plot_data(
                 "y_eff_mean": _finite_float(item.get("y_eff_mean", float("nan"))),
                 "suppression_mean": _finite_float(item.get("suppression_mean", float("nan"))),
                 "w_mean": _finite_float(item.get("w_mean", float("nan"))),
+                "row_progress_score": _finite_float(item.get("success_episode_rate", float("nan"))),
                 "success_episode_rate": _finite_float(item.get("success_episode_rate", float("nan"))),
                 "success_event_episode_rate": _finite_float(item.get("success_event_episode_rate", float("nan"))),
                 "collision_episode_rate": _finite_float(item.get("collision_episode_rate", float("nan"))),
@@ -207,34 +207,35 @@ def draw_figure(args) -> Tuple[str, str]:
         (args.geomw_label or METHOD_STYLE["geomw"]["label"], geomw),
     ]
     outcome_x = np.arange(len(outcome_methods), dtype=np.float64)
-    bottoms = np.zeros(len(outcome_methods), dtype=np.float64)
-    for key, label, color in OUTCOME_FIELDS:
+    bar_width = 0.34
+    offsets = (
+        np.arange(len(OUTCOME_FIELDS), dtype=np.float64) - (len(OUTCOME_FIELDS) - 1.0) / 2.0
+    ) * bar_width
+    for field_idx, (key, label, color) in enumerate(OUTCOME_FIELDS):
         values = np.asarray([_overall_rate(metrics, key) for _, metrics in outcome_methods], dtype=np.float64)
         axes[2].bar(
-            outcome_x,
+            outcome_x + offsets[field_idx],
             values,
-            width=0.48,
-            bottom=bottoms,
+            width=bar_width,
             color=color,
-            edgecolor="white",
-            linewidth=0.7,
+            edgecolor="#333333",
+            linewidth=0.35,
             label=label,
         )
-        for xi, bottom, value in zip(outcome_x, bottoms, values):
+        for xi, value in zip(outcome_x + offsets[field_idx], values):
             if math.isfinite(value) and value >= args.outcome_label_min:
                 axes[2].text(
                     xi,
-                    bottom + value / 2.0,
+                    min(0.98, value + 0.025),
                     f"{value:.2f}",
                     ha="center",
-                    va="center",
+                    va="bottom",
                     fontsize=7,
-                    color="white" if value >= 0.12 else "black",
+                    color="#202020",
                 )
-        bottoms = bottoms + np.nan_to_num(values, nan=0.0)
 
-    axes[2].set_title("C. Episode outcome")
-    axes[2].set_ylabel("Episode rate")
+    axes[2].set_title("C. Row-progress task score")
+    axes[2].set_ylabel("Episode-level score / rate")
     axes[2].set_xticks(outcome_x)
     axes[2].set_xticklabels([name for name, _ in outcome_methods], rotation=18, ha="right")
     axes[2].set_ylim(0.0, 1.0)
