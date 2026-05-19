@@ -957,6 +957,7 @@ def resolve_moe_gate_pcr(
     clearance_a = diag["clearance_A"]
     risk_f = diag["risk_F"]
     risk_a = diag["risk_A"]
+    safe_d = diag["post_safe_distance"]
 
     w_mode = str(getattr(args, "w_mode", "none")).lower()
     w_tau = max(float(getattr(args, "w_tau", 0.25)), 1e-6)
@@ -6439,13 +6440,14 @@ def train(args):
                             cmd_f,
                             cmd_a,
                         )
+                        gate_goal_finite = _row_finite_mask(gate_policy_goal)
+                        action_valid = action_valid & gate_goal_finite
                         gate_policy_goal = torch.nan_to_num(
                             gate_policy_goal,
                             nan=0.0,
                             posinf=0.0,
                             neginf=0.0,
                         )
-                        action_valid = action_valid & _row_finite_mask(gate_policy_goal)
                     policy_goal_for_buffer = gate_policy_goal
                 with torch.no_grad():
                     gate_action, _ = policy.get_action(
@@ -6483,6 +6485,13 @@ def train(args):
                         cmd_a,
                         learned_w=gate_learned_w,
                     )
+                    gate_diag_finite = (
+                        _row_finite_mask(gate_diag["w"].unsqueeze(-1))
+                        & _row_finite_mask(gate_diag["risk_F"].unsqueeze(-1))
+                        & _row_finite_mask(gate_diag["risk_A"].unsqueeze(-1))
+                        & _row_finite_mask(gate_diag["conflict_score"].unsqueeze(-1))
+                    )
+                    action_valid = action_valid & gate_diag_finite
                     gate_y = gate_diag["gate_y"]
                     y_eff = gate_diag["y_eff"]
                     if bool(gate_diag["gate_safe_clamp_mask"].any().item()):
