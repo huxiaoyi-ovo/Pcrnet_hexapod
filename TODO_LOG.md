@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-19 PCR learned-w 行内释放安全收口
+
+- [x] ~~[P0] 将近期 PCR w 主线切到 `learned-w + row_not_released + row-aware w_aux`：保持当前 `w` 单向压 follow 语义和 `y_eff = y_raw * (1 - w)` 不变，先解决当前障碍行未释放前过早追目标导致的侧向碰撞；暂缓双向 follow-support 公式、learned beta 与大范围奖励改动。~~
+
 ## 2026-04-02 场景命名体系收口
 
 - [x] ~~[P0] 将项目主线场景体系收口为两类命名：`s_` 仅表示训练场景，`e_` 仅表示实验场景；除这两类外的旧场景名默认废弃，不再作为主线讨论、命令示例与结果汇报依据~~
@@ -115,6 +119,7 @@
 ## 2026-05-18 PCR learned-w command-conflict 主线
 
 - [x] ~~[P0] 新增 `w_mode=learned` 作为第三个 PCR 对照：GatePolicy 输出 `y` 与 `w` 两维，`w` 的输入显式包含 follow/avoid 命令、`risk_F/risk_A`、命令夹角与 `conflict_score`，并与 `yonly / geom-w` 共用同一套 PCR 融合公式和 eval/play 口径~~
+- [x] ~~[P0] 将 PCR 训练、eval 与机制图输出命名收口到策略特征标签：训练目录、eval 目录和 figures 子目录必须包含 `yonly / geomw_w* / learnedw_rowrel_aux*` 等关键信息，并为 PCR 常用训练参数提供默认值，减少命令行重复项和误填风险~~
 
 ## 2026-03-30 avoid 连续避障收口阶段
 

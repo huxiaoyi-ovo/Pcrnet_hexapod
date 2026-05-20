@@ -961,8 +961,13 @@ class GatePolicy(nn.Module):
             w_dist = Beta(out.w_alpha, out.w_beta)
             w_log_prob = w_dist.log_prob(w_clamped).sum(dim=-1)
             w_entropy = w_dist.entropy().sum(dim=-1)
-            return y_log_prob + w_log_prob, out.value, y_entropy + w_entropy, None
-        return y_log_prob, out.value, y_entropy, None
+            info = {
+                "y_mean": out.y_alpha / (out.y_alpha + out.y_beta),
+                "w_mean": out.w_alpha / (out.w_alpha + out.w_beta),
+            }
+            return y_log_prob + w_log_prob, out.value, y_entropy + w_entropy, info
+        info = {"y_mean": out.y_alpha / (out.y_alpha + out.y_beta)}
+        return y_log_prob, out.value, y_entropy, info
 
 
 class CommandPostProcessor:

@@ -2773,6 +2773,8 @@ def main():
                 post_info["cmd_F"] = gate_diag["cmd_f"].detach().clone()
                 post_info["cmd_A"] = gate_diag["cmd_a"].detach().clone()
                 post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
+                post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
+                post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
             _update_e_s_metrics(e_s_metrics, env, obs_before_step, info, dones, step_idx, cmd)
             if e_s_metrics.get("enabled", False) and ((step_idx + 1) % e_s_metrics["autosave_steps"] == 0):
                 _export_e_s_metrics(e_s_metrics, final=False, stop_reason="autosave")
@@ -3035,6 +3037,7 @@ def main():
                     pcr_conflict_dbg = 0.0
                     pcr_follow_err_dbg = 0.0
                     pcr_follow_quality_dbg = 0.0
+                    row_not_released_dbg = 0.0
                     target_finished_dbg = 0
                     follow_lost_dbg = 0
                     cmd_f_dbg = None
@@ -3058,17 +3061,20 @@ def main():
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
                         y_eff_t = post_info.get("y_eff", None)
+                        row_not_released_t = post_info.get("row_not_released", None)
                         if torch.is_tensor(cmd_f_t):
                             cmd_f_dbg = cmd_f_t[env_idx].detach().cpu().numpy()
                         if torch.is_tensor(cmd_a_t):
                             cmd_a_dbg = cmd_a_t[env_idx].detach().cpu().numpy()
                         if torch.is_tensor(y_eff_t):
                             y_eff_dbg = float(y_eff_t[env_idx].detach().cpu().item())
+                        if torch.is_tensor(row_not_released_t):
+                            row_not_released_dbg = float(row_not_released_t[env_idx].detach().cpu().item())
                     cmd_f_str = "None" if cmd_f_dbg is None else np.array2string(cmd_f_dbg, precision=3, floatmode="fixed")
                     cmd_a_str = "None" if cmd_a_dbg is None else np.array2string(cmd_a_dbg, precision=3, floatmode="fixed")
                     print(
                         "[PlayHigh][PCR] step={} follow_dist={:.3f} follow_goal={} target_xy={} robot_xy={} "
-                        "gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} conflict={:.3f} "
+                        "gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} conflict={:.3f} rowNR={:.1f} "
                         "reward(core/gate/gap)={:.3f}/{:.3f}/{:.3f} follow(err/q)={:.3f}/{:.3f} "
                         "flags(target_finish/follow_lost)={}/{}".format(
                             step_idx,
@@ -3080,6 +3086,7 @@ def main():
                             y_eff_dbg,
                             gate_w_val,
                             pcr_conflict_dbg,
+                            row_not_released_dbg,
                             pcr_core_dbg,
                             pcr_gate_aux_dbg,
                             pcr_gap_success_dbg,

@@ -264,6 +264,11 @@ class EpisodeAccumulator:
     clearance_a_sum: float = 0.0
     risk_f_sum: float = 0.0
     risk_a_sum: float = 0.0
+    row_not_released_sum: float = 0.0
+    row_not_released_w_sum: float = 0.0
+    row_not_released_steps: int = 0
+    row_released_w_sum: float = 0.0
+    row_released_steps: int = 0
     near_miss_steps: int = 0
     gate_switch_count: int = 0
     cmd_jerk_lin_sum: float = 0.0
@@ -315,6 +320,11 @@ class EvalRunner:
         self.primary_meta = runtime.primary_meta
         self.policy_meta = runtime.policy_meta
         self.aux_checkpoint_meta = runtime.aux_checkpoint_meta
+        selected_w_mode = getattr(args, "_eval_selected_w_mode", None)
+        if selected_w_mode is not None and str(getattr(self.args, "w_mode", "")) != str(selected_w_mode):
+            raise ValueError(
+                f"eval_w_mode 被 checkpoint meta 改写: requested={selected_w_mode}, runtime={self.args.w_mode}"
+            )
         self.gate_state_dim = runtime.gate_state_dim
         self.gate_goal_dim = getattr(runtime, "gate_goal_dim", None)
         self.avoid_state_dim = runtime.avoid_state_dim
@@ -786,6 +796,8 @@ class EvalRunner:
                     post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                     post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                     post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                    post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
+                    post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
                     post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                     post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
 
@@ -896,6 +908,7 @@ class EvalRunner:
                         clr_a_t = post_info.get("clearance_A", None)
                         risk_f_t = post_info.get("risk_F", None)
                         risk_a_t = post_info.get("risk_A", None)
+                        row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
@@ -909,6 +922,7 @@ class EvalRunner:
                         clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
                         risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
+                        row_not_released_v = _safe_float(row_not_released_t[i].item(), default=0.0) if torch.is_tensor(row_not_released_t) else 0.0
                         conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
                         clr_pp_v = float("nan")
                         safe_thr_v = float("nan")
@@ -929,6 +943,13 @@ class EvalRunner:
                         ai.clearance_a_sum += clr_a_v
                         ai.risk_f_sum += risk_f_v
                         ai.risk_a_sum += risk_a_v
+                        ai.row_not_released_sum += row_not_released_v
+                        if row_not_released_v > 0.5:
+                            ai.row_not_released_w_sum += w_v
+                            ai.row_not_released_steps += 1
+                        else:
+                            ai.row_released_w_sum += w_v
+                            ai.row_released_steps += 1
                         if ai.prev_y_eff is not None and abs(y_eff_v - ai.prev_y_eff) > th.GATE_SWITCH_DY_DEFAULT:
                             ai.gate_switch_count += 1
                         ai.prev_y_eff = y_eff_v
@@ -1012,6 +1033,7 @@ class EvalRunner:
                                     "risk_f": risk_f_v,
                                     "risk_a": risk_a_v,
                                     "risk_delta": risk_f_v - risk_a_v,
+                                    "row_not_released": row_not_released_v,
                                     "conflict_score": conflict_v,
                                     "clearance_pp": clr_pp_v,
                                     "near_miss": int(near_miss_now),
@@ -1150,6 +1172,15 @@ class EvalRunner:
                             "risk_f_mean": ai.risk_f_sum / denom_steps,
                             "risk_a_mean": ai.risk_a_sum / denom_steps,
                             "risk_delta_mean": (ai.risk_f_sum - ai.risk_a_sum) / denom_steps,
+                            "row_not_released_rate": ai.row_not_released_sum / denom_steps,
+                            "row_not_released_w_mean": (
+                                ai.row_not_released_w_sum / float(max(ai.row_not_released_steps, 1))
+                                if ai.row_not_released_steps > 0 else float("nan")
+                            ),
+                            "row_released_w_mean": (
+                                ai.row_released_w_sum / float(max(ai.row_released_steps, 1))
+                                if ai.row_released_steps > 0 else float("nan")
+                            ),
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
                             "rotate_only_rate": ai.rotate_only_steps / denom_steps,
@@ -1419,6 +1450,9 @@ class EvalRunner:
         risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
         risk_a_vals = _clean([r.get("risk_a_mean", float("nan")) for r in rows])
         risk_delta_vals = _clean([r.get("risk_delta_mean", float("nan")) for r in rows])
+        row_not_released_vals = _clean([r.get("row_not_released_rate", float("nan")) for r in rows])
+        row_not_released_w_vals = _clean([r.get("row_not_released_w_mean", float("nan")) for r in rows])
+        row_released_w_vals = _clean([r.get("row_released_w_mean", float("nan")) for r in rows])
         switch_vals = _clean([r.get("switch_rate", float("nan")) for r in rows])
         near_miss_vals = _clean([r.get("near_miss_rate", float("nan")) for r in rows])
         rotate_only_vals = _clean([r.get("rotate_only_rate", float("nan")) for r in rows])
@@ -1515,6 +1549,9 @@ class EvalRunner:
             "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
             "risk_a_mean": float(np.mean(risk_a_vals)) if risk_a_vals else float("nan"),
             "risk_delta_mean": float(np.mean(risk_delta_vals)) if risk_delta_vals else float("nan"),
+            "row_not_released_rate_mean": float(np.mean(row_not_released_vals)) if row_not_released_vals else float("nan"),
+            "row_not_released_w_mean": float(np.mean(row_not_released_w_vals)) if row_not_released_w_vals else float("nan"),
+            "row_released_w_mean": float(np.mean(row_released_w_vals)) if row_released_w_vals else float("nan"),
             "w_clearance_f_corr": w_clearance_f_corr,
             "w_risk_f_corr": w_risk_f_corr,
             "w_risk_delta_corr": w_risk_delta_corr,
@@ -1698,6 +1735,11 @@ class EvalRunner:
                 "w_tau": float(self.args.w_tau),
                 "w_blend_mode": str(self.args.w_blend_mode),
                 "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
+                "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
+                "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
+                "pcr_w_aux_risk_f_threshold": float(getattr(self.args, "pcr_w_aux_risk_f_threshold", 0.4)),
+                "pcr_w_aux_risk_margin": float(getattr(self.args, "pcr_w_aux_risk_margin", 0.10)),
+                "pcr_w_aux_cmd_cos_threshold": float(getattr(self.args, "pcr_w_aux_cmd_cos_threshold", 0.5)),
                 "cmd_slew_lin": float(self.args.cmd_slew_lin),
                 "cmd_slew_ang": float(self.args.cmd_slew_ang),
                 "cmd_safe_dist": None if self.args.cmd_safe_dist is None else float(self.args.cmd_safe_dist),
@@ -1784,6 +1826,9 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "risk_f_mean",
         "risk_a_mean",
         "risk_delta_mean",
+        "row_not_released_rate",
+        "row_not_released_w_mean",
+        "row_released_w_mean",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
@@ -1841,6 +1886,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_f",
             "risk_a",
             "risk_delta",
+            "row_not_released",
             "conflict_score",
             "clearance_pp",
             "near_miss",
@@ -1935,22 +1981,22 @@ def parse_args():
 
     parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
-    parser.add_argument("--skill", type=str, default="follow", choices=["follow", "avoid", "moe"])
+    parser.add_argument("--skill", type=str, default="moe", choices=["follow", "avoid", "moe"])
 
     parser.add_argument("--pcr_ckpt", type=str, required=True, help="PCR gate policy checkpoint")
     parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
-    parser.add_argument("--avoid_ckpt", type=str, required=True, help="avoid checkpoint for moe")
+    parser.add_argument("--avoid_ckpt", type=str, default=th.DEFAULT_AVOID_CKPT, help=f"avoid checkpoint for moe (default {th.DEFAULT_AVOID_CKPT})")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="vision checkpoint for student mode")
-    parser.add_argument("--lowlevel_ckpt", type=str, required=True, help="low-level locomotion checkpoint")
+    parser.add_argument("--lowlevel_ckpt", type=str, default=th.DEFAULT_LOWLEVEL_CKPT, help=f"low-level locomotion checkpoint (default {th.DEFAULT_LOWLEVEL_CKPT})")
 
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_envs", type=int, default=256)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--num_envs", type=int, default=25)
     parser.add_argument("--decimation", type=int, default=5)
     parser.add_argument("--aff_stack", type=int, default=1)
     parser.add_argument("--camera_enable", action="store_true", default=False)
     parser.add_argument("--camera_interval", type=int, default=None)
 
-    parser.add_argument("--episodes", type=int, default=200)
+    parser.add_argument("--episodes", type=int, default=512)
     parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
     parser.add_argument("--stochastic", action="store_true", help="use stochastic policy sampling")
     parser.add_argument(
@@ -1978,6 +2024,11 @@ def parse_args():
     parser.add_argument("--w_tau", type=float, default=0.25)
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
+    parser.add_argument("--pcr_w_aux_enable", action="store_true")
+    parser.add_argument("--pcr_w_aux_coef", type=float, default=0.05)
+    parser.add_argument("--pcr_w_aux_risk_f_threshold", type=float, default=0.4)
+    parser.add_argument("--pcr_w_aux_risk_margin", type=float, default=0.10)
+    parser.add_argument("--pcr_w_aux_cmd_cos_threshold", type=float, default=0.5)
     parser.add_argument("--cmd_slew_lin", type=float, default=0.2)
     parser.add_argument("--cmd_slew_ang", type=float, default=0.4)
     parser.add_argument("--cmd_safe_dist", type=float, default=None)
@@ -2014,6 +2065,8 @@ def parse_args():
             f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned'}[selected_w_mode] } 不一致"
         )
     args.w_mode = selected_w_mode
+    args._eval_selected_w_mode = selected_w_mode
+    args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
     for opt_name in ("pcr_ckpt", "avoid_ckpt", "lowlevel_ckpt"):
         if not str(getattr(args, opt_name, "") or "").strip():
             parser.error(f"缺少必须的 checkpoint 路径：--{opt_name}")
@@ -2025,6 +2078,7 @@ def parse_args():
     if bool(getattr(args, "viewer", False)):
         args.headless = False
     th.capture_cli_explicit_arg_values(args, parser)
+    args._runtime_ablation_cli_overrides["w_mode"] = selected_w_mode
     if not hasattr(args, "physics_engine"):
         args.physics_engine = gymapi.SIM_PHYSX
     if not hasattr(args, "sim_device_type"):
@@ -2058,7 +2112,8 @@ def main():
     metrics = runner.evaluate()
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{ts}")
+    variant_tag = th.format_pcr_variant_tag(args)
+    out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")
     _write_outputs(metrics, out_dir)
 
     overall = metrics["overall"]

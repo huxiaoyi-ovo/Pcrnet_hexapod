@@ -1,5 +1,109 @@
 # PCR w 主线近期任务计划
 
+## 0. 2026-05-19 最新主线：learned-w 行内释放安全收口
+
+### 0.1 当前判断
+
+最新 learned-w 评测和 viewer 观察说明，当前主矛盾不是“能不能通过障碍行”，而是：
+
+```text
+row-progress 已经较高；
+full task success 仍被 collision 拉低；
+主要碰撞发生在当前障碍行尚未完全释放时，机器人过早大幅转向/横移追目标，腿或身体贴到旁边障碍物。
+```
+
+最近一次未修复前 learned-w eval 参考值：
+
+```text
+Row-progress success: 0.8008
+Full/strict/event success: 0.6113 / 0.6113 / 0.6113
+Episode collision: 0.3887
+Follow MAE/RMSE: 0.3391 / 0.3528 m
+```
+
+这说明 learned-w 已经有推进能力，但安全释放时机不够好。下一步不应先改成更大的公式体系，而应先把这个行为修干净。
+
+### 0.2 当前最小执行路线
+
+近期主线固定为：
+
+```text
+learned-w + row_not_released feature + row-aware w_aux
+```
+
+保持当前执行语义不变：
+
+```text
+w 越大 -> 越压 follow；
+y_eff = y_raw * (1 - w)；
+cmd = y_eff * cmd_F + (1 - y_eff) * cmd_A。
+```
+
+新增 `row_not_released` 的目的：
+
+```text
+让 gate 明确知道“当前障碍行还没完全通过”；
+在这一阶段不要急着追目标；
+等身体和腿从当前行安全释放后，再恢复 follow。
+```
+
+### 0.3 row-aware w_aux 口径
+
+`w_aux` 不再使用全局、粗糙的 `risk_F - risk_A` 标签作为唯一监督，而只在高置信冲突样本上轻量约束：
+
+```text
+row_not_released = True；
+risk_F 较高；
+risk_F - risk_A 超过 margin；
+cmd_F 与 cmd_A 有明显方向冲突。
+```
+
+此时标签含义为：
+
+```text
+w_label = 1 表示“当前应压 follow，优先安全释放当前障碍行”。
+```
+
+低置信样本不强行监督，避免把 learned-w 训练成只看 clearance 的几何规则。
+
+### 0.4 暂缓项
+
+当前暂不作为下一步主线：
+
+```text
+不立即把 w 改成双向 follow-support prior；
+不立即使用 y_eff = y + lambda*(w-0.5) + gamma*(risk_A-risk_F)；
+不训练 learned beta；
+不把 beta 放进主训练贡献；
+不因为单次 viewer 行为就大范围改奖励。
+```
+
+这些方案可以作为后续 PCR-Net++ 扩展，但不是现在最省时间、最贴近问题的修复。
+
+### 0.5 验收标准
+
+下一版 learned-w 重点看：
+
+```text
+Row-progress success 保持高位；
+Episode collision 明显下降；
+Full task success 上升；
+Follow MAE/RMSE 不明显恶化；
+viewer 中当前障碍行未释放前，不再出现过早大幅转向追目标；
+高冲突/未释放阶段 w 明显高于低冲突/已释放阶段。
+```
+
+论文机制图重点保留：
+
+```text
+risk_F / risk_A；
+row_not_released；
+w；
+y_raw / y_eff；
+row-progress；
+collision / near-miss。
+```
+
 ## 1. 当前结论
 
 当前 PCR 主线的核心问题不是继续扩展系统，而是把 `w` 这个贡献点打穿：
@@ -11,7 +115,7 @@ w 在 follow 命令方向危险时降低实际 follow 权重 y_eff；
 最终目标是减少危险跟随，同时尽量保持通过率和成功跟随距离。
 ```
 
-当前代码中的 `w` 是 `geom w`，不是学习出来的网络头：
+历史上第一版 `w` 是 `geom w`，不是学习出来的网络头：
 
 ```text
 w_geom = exp(-clearance_F / w_tau)
@@ -181,7 +285,7 @@ cmd = y_eff * cmd_F + (1 - y_eff) * cmd_A
 训练时加入 loss_w，让 w_pred 学习 command-conditioned conflict。
 ```
 
-推荐标签：
+早期推荐标签：
 
 ```text
 w_label = clamp(risk_F - risk_A, 0, 1)
@@ -199,12 +303,24 @@ w_label = sigmoid(k * (risk_F - risk_A - margin))
 只有 follow 比 avoid 更危险时，w 才应该明显变大。
 ```
 
+2026-05-19 后，近期训练不再优先使用这个全局标签作为唯一监督。原因是 viewer 中的主要失败不是“整体不知道风险”，而是“当前障碍行没释放时过早追目标”。近期优先使用 row-aware 标签：
+
+```text
+row_not_released = True；
+risk_F 较高；
+risk_F - risk_A 超过 margin；
+cmd_F 与 cmd_A 有明显方向冲突；
+满足上述条件时 w_label = 1。
+```
+
+全局 `risk_delta` 标签可以作为后续补充，但不能替代 `row_not_released` 这个时机信息。
+
 可能新增参数：
 
 ```text
 learn_w = True
 w_aux_loss_coef = 0.1
-w_label_mode = risk_delta
+w_label_mode = row_aware_risk_delta
 w_label_margin = 0.1
 w_label_temperature = 5.0
 ```
@@ -272,24 +388,26 @@ PCR Success / RobotCrossedRate 被跟随拖住。
 补回低风险区域的跟随推进能力。
 ```
 
-### Stage 3：learned w 升级
+### Stage 3：learned w 行内释放安全收口
 
-仅当下面任一条件满足时执行：
+当前已进入 learned-w 阶段。近期目标不是证明“多一个网络头”本身，而是修复 viewer 中看到的关键失败模式：
 
 ```text
-geom w 结果只能证明“更保守更安全”，无法支撑主贡献；
-论文叙事需要更强的学习型创新；
-geom w 机制图清楚，但 FollowLostRate 始终压不下来。
+当前障碍行未完全释放；
+机器人过早大幅追目标；
+转向/横移过程中贴到旁边障碍物；
+row-progress 高，但 collision 也高。
 ```
 
 最小实现目标：
 
 ```text
 GatePolicy 输出 y_raw 和 w_pred；
-用 risk_delta 构造 w_label；
-加入 w_aux_loss；
+learned-w 输入补充 row_not_released；
+w_aux 只在 row_not_released + follow-risk 高 + avoid 更安全 + 命令冲突的高置信样本上监督；
+保持 y_eff = y_raw * (1 - w_pred)；
 训练 MoE-y+learned-w；
-与 MoE-y、MoE-y+geom-w 对比。
+与 MoE-y、MoE-y+geom-w 对比 row-progress / collision / full task success。
 ```
 
 ## 6. 论文图表规划
@@ -420,13 +538,13 @@ MoE-y+learned-w：若实现，应显示更少过保守、更快恢复跟随
 当前最小主线：
 
 ```text
-1. 使用 final line 修正后的代码重训 MoE-y；
-2. 使用相同代码重训 MoE-y+geom-w；
-3. 用 eval 输出 Table 1 所需指标；
-4. 导出 Figure 2 所需机制时间序列；
-5. 判断 geom w 是否足够支撑论文；
-6. 若 geom w 过保守，再做 follow 奖励再平衡；
-7. 若仍不够，再实现 learned w。
+1. 固定当前 train/play/eval 口径；
+2. 在 learned-w 中加入 row_not_released 输入；
+3. 加 row-aware w_aux；
+4. 先短训确认 w 和 y_eff 行为是否改变；
+5. 再跑 full learned-w 训练；
+6. 用 eval 对比 MoE-y / geom-w / learned-w；
+7. 导出 Figure 2 和 conflict-bin 机制图。
 ```
 
 当前不优先：
@@ -436,7 +554,8 @@ MoE-y+learned-w：若实现，应显示更少过保守、更快恢复跟随
 不继续扫 w_tau；
 不先做大规模随机化；
 不先追 1 m/s 目标速度；
-不把 learned w 直接插到未收干净的基线前面。
+不把 learned w 改成双向 follow-support 公式；
+不在还没修复行内释放问题前继续大改奖励。
 ```
 
 ## 8. 成功标准
@@ -454,9 +573,10 @@ Figure 2 能清楚显示 risk_F -> w -> y_eff 的机制链。
 learned w 版本值得成为最终方法的标准：
 
 ```text
-安全指标接近 geom w；
-FollowLostRate / SuccessfulFollowDistMean 接近或优于 MoE-y；
-PCR Success 高于 MoE-y 和 geom w；
-w_pred 不退化成 clearance，而是和 risk_F-risk_A / 冲突事件更一致。
+Row-progress success 保持高位；
+Episode collision 明显低于当前 learned-w；
+Full task success 高于 MoE-y 和 geom-w；
+Follow MAE/RMSE 不明显恶化；
+w_pred 在 row_not_released + high-conflict 阶段升高；
+w_pred 不退化成 clearance，而是和 row_not_released / risk_F-risk_A / 命令冲突事件更一致。
 ```
-

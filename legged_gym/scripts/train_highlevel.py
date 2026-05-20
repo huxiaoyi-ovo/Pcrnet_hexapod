@@ -878,6 +878,48 @@ def _pcr_gate_command_conflict_diag(
     clearance_a = env._compute_clearance_along_cmd(aff_map, cmd_a_eff[:, :2])
     risk_f = env._risk_from_clearance(clearance_f, safe_d, free_d)
     risk_a = env._risk_from_clearance(clearance_a, safe_d, free_d)
+    row_current_valid = torch.zeros_like(risk_f)
+    row_not_released = torch.zeros_like(risk_f)
+    if bool(getattr(env, "is_pcr_line_task", False)) and hasattr(env, "_compute_current_next_row_gap_state"):
+        try:
+            robot_pos = env.env.root_states[:, :3]
+            (
+                _current_gap_center,
+                _current_gap_width,
+                _current_row_center_y,
+                current_row_front_edge,
+                current_row_back_edge,
+                _current_row_index,
+                current_row_valid,
+                _next_gap_center,
+                _next_row_center_y,
+                _next_valid,
+            ) = env._compute_current_next_row_gap_state(robot_pos)
+            row_current_valid = current_row_valid.to(device=cmd_f.device, dtype=cmd_f.dtype)
+            body_half_length = float(getattr(env.env.cfg.terrain, "avoid_body_half_length", 0.0))
+            row_release_offset = float(getattr(env.reward_cfg, "avoid_row_release_offset", 0.20))
+            robot_front_y = robot_pos[:, 1].to(device=cmd_f.device, dtype=cmd_f.dtype) + body_half_length
+            robot_rear_y = robot_pos[:, 1].to(device=cmd_f.device, dtype=cmd_f.dtype) - body_half_length
+            in_release_zone = (
+                current_row_valid.to(device=cmd_f.device)
+                & (robot_front_y >= current_row_front_edge.to(device=cmd_f.device, dtype=cmd_f.dtype))
+                & (robot_rear_y <= (current_row_back_edge.to(device=cmd_f.device, dtype=cmd_f.dtype) + row_release_offset))
+            )
+            row_not_released = in_release_zone.to(dtype=cmd_f.dtype)
+        except Exception as exc:
+            if bool(getattr(args, "pcr_w_aux_enable", False)):
+                raise RuntimeError(
+                    "row_not_released failed while --pcr_w_aux_enable is active; "
+                    "learned-w row-aware supervision would become invalid."
+                ) from exc
+            if not bool(getattr(_pcr_gate_command_conflict_diag, "_row_not_released_warned", False)):
+                print(
+                    f"[Warn] row_not_released unavailable; learned-w row feature falls back to 0 ({exc})",
+                    flush=True,
+                )
+                setattr(_pcr_gate_command_conflict_diag, "_row_not_released_warned", True)
+            row_not_released = torch.zeros_like(risk_f)
+            row_current_valid = torch.zeros_like(risk_f)
     lin_f = cmd_f[:, :2]
     lin_a = cmd_a_eff[:, :2]
     norm_f = torch.norm(lin_f, dim=1)
@@ -893,6 +935,8 @@ def _pcr_gate_command_conflict_diag(
         "clearance_A": clearance_a,
         "risk_F": risk_f,
         "risk_A": risk_a,
+        "row_current_valid": row_current_valid,
+        "row_not_released": row_not_released,
         "cmd_cos": cmd_cos,
         "conflict_score": torch.clamp(conflict_score, 0.0, 1.0),
         "post_safe_distance": torch.full_like(risk_f, safe_d),
@@ -919,6 +963,7 @@ def build_learned_w_gate_goal(
         cmd_f[:, :3] - cmd_a_eff[:, :3],
         diag["risk_F"].unsqueeze(-1),
         diag["risk_A"].unsqueeze(-1),
+        diag["row_not_released"].unsqueeze(-1),
         diag["cmd_cos"].unsqueeze(-1),
         diag["conflict_score"].unsqueeze(-1),
         clearance_f.unsqueeze(-1),
@@ -1009,12 +1054,36 @@ def resolve_moe_gate_pcr(
         "clearance_A": clearance_a,
         "risk_F": risk_f,
         "risk_A": risk_a,
+        "row_current_valid": diag["row_current_valid"],
+        "row_not_released": diag["row_not_released"],
         "cmd_cos": diag["cmd_cos"],
         "conflict_score": diag["conflict_score"],
         "post_safe_distance": diag["post_safe_distance"],
         "post_free_distance": diag["post_free_distance"],
         "gate_safe_clamp_mask": clamp_mask,
     }
+
+
+def build_row_aware_w_aux_targets(
+    args: argparse.Namespace,
+    gate_diag: Dict[str, torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build high-confidence labels for learned-w suppression."""
+    w_ref = gate_diag["w"]
+    row_not_released = gate_diag.get("row_not_released", torch.zeros_like(w_ref))
+    risk_f = gate_diag["risk_F"]
+    risk_a = gate_diag["risk_A"]
+    cmd_cos = gate_diag["cmd_cos"]
+    risk_thr = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
+    margin = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
+    cos_thr = float(getattr(args, "pcr_w_aux_cmd_cos_threshold", 0.5))
+    row_active = row_not_released > 0.5
+    follow_risky = risk_f > risk_thr
+    avoid_safer = (risk_f - risk_a) > margin
+    command_conflict = cmd_cos < cos_thr
+    valid = row_active & follow_risky & avoid_safer & command_conflict
+    label = torch.ones_like(w_ref)
+    return label.detach(), valid.detach()
 
 
 def _get_expert_alpha(local_iteration: int, interface_iters: int) -> float:
@@ -1072,6 +1141,81 @@ def _sanitize_or_fail_action_tensor(
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0), bad_rows
 
 
+def format_pcr_variant_tag(args: argparse.Namespace) -> str:
+    skill = str(getattr(args, "skill", "")).lower()
+    w_mode = str(getattr(args, "w_mode", "none")).lower()
+    if skill != "moe":
+        return skill or "policy"
+    if w_mode in ("none", ""):
+        return "yonly"
+    if w_mode == "geom":
+        return f"geomw_w{float(getattr(args, 'w_tau', 0.25)):g}"
+    if w_mode == "learned":
+        parts = ["learnedw"]
+        if bool(getattr(args, "pcr_w_aux_enable", False)):
+            parts.append(f"rowrel_aux{float(getattr(args, 'pcr_w_aux_coef', 0.0)):g}")
+        return "_".join(parts)
+    return w_mode
+
+
+DEFAULT_LOWLEVEL_CKPT = "agents/low_level_best.pt"
+DEFAULT_AVOID_CKPT = "agents/avoid_best.pt"
+
+
+def _set_arg_if_not_explicit(args: argparse.Namespace, key: str, value: Any) -> None:
+    explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
+    if key not in explicit:
+        setattr(args, key, value)
+
+
+def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if bool(getattr(args, "pcr_w_aux_enable", False)) and bool(getattr(args, "no_pcr_w_aux", False)):
+        parser.error("--pcr_w_aux_enable 与 --no_pcr_w_aux 不能同时使用")
+    selected = None
+    if bool(getattr(args, "yonly", False)):
+        selected = "none"
+    elif bool(getattr(args, "wgeom", False)):
+        selected = "geom"
+    elif bool(getattr(args, "wlearned", False)):
+        selected = "learned"
+
+    explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
+    if selected is not None and ("w_mode" in explicit) and str(getattr(args, "w_mode", "")) != selected:
+        parser.error(
+            f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned 之一"
+        )
+    if selected is not None:
+        args.w_mode = selected
+        if selected == "learned" and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
+            args.pcr_w_aux_enable = True
+
+
+def apply_common_train_defaults(args: argparse.Namespace) -> None:
+    task = str(getattr(args, "task", ""))
+    skill_raw = getattr(args, "skill", None)
+    skill = str(skill_raw or "").lower()
+    if not skill:
+        if task == "s_pcr_line_avoid_basic":
+            skill = "moe"
+        elif task.startswith("s_avoid"):
+            skill = "avoid"
+        elif task.startswith("s_follow"):
+            skill = "follow"
+        else:
+            skill = "follow"
+        args.skill = skill
+    _set_arg_if_not_explicit(args, "low_level_ckpt", DEFAULT_LOWLEVEL_CKPT)
+    if skill == "moe":
+        _set_arg_if_not_explicit(args, "avoid_ckpt", DEFAULT_AVOID_CKPT)
+    if task == "s_pcr_line_avoid_basic" and skill == "moe":
+        _set_arg_if_not_explicit(args, "seed", 1)
+        _set_arg_if_not_explicit(args, "num_envs", 256)
+        _set_arg_if_not_explicit(args, "num_steps", 48)
+        _set_arg_if_not_explicit(args, "num_epochs", 5)
+        _set_arg_if_not_explicit(args, "mini_batch_size", 12288)
+        _set_arg_if_not_explicit(args, "lr", 6e-5)
+
+
 def _row_finite_mask(t: torch.Tensor) -> torch.Tensor:
     if not torch.is_tensor(t):
         raise TypeError("_row_finite_mask expects a tensor input.")
@@ -1097,6 +1241,11 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "w_tau",
     "w_blend_mode",
     "w_disable_gate_safe_clamp",
+    "pcr_w_aux_enable",
+    "pcr_w_aux_coef",
+    "pcr_w_aux_risk_f_threshold",
+    "pcr_w_aux_risk_margin",
+    "pcr_w_aux_cmd_cos_threshold",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -1108,8 +1257,8 @@ RUNTIME_ABLATION_ARG_KEYS = (
     "w_blend_mode",
     "w_disable_gate_safe_clamp",
 )
-LEARNED_W_FEATURE_DIM = 15
-LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_v1"
+LEARNED_W_FEATURE_DIM = 16
+LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_row_release_v2"
 FUSION_FORMULA_VERSION = "pcr_shared_w_multiply_v1"
 CHECKPOINT_CONTRACT_KEY_PATHS = (
     "aff_stack",
@@ -1152,6 +1301,11 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "w_tau",
     "w_blend_mode",
     "w_disable_gate_safe_clamp",
+    "pcr_w_aux_enable",
+    "pcr_w_aux_coef",
+    "pcr_w_aux_risk_f_threshold",
+    "pcr_w_aux_risk_margin",
+    "pcr_w_aux_cmd_cos_threshold",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -1353,6 +1507,7 @@ def collect_runtime_observation_contract(
         "gate_uses_riskA": learned_w_enabled,
         "gate_uses_cmd_cos": learned_w_enabled,
         "gate_uses_conflict_score": learned_w_enabled,
+        "gate_uses_row_not_released": learned_w_enabled,
         "affordance_map_size": int(getattr(env, "affordance_map_size", get_vision_native_output_size())),
         "affordance_map_extent_m": float(getattr(env, "affordance_map_extent", 0.0)),
         "affordance_origin_mode": str(getattr(env, "affordance_origin_mode", "base_center")),
@@ -1630,6 +1785,9 @@ class RolloutBuffer:
         self.teacher_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
         # EGPO 目标 (S0 follow expert 命令)
         self.expert_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
+        self.w_aux_labels = torch.zeros(num_steps, num_envs, device=device)
+        self.w_aux_valid = torch.zeros(num_steps, num_envs, device=device, dtype=torch.bool)
+        self.row_not_released = torch.zeros(num_steps, num_envs, device=device)
 
     def add(
         self,
@@ -1647,6 +1805,9 @@ class RolloutBuffer:
         action_valid=None,
         teacher_action=None,
         expert_action=None,
+        w_aux_label=None,
+        w_aux_valid=None,
+        row_not_released=None,
     ):
         """添加一步数据"""
         self.states[self.step] = state
@@ -1669,6 +1830,12 @@ class RolloutBuffer:
             self.teacher_actions[self.step] = teacher_action
         if expert_action is not None:
             self.expert_actions[self.step] = expert_action
+        if w_aux_label is not None:
+            self.w_aux_labels[self.step] = w_aux_label
+        if w_aux_valid is not None:
+            self.w_aux_valid[self.step] = w_aux_valid.bool()
+        if row_not_released is not None:
+            self.row_not_released[self.step] = row_not_released
         
         self.step += 1
 
@@ -1715,6 +1882,9 @@ class RolloutBuffer:
         self.action_valid.fill_(True)
         self.teacher_actions.zero_()
         self.expert_actions.zero_()
+        self.w_aux_labels.zero_()
+        self.w_aux_valid.zero_()
+        self.row_not_released.zero_()
 
 
 # V5 核心环境包装器 (The Hierarchical Environment Wrapper)
@@ -5435,6 +5605,12 @@ def train(args):
         meta["uses_riskA"] = bool(gate_learned_w_enabled)
         meta["uses_cmd_cos"] = bool(gate_learned_w_enabled)
         meta["uses_conflict_score"] = bool(gate_learned_w_enabled)
+        meta["uses_row_not_released"] = bool(gate_learned_w_enabled)
+        meta["pcr_w_aux_enable"] = bool(getattr(args, "pcr_w_aux_enable", False))
+        meta["pcr_w_aux_coef"] = float(getattr(args, "pcr_w_aux_coef", 0.0))
+        meta["pcr_w_aux_risk_f_threshold"] = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
+        meta["pcr_w_aux_risk_margin"] = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
+        meta["pcr_w_aux_cmd_cos_threshold"] = float(getattr(args, "pcr_w_aux_cmd_cos_threshold", 0.5))
         meta["run_mode_tag"] = run_mode_tag
         meta["online_best_metric"] = "online_mean_reward_monitor_only"
         meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
@@ -5778,7 +5954,10 @@ def train(args):
         os.makedirs(log_dir, exist_ok=True)
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_dir = os.path.join(args.output_dir, f"{skill}_{run_mode_tag}_{timestamp}")
+        variant_tag = format_pcr_variant_tag(args)
+        run_name = str(getattr(args, "run_name", "") or "").strip()
+        run_prefix = run_name if run_name else f"{skill}_{run_mode_tag}_{variant_tag}"
+        log_dir = os.path.join(args.output_dir, f"{run_prefix}_{timestamp}")
         os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     print(f"[Main] 日志目录: {log_dir}")
@@ -6061,6 +6240,12 @@ def train(args):
         gate_low_conflict_w_sum = torch.zeros((), device=device)
         gate_low_conflict_supp_sum = torch.zeros((), device=device)
         gate_low_conflict_count = torch.zeros((), device=device)
+        gate_row_not_released_sum = torch.zeros((), device=device)
+        gate_row_not_released_w_sum = torch.zeros((), device=device)
+        gate_row_not_released_count = torch.zeros((), device=device)
+        gate_row_released_w_sum = torch.zeros((), device=device)
+        gate_row_released_count = torch.zeros((), device=device)
+        w_aux_valid_rollout_count = torch.zeros((), device=device)
         gate_y_change_sum = torch.zeros((), device=device)
         cmd_speed_sum = torch.zeros((), device=device)
         cmd_pred_x_sum = torch.zeros((), device=device)
@@ -6403,6 +6588,9 @@ def train(args):
             gate_y = None
             cmd_used = None
             policy_goal_for_buffer = goal
+            w_aux_label_step = None
+            w_aux_valid_step = None
+            row_not_released_step = None
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
@@ -6485,10 +6673,20 @@ def train(args):
                         cmd_a,
                         learned_w=gate_learned_w,
                     )
+                    row_not_released_step = gate_diag.get(
+                        "row_not_released",
+                        torch.zeros_like(gate_diag["w"]),
+                    )
+                    if gate_learned_w_enabled:
+                        w_aux_label_step, w_aux_valid_step = build_row_aware_w_aux_targets(
+                            args,
+                            gate_diag,
+                        )
                     gate_diag_finite = (
                         _row_finite_mask(gate_diag["w"].unsqueeze(-1))
                         & _row_finite_mask(gate_diag["risk_F"].unsqueeze(-1))
                         & _row_finite_mask(gate_diag["risk_A"].unsqueeze(-1))
+                        & _row_finite_mask(gate_diag["row_not_released"].unsqueeze(-1))
                         & _row_finite_mask(gate_diag["conflict_score"].unsqueeze(-1))
                     )
                     action_valid = action_valid & gate_diag_finite
@@ -6557,6 +6755,7 @@ def train(args):
                             post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                             post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                             post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                            post_info["row_not_released"] = row_not_released_step.detach().clone()
                             post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                             post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
                             post_info["post_safe_distance"] = gate_diag["post_safe_distance"].detach().clone()
@@ -6763,6 +6962,9 @@ def train(args):
                 action_valid.detach(),
                 teacher_action.detach() if teacher_action is not None else None,
                 expert_action.detach() if expert_action is not None else None,
+                w_aux_label_step.detach() if w_aux_label_step is not None else None,
+                w_aux_valid_step.detach() if w_aux_valid_step is not None else None,
+                row_not_released_step.detach() if row_not_released_step is not None else None,
             )
 
             # 统计分量与行为
@@ -6847,6 +7049,20 @@ def train(args):
                     supp = gate_diag["gate_y_raw"] - gate_diag["y_eff"]
                     high_conflict_w_mask = conflict_score > 0.5
                     low_conflict_w_mask = conflict_score < 0.1
+                    row_not_released_mask = gate_diag.get(
+                        "row_not_released",
+                        torch.zeros_like(gate_diag["w"]),
+                    ) > 0.5
+                    gate_row_not_released_sum += row_not_released_mask.float().sum()
+                    if row_not_released_mask.any():
+                        gate_row_not_released_w_sum += gate_diag["w"][row_not_released_mask].sum()
+                        gate_row_not_released_count += row_not_released_mask.float().sum()
+                    row_released_mask = ~row_not_released_mask
+                    if row_released_mask.any():
+                        gate_row_released_w_sum += gate_diag["w"][row_released_mask].sum()
+                        gate_row_released_count += row_released_mask.float().sum()
+                    if w_aux_valid_step is not None:
+                        w_aux_valid_rollout_count += w_aux_valid_step.float().sum()
                     if high_conflict_w_mask.any():
                         gate_high_conflict_w_sum += gate_diag["w"][high_conflict_w_mask].sum()
                         gate_high_conflict_supp_sum += supp[high_conflict_w_mask].sum()
@@ -7480,6 +7696,8 @@ def train(args):
         distill_loss_sum = 0
         bc_loss_sum = 0
         effective_bc_loss_sum = 0
+        w_aux_loss_sum = 0
+        w_aux_valid_ratio_sum = 0
         expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
         clip_frac_sum = 0
@@ -7537,6 +7755,8 @@ def train(args):
                 mb_action_valid = buffer.action_valid[step_idx, env_idx].bool()
                 mb_advantages = advantages[step_idx, env_idx]
                 mb_returns = returns[step_idx, env_idx]
+                mb_w_aux_labels = buffer.w_aux_labels[step_idx, env_idx]
+                mb_w_aux_valid = buffer.w_aux_valid[step_idx, env_idx].bool()
                 
                 # 读取 rollout 缓冲区
                 mb_states = buffer.states[step_idx, env_idx]
@@ -7549,6 +7769,7 @@ def train(args):
                 mb_old_log_probs = torch.nan_to_num(mb_old_log_probs, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_advantages = torch.nan_to_num(mb_advantages, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_returns = torch.nan_to_num(mb_returns, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_w_aux_labels = torch.nan_to_num(mb_w_aux_labels, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_states = torch.nan_to_num(mb_states, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_goals = torch.nan_to_num(mb_goals, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_aff_maps = torch.nan_to_num(mb_aff_maps, nan=0.0, posinf=0.0, neginf=0.0)
@@ -7573,7 +7794,7 @@ def train(args):
                         gate_critic_difficulty = (
                             mb_critic_difficulties if gate_use_difficulty else torch.zeros_like(mb_critic_difficulties)
                         )
-                        new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                        new_log_probs, new_values, entropy, policy_eval_info = policy.evaluate_actions(
                             mb_aff_maps,
                             mb_states,
                             mb_goals,
@@ -7585,7 +7806,7 @@ def train(args):
                             critic_terrain_difficulty=gate_critic_difficulty,
                         )
                     else:
-                        new_log_probs, new_values, entropy, _ = policy.evaluate_actions(
+                        new_log_probs, new_values, entropy, policy_eval_info = policy.evaluate_actions(
                             mb_aff_maps,
                             mb_states,
                             mb_goals,
@@ -7707,21 +7928,41 @@ def train(args):
                     expert_log_prob_mean = torch.clamp(expert_log_prob.mean(), min=-20.0, max=0.0)
                     expert_bc_weight = expert_alpha_update if use_egpo else 1.0
                     bc_loss = (-expert_log_prob_mean) * expert_bc_weight * EXPERT_BC_COEF
+
+                w_aux_loss = torch.tensor(0.0, device=device)
+                w_aux_valid_ratio = torch.tensor(0.0, device=device)
+                if (
+                    gate_learned_w_enabled
+                    and bool(getattr(args, "pcr_w_aux_enable", False))
+                    and isinstance(policy_eval_info, dict)
+                    and "w_mean" in policy_eval_info
+                ):
+                    valid_w_aux = mb_action_valid & mb_w_aux_valid
+                    w_aux_valid_ratio = valid_w_aux.float().mean()
+                    if valid_w_aux.any():
+                        w_mean = policy_eval_info["w_mean"].squeeze(-1)
+                        w_aux_loss = F.binary_cross_entropy(
+                            torch.clamp(w_mean[valid_w_aux], 1e-6, 1.0 - 1e-6),
+                            torch.clamp(mb_w_aux_labels[valid_w_aux], 0.0, 1.0),
+                        )
                 
                 # Total loss (full EGPO update path, no hold-phase masking).
                 policy_loss_weight = 1.0
                 value_loss_weight = args.value_loss_coef
                 entropy_loss_weight = args.entropy_coef
                 bc_loss_weight = 1.0
+                w_aux_loss_weight = float(getattr(args, "pcr_w_aux_coef", 0.0))
                 effective_policy_loss = policy_loss_weight * policy_loss
                 effective_entropy_loss = entropy_loss_weight * entropy_loss
                 effective_bc_loss = bc_loss_weight * bc_loss
+                effective_w_aux_loss = w_aux_loss_weight * w_aux_loss
                 loss_terms = (
                     policy_loss_weight * policy_loss
                     + value_loss_weight * value_loss
                     + entropy_loss_weight * entropy_loss
                     + args.distill_coef * distill_loss
                     + effective_bc_loss
+                    + effective_w_aux_loss
                 )
                 loss = loss_terms
                 if not torch.isfinite(loss):
@@ -7788,6 +8029,8 @@ def train(args):
                 distill_loss_sum += distill_loss.item()
                 bc_loss_sum += bc_loss.item()
                 effective_bc_loss_sum += effective_bc_loss.item()
+                w_aux_loss_sum += w_aux_loss.item()
+                w_aux_valid_ratio_sum += w_aux_valid_ratio.item()
                 expert_log_prob_mean_sum += expert_log_prob_mean.item()
                 num_updates += 1
 
@@ -7796,6 +8039,8 @@ def train(args):
                     mb_old_log_probs,
                     mb_advantages,
                     mb_returns,
+                    mb_w_aux_labels,
+                    mb_w_aux_valid,
                     mb_states,
                     mb_goals,
                     mb_aff_maps,
@@ -7810,9 +8055,12 @@ def train(args):
                     entropy_loss,
                     distill_loss,
                     bc_loss,
+                    w_aux_loss,
+                    w_aux_valid_ratio,
                     effective_policy_loss,
                     effective_entropy_loss,
                     effective_bc_loss,
+                    effective_w_aux_loss,
                     loss,
                 )
         
@@ -7900,6 +8148,10 @@ def train(args):
         gate_low_conflict_w_mean = 0.0
         gate_high_conflict_supp_mean = 0.0
         gate_low_conflict_supp_mean = 0.0
+        gate_row_not_released_rate = 0.0
+        gate_row_not_released_w_mean = 0.0
+        gate_row_released_w_mean = 0.0
+        w_aux_valid_rollout_rate = 0.0
         if is_gate:
             mean_w_t = gate_w_sum / total_samples
             mean_conflict_t = gate_conflict_score_sum / total_samples
@@ -7921,6 +8173,14 @@ def train(args):
             gate_low_conflict_supp_mean = (
                 gate_low_conflict_supp_sum / torch.clamp(gate_low_conflict_count, min=1.0)
             ).item()
+            gate_row_not_released_rate = (gate_row_not_released_sum / total_samples).item()
+            gate_row_not_released_w_mean = (
+                gate_row_not_released_w_sum / torch.clamp(gate_row_not_released_count, min=1.0)
+            ).item()
+            gate_row_released_w_mean = (
+                gate_row_released_w_sum / torch.clamp(gate_row_released_count, min=1.0)
+            ).item()
+            w_aux_valid_rollout_rate = (w_aux_valid_rollout_count / total_samples).item()
         gate_y_change_mean = (gate_y_change_sum / total_samples).item() if is_gate else 0.0
         risk_scale_mean = (risk_scale_sum / total_samples).item()
         goal_dist_mean = (goal_dist_sum / total_samples).item()
@@ -8253,9 +8513,16 @@ def train(args):
             writer.add_scalar('Stats/GateWLowConflict', gate_low_conflict_w_mean, iteration)
             writer.add_scalar('Stats/GateSuppHighConflict', gate_high_conflict_supp_mean, iteration)
             writer.add_scalar('Stats/GateSuppLowConflict', gate_low_conflict_supp_mean, iteration)
+            writer.add_scalar('Stats/GateRowNotReleasedRate', gate_row_not_released_rate, iteration)
+            writer.add_scalar('Stats/GateWRowNotReleased', gate_row_not_released_w_mean, iteration)
+            writer.add_scalar('Stats/GateWRowReleased', gate_row_released_w_mean, iteration)
+            writer.add_scalar('Stats/GateWAuxValidRolloutRate', w_aux_valid_rollout_rate, iteration)
             writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
+        if gate_learned_w_enabled:
+            writer.add_scalar('Loss/WAux', w_aux_loss_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Stats/WAuxValidUpdateRate', w_aux_valid_ratio_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
         writer.add_scalar('Stats/CmdPredX', cmd_pred_x_mean, iteration)
         writer.add_scalar('Stats/CmdPredXAbs', cmd_pred_x_abs_mean, iteration)
@@ -8374,6 +8641,9 @@ def train(args):
                 gate_line = f"""{'Gate raw/eff/w/Δeff:':>{pad}} {gate_y_raw_mean:.3f} / {gate_y_mean:.3f} / {gate_w_mean:.3f} / {gate_y_change_mean:.3f}\n"""
                 gate_line += f"""{'Gate gap(clamp/w/total):':>{pad}} {gate_y_clamp_gap_mean:.3f} / {gate_y_w_gap_mean:.3f} / {gate_y_gap_mean:.3f}\n"""
                 gate_line += f"""{'Gate clrF/riskF:':>{pad}} {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
+                gate_line += f"""{'Gate rowNR w(on/off):':>{pad}} {gate_row_not_released_rate:.3f} / {gate_row_not_released_w_mean:.3f} / {gate_row_released_w_mean:.3f}\n"""
+                if gate_learned_w_enabled:
+                    gate_line += f"""{'Gate wAux loss/valid:':>{pad}} {w_aux_loss_sum / max(num_updates, 1):.4f} / {w_aux_valid_rollout_rate:.3f}\n"""
             egpo_line = ""
             if use_egpo:
                 egpo_line = (
@@ -8603,12 +8873,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V5 Command-Space MoE Training")
     
     # 模式
-    parser.add_argument('--mode', type=str, required=True, 
+    parser.add_argument('--mode', type=str, default='teacher',
                         choices=['teacher', 'student'],
-                        help='训练模式: teacher (GT) 或 student (Vision)')
-    parser.add_argument('--skill', type=str, default='follow',
+                        help='训练模式: teacher (GT) 或 student (Vision)，默认 teacher')
+    parser.add_argument('--skill', type=str, default=None,
                         choices=['follow', 'avoid', 'moe'],
-                        help='训练技能: follow / avoid / moe (gate)')
+                        help='训练技能: follow / avoid / moe (gate)，默认按 task 自动选择')
     
     # 环境
     parser.add_argument('--task', type=str, required=True,
@@ -8627,14 +8897,14 @@ if __name__ == "__main__":
                         help='深度相机采样间隔（按 low-level step 计；None 使用任务默认）')
     
     # Checkpoints
-    parser.add_argument('--low_level_ckpt', type=str, required=True,
-                        help='底层控制器路径')
+    parser.add_argument('--low_level_ckpt', type=str, default=DEFAULT_LOWLEVEL_CKPT,
+                        help=f'底层控制器路径（默认 {DEFAULT_LOWLEVEL_CKPT}）')
     parser.add_argument('--teacher_ckpt', type=str, default=None,
                         help='(Student) Teacher 模型路径')
     parser.add_argument('--follow_ckpt', type=str, default=None,
                         help='旧参数保留；当前 moe 默认使用解析式 follow expert，不再需要该项')
     parser.add_argument('--avoid_ckpt', type=str, default=None,
-                        help='(Gate) Avoid expert 模型路径')
+                        help=f'(Gate) Avoid expert 模型路径（moe 默认 {DEFAULT_AVOID_CKPT}）')
     parser.add_argument('--vision_ckpt', type=str, default=None,
                         help='(Student) Vision 模型路径')
     parser.add_argument('--resume', type=str, default=None,
@@ -8689,12 +8959,31 @@ if __name__ == "__main__":
                         help='安全 clamp 的最大 y 值')
     parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned'],
                         help='PCR 冲突先验模式：none=y-only，geom=解析 w，learned=策略输出 w')
+    w_alias_group = parser.add_mutually_exclusive_group()
+    w_alias_group.add_argument('--yonly', action='store_true',
+                               help='PCR MoE-y 训练别名，等价于 --w_mode none')
+    w_alias_group.add_argument('--wgeom', action='store_true',
+                               help='PCR geom-w 训练别名，等价于 --w_mode geom')
+    w_alias_group.add_argument('--wlearned', action='store_true',
+                               help='PCR learned-w 训练别名，默认同时启用 row-aware w_aux')
     parser.add_argument('--w_tau', type=float, default=0.25,
                         help='w_geom 衰减尺度（米）；越小表示更早把近障碍判为高冲突')
     parser.add_argument('--w_blend_mode', type=str, default='multiply', choices=['multiply', 'mix'],
                         help='w 与 gate_y 的融合方式：multiply=y*(1-w)，mix=0.5*y+0.5*(1-w)')
     parser.add_argument('--w_disable_gate_safe_clamp', action='store_true',
                         help='当 w_mode!=none 时关闭旧 gate_safe_clamp，避免双重安全干预')
+    parser.add_argument('--pcr_w_aux_enable', action='store_true',
+                        help='learned-w 行内未释放高冲突样本辅助监督')
+    parser.add_argument('--no_pcr_w_aux', action='store_true',
+                        help='与 --wlearned 搭配使用：显式关闭 learned-w 辅助监督')
+    parser.add_argument('--pcr_w_aux_coef', type=float, default=0.05,
+                        help='learned-w 辅助监督权重')
+    parser.add_argument('--pcr_w_aux_risk_f_threshold', type=float, default=0.4,
+                        help='w_aux 高风险 follow 阈值')
+    parser.add_argument('--pcr_w_aux_risk_margin', type=float, default=0.10,
+                        help='w_aux 要求 risk_F 比 risk_A 高出的 margin')
+    parser.add_argument('--pcr_w_aux_cmd_cos_threshold', type=float, default=0.5,
+                        help='w_aux 命令冲突阈值，cmd_cos 低于该值才监督')
     parser.add_argument('--moe_expert_deterministic', action='store_true',
                         help='Gate 训练时专家使用确定性输出')
     parser.add_argument('--gate_use_difficulty', action='store_true',
@@ -8726,6 +9015,8 @@ if __name__ == "__main__":
     # 输出
     parser.add_argument('--output_dir', type=str, default='outputs/planner',
                         help='输出目录')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='可选实验名；为空时自动使用策略类型和关键参数命名')
     parser.add_argument('--log_interval', type=int, default=10,
                         help='日志间隔（运行时自动覆盖为 num_iterations/20）')
     parser.add_argument('--save_interval', type=int, default=200,
@@ -8746,6 +9037,9 @@ if __name__ == "__main__":
     args._entropy_coef_explicit = ("--entropy_coef" in sys.argv)
     args.task = normalize_task_name(getattr(args, "task", ""))
     args._unknown_cli = list(unknown)
+    capture_cli_explicit_arg_values(args, parser)
+    apply_train_w_alias_defaults(args, parser)
+    apply_common_train_defaults(args)
     
     # 传递未知参数给 Isaac Gym
     sys.argv = [sys.argv[0]] + unknown

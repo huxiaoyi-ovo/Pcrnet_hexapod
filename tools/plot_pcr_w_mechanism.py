@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -137,6 +138,42 @@ def _write_plot_data(
         json.dump(rows, f, indent=2, ensure_ascii=False)
 
 
+def _safe_tag(text: str) -> str:
+    safe = []
+    for ch in str(text):
+        if ch.isalnum() or ch in ("-", "_", "."):
+            safe.append(ch)
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_") or "run"
+
+
+def _method_tag(method_key: str, metrics: Dict, label: str) -> str:
+    protocol = metrics.get("resolved_protocol", {})
+    if not isinstance(protocol, dict):
+        protocol = {}
+    runtime_args = protocol.get("runtime_args", {})
+    if not isinstance(runtime_args, dict):
+        runtime_args = {}
+
+    def _protocol_value(key: str, default=None):
+        if key in protocol:
+            return protocol.get(key, default)
+        return runtime_args.get(key, default)
+
+    w_mode = str(_protocol_value("w_mode", "") or "")
+    if w_mode == "none" or method_key == "yonly":
+        return "yonly"
+    if w_mode == "geom" or method_key == "geomw":
+        return f"geomw_w{float(_protocol_value('w_tau', 0.25)):g}"
+    if w_mode == "learned" or method_key == "learnedw":
+        parts = ["learnedw"]
+        if bool(_protocol_value("pcr_w_aux_enable", False)):
+            parts.append(f"rowrel_aux{float(_protocol_value('pcr_w_aux_coef', 0.0)):g}")
+        return "_".join(parts)
+    return _safe_tag(label).lower()
+
+
 def draw_figure(args) -> Tuple[str, str]:
     import matplotlib
 
@@ -155,8 +192,6 @@ def draw_figure(args) -> Tuple[str, str]:
         learnedw_labels = _bin_labels(learnedw)
         if labels != learnedw_labels:
             raise ValueError(f"risk bin mismatch: y-only={labels}, learned-w={learnedw_labels}")
-
-    os.makedirs(args.out_dir, exist_ok=True)
 
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
@@ -188,6 +223,12 @@ def draw_figure(args) -> Tuple[str, str]:
     ]
     if learnedw is not None:
         methods.append(("learnedw", learnedw, args.learnedw_label or METHOD_STYLE["learnedw"]["label"]))
+
+    out_dir = args.out_dir
+    if bool(getattr(args, "auto_subdir", True)):
+        tags = [_method_tag(method_key, metrics, label) for method_key, metrics, label in methods]
+        out_dir = os.path.join(args.out_dir, "_vs_".join(tags) + "_" + time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(out_dir, exist_ok=True)
 
     for method_key, metrics, label in methods:
         style = METHOD_STYLE[method_key]
@@ -311,13 +352,13 @@ def draw_figure(args) -> Tuple[str, str]:
     if args.title:
         fig.suptitle(args.title, fontsize=11, y=1.03)
 
-    png_path = os.path.join(args.out_dir, f"{args.name}.png")
-    pdf_path = os.path.join(args.out_dir, f"{args.name}.pdf")
+    png_path = os.path.join(out_dir, f"{args.name}.png")
+    pdf_path = os.path.join(out_dir, f"{args.name}.pdf")
     fig.savefig(png_path, dpi=args.dpi, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
 
-    _write_plot_data(args.out_dir, labels, methods, args.min_steps)
+    _write_plot_data(out_dir, labels, methods, args.min_steps)
     return png_path, pdf_path
 
 
@@ -327,6 +368,8 @@ def parse_args():
     parser.add_argument("--geomw_dir", required=True, help="Eval output dir for MoE-y + geom-w.")
     parser.add_argument("--learnedw_dir", default=None, help="Optional eval output dir for MoE-y + learned-w.")
     parser.add_argument("--out_dir", default="figures", help="Output directory for paper figures.")
+    parser.add_argument("--no_auto_subdir", dest="auto_subdir", action="store_false", help="Write directly into out_dir instead of creating a tagged timestamp subfolder.")
+    parser.set_defaults(auto_subdir=True)
     parser.add_argument("--name", default="pcr_w_mechanism", help="Output file stem.")
     parser.add_argument("--yonly_label", default="MoE-y", help="Legend label for y-only.")
     parser.add_argument("--geomw_label", default="MoE-y + geom-w", help="Legend label for geom-w.")
