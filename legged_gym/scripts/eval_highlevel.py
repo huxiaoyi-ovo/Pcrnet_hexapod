@@ -272,6 +272,7 @@ class EpisodeAccumulator:
     risk_a_sum: float = 0.0
     w_support_correction_sum: float = 0.0
     risk_diff_correction_sum: float = 0.0
+    risk_memory_sum: float = 0.0
     row_not_released_sum: float = 0.0
     row_not_released_w_sum: float = 0.0
     row_not_released_steps: int = 0
@@ -621,6 +622,8 @@ class EvalRunner:
                         gate_aff_input,
                         cmd_f,
                         cmd_a,
+                        update_risk_memory=True,
+                        state_tensor=gate_state,
                     )
                 if getattr(self, "gate_goal_dim", None) is not None:
                     gate_policy_goal = th.match_goal_dim(
@@ -816,6 +819,7 @@ class EvalRunner:
                     post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
                     post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
                     post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
+                    post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
                     post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                     post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
 
@@ -930,6 +934,7 @@ class EvalRunner:
                         risk_a_t = post_info.get("risk_A", None)
                         w_support_corr_t = post_info.get("w_support_correction", None)
                         risk_diff_corr_t = post_info.get("risk_diff_correction", None)
+                        risk_memory_t = post_info.get("risk_memory", None)
                         row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
                         cmd_f_t = post_info.get("cmd_F", None)
@@ -948,6 +953,7 @@ class EvalRunner:
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
                         w_support_corr_v = _safe_float(w_support_corr_t[i].item(), default=0.0) if torch.is_tensor(w_support_corr_t) else 0.0
                         risk_diff_corr_v = _safe_float(risk_diff_corr_t[i].item(), default=0.0) if torch.is_tensor(risk_diff_corr_t) else 0.0
+                        risk_memory_v = _safe_float(risk_memory_t[i].item(), default=0.0) if torch.is_tensor(risk_memory_t) else 0.0
                         row_not_released_v = _safe_float(row_not_released_t[i].item(), default=0.0) if torch.is_tensor(row_not_released_t) else 0.0
                         conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
                         clr_pp_v = float("nan")
@@ -973,6 +979,7 @@ class EvalRunner:
                         ai.risk_a_sum += risk_a_v
                         ai.w_support_correction_sum += w_support_corr_v
                         ai.risk_diff_correction_sum += risk_diff_corr_v
+                        ai.risk_memory_sum += risk_memory_v
                         ai.row_not_released_sum += row_not_released_v
                         if row_not_released_v > 0.5:
                             ai.row_not_released_w_sum += w_v
@@ -1075,6 +1082,7 @@ class EvalRunner:
                                     "risk_delta": risk_f_v - risk_a_v,
                                     "w_support_correction": w_support_corr_v,
                                     "risk_diff_correction": risk_diff_corr_v,
+                                    "risk_memory": risk_memory_v,
                                     "row_not_released": row_not_released_v,
                                     "conflict_score": conflict_v,
                                     "clearance_pp": clr_pp_v,
@@ -1218,6 +1226,7 @@ class EvalRunner:
                             "risk_delta_mean": (ai.risk_f_sum - ai.risk_a_sum) / denom_steps,
                             "w_support_correction_mean": ai.w_support_correction_sum / denom_steps,
                             "risk_diff_correction_mean": ai.risk_diff_correction_sum / denom_steps,
+                            "risk_memory_mean": ai.risk_memory_sum / denom_steps,
                             "row_not_released_rate": ai.row_not_released_sum / denom_steps,
                             "row_not_released_w_mean": (
                                 ai.row_not_released_w_sum / float(max(ai.row_not_released_steps, 1))
@@ -1910,6 +1919,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "risk_delta_mean",
         "w_support_correction_mean",
         "risk_diff_correction_mean",
+        "risk_memory_mean",
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
@@ -1974,6 +1984,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_delta",
             "w_support_correction",
             "risk_diff_correction",
+            "risk_memory",
             "row_not_released",
             "conflict_score",
             "clearance_pp",
@@ -2119,6 +2130,9 @@ def parse_args():
     parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
+    parser.add_argument("--risk_memory", action="store_true", help="use deployable temporal risk memory in learned-w row slot")
+    parser.add_argument("--risk_memory_l_clear", type=float, default=0.40)
+    parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"])
     parser.add_argument("--pcr_w_aux_enable", action="store_true")
     parser.add_argument("--pcr_w_aux_coef", type=float, default=0.05)
     parser.add_argument("--pcr_w_aux_risk_f_threshold", type=float, default=0.4)

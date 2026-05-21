@@ -926,6 +926,59 @@ def _pcr_gate_command_conflict_diag(
     }
 
 
+def is_risk_memory_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "risk_memory", False))
+
+
+def _get_risk_memory_forward_velocity(
+    env,
+    args: argparse.Namespace,
+    cmd_f: Optional[torch.Tensor],
+    ref: torch.Tensor,
+    state_tensor: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    source = str(getattr(args, "risk_memory_velocity_source", "body")).lower()
+    if source == "body":
+        base_lin_vel = getattr(getattr(env, "env", None), "base_lin_vel", None)
+        if torch.is_tensor(base_lin_vel) and base_lin_vel.shape[0] == ref.shape[0] and base_lin_vel.shape[1] >= 2:
+            return base_lin_vel[:, 1].to(device=ref.device, dtype=ref.dtype)
+        if torch.is_tensor(state_tensor) and state_tensor.shape[0] == ref.shape[0] and state_tensor.shape[1] >= 5:
+            return state_tensor[:, 4].to(device=ref.device, dtype=ref.dtype)
+    if torch.is_tensor(cmd_f) and cmd_f.shape[0] == ref.shape[0] and cmd_f.shape[1] >= 2:
+        return cmd_f[:, 1].to(device=ref.device, dtype=ref.dtype)
+    return torch.zeros_like(ref)
+
+
+def get_or_update_pcr_risk_memory(
+    env,
+    args: argparse.Namespace,
+    risk_f: torch.Tensor,
+    *,
+    cmd_f: Optional[torch.Tensor] = None,
+    state_tensor: Optional[torch.Tensor] = None,
+    update: bool = False,
+) -> torch.Tensor:
+    if not is_risk_memory_enabled(args):
+        return torch.zeros_like(risk_f)
+    if not hasattr(env, "pcr_risk_memory") or not torch.is_tensor(getattr(env, "pcr_risk_memory")):
+        env.pcr_risk_memory = torch.zeros_like(risk_f).detach()
+    memory = env.pcr_risk_memory.to(device=risk_f.device, dtype=risk_f.dtype)
+    if memory.shape != risk_f.shape:
+        memory = torch.zeros_like(risk_f)
+        env.pcr_risk_memory = memory.detach()
+
+    l_clear = max(float(getattr(args, "risk_memory_l_clear", 0.40)), 1e-6)
+    dt = float(getattr(env, "high_level_dt", 0.1))
+    v_forward = _get_risk_memory_forward_velocity(env, args, cmd_f, risk_f, state_tensor=state_tensor)
+    delta_s = torch.clamp(v_forward, min=0.0) * max(dt, 1e-6)
+    decay = torch.exp(-delta_s / l_clear)
+    next_memory = torch.maximum(torch.clamp(risk_f.detach(), 0.0, 1.0), memory.detach() * decay)
+    if not update:
+        return next_memory
+    env.pcr_risk_memory = next_memory.detach()
+    return next_memory
+
+
 def build_learned_w_gate_goal(
     env,
     args,
@@ -933,16 +986,27 @@ def build_learned_w_gate_goal(
     aff_map: torch.Tensor,
     cmd_f: torch.Tensor,
     cmd_a: torch.Tensor,
+    *,
+    update_risk_memory: bool = False,
+    state_tensor: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     diag = _pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
     cmd_a_eff = diag["cmd_a_eff"]
     clearance_scale = max(float(getattr(env, "affordance_map_extent", 3.0)), 1e-6)
     clearance_f = torch.clamp(diag["clearance_F"], 0.0, clearance_scale) / clearance_scale
     clearance_a = torch.clamp(diag["clearance_A"], 0.0, clearance_scale) / clearance_scale
-    # Keep the historical feature slot, but do not expose row-release privileged
-    # information to the actor.  The real row value is reserved for w_aux labels
-    # and diagnostics only.
-    row_actor = torch.zeros_like(diag["row_not_released"])
+    risk_memory = get_or_update_pcr_risk_memory(
+        env,
+        args,
+        diag["risk_F"],
+        cmd_f=cmd_f,
+        state_tensor=state_tensor,
+        update=update_risk_memory,
+    )
+    # Keep the historical feature slot.  It is either zero (old behavior) or a
+    # deployable temporal risk memory; row-release privileged info never enters actor input.
+    row_actor = risk_memory
+    diag["risk_memory"] = risk_memory
     features = torch.cat([
         cmd_f[:, :3],
         cmd_a_eff[:, :3],
@@ -989,6 +1053,13 @@ def resolve_moe_gate_pcr(
     risk_f = diag["risk_F"]
     risk_a = diag["risk_A"]
     safe_d = diag["post_safe_distance"]
+    risk_memory = get_or_update_pcr_risk_memory(
+        env,
+        args,
+        risk_f,
+        cmd_f=cmd_f,
+        update=False,
+    )
 
     w_mode = str(getattr(args, "w_mode", "none")).lower()
     w_tau = max(float(getattr(args, "w_tau", 0.25)), 1e-6)
@@ -1069,6 +1140,7 @@ def resolve_moe_gate_pcr(
         "fusion_formula_version": get_pcr_fusion_formula_version(w_mode),
         "row_current_valid": diag["row_current_valid"],
         "row_not_released": diag["row_not_released"],
+        "risk_memory": risk_memory,
         "cmd_cos": diag["cmd_cos"],
         "conflict_score": diag["conflict_score"],
         "post_safe_distance": diag["post_safe_distance"],
@@ -1189,6 +1261,8 @@ def format_pcr_variant_tag(args: argparse.Namespace) -> str:
         ]
         if bool(getattr(args, "pcr_w_aux_enable", False)):
             parts.append(f"rowrel_aux{float(getattr(args, 'pcr_w_aux_coef', 0.0)):g}")
+        if is_risk_memory_enabled(args):
+            parts.append(f"riskmem_lc{float(getattr(args, 'risk_memory_l_clear', 0.40)):g}")
         return "_".join(parts)
     return w_mode
 
@@ -1303,6 +1377,9 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "pcr_w_aux_risk_f_threshold",
     "pcr_w_aux_risk_margin",
     "pcr_w_aux_cmd_cos_threshold",
+    "risk_memory",
+    "risk_memory_l_clear",
+    "risk_memory_velocity_source",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -1316,6 +1393,9 @@ RUNTIME_ABLATION_ARG_KEYS = (
     "signed_w_gamma_risk",
     "signed_w_margin",
     "w_disable_gate_safe_clamp",
+    "risk_memory",
+    "risk_memory_l_clear",
+    "risk_memory_velocity_source",
 )
 LEARNED_W_FEATURE_DIM = 16
 LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_no_priv_row_v3"
@@ -1384,6 +1464,9 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "pcr_w_aux_risk_f_threshold",
     "pcr_w_aux_risk_margin",
     "pcr_w_aux_cmd_cos_threshold",
+    "risk_memory",
+    "risk_memory_l_clear",
+    "risk_memory_velocity_source",
     "camera_enable",
     "camera_interval",
     "decimation",
@@ -1586,7 +1669,21 @@ def collect_runtime_observation_contract(
         "gate_uses_cmd_cos": learned_w_enabled,
         "gate_uses_conflict_score": learned_w_enabled,
         "gate_uses_row_not_released": False,
-        "gate_row_not_released_actor_value": 0.0 if learned_w_enabled else None,
+        "gate_uses_risk_memory": bool(learned_w_enabled and is_risk_memory_enabled(args)),
+        "gate_row_slot_semantics": (
+            "risk_memory" if learned_w_enabled and is_risk_memory_enabled(args)
+            else ("zero" if learned_w_enabled else None)
+        ),
+        "gate_row_not_released_actor_value": 0.0 if learned_w_enabled and not is_risk_memory_enabled(args) else None,
+        "gate_risk_memory_l_clear_m": (
+            float(getattr(args, "risk_memory_l_clear", 0.40))
+            if learned_w_enabled and is_risk_memory_enabled(args) else None
+        ),
+        "gate_risk_memory_velocity_source": (
+            str(getattr(args, "risk_memory_velocity_source", "body"))
+            if learned_w_enabled and is_risk_memory_enabled(args) else None
+        ),
+        "gate_risk_memory_deployable": bool(learned_w_enabled and is_risk_memory_enabled(args)),
         "gate_w_aux_uses_row_not_released": bool(
             learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
         ),
@@ -2267,6 +2364,7 @@ class HierarchicalHexapodEnv:
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_follow_far_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.pcr_risk_memory = torch.zeros(self.num_envs, device=device)
         self.stable_follow_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_max_rows = 1
         if self.is_pcr_line_task and hasattr(self.env, "_get_s_avoid_fixed_stage_row_y"):
@@ -2431,6 +2529,7 @@ class HierarchicalHexapodEnv:
         self.goal_change_count.zero_()
         self.target_lost_steps.zero_()
         self.pcr_follow_far_steps.zero_()
+        self.pcr_risk_memory.zero_()
         self.stable_follow_steps.zero_()
         self.pcr_row_success_flags.zero_()
         self.pcr_row_collision_flags.zero_()
@@ -2462,6 +2561,7 @@ class HierarchicalHexapodEnv:
         self.pcr_row_band_fail_flags[env_ids] = False
         self.pcr_prev_row_index[env_ids] = -1
         self.pcr_prev_row_valid[env_ids] = False
+        self.pcr_risk_memory[env_ids] = 0.0
         self.env.reset_idx(env_ids)
 
     def _resample_forced_forward_speed(self, env_ids: torch.Tensor) -> None:
@@ -5661,6 +5761,9 @@ def train(args):
             "signed_w_gamma_risk",
             "signed_w_margin",
             "w_disable_gate_safe_clamp",
+            "risk_memory",
+            "risk_memory_l_clear",
+            "risk_memory_velocity_source",
             "moe_expert_deterministic",
             "disable_risk_scale",
             "camera_enable",
@@ -5686,7 +5789,22 @@ def train(args):
         meta["uses_cmd_cos"] = bool(gate_learned_w_enabled)
         meta["uses_conflict_score"] = bool(gate_learned_w_enabled)
         meta["uses_row_not_released"] = False
-        meta["gate_row_not_released_actor_value"] = 0.0 if gate_learned_w_enabled else None
+        meta["uses_risk_memory"] = bool(gate_learned_w_enabled and is_risk_memory_enabled(args))
+        meta["gate_row_slot_semantics"] = (
+            "risk_memory" if gate_learned_w_enabled and is_risk_memory_enabled(args)
+            else ("zero" if gate_learned_w_enabled else None)
+        )
+        meta["gate_row_not_released_actor_value"] = (
+            0.0 if gate_learned_w_enabled and not is_risk_memory_enabled(args) else None
+        )
+        meta["risk_memory_l_clear_m"] = (
+            float(getattr(args, "risk_memory_l_clear", 0.40))
+            if gate_learned_w_enabled and is_risk_memory_enabled(args) else None
+        )
+        meta["risk_memory_velocity_source"] = (
+            str(getattr(args, "risk_memory_velocity_source", "body"))
+            if gate_learned_w_enabled and is_risk_memory_enabled(args) else None
+        )
         meta["w_aux_uses_row_not_released"] = bool(
             gate_learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
         )
@@ -6322,6 +6440,7 @@ def train(args):
         gate_risk_f_sum = torch.zeros((), device=device)
         gate_w_support_correction_sum = torch.zeros((), device=device)
         gate_risk_diff_correction_sum = torch.zeros((), device=device)
+        gate_risk_memory_sum = torch.zeros((), device=device)
         gate_conflict_score_sum = torch.zeros((), device=device)
         gate_w_conflict_cross_sum = torch.zeros((), device=device)
         gate_w_sq_sum = torch.zeros((), device=device)
@@ -6724,6 +6843,8 @@ def train(args):
                             aff_map,
                             cmd_f,
                             cmd_a,
+                            update_risk_memory=True,
+                            state_tensor=state,
                         )
                         gate_goal_finite = _row_finite_mask(gate_policy_goal)
                         action_valid = action_valid & gate_goal_finite
@@ -6855,6 +6976,7 @@ def train(args):
                             post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
                             post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
                             post_info["row_not_released"] = row_not_released_step.detach().clone()
+                            post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
                             post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                             post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
                             post_info["post_safe_distance"] = gate_diag["post_safe_distance"].detach().clone()
@@ -7142,6 +7264,7 @@ def train(args):
                     gate_risk_f_sum += gate_diag["risk_F"].sum()
                     gate_w_support_correction_sum += gate_diag["w_support_correction"].sum()
                     gate_risk_diff_correction_sum += gate_diag["risk_diff_correction"].sum()
+                    gate_risk_memory_sum += gate_diag.get("risk_memory", torch.zeros_like(gate_diag["w"])).sum()
                     conflict_score = gate_diag.get("conflict_score", torch.zeros_like(gate_diag["w"]))
                     gate_conflict_score_sum += conflict_score.sum()
                     gate_w_conflict_cross_sum += (gate_diag["w"] * conflict_score).sum()
@@ -8249,6 +8372,7 @@ def train(args):
         gate_risk_f_mean = (gate_risk_f_sum / total_samples).item() if is_gate else 0.0
         gate_w_support_correction_mean = (gate_w_support_correction_sum / total_samples).item() if is_gate else 0.0
         gate_risk_diff_correction_mean = (gate_risk_diff_correction_sum / total_samples).item() if is_gate else 0.0
+        gate_risk_memory_mean = (gate_risk_memory_sum / total_samples).item() if is_gate else 0.0
         gate_conflict_score_mean = (gate_conflict_score_sum / total_samples).item() if is_gate else 0.0
         gate_w_std = 0.0
         gate_conflict_w_corr = 0.0
@@ -8631,6 +8755,7 @@ def train(args):
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
             writer.add_scalar('Stats/GateWSupportCorrection', gate_w_support_correction_mean, iteration)
             writer.add_scalar('Stats/GateRiskDiffCorrection', gate_risk_diff_correction_mean, iteration)
+            writer.add_scalar('Stats/GateRiskMemory', gate_risk_memory_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
         if gate_learned_w_enabled:
             writer.add_scalar('Loss/WAux', w_aux_loss_sum / max(num_updates, 1), iteration)
@@ -8754,6 +8879,7 @@ def train(args):
                 gate_line += f"""{'Gate gap(clamp/w/total):':>{pad}} {gate_y_clamp_gap_mean:.3f} / {gate_y_w_gap_mean:.3f} / {gate_y_gap_mean:.3f}\n"""
                 gate_line += f"""{'Gate clrF/riskF:':>{pad}} {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
                 gate_line += f"""{'Gate corr(w/risk):':>{pad}} {gate_w_support_correction_mean:.3f} / {gate_risk_diff_correction_mean:.3f}\n"""
+                gate_line += f"""{'Gate risk memory:':>{pad}} {gate_risk_memory_mean:.3f}\n"""
                 gate_line += f"""{'Gate rowNR w(on/off):':>{pad}} {gate_row_not_released_rate:.3f} / {gate_row_not_released_w_mean:.3f} / {gate_row_released_w_mean:.3f}\n"""
                 if gate_learned_w_enabled:
                     gate_line += f"""{'Gate wAux loss/valid:':>{pad}} {w_aux_loss_sum / max(num_updates, 1):.4f} / {w_aux_valid_rollout_rate:.3f}\n"""
@@ -9097,6 +9223,12 @@ if __name__ == "__main__":
     parser.add_argument('--w2_risk_gamma', type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument('--w_disable_gate_safe_clamp', action='store_true',
                         help='当 w_mode!=none 时关闭旧 gate_safe_clamp，避免双重安全干预')
+    parser.add_argument('--risk_memory', action='store_true',
+                        help='learned-w 输入旧 row slot 改用可部署短时 risk_F 记忆')
+    parser.add_argument('--risk_memory_l_clear', type=float, default=0.40,
+                        help='risk memory 距离衰减释放长度，单位 m')
+    parser.add_argument('--risk_memory_velocity_source', type=str, default='body', choices=['body', 'cmd'],
+                        help='risk memory 衰减速度来源：body=机体估计速度，cmd=follow 命令前向分量')
     parser.add_argument('--pcr_w_aux_enable', action='store_true',
                         help='learned-w 行内未释放高冲突样本辅助监督')
     parser.add_argument('--no_pcr_w_aux', action='store_true',

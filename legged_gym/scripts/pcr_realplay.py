@@ -267,6 +267,7 @@ class PcrRealplay:
         self.snapshot = RealInputSnapshot()
         self.prev_cmd = np.zeros(3, dtype=np.float32)
         self.prev_cmd_stamp = time.time()
+        self.risk_memory = None
         self.bridge = RealPcrPolicyShim(args, self.torch, self.device)
         self._load_models()
 
@@ -299,7 +300,15 @@ class PcrRealplay:
             raise ValueError(
                 f"--w_mode={self.args.w_mode} mismatches checkpoint trained_w_mode={trained_w_mode}"
             )
-        for key in ("w_blend_mode", "signed_w_lambda", "signed_w_gamma_risk", "signed_w_margin"):
+        for key in (
+            "w_blend_mode",
+            "signed_w_lambda",
+            "signed_w_gamma_risk",
+            "signed_w_margin",
+            "risk_memory",
+            "risk_memory_l_clear",
+            "risk_memory_velocity_source",
+        ):
             if key in gate_meta and gate_meta[key] is not None:
                 setattr(self.args, key, gate_meta[key])
         action_dim = _infer_gate_action_dim(gate_ckpt, gate_meta, self.torch)
@@ -543,7 +552,27 @@ class PcrRealplay:
         repeat = max(1, int(self.aff_stack))
         return local_map.repeat(1, repeat, 1, 1)
 
-    def _learned_w_goal(self, base_goal, aff_map, cmd_f, cmd_a):
+    def _update_risk_memory(self, risk_f, cmd_f, state_tensor):
+        torch_mod = self.torch
+        if not bool(getattr(self.args, "risk_memory", False)):
+            return torch_mod.zeros_like(risk_f)
+        if self.risk_memory is None or self.risk_memory.shape != risk_f.shape:
+            self.risk_memory = torch_mod.zeros_like(risk_f)
+        source = str(getattr(self.args, "risk_memory_velocity_source", "body")).lower()
+        if source == "body" and state_tensor.shape[1] >= 5:
+            v_forward = state_tensor[:, 4].to(device=risk_f.device, dtype=risk_f.dtype)
+        elif cmd_f.shape[1] >= 2:
+            v_forward = cmd_f[:, 1].to(device=risk_f.device, dtype=risk_f.dtype)
+        else:
+            v_forward = torch_mod.zeros_like(risk_f)
+        dt = max(float(getattr(self.args, "high_level_dt", 0.10)), 1e-6)
+        l_clear = max(float(getattr(self.args, "risk_memory_l_clear", 0.40)), 1e-6)
+        delta_s = torch_mod.clamp(v_forward, min=0.0) * dt
+        decay = torch_mod.exp(-delta_s / l_clear)
+        self.risk_memory = torch_mod.maximum(torch_mod.clamp(risk_f, 0.0, 1.0), self.risk_memory * decay).detach()
+        return self.risk_memory
+
+    def _learned_w_goal(self, base_goal, aff_map, cmd_f, cmd_a, state_tensor):
         torch_mod = self.torch
         cmd_a_eff = cmd_a.clone()
         if cmd_a_eff.shape[-1] >= 2:
@@ -564,7 +593,8 @@ class PcrRealplay:
         cmd_cos = torch_mod.clamp(cmd_cos, -1.0, 1.0)
         conflict_score = torch_mod.clamp(risk_f - risk_a, min=0.0) * (1.0 - cmd_cos) * 0.5
         row_not_released = torch_mod.full_like(risk_f, float(self.bridge.row_not_released_value))
-        row_actor = torch_mod.zeros_like(row_not_released)
+        risk_memory = self._update_risk_memory(risk_f, cmd_f, state_tensor)
+        row_actor = risk_memory
         scale = max(float(self.args.map_extent_m), 1e-6)
         features = torch_mod.cat(
             [
@@ -588,6 +618,7 @@ class PcrRealplay:
             "clearance_A": clearance_a,
             "risk_F": risk_f,
             "risk_A": risk_a,
+            "risk_memory": risk_memory,
             "row_not_released": row_not_released,
             "cmd_cos": cmd_cos,
             "conflict_score": torch_mod.clamp(conflict_score, 0.0, 1.0),
@@ -672,7 +703,7 @@ class PcrRealplay:
                 difficulty,
                 deterministic=True,
             )
-            gate_goal, diag = self._learned_w_goal(goal, local_map, cmd_f, cmd_a)
+            gate_goal, diag = self._learned_w_goal(goal, local_map, cmd_f, cmd_a, gate_state)
             gate_goal = _match_2d_tensor(gate_goal, self.gate_goal_dim, torch_mod, label="real_gate_goal")
             gate_action, _ = self.gate_policy.get_action(
                 local_stack[:, : self.gate_aff_channels, :, :],
@@ -722,6 +753,7 @@ class PcrRealplay:
             "clearance_A",
             "risk_F",
             "risk_A",
+            "risk_memory",
             "row_not_released",
             "cmd_cos",
             "conflict_score",
@@ -791,6 +823,7 @@ class PcrRealplay:
             "y_eff": float(result["y_eff"]),
             "risk_F": float(result["risk_F"]),
             "risk_A": float(result["risk_A"]),
+            "risk_memory": float(result["risk_memory"]),
             "row_not_released": float(result["row_not_released"]),
             "target_valid": bool(result["target_valid"]),
             "target_too_close": bool(result.get("target_too_close", False)),
@@ -840,6 +873,7 @@ class PcrRealplay:
                     "y_eff": 0.0,
                     "risk_F": 0.0,
                     "risk_A": 0.0,
+                    "risk_memory": 0.0,
                     "row_not_released": 0.0,
                     "safety": {"reasons": [str(exc)], "dry_run": not bool(self.args.publish_cmd)},
                 }
@@ -859,6 +893,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signed_w_margin", type=float, default=0.05)
     parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
+    parser.add_argument("--risk_memory", action="store_true", help="use deployable temporal risk memory in learned-w row slot")
+    parser.add_argument("--risk_memory_l_clear", type=float, default=0.40)
+    parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"])
+    parser.add_argument("--high_level_dt", type=float, default=0.10)
     parser.add_argument("--cmd_scale", default="1.0,1.0,1.0")
     parser.add_argument("--device", default="", help="cuda, cuda:0, or cpu; default auto")
 

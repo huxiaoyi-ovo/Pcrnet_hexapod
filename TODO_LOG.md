@@ -2037,3 +2037,8 @@
 
 - [x] Must: 将 `goal_buf=(x_right,y_forward)` 到世界坐标的反投影统一为项目固定 S0 口径，避免 `cmd_F / risk_F / conflict_score` 在非零 heading 时静默反向
 - [x] Must: 同步修复训练与实机 `pcr_realplay.py`，并补最小坐标自检，保证 learnedw2 开训前输入语义干净
+
+## 2026-05-21 PCR 可部署风险记忆
+
+- [x] Must: 新增可选 `--risk_memory`，用距离衰减的 `risk_F` 记忆替换 learned-w 旧 row slot，解决当前帧看不到侧边障碍时过早恢复跟随的问题
+- [x] Must: 保持 `row_not_released` 只用于 `w_aux` 监督与诊断，不进入 actor，确保训练输入可实机复现

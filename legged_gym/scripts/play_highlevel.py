@@ -2001,6 +2001,9 @@ def parse_args():
     parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true", help="当 w_mode!=none 时关闭旧 gate_safe_clamp")
+    parser.add_argument("--risk_memory", action="store_true", help="learned-w 输入旧 row slot 改用可部署短时 risk_F 记忆")
+    parser.add_argument("--risk_memory_l_clear", type=float, default=0.40, help="risk memory 距离衰减释放长度，单位 m")
+    parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"], help="risk memory 衰减速度来源")
     parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
         "--debug_cmd",
@@ -2727,6 +2730,8 @@ def main():
                                 gate_aff_input,
                                 cmd_f,
                                 cmd_a,
+                                update_risk_memory=True,
+                                state_tensor=gate_state,
                             )
                         gate_policy_goal = th.match_goal_dim(
                             gate_policy_goal,
@@ -2915,6 +2920,7 @@ def main():
                 post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
                 post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
                 post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
+                post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
                 post_info["signed_w"] = gate_diag["signed_w"].detach().clone()
                 post_info["signed_w_active"] = gate_diag["signed_w_active"].detach().clone()
                 post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
