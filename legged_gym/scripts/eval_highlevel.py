@@ -200,6 +200,8 @@ def _empty_risk_bin_state() -> list:
             "suppression_sq_sum": 0.0,
             "w_sum": 0.0,
             "w_sq_sum": 0.0,
+            "signed_w_sum": 0.0,
+            "signed_w_active_sum": 0.0,
             "risk_f_sum": 0.0,
             "risk_a_sum": 0.0,
             "risk_delta_sum": 0.0,
@@ -262,6 +264,8 @@ class EpisodeAccumulator:
     gate_y_raw_sum: float = 0.0
     y_eff_sum: float = 0.0
     w_sum: float = 0.0
+    signed_w_sum: float = 0.0
+    signed_w_active_sum: float = 0.0
     clearance_f_sum: float = 0.0
     clearance_a_sum: float = 0.0
     risk_f_sum: float = 0.0
@@ -806,6 +810,8 @@ class EvalRunner:
                     post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                     post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                     post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                    post_info["signed_w"] = gate_diag["signed_w"].detach().clone()
+                    post_info["signed_w_active"] = gate_diag["signed_w_active"].detach().clone()
                     post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
                     post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
                     post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
@@ -916,6 +922,8 @@ class EvalRunner:
                         gate_raw_t = post_info.get("gate_y_raw", None)
                         y_eff_t = post_info.get("y_eff", None)
                         w_t = post_info.get("w", None)
+                        signed_w_t = post_info.get("signed_w", None)
+                        signed_w_active_t = post_info.get("signed_w_active", None)
                         clr_f_t = post_info.get("clearance_F", None)
                         clr_a_t = post_info.get("clearance_A", None)
                         risk_f_t = post_info.get("risk_F", None)
@@ -932,6 +940,8 @@ class EvalRunner:
                         gate_raw_v = _safe_float(gate_raw_t[i].item(), default=0.0) if torch.is_tensor(gate_raw_t) else 0.0
                         y_eff_v = _safe_float(y_eff_t[i].item(), default=gate_raw_v) if torch.is_tensor(y_eff_t) else gate_raw_v
                         w_v = _safe_float(w_t[i].item(), default=0.0) if torch.is_tensor(w_t) else 0.0
+                        signed_w_v = _safe_float(signed_w_t[i].item(), default=0.0) if torch.is_tensor(signed_w_t) else 0.0
+                        signed_w_active_v = _safe_float(signed_w_active_t[i].item(), default=0.0) if torch.is_tensor(signed_w_active_t) else 0.0
                         clr_f_v = _safe_float(clr_f_t[i].item(), default=0.0) if torch.is_tensor(clr_f_t) else 0.0
                         clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
                         risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
@@ -955,6 +965,8 @@ class EvalRunner:
                         ai.gate_y_raw_sum += gate_raw_v
                         ai.y_eff_sum += y_eff_v
                         ai.w_sum += w_v
+                        ai.signed_w_sum += signed_w_v
+                        ai.signed_w_active_sum += signed_w_active_v
                         ai.clearance_f_sum += clr_f_v
                         ai.clearance_a_sum += clr_a_v
                         ai.risk_f_sum += risk_f_v
@@ -998,6 +1010,8 @@ class EvalRunner:
                             bin_state["suppression_sq_sum"] += suppression_v * suppression_v
                             bin_state["w_sum"] += w_v
                             bin_state["w_sq_sum"] += w_v * w_v
+                            bin_state["signed_w_sum"] += signed_w_v
+                            bin_state["signed_w_active_sum"] += signed_w_active_v
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
@@ -1018,6 +1032,8 @@ class EvalRunner:
                             bin_state["suppression_sq_sum"] += suppression_v * suppression_v
                             bin_state["w_sum"] += w_v
                             bin_state["w_sq_sum"] += w_v * w_v
+                            bin_state["signed_w_sum"] += signed_w_v
+                            bin_state["signed_w_active_sum"] += signed_w_active_v
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
@@ -1050,6 +1066,8 @@ class EvalRunner:
                                     "gate_y_raw": gate_raw_v,
                                     "y_eff": y_eff_v,
                                     "w": w_v,
+                                    "signed_w": signed_w_v,
+                                    "signed_w_active": signed_w_active_v,
                                     "clearance_f": clr_f_v,
                                     "clearance_a": clr_a_v,
                                     "risk_f": risk_f_v,
@@ -1191,6 +1209,8 @@ class EvalRunner:
                             "gate_y_raw_mean": ai.gate_y_raw_sum / denom_steps,
                             "y_eff_mean": ai.y_eff_sum / denom_steps,
                             "w_mean": ai.w_sum / denom_steps,
+                            "signed_w_mean": ai.signed_w_sum / denom_steps,
+                            "signed_w_active_mean": ai.signed_w_active_sum / denom_steps,
                             "clearance_f_mean": ai.clearance_f_sum / denom_steps,
                             "clearance_a_mean": ai.clearance_a_sum / denom_steps,
                             "risk_f_mean": ai.risk_f_sum / denom_steps,
@@ -1371,6 +1391,8 @@ class EvalRunner:
                         "suppression_sq_sum",
                         "w_sum",
                         "w_sq_sum",
+                        "signed_w_sum",
+                        "signed_w_active_sum",
                         "risk_f_sum",
                         "risk_a_sum",
                         "risk_delta_sum",
@@ -1423,6 +1445,8 @@ class EvalRunner:
                     "suppression_sem": _sem_from_sums(bins[idx]["suppression_sum"], bins[idx]["suppression_sq_sum"]),
                     "w_mean": bins[idx]["w_sum"] / float(steps) if steps > 0 else float("nan"),
                     "w_sem": _sem_from_sums(bins[idx]["w_sum"], bins[idx]["w_sq_sum"]),
+                    "signed_w_mean": bins[idx]["signed_w_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "signed_w_active_mean": bins[idx]["signed_w_active_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_f_mean": bins[idx]["risk_f_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_a_mean": bins[idx]["risk_a_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_delta_mean": bins[idx]["risk_delta_sum"] / float(steps) if steps > 0 else float("nan"),
@@ -1480,6 +1504,8 @@ class EvalRunner:
         gate_y_raw_vals = _clean([r.get("gate_y_raw_mean", float("nan")) for r in rows])
         y_eff_vals = _clean([r.get("y_eff_mean", float("nan")) for r in rows])
         w_vals = _clean([r.get("w_mean", float("nan")) for r in rows])
+        signed_w_vals = _clean([r.get("signed_w_mean", float("nan")) for r in rows])
+        signed_w_active_vals = _clean([r.get("signed_w_active_mean", float("nan")) for r in rows])
         clearance_f_vals = _clean([r.get("clearance_f_mean", float("nan")) for r in rows])
         clearance_a_vals = _clean([r.get("clearance_a_mean", float("nan")) for r in rows])
         risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
@@ -1581,6 +1607,10 @@ class EvalRunner:
             "gate_y_raw_mean": float(np.mean(gate_y_raw_vals)) if gate_y_raw_vals else float("nan"),
             "y_eff_mean": float(np.mean(y_eff_vals)) if y_eff_vals else float("nan"),
             "w_mean": float(np.mean(w_vals)) if w_vals else float("nan"),
+            "signed_w_mean": float(np.mean(signed_w_vals)) if signed_w_vals else float("nan"),
+            "signed_w_active_mean": (
+                float(np.mean(signed_w_active_vals)) if signed_w_active_vals else float("nan")
+            ),
             "clearance_f_mean": float(np.mean(clearance_f_vals)) if clearance_f_vals else float("nan"),
             "clearance_a_mean": float(np.mean(clearance_a_vals)) if clearance_a_vals else float("nan"),
             "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
@@ -1645,6 +1675,8 @@ class EvalRunner:
             gate_y_raw_d = _clean([r.get("gate_y_raw_mean", float("nan")) for r in sub])
             y_eff_d = _clean([r.get("y_eff_mean", float("nan")) for r in sub])
             w_d = _clean([r.get("w_mean", float("nan")) for r in sub])
+            signed_w_d = _clean([r.get("signed_w_mean", float("nan")) for r in sub])
+            signed_w_active_d = _clean([r.get("signed_w_active_mean", float("nan")) for r in sub])
             clearance_f_d = _clean([r.get("clearance_f_mean", float("nan")) for r in sub])
             clearance_a_d = _clean([r.get("clearance_a_mean", float("nan")) for r in sub])
             risk_f_d = _clean([r.get("risk_f_mean", float("nan")) for r in sub])
@@ -1699,6 +1731,8 @@ class EvalRunner:
                 "gate_y_raw_mean": float(np.mean(gate_y_raw_d)) if gate_y_raw_d else float("nan"),
                 "y_eff_mean": float(np.mean(y_eff_d)) if y_eff_d else float("nan"),
                 "w_mean": float(np.mean(w_d)) if w_d else float("nan"),
+                "signed_w_mean": float(np.mean(signed_w_d)) if signed_w_d else float("nan"),
+                "signed_w_active_mean": float(np.mean(signed_w_active_d)) if signed_w_active_d else float("nan"),
                 "clearance_f_mean": float(np.mean(clearance_f_d)) if clearance_f_d else float("nan"),
                 "clearance_a_mean": float(np.mean(clearance_a_d)) if clearance_a_d else float("nan"),
                 "risk_f_mean": float(np.mean(risk_f_d)) if risk_f_d else float("nan"),
@@ -1777,8 +1811,9 @@ class EvalRunner:
                 ),
                 "w_tau": float(self.args.w_tau),
                 "w_blend_mode": str(self.args.w_blend_mode),
-                "w2_lambda": float(getattr(self.args, "w2_lambda", 0.5)),
-                "w2_risk_gamma": float(getattr(self.args, "w2_risk_gamma", 0.5)),
+                "signed_w_lambda": float(getattr(self.args, "signed_w_lambda", 0.30)),
+                "signed_w_gamma_risk": float(getattr(self.args, "signed_w_gamma_risk", 0.15)),
+                "signed_w_margin": float(getattr(self.args, "signed_w_margin", 0.05)),
                 "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
                 "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
                 "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
@@ -1866,6 +1901,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "gate_y_raw_mean",
         "y_eff_mean",
         "w_mean",
+        "signed_w_mean",
+        "signed_w_active_mean",
         "clearance_f_mean",
         "clearance_a_mean",
         "risk_f_mean",
@@ -1928,6 +1965,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "gate_y_raw",
             "y_eff",
             "w",
+            "signed_w",
+            "signed_w_active",
             "clearance_f",
             "clearance_a",
             "risk_f",
@@ -2070,12 +2109,15 @@ def parse_args():
     w_group.add_argument("--yonly", action="store_true", help="evaluate MoE-y without w")
     w_group.add_argument("--wgeom", action="store_true", help="evaluate MoE-y with geometric w")
     w_group.add_argument("--wlearned", action="store_true", help="evaluate MoE-y with learned w")
-    w_group.add_argument("--wlearned2", action="store_true", help="evaluate learnedw2 with support+riskdiff w")
+    w_group.add_argument("--wlearned2", action="store_true", help="evaluate learnedw2 signed conflict prior")
     parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "learned", "learnedw2"])
     parser.add_argument("--w_tau", type=float, default=0.25)
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
-    parser.add_argument("--w2_lambda", type=float, default=0.5)
-    parser.add_argument("--w2_risk_gamma", type=float, default=0.5)
+    parser.add_argument("--signed_w_lambda", type=float, default=0.30)
+    parser.add_argument("--signed_w_gamma_risk", type=float, default=0.15)
+    parser.add_argument("--signed_w_margin", type=float, default=0.05)
+    parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
+    parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--pcr_w_aux_enable", action="store_true")
     parser.add_argument("--pcr_w_aux_coef", type=float, default=0.05)

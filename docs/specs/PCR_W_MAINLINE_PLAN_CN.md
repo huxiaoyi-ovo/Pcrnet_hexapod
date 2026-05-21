@@ -13,10 +13,12 @@ learnedw2
 其最小验证口径固定为：
 
 ```text
-w 是 follow-support prior；
-y_eff = clip(y + lambda * (w - 0.5) + gamma * (risk_A - risk_F), 0, 1)；
+w 是 signed conflict prior；
+w_s = 2w - 1；
+w_s > 0 表示偏 follow，w_s < 0 表示偏 avoid；
+y_eff = clip(y + lambda * w_s_active + gamma * (risk_A - risk_F), 0, 1)；
 旧 learnedw 的 w_aux 高冲突标签为 1；
-learnedw2 的 w_aux 高冲突标签为 0；
+learnedw2 的高冲突 avoid 标签为 0，对应 w_s = -1；
 checkpoint、训练目录、play、eval、figure 必须显式区分 learnedw 与 learnedw2。
 ```
 
@@ -24,7 +26,7 @@ checkpoint、训练目录、play、eval、figure 必须显式区分 learnedw 与
 
 ```text
 公式版本没有和旧 learnedw 混用；
-w2 的 w / risk 两项修正能在日志和 eval 中看见；
+signed-w 的 w / risk 两项修正能在日志和 eval 中看见；
 row-progress、episode collision、follow error 没有因公式口径错误直接崩掉。
 ```
 

@@ -534,8 +534,10 @@ def get_follow_target_world_xy(
     goal_y = goal_tensor[:, 1]
     cos_heading = torch.cos(robot_heading)
     sin_heading = torch.sin(robot_heading)
-    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
-    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
+    # Project contract: goal_buf = (x_right, y_forward).
+    # heading=0 => right=world +X, forward=world +Y.
+    delta_world_x = cos_heading * goal_x + sin_heading * goal_y
+    delta_world_y = -sin_heading * goal_x + cos_heading * goal_y
     return robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
 
 
@@ -1022,10 +1024,17 @@ def resolve_moe_gate_pcr(
     if w_mode == "none":
         y_eff = gate_y
     elif is_learnedw2_mode(w_mode):
-        w2_lambda = float(getattr(args, "w2_lambda", 0.5))
-        w2_risk_gamma = float(getattr(args, "w2_risk_gamma", 0.5))
-        w_support_correction = w2_lambda * (w - 0.5)
-        risk_diff_correction = w2_risk_gamma * (risk_a - risk_f)
+        signed_lambda = float(getattr(args, "signed_w_lambda", 0.30))
+        signed_gamma = float(getattr(args, "signed_w_gamma_risk", 0.15))
+        signed_margin = float(getattr(args, "signed_w_margin", 0.05))
+        signed_w = 2.0 * w - 1.0
+        signed_w_active = torch.where(
+            torch.abs(signed_w) > signed_margin,
+            signed_w,
+            torch.zeros_like(signed_w),
+        )
+        w_support_correction = signed_lambda * signed_w_active
+        risk_diff_correction = signed_gamma * (risk_a - risk_f)
         y_eff = torch.clamp(gate_y + w_support_correction + risk_diff_correction, 0.0, 1.0)
     elif blend_mode == "mix":
         y_eff = torch.clamp(0.5 * gate_y + 0.5 * (1.0 - w), 0.0, 1.0)
@@ -1046,6 +1055,15 @@ def resolve_moe_gate_pcr(
         "clearance_A": clearance_a,
         "risk_F": risk_f,
         "risk_A": risk_a,
+        "signed_w": (2.0 * w - 1.0) if is_learnedw2_mode(w_mode) else torch.zeros_like(w),
+        "signed_w_active": (
+            torch.where(
+                torch.abs(2.0 * w - 1.0) > float(getattr(args, "signed_w_margin", 0.05)),
+                2.0 * w - 1.0,
+                torch.zeros_like(w),
+            )
+            if is_learnedw2_mode(w_mode) else torch.zeros_like(w)
+        ),
         "w_support_correction": w_support_correction,
         "risk_diff_correction": risk_diff_correction,
         "fusion_formula_version": get_pcr_fusion_formula_version(w_mode),
@@ -1069,6 +1087,7 @@ def build_row_aware_w_aux_targets(
     risk_f = gate_diag["risk_F"]
     risk_a = gate_diag["risk_A"]
     cmd_cos = gate_diag["cmd_cos"]
+    is_w2 = is_learnedw2_mode(getattr(args, "w_mode", "none"))
     risk_thr = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
     margin = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
     cos_thr = float(getattr(args, "pcr_w_aux_cmd_cos_threshold", 0.5))
@@ -1076,9 +1095,18 @@ def build_row_aware_w_aux_targets(
     follow_risky = risk_f > risk_thr
     avoid_safer = (risk_f - risk_a) > margin
     command_conflict = cmd_cos < cos_thr
-    valid = row_active & follow_risky & avoid_safer & command_conflict
-    # Old learned-w: w=1 suppresses follow. learnedw2: w=0 supports avoid.
-    label = torch.zeros_like(w_ref) if is_learnedw2_mode(getattr(args, "w_mode", "none")) else torch.ones_like(w_ref)
+    if is_w2:
+        valid_row = row_active & follow_risky & avoid_safer & command_conflict
+        valid_global = (
+            (risk_f > max(risk_thr + 0.20, 0.45))
+            & ((risk_f - risk_a) > max(margin + 0.10, 0.15))
+            & (cmd_cos < min(cos_thr, 0.3))
+        )
+        valid = valid_row | valid_global
+    else:
+        valid = row_active & follow_risky & avoid_safer & command_conflict
+    # Old learned-w: w=1 suppresses follow. learnedw2: w=0 means signed-w prefers avoid.
+    label = torch.zeros_like(w_ref) if is_w2 else torch.ones_like(w_ref)
     return label.detach(), valid.detach()
 
 
@@ -1154,8 +1182,10 @@ def format_pcr_variant_tag(args: argparse.Namespace) -> str:
     if w_mode == "learnedw2":
         parts = [
             "learnedw2",
-            f"lam{float(getattr(args, 'w2_lambda', 0.5)):g}",
-            f"gam{float(getattr(args, 'w2_risk_gamma', 0.5)):g}",
+            "signed",
+            f"lam{float(getattr(args, 'signed_w_lambda', 0.30)):g}",
+            f"gam{float(getattr(args, 'signed_w_gamma_risk', 0.15)):g}",
+            f"m{float(getattr(args, 'signed_w_margin', 0.05)):g}",
         ]
         if bool(getattr(args, "pcr_w_aux_enable", False)):
             parts.append(f"rowrel_aux{float(getattr(args, 'pcr_w_aux_coef', 0.0)):g}")
@@ -1193,8 +1223,12 @@ def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.Argu
         )
     if selected is not None:
         args.w_mode = selected
-        if selected in ("learned", "learnedw2") and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
-            args.pcr_w_aux_enable = True
+    effective_mode = str(getattr(args, "w_mode", "none")).lower()
+    if effective_mode in ("learned", "learnedw2") and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
+        args.pcr_w_aux_enable = True
+    if effective_mode == "learnedw2":
+        _set_arg_if_not_explicit(args, "pcr_w_aux_risk_f_threshold", 0.25)
+        _set_arg_if_not_explicit(args, "pcr_w_aux_risk_margin", 0.05)
 
 
 def apply_train_pcr_ckpt_alias(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -1260,8 +1294,9 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
-    "w2_lambda",
-    "w2_risk_gamma",
+    "signed_w_lambda",
+    "signed_w_gamma_risk",
+    "signed_w_margin",
     "w_disable_gate_safe_clamp",
     "pcr_w_aux_enable",
     "pcr_w_aux_coef",
@@ -1277,14 +1312,15 @@ RUNTIME_ABLATION_ARG_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
-    "w2_lambda",
-    "w2_risk_gamma",
+    "signed_w_lambda",
+    "signed_w_gamma_risk",
+    "signed_w_margin",
     "w_disable_gate_safe_clamp",
 )
 LEARNED_W_FEATURE_DIM = 16
 LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_no_priv_row_v3"
 FUSION_FORMULA_VERSION = "pcr_shared_w_multiply_v1"
-LEARNED_W2_FUSION_FORMULA_VERSION = "pcr_learnedw2_support_riskdiff_v1"
+LEARNED_W2_FUSION_FORMULA_VERSION = "pcr_learnedw2_signed_conflict_prior_v2"
 
 
 def is_learned_w_mode(w_mode: Any) -> bool:
@@ -1339,8 +1375,9 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
-    "w2_lambda",
-    "w2_risk_gamma",
+    "signed_w_lambda",
+    "signed_w_gamma_risk",
+    "signed_w_margin",
     "w_disable_gate_safe_clamp",
     "pcr_w_aux_enable",
     "pcr_w_aux_coef",
@@ -5620,8 +5657,9 @@ def train(args):
             "w_mode",
             "w_tau",
             "w_blend_mode",
-            "w2_lambda",
-            "w2_risk_gamma",
+            "signed_w_lambda",
+            "signed_w_gamma_risk",
+            "signed_w_margin",
             "w_disable_gate_safe_clamp",
             "moe_expert_deterministic",
             "disable_risk_scale",
@@ -9035,7 +9073,7 @@ if __name__ == "__main__":
     parser.add_argument('--gate_safe_max', type=float, default=0.3,
                         help='安全 clamp 的最大 y 值')
     parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned', 'learnedw2'],
-                        help='PCR w 模式：learned 保留旧 suppression 公式；learnedw2 使用终版 support+riskdiff 公式')
+                        help='PCR w 模式：learned 保留旧 suppression 公式；learnedw2 使用 signed conflict prior 公式')
     w_alias_group = parser.add_mutually_exclusive_group()
     w_alias_group.add_argument('--yonly', action='store_true',
                                help='PCR MoE-y 训练别名，等价于 --w_mode none')
@@ -9044,15 +9082,19 @@ if __name__ == "__main__":
     w_alias_group.add_argument('--wlearned', action='store_true',
                                help='PCR learned-w 训练别名，默认同时启用 row-aware w_aux')
     w_alias_group.add_argument('--wlearned2', action='store_true',
-                               help='PCR learnedw2 训练别名，自动使用终版 w 公式并默认启用匹配的 row-aware w_aux')
+                               help='PCR learnedw2 训练别名，自动使用 signed-w 公式并默认启用匹配的 row/global w_aux')
     parser.add_argument('--w_tau', type=float, default=0.25,
                         help='w_geom 衰减尺度（米）；越小表示更早把近障碍判为高冲突')
     parser.add_argument('--w_blend_mode', type=str, default='multiply', choices=['multiply', 'mix'],
                         help='w 与 gate_y 的融合方式：multiply=y*(1-w)，mix=0.5*y+0.5*(1-w)')
-    parser.add_argument('--w2_lambda', type=float, default=0.5,
-                        help='learnedw2 的 follow-support w 修正系数')
-    parser.add_argument('--w2_risk_gamma', type=float, default=0.5,
-                        help='learnedw2 的 risk_A-risk_F 修正系数')
+    parser.add_argument('--signed_w_lambda', type=float, default=0.30,
+                        help='learnedw2 signed-w 修正系数')
+    parser.add_argument('--signed_w_gamma_risk', type=float, default=0.15,
+                        help='learnedw2 risk_A-risk_F 安全修正系数')
+    parser.add_argument('--signed_w_margin', type=float, default=0.05,
+                        help='learnedw2 signed-w 小幅抖动死区')
+    parser.add_argument('--w2_lambda', type=float, default=0.5, help=argparse.SUPPRESS)
+    parser.add_argument('--w2_risk_gamma', type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument('--w_disable_gate_safe_clamp', action='store_true',
                         help='当 w_mode!=none 时关闭旧 gate_safe_clamp，避免双重安全干预')
     parser.add_argument('--pcr_w_aux_enable', action='store_true',

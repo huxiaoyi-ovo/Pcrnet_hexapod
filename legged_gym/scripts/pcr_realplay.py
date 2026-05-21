@@ -299,7 +299,7 @@ class PcrRealplay:
             raise ValueError(
                 f"--w_mode={self.args.w_mode} mismatches checkpoint trained_w_mode={trained_w_mode}"
             )
-        for key in ("w_blend_mode", "w2_lambda", "w2_risk_gamma"):
+        for key in ("w_blend_mode", "signed_w_lambda", "signed_w_gamma_risk", "signed_w_margin"):
             if key in gate_meta and gate_meta[key] is not None:
                 setattr(self.args, key, gate_meta[key])
         action_dim = _infer_gate_action_dim(gate_ckpt, gate_meta, self.torch)
@@ -603,9 +603,20 @@ class PcrRealplay:
         w = torch_mod.clamp(learned_w, 0.0, 1.0)
         gate_y = torch_mod.clamp(gate_y_raw, 0.0, 1.0)
         cmd_a_eff = diag["cmd_a_eff"]
+        signed_w = torch_mod.zeros_like(w)
+        signed_w_active = torch_mod.zeros_like(w)
+        w_corr = torch_mod.zeros_like(w)
+        risk_corr = torch_mod.zeros_like(w)
         if str(self.args.w_mode).lower() == "learnedw2":
-            w_corr = float(self.args.w2_lambda) * (w - 0.5)
-            risk_corr = float(self.args.w2_risk_gamma) * (diag["risk_A"] - diag["risk_F"])
+            signed_w = 2.0 * w - 1.0
+            signed_margin = float(getattr(self.args, "signed_w_margin", 0.05))
+            signed_w_active = torch_mod.where(
+                torch_mod.abs(signed_w) > signed_margin,
+                signed_w,
+                torch_mod.zeros_like(signed_w),
+            )
+            w_corr = float(self.args.signed_w_lambda) * signed_w_active
+            risk_corr = float(self.args.signed_w_gamma_risk) * (diag["risk_A"] - diag["risk_F"])
             y_eff = torch_mod.clamp(gate_y + w_corr + risk_corr, 0.0, 1.0)
         elif str(self.args.w_blend_mode).lower() == "mix":
             y_eff = torch_mod.clamp(0.5 * gate_y + 0.5 * (1.0 - w), 0.0, 1.0)
@@ -617,6 +628,10 @@ class PcrRealplay:
             "gate_y_raw": gate_y_raw,
             "gate_y": gate_y,
             "w": w,
+            "signed_w": signed_w,
+            "signed_w_active": signed_w_active,
+            "w_support_correction": w_corr,
+            "risk_diff_correction": risk_corr,
             "y_eff": y_eff,
             "cmd_f": cmd_f,
             "cmd_a": cmd_a_eff,
@@ -636,8 +651,9 @@ class PcrRealplay:
             robot_heading = expert_state[:, 2]
             cos_h = torch_mod.cos(robot_heading)
             sin_h = torch_mod.sin(robot_heading)
-            delta_world_x = cos_h * goal[:, 0] - sin_h * goal[:, 1]
-            delta_world_y = sin_h * goal[:, 0] + cos_h * goal[:, 1]
+            # goal = (x_right, y_forward), heading=0 => forward is world +Y.
+            delta_world_x = cos_h * goal[:, 0] + sin_h * goal[:, 1]
+            delta_world_y = -sin_h * goal[:, 0] + cos_h * goal[:, 1]
             target_world = robot_pos + torch_mod.stack([delta_world_x, delta_world_y], dim=1)
             cmd_f = compute_s0_follow_expert_cmd(
                 robot_pos_world_xy=robot_pos,
@@ -695,7 +711,11 @@ class PcrRealplay:
             "gate_y_raw",
             "gate_y",
             "w",
+            "signed_w",
+            "signed_w_active",
             "y_eff",
+            "w_support_correction",
+            "risk_diff_correction",
             "cmd_f",
             "cmd_a",
             "clearance_F",
@@ -834,8 +854,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lowlevel_ckpt", default="agents/low_level_best.pt", type=str, help="path hint for deployment record")
     parser.add_argument("--w_mode", default="auto", choices=["auto", "learned", "learnedw2"])
     parser.add_argument("--w_blend_mode", default="multiply", choices=["multiply", "mix"])
-    parser.add_argument("--w2_lambda", type=float, default=0.5)
-    parser.add_argument("--w2_risk_gamma", type=float, default=0.5)
+    parser.add_argument("--signed_w_lambda", type=float, default=0.30)
+    parser.add_argument("--signed_w_gamma_risk", type=float, default=0.15)
+    parser.add_argument("--signed_w_margin", type=float, default=0.05)
+    parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
+    parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--cmd_scale", default="1.0,1.0,1.0")
     parser.add_argument("--device", default="", help="cuda, cuda:0, or cpu; default auto")
 

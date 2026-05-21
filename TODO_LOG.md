@@ -62,7 +62,7 @@
 
 ## 2026-05-21 PCR learnedw2 终版 w 公式验证
 
-- [ ] [P0] 新增 `learnedw2` 作为独立终版 w 公式实验线：保留旧 `learnedw` 单向 suppression 语义，`learnedw2` 自动使用 follow-support + risk-difference 公式、匹配监督语义、checkpoint 公式版本与 train/play/eval 识别，先做短训一致性验收再决定是否开长训。
+- [ ] [P0] 新增 `learnedw2` 作为独立 signed-w 公式实验线：保留旧 `learnedw` 单向 suppression 语义，`learnedw2` 使用 `w_s=2w-1` 的 signed conflict prior 与 `risk_A-risk_F` 安全修正；同步 `w_aux` 的 row/global 高置信样本，先做短训一致性验收再决定是否开长训。
 
 ## 2026-05-20 PCR realplay 实机部署入口
 
@@ -2032,3 +2032,8 @@
 
 - [x] Must: 将 `real_pcr_input_check.py` 从整框删除目标人改为 bbox 内按目标深度薄层 mask，避免把被跟随目标当作普通障碍，同时保留目标后方真实障碍
 - [x] Must: 输出 `target_lost / target_too_close / depth_invalid_ratio` 等安全状态，作为 ROS1 接入前的实机输入验收字段
+
+## 2026-05-21 learnedw2 坐标口径修复
+
+- [x] Must: 将 `goal_buf=(x_right,y_forward)` 到世界坐标的反投影统一为项目固定 S0 口径，避免 `cmd_F / risk_F / conflict_score` 在非零 heading 时静默反向
+- [x] Must: 同步修复训练与实机 `pcr_realplay.py`，并补最小坐标自检，保证 learnedw2 开训前输入语义干净

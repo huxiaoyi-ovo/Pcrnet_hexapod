@@ -182,8 +182,10 @@ def _method_tag(method_key: str, metrics: Dict, label: str) -> str:
     if w_mode == "learnedw2" or method_key == "learnedw2":
         parts = [
             "learnedw2",
-            f"lam{float(_protocol_value('w2_lambda', 0.5)):g}",
-            f"gam{float(_protocol_value('w2_risk_gamma', 0.5)):g}",
+            "signed",
+            f"lam{float(_protocol_value('signed_w_lambda', 0.30)):g}",
+            f"gam{float(_protocol_value('signed_w_gamma_risk', 0.15)):g}",
+            f"m{float(_protocol_value('signed_w_margin', 0.05)):g}",
         ]
         if bool(_protocol_value("pcr_w_aux_enable", False)):
             parts.append(f"rowrel_aux{float(_protocol_value('pcr_w_aux_coef', 0.0)):g}")
