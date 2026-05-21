@@ -203,6 +203,8 @@ def _empty_risk_bin_state() -> list:
             "risk_f_sum": 0.0,
             "risk_a_sum": 0.0,
             "risk_delta_sum": 0.0,
+            "w_support_correction_sum": 0.0,
+            "risk_diff_correction_sum": 0.0,
             "near_miss_steps": 0,
         }
         for _ in RISK_BIN_LABELS
@@ -264,6 +266,8 @@ class EpisodeAccumulator:
     clearance_a_sum: float = 0.0
     risk_f_sum: float = 0.0
     risk_a_sum: float = 0.0
+    w_support_correction_sum: float = 0.0
+    risk_diff_correction_sum: float = 0.0
     row_not_released_sum: float = 0.0
     row_not_released_w_sum: float = 0.0
     row_not_released_steps: int = 0
@@ -409,7 +413,7 @@ class EvalRunner:
 
         if skill == "moe":
             if not self.args.ckpt:
-                raise ValueError("MoE mode requires --ckpt for gate policy")
+                raise ValueError("MoE mode requires --pcr_ckpt for gate policy")
             if not self.args.avoid_ckpt:
                 raise ValueError("MoE mode requires --avoid_ckpt; follow side uses analytic expert")
 
@@ -417,7 +421,7 @@ class EvalRunner:
             self.policy_meta = self._ckpt_meta(gate_ckpt)
             self.gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or state_dim
             gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, self.policy_meta)
-            expected_action_dim = 2 if str(self.args.w_mode).lower() == "learned" else 1
+            expected_action_dim = 2 if th.is_learned_w_mode(self.args.w_mode) else 1
             if gate_action_dim is not None and int(gate_action_dim) != expected_action_dim:
                 raise ValueError(
                     f"gate ckpt actor_output_dim 与当前 eval_w_mode 不一致: "
@@ -473,15 +477,16 @@ class EvalRunner:
             }
         else:
             if not self.args.ckpt:
-                raise ValueError("Follow/Avoid mode requires --ckpt")
+                raise ValueError("Follow/Avoid mode requires --pcr_ckpt")
+            ckpt = torch.load(self.args.ckpt, map_location=self.device)
+            self.policy_meta = self._ckpt_meta(ckpt)
+            self.gate_state_dim = th.infer_checkpoint_state_dim(ckpt) or state_dim
             self.policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
-                state_dim=state_dim,
+                state_dim=self.gate_state_dim,
                 goal_dim=goal_dim,
                 cmd_scale=cmd_scale,
             ).to(self.device)
-            ckpt = torch.load(self.args.ckpt, map_location=self.device)
-            self.policy_meta = self._ckpt_meta(ckpt)
             self._validate_ckpt_meta(self.policy_meta, expected_skill=skill, source_name="policy ckpt")
             th.validate_checkpoint_contract_compatibility(
                 th.build_runtime_contract_meta(self.args, self.env),
@@ -604,7 +609,7 @@ class EvalRunner:
                 if bool(getattr(self.args, "zero_local_map", False)):
                     gate_difficulty = torch.zeros_like(gate_difficulty)
                 gate_policy_goal = goal
-                if str(self.args.w_mode).lower() == "learned":
+                if th.is_learned_w_mode(self.args.w_mode):
                     gate_policy_goal, _ = th.build_learned_w_gate_goal(
                         self.env,
                         self.args,
@@ -626,7 +631,7 @@ class EvalRunner:
                     gate_difficulty,
                     deterministic=not self.args.stochastic,
                 )
-                if str(self.args.w_mode).lower() == "learned":
+                if th.is_learned_w_mode(self.args.w_mode):
                     gate_y_raw = gate_action[:, 0]
                     learned_w = gate_action[:, 1]
                 else:
@@ -644,9 +649,14 @@ class EvalRunner:
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
+            policy_state = th.match_state_dim(
+                state,
+                self.gate_state_dim or int(state.shape[1]),
+                label="eval_policy_state",
+            )
             cmd, _ = self.policy.get_action(
                 policy_aff_stack,
-                state,
+                policy_state,
                 goal,
                 difficulty_input,
                 deterministic=not self.args.stochastic,
@@ -796,6 +806,8 @@ class EvalRunner:
                     post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                     post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                     post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                    post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
+                    post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
                     post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
                     post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
                     post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
@@ -908,6 +920,8 @@ class EvalRunner:
                         clr_a_t = post_info.get("clearance_A", None)
                         risk_f_t = post_info.get("risk_F", None)
                         risk_a_t = post_info.get("risk_A", None)
+                        w_support_corr_t = post_info.get("w_support_correction", None)
+                        risk_diff_corr_t = post_info.get("risk_diff_correction", None)
                         row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
                         cmd_f_t = post_info.get("cmd_F", None)
@@ -922,6 +936,8 @@ class EvalRunner:
                         clr_a_v = _safe_float(clr_a_t[i].item(), default=0.0) if torch.is_tensor(clr_a_t) else 0.0
                         risk_f_v = _safe_float(risk_f_t[i].item(), default=0.0) if torch.is_tensor(risk_f_t) else 0.0
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
+                        w_support_corr_v = _safe_float(w_support_corr_t[i].item(), default=0.0) if torch.is_tensor(w_support_corr_t) else 0.0
+                        risk_diff_corr_v = _safe_float(risk_diff_corr_t[i].item(), default=0.0) if torch.is_tensor(risk_diff_corr_t) else 0.0
                         row_not_released_v = _safe_float(row_not_released_t[i].item(), default=0.0) if torch.is_tensor(row_not_released_t) else 0.0
                         conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
                         clr_pp_v = float("nan")
@@ -943,6 +959,8 @@ class EvalRunner:
                         ai.clearance_a_sum += clr_a_v
                         ai.risk_f_sum += risk_f_v
                         ai.risk_a_sum += risk_a_v
+                        ai.w_support_correction_sum += w_support_corr_v
+                        ai.risk_diff_correction_sum += risk_diff_corr_v
                         ai.row_not_released_sum += row_not_released_v
                         if row_not_released_v > 0.5:
                             ai.row_not_released_w_sum += w_v
@@ -983,6 +1001,8 @@ class EvalRunner:
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
+                            bin_state["w_support_correction_sum"] += w_support_corr_v
+                            bin_state["risk_diff_correction_sum"] += risk_diff_corr_v
                             if near_miss_now:
                                 bin_state["near_miss_steps"] += 1
                         conflict_bin_idx = _risk_bin_index(conflict_v)
@@ -1001,6 +1021,8 @@ class EvalRunner:
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
+                            bin_state["w_support_correction_sum"] += w_support_corr_v
+                            bin_state["risk_diff_correction_sum"] += risk_diff_corr_v
                             if near_miss_now:
                                 bin_state["near_miss_steps"] += 1
 
@@ -1033,6 +1055,8 @@ class EvalRunner:
                                     "risk_f": risk_f_v,
                                     "risk_a": risk_a_v,
                                     "risk_delta": risk_f_v - risk_a_v,
+                                    "w_support_correction": w_support_corr_v,
+                                    "risk_diff_correction": risk_diff_corr_v,
                                     "row_not_released": row_not_released_v,
                                     "conflict_score": conflict_v,
                                     "clearance_pp": clr_pp_v,
@@ -1172,6 +1196,8 @@ class EvalRunner:
                             "risk_f_mean": ai.risk_f_sum / denom_steps,
                             "risk_a_mean": ai.risk_a_sum / denom_steps,
                             "risk_delta_mean": (ai.risk_f_sum - ai.risk_a_sum) / denom_steps,
+                            "w_support_correction_mean": ai.w_support_correction_sum / denom_steps,
+                            "risk_diff_correction_mean": ai.risk_diff_correction_sum / denom_steps,
                             "row_not_released_rate": ai.row_not_released_sum / denom_steps,
                             "row_not_released_w_mean": (
                                 ai.row_not_released_w_sum / float(max(ai.row_not_released_steps, 1))
@@ -1348,6 +1374,8 @@ class EvalRunner:
                         "risk_f_sum",
                         "risk_a_sum",
                         "risk_delta_sum",
+                        "w_support_correction_sum",
+                        "risk_diff_correction_sum",
                         "near_miss_steps",
                     ):
                         bins[idx][key] += float(row_bin.get(key, 0.0) or 0.0)
@@ -1398,8 +1426,15 @@ class EvalRunner:
                     "risk_f_mean": bins[idx]["risk_f_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_a_mean": bins[idx]["risk_a_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_delta_mean": bins[idx]["risk_delta_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "w_support_correction_mean": bins[idx]["w_support_correction_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "risk_diff_correction_mean": bins[idx]["risk_diff_correction_sum"] / float(steps) if steps > 0 else float("nan"),
                     "near_miss_rate": bins[idx]["near_miss_steps"] / float(steps) if steps > 0 else float("nan"),
                     "success_episode_rate": (
+                        episode_sets[idx]["success_score_sum"] / float(episode_count)
+                        if episode_count > 0
+                        else float("nan")
+                    ),
+                    "row_progress_success_mean": (
                         episode_sets[idx]["success_score_sum"] / float(episode_count)
                         if episode_count > 0
                         else float("nan")
@@ -1450,6 +1485,8 @@ class EvalRunner:
         risk_f_vals = _clean([r.get("risk_f_mean", float("nan")) for r in rows])
         risk_a_vals = _clean([r.get("risk_a_mean", float("nan")) for r in rows])
         risk_delta_vals = _clean([r.get("risk_delta_mean", float("nan")) for r in rows])
+        w_support_correction_vals = _clean([r.get("w_support_correction_mean", float("nan")) for r in rows])
+        risk_diff_correction_vals = _clean([r.get("risk_diff_correction_mean", float("nan")) for r in rows])
         row_not_released_vals = _clean([r.get("row_not_released_rate", float("nan")) for r in rows])
         row_not_released_w_vals = _clean([r.get("row_not_released_w_mean", float("nan")) for r in rows])
         row_released_w_vals = _clean([r.get("row_released_w_mean", float("nan")) for r in rows])
@@ -1549,6 +1586,8 @@ class EvalRunner:
             "risk_f_mean": float(np.mean(risk_f_vals)) if risk_f_vals else float("nan"),
             "risk_a_mean": float(np.mean(risk_a_vals)) if risk_a_vals else float("nan"),
             "risk_delta_mean": float(np.mean(risk_delta_vals)) if risk_delta_vals else float("nan"),
+            "w_support_correction_mean": float(np.mean(w_support_correction_vals)) if w_support_correction_vals else float("nan"),
+            "risk_diff_correction_mean": float(np.mean(risk_diff_correction_vals)) if risk_diff_correction_vals else float("nan"),
             "row_not_released_rate_mean": float(np.mean(row_not_released_vals)) if row_not_released_vals else float("nan"),
             "row_not_released_w_mean": float(np.mean(row_not_released_w_vals)) if row_not_released_w_vals else float("nan"),
             "row_released_w_mean": float(np.mean(row_released_w_vals)) if row_released_w_vals else float("nan"),
@@ -1611,6 +1650,8 @@ class EvalRunner:
             risk_f_d = _clean([r.get("risk_f_mean", float("nan")) for r in sub])
             risk_a_d = _clean([r.get("risk_a_mean", float("nan")) for r in sub])
             risk_delta_d = _clean([r.get("risk_delta_mean", float("nan")) for r in sub])
+            w_support_correction_d = _clean([r.get("w_support_correction_mean", float("nan")) for r in sub])
+            risk_diff_correction_d = _clean([r.get("risk_diff_correction_mean", float("nan")) for r in sub])
             switch_d = _clean([r.get("switch_rate", float("nan")) for r in sub])
             near_miss_d = _clean([r.get("near_miss_rate", float("nan")) for r in sub])
             rotate_only_d = _clean([r.get("rotate_only_rate", float("nan")) for r in sub])
@@ -1663,6 +1704,8 @@ class EvalRunner:
                 "risk_f_mean": float(np.mean(risk_f_d)) if risk_f_d else float("nan"),
                 "risk_a_mean": float(np.mean(risk_a_d)) if risk_a_d else float("nan"),
                 "risk_delta_mean": float(np.mean(risk_delta_d)) if risk_delta_d else float("nan"),
+                "w_support_correction_mean": float(np.mean(w_support_correction_d)) if w_support_correction_d else float("nan"),
+                "risk_diff_correction_mean": float(np.mean(risk_diff_correction_d)) if risk_diff_correction_d else float("nan"),
                 "w_clearance_f_corr": _pearson_corr(
                     [float(r.get("w_mean", float("nan"))) for r in sub],
                     [float(r.get("clearance_f_mean", float("nan"))) for r in sub],
@@ -1714,7 +1757,7 @@ class EvalRunner:
                 "gate_safe_max": float(getattr(self.args, "gate_safe_max", 0.3)),
                 "beta": None if self.args.beta is None else float(self.args.beta),
                 "w_mode": str(self.args.w_mode),
-                "policy_variant": {"none": "yonly", "geom": "geomw", "learned": "learnedw"}.get(str(self.args.w_mode), str(self.args.w_mode)),
+                "policy_variant": {"none": "yonly", "geom": "geomw", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode)),
                 "eval_w_mode": str(self.args.w_mode),
                 "trained_w_mode": (
                     self.policy_meta.get("trained_w_mode", self.policy_meta.get("w_mode", None))
@@ -1734,6 +1777,8 @@ class EvalRunner:
                 ),
                 "w_tau": float(self.args.w_tau),
                 "w_blend_mode": str(self.args.w_blend_mode),
+                "w2_lambda": float(getattr(self.args, "w2_lambda", 0.5)),
+                "w2_risk_gamma": float(getattr(self.args, "w2_risk_gamma", 0.5)),
                 "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
                 "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
                 "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
@@ -1826,6 +1871,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "risk_f_mean",
         "risk_a_mean",
         "risk_delta_mean",
+        "w_support_correction_mean",
+        "risk_diff_correction_mean",
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
@@ -1886,6 +1933,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_f",
             "risk_a",
             "risk_delta",
+            "w_support_correction",
+            "risk_diff_correction",
             "row_not_released",
             "conflict_score",
             "clearance_pp",
@@ -1933,7 +1982,7 @@ def _write_mechanism_plots(metrics: Dict, out_dir: str) -> None:
 
     y_eff = vals("y_eff_mean")
     w_vals = vals("w_mean")
-    success = vals("success_episode_rate")
+    success = vals("row_progress_success_mean")
     collision = vals("collision_episode_rate")
     steps = vals("steps")
     episodes = vals("episode_count")
@@ -1983,7 +2032,8 @@ def parse_args():
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--skill", type=str, default="moe", choices=["follow", "avoid", "moe"])
 
-    parser.add_argument("--pcr_ckpt", type=str, required=True, help="PCR gate policy checkpoint")
+    parser.add_argument("--pcr_ckpt", type=str, default=None, help="PCR gate policy checkpoint")
+    parser.add_argument("--ckpt", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
     parser.add_argument("--avoid_ckpt", type=str, default=th.DEFAULT_AVOID_CKPT, help=f"avoid checkpoint for moe (default {th.DEFAULT_AVOID_CKPT})")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="vision checkpoint for student mode")
@@ -2016,13 +2066,16 @@ def parse_args():
     parser.add_argument("--gate_safe_clamp", action="store_true")
     parser.add_argument("--gate_safe_max", type=float, default=0.3)
     parser.add_argument("--beta", type=float, default=None)
-    w_group = parser.add_mutually_exclusive_group(required=True)
+    w_group = parser.add_mutually_exclusive_group()
     w_group.add_argument("--yonly", action="store_true", help="evaluate MoE-y without w")
     w_group.add_argument("--wgeom", action="store_true", help="evaluate MoE-y with geometric w")
     w_group.add_argument("--wlearned", action="store_true", help="evaluate MoE-y with learned w")
-    parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "learned"])
+    w_group.add_argument("--wlearned2", action="store_true", help="evaluate learnedw2 with support+riskdiff w")
+    parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "learned", "learnedw2"])
     parser.add_argument("--w_tau", type=float, default=0.25)
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
+    parser.add_argument("--w2_lambda", type=float, default=0.5)
+    parser.add_argument("--w2_risk_gamma", type=float, default=0.5)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--pcr_w_aux_enable", action="store_true")
     parser.add_argument("--pcr_w_aux_coef", type=float, default=0.05)
@@ -2052,22 +2105,39 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if not getattr(args, "pcr_ckpt", None) and getattr(args, "ckpt", None):
+        args.pcr_ckpt = args.ckpt
+    if not str(getattr(args, "pcr_ckpt", "") or "").strip():
+        parser.error("缺少必须的 checkpoint 路径：--pcr_ckpt")
+
+    selected_w_mode = None
     if args.yonly:
         selected_w_mode = "none"
     elif args.wgeom:
         selected_w_mode = "geom"
     elif args.wlearned:
         selected_w_mode = "learned"
+    elif args.wlearned2:
+        selected_w_mode = "learnedw2"
+    elif args.w_mode is not None:
+        selected_w_mode = args.w_mode
     else:
-        parser.error("必须指定策略模式：--yonly / --wgeom / --wlearned 三选一")
+        selected_w_mode, reason = ph._infer_play_w_mode_from_ckpt(args.pcr_ckpt)
+        if selected_w_mode is None:
+            parser.error(
+                f"无法从 --pcr_ckpt 自动识别策略模式：{reason}；请显式加 --yonly / --wgeom / --wlearned / --wlearned2"
+            )
+        print(f"[Eval] auto w_mode={selected_w_mode} ({reason})")
+        if selected_w_mode == "none" and "actor_output_dim=1 without geom metadata" in reason:
+            print("[Eval] 如果这是 geom-w checkpoint，请显式加 --wgeom；一维 ckpt 不能仅靠网络结构区分 yonly/geom-w。")
     if args.w_mode is not None and args.w_mode != selected_w_mode:
         parser.error(
-            f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned'}[selected_w_mode] } 不一致"
+            f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned', 'learnedw2': 'wlearned2'}[selected_w_mode] } 不一致"
         )
     args.w_mode = selected_w_mode
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
-    for opt_name in ("pcr_ckpt", "avoid_ckpt", "lowlevel_ckpt"):
+    for opt_name in ("avoid_ckpt", "lowlevel_ckpt"):
         if not str(getattr(args, opt_name, "") or "").strip():
             parser.error(f"缺少必须的 checkpoint 路径：--{opt_name}")
     args.ckpt = args.pcr_ckpt

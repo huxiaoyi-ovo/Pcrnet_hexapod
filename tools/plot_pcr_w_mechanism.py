@@ -27,6 +27,11 @@ METHOD_STYLE = {
         "marker": "^",
         "label": "MoE-y + learned-w",
     },
+    "learnedw2": {
+        "color": "#1B9E77",
+        "marker": "D",
+        "label": "MoE-y + learnedw2",
+    },
 }
 
 
@@ -71,8 +76,11 @@ def _finite_float(v, default=float("nan")) -> float:
 
 
 def _bin_labels(metrics: Dict, bin_key: str = "risk_bins") -> List[str]:
+    bins = metrics.get(bin_key, None)
+    if not isinstance(bins, list) or len(bins) == 0:
+        raise ValueError(f"metrics has no {bin_key}; re-run eval with the latest PCR metrics.")
     labels = []
-    for item in metrics[bin_key]:
+    for item in bins:
         label = str(item.get("bin", ""))
         if not label:
             low = _finite_float(item.get("low", float("nan")))
@@ -109,7 +117,7 @@ def _overall_rate(metrics: Dict, key: str) -> float:
 def _write_plot_data(
     out_dir: str,
     labels: List[str],
-    methods: List[Tuple[str, str, Dict]],
+    methods: List[Tuple[str, Dict, str]],
     min_steps: int,
 ) -> None:
     rows = []
@@ -128,7 +136,7 @@ def _write_plot_data(
                 "y_eff_mean": _finite_float(item.get("y_eff_mean", float("nan"))),
                 "suppression_mean": _finite_float(item.get("suppression_mean", float("nan"))),
                 "w_mean": _finite_float(item.get("w_mean", float("nan"))),
-                "row_progress_score": _finite_float(item.get("success_episode_rate", float("nan"))),
+                "row_progress_score": _finite_float(item.get("row_progress_success_mean", float("nan"))),
                 "success_episode_rate": _finite_float(item.get("success_episode_rate", float("nan"))),
                 "success_event_episode_rate": _finite_float(item.get("success_event_episode_rate", float("nan"))),
                 "collision_episode_rate": _finite_float(item.get("collision_episode_rate", float("nan"))),
@@ -171,7 +179,50 @@ def _method_tag(method_key: str, metrics: Dict, label: str) -> str:
         if bool(_protocol_value("pcr_w_aux_enable", False)):
             parts.append(f"rowrel_aux{float(_protocol_value('pcr_w_aux_coef', 0.0)):g}")
         return "_".join(parts)
+    if w_mode == "learnedw2" or method_key == "learnedw2":
+        parts = [
+            "learnedw2",
+            f"lam{float(_protocol_value('w2_lambda', 0.5)):g}",
+            f"gam{float(_protocol_value('w2_risk_gamma', 0.5)):g}",
+        ]
+        if bool(_protocol_value("pcr_w_aux_enable", False)):
+            parts.append(f"rowrel_aux{float(_protocol_value('pcr_w_aux_coef', 0.0)):g}")
+        return "_".join(parts)
     return _safe_tag(label).lower()
+
+
+def _selected_methods(args) -> List[Tuple[str, Dict, str]]:
+    method_args = (
+        ("yonly", "yonly_dir", "yonly_label"),
+        ("geomw", "geomw_dir", "geomw_label"),
+        ("learnedw", "learnedw_dir", "learnedw_label"),
+        ("learnedw2", "learnedw2_dir", "learnedw2_label"),
+    )
+    methods = []
+    for method_key, dir_attr, label_attr in method_args:
+        eval_dir = getattr(args, dir_attr, None)
+        if not eval_dir:
+            continue
+        label = getattr(args, label_attr, "") or METHOD_STYLE[method_key]["label"]
+        methods.append((method_key, _load_metrics(eval_dir), label))
+    if len(methods) < 2:
+        raise ValueError(
+            "PCR w mechanism figure needs at least two eval dirs among "
+            "--yonly_dir / --geomw_dir / --learnedw_dir / --learnedw2_dir."
+        )
+    return methods
+
+
+def _matched_bin_labels(methods: List[Tuple[str, Dict, str]], bin_key: str) -> List[str]:
+    base_key, base_metrics, _ = methods[0]
+    labels = _bin_labels(base_metrics, bin_key)
+    for method_key, metrics, _ in methods[1:]:
+        current_labels = _bin_labels(metrics, bin_key)
+        if labels != current_labels:
+            raise ValueError(
+                f"{bin_key} mismatch: {base_key}={labels}, {method_key}={current_labels}"
+            )
+    return labels
 
 
 def draw_figure(args) -> Tuple[str, str]:
@@ -180,18 +231,10 @@ def draw_figure(args) -> Tuple[str, str]:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    yonly = _load_metrics(args.yonly_dir)
-    geomw = _load_metrics(args.geomw_dir)
-    learnedw = _load_metrics(args.learnedw_dir) if args.learnedw_dir else None
-
-    labels = _bin_labels(yonly)
-    geomw_labels = _bin_labels(geomw)
-    if labels != geomw_labels:
-        raise ValueError(f"risk bin mismatch: y-only={labels}, geom-w={geomw_labels}")
-    if learnedw is not None:
-        learnedw_labels = _bin_labels(learnedw)
-        if labels != learnedw_labels:
-            raise ValueError(f"risk bin mismatch: y-only={labels}, learned-w={learnedw_labels}")
+    methods = _selected_methods(args)
+    labels = _matched_bin_labels(methods, "risk_bins")
+    has_learnedw = any(method_key in ("learnedw", "learnedw2") for method_key, _, _ in methods)
+    has_learnedw2 = any(method_key == "learnedw2" for method_key, _, _ in methods)
 
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
@@ -208,7 +251,7 @@ def draw_figure(args) -> Tuple[str, str]:
     })
 
     x = np.arange(len(labels), dtype=np.float64)
-    if learnedw is None:
+    if not has_learnedw:
         fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.15), constrained_layout=True)
         axes = np.asarray(axes).reshape(1, 3)
         ax_y, ax_supp, ax_outcome = axes[0, 0], axes[0, 1], axes[0, 2]
@@ -216,13 +259,6 @@ def draw_figure(args) -> Tuple[str, str]:
     else:
         fig, axes = plt.subplots(2, 2, figsize=(8.3, 6.2), constrained_layout=True)
         ax_y, ax_supp, ax_conflict, ax_outcome = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
-
-    methods = [
-        ("yonly", yonly, args.yonly_label or METHOD_STYLE["yonly"]["label"]),
-        ("geomw", geomw, args.geomw_label or METHOD_STYLE["geomw"]["label"]),
-    ]
-    if learnedw is not None:
-        methods.append(("learnedw", learnedw, args.learnedw_label or METHOD_STYLE["learnedw"]["label"]))
 
     out_dir = args.out_dir
     if bool(getattr(args, "auto_subdir", True)):
@@ -263,16 +299,18 @@ def draw_figure(args) -> Tuple[str, str]:
     ax_y.set_xlabel(r"Follow-command risk $r_F$")
     ax_y.set_ylim(args.ymin, args.ymax)
 
-    ax_supp.set_title("B. Follow suppression")
+    ax_supp.set_title("B. Follow-weight change")
     ax_supp.set_ylabel(r"$\Delta y = y_{\mathrm{raw}} - y_{\mathrm{eff}}$")
     ax_supp.set_xlabel(r"Follow-command risk $r_F$")
-    ax_supp.set_ylim(args.suppression_ymin, args.suppression_ymax)
+    suppression_ymin = args.suppression_ymin
+    if suppression_ymin is None:
+        suppression_ymin = -0.45 if has_learnedw2 else 0.0
+    ax_supp.set_ylim(suppression_ymin, args.suppression_ymax)
+    if has_learnedw2:
+        ax_supp.axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
 
     if ax_conflict is not None:
-        conflict_labels = _bin_labels(yonly, "conflict_bins")
-        for _, metrics, _ in methods:
-            if _bin_labels(metrics, "conflict_bins") != conflict_labels:
-                raise ValueError("conflict bin mismatch across methods")
+        conflict_labels = _matched_bin_labels(methods, "conflict_bins")
         conflict_x = np.arange(len(conflict_labels), dtype=np.float64)
         for method_key, metrics, label in methods:
             style = METHOD_STYLE[method_key]
@@ -295,12 +333,7 @@ def draw_figure(args) -> Tuple[str, str]:
         ax_conflict.set_xticks(conflict_x)
         ax_conflict.set_xticklabels(conflict_labels, rotation=25, ha="right")
 
-    outcome_methods = [
-        (args.yonly_label or METHOD_STYLE["yonly"]["label"], yonly),
-        (args.geomw_label or METHOD_STYLE["geomw"]["label"], geomw),
-    ]
-    if learnedw is not None:
-        outcome_methods.append((args.learnedw_label or METHOD_STYLE["learnedw"]["label"], learnedw))
+    outcome_methods = [(label, metrics) for _, metrics, label in methods]
     outcome_x = np.arange(len(outcome_methods), dtype=np.float64)
     bar_width = 0.34
     offsets = (
@@ -329,7 +362,7 @@ def draw_figure(args) -> Tuple[str, str]:
                     color="#202020",
                 )
 
-    ax_outcome.set_title("D. Row-progress task score" if learnedw is not None else "C. Row-progress task score")
+    ax_outcome.set_title("D. Row-progress task score" if ax_conflict is not None else "C. Row-progress task score")
     ax_outcome.set_ylabel("Episode-level score / rate")
     ax_outcome.set_xticks(outcome_x)
     ax_outcome.set_xticklabels([name for name, _ in outcome_methods], rotation=18, ha="right")
@@ -364,9 +397,10 @@ def draw_figure(args) -> Tuple[str, str]:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Draw PCR w mechanism figure from eval outputs.")
-    parser.add_argument("--yonly_dir", required=True, help="Eval output dir for MoE-y.")
-    parser.add_argument("--geomw_dir", required=True, help="Eval output dir for MoE-y + geom-w.")
-    parser.add_argument("--learnedw_dir", default=None, help="Optional eval output dir for MoE-y + learned-w.")
+    parser.add_argument("--yonly_dir", default=None, help="Eval output dir for MoE-y.")
+    parser.add_argument("--geomw_dir", default=None, help="Eval output dir for MoE-y + geom-w.")
+    parser.add_argument("--learnedw_dir", default=None, help="Eval output dir for MoE-y + learned-w.")
+    parser.add_argument("--learnedw2_dir", default=None, help="Eval output dir for MoE-y + learnedw2.")
     parser.add_argument("--out_dir", default="figures", help="Output directory for paper figures.")
     parser.add_argument("--no_auto_subdir", dest="auto_subdir", action="store_false", help="Write directly into out_dir instead of creating a tagged timestamp subfolder.")
     parser.set_defaults(auto_subdir=True)
@@ -374,18 +408,23 @@ def parse_args():
     parser.add_argument("--yonly_label", default="MoE-y", help="Legend label for y-only.")
     parser.add_argument("--geomw_label", default="MoE-y + geom-w", help="Legend label for geom-w.")
     parser.add_argument("--learnedw_label", default="MoE-y + learned-w", help="Legend label for learned-w.")
+    parser.add_argument("--learnedw2_label", default="MoE-y + learnedw2", help="Legend label for learnedw2.")
     parser.add_argument("--min_steps", type=int, default=50, help="Hide risk bins with fewer steps.")
     parser.add_argument("--dpi", type=int, default=400, help="PNG resolution.")
     parser.add_argument("--ymin", type=float, default=0.0)
     parser.add_argument("--ymax", type=float, default=1.0)
-    parser.add_argument("--suppression_ymin", type=float, default=0.0)
+    parser.add_argument("--suppression_ymin", type=float, default=None)
     parser.add_argument("--suppression_ymax", type=float, default=0.45)
     parser.add_argument("--w_ymin", type=float, default=0.0)
     parser.add_argument("--w_ymax", type=float, default=1.0)
     parser.add_argument("--rate_ymax", type=float, default=0.5)
     parser.add_argument("--outcome_label_min", type=float, default=0.055, help="Hide tiny stacked-bar labels below this rate.")
     parser.add_argument("--title", default="", help="Optional figure title.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    selected = [args.yonly_dir, args.geomw_dir, args.learnedw_dir, args.learnedw2_dir]
+    if sum(bool(path) for path in selected) < 2:
+        parser.error("至少提供两个 eval 输出目录：--yonly_dir / --geomw_dir / --learnedw_dir / --learnedw2_dir")
+    return args
 
 
 def main():

@@ -528,11 +528,6 @@ def get_follow_target_world_xy(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
 ) -> torch.Tensor:
-    base_env = getattr(env_like, "env", env_like)
-    target_world_xy = getattr(base_env, "target_world", None)
-    if torch.is_tensor(target_world_xy) and target_world_xy.ndim == 2 and target_world_xy.shape[1] >= 2:
-        if target_world_xy.shape[0] == state_tensor.shape[0]:
-            return target_world_xy[:, :2]
     robot_pos_world_xy = state_tensor[:, :2]
     robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
     goal_x = goal_tensor[:, 0]
@@ -555,21 +550,6 @@ def get_follow_expert_world_inputs(
         raise ValueError(f"goal_tensor shape invalid for analytic follow expert: {tuple(goal_tensor.shape)}")
 
     robot_heading = torch.atan2(torch.sin(state_tensor[:, 2]), torch.cos(state_tensor[:, 2]))
-    base_env = getattr(env_like, "env", env_like)
-    root_states = getattr(base_env, "root_states", None)
-    target_world_xy = getattr(base_env, "target_world", None)
-    if (
-        torch.is_tensor(root_states)
-        and root_states.ndim == 2
-        and root_states.shape[1] >= 2
-        and root_states.shape[0] == state_tensor.shape[0]
-        and torch.is_tensor(target_world_xy)
-        and target_world_xy.ndim == 2
-        and target_world_xy.shape[1] >= 2
-        and target_world_xy.shape[0] == state_tensor.shape[0]
-    ):
-        return root_states[:, :2], robot_heading, target_world_xy[:, :2]
-
     robot_pos_world_xy = state_tensor[:, :2]
     target_world_xy = get_follow_target_world_xy(env_like, state_tensor, goal_tensor)
     return robot_pos_world_xy, robot_heading, target_world_xy
@@ -957,13 +937,17 @@ def build_learned_w_gate_goal(
     clearance_scale = max(float(getattr(env, "affordance_map_extent", 3.0)), 1e-6)
     clearance_f = torch.clamp(diag["clearance_F"], 0.0, clearance_scale) / clearance_scale
     clearance_a = torch.clamp(diag["clearance_A"], 0.0, clearance_scale) / clearance_scale
+    # Keep the historical feature slot, but do not expose row-release privileged
+    # information to the actor.  The real row value is reserved for w_aux labels
+    # and diagnostics only.
+    row_actor = torch.zeros_like(diag["row_not_released"])
     features = torch.cat([
         cmd_f[:, :3],
         cmd_a_eff[:, :3],
         cmd_f[:, :3] - cmd_a_eff[:, :3],
         diag["risk_F"].unsqueeze(-1),
         diag["risk_A"].unsqueeze(-1),
-        diag["row_not_released"].unsqueeze(-1),
+        row_actor.unsqueeze(-1),
         diag["cmd_cos"].unsqueeze(-1),
         diag["conflict_score"].unsqueeze(-1),
         clearance_f.unsqueeze(-1),
@@ -1009,9 +993,9 @@ def resolve_moe_gate_pcr(
     if w_mode == "geom":
         w = torch.exp(-torch.clamp(clearance_f, min=0.0) / w_tau)
         w = torch.clamp(w, 0.0, 1.0)
-    elif w_mode == "learned":
+    elif is_learned_w_mode(w_mode):
         if learned_w is None:
-            raise ValueError("w_mode=learned requires learned_w action")
+            raise ValueError(f"w_mode={w_mode} requires learned_w action")
         if learned_w.dim() == 2 and learned_w.shape[-1] == 1:
             learned_w = learned_w.squeeze(-1)
         w = torch.clamp(learned_w.to(device=gate_y_raw.device, dtype=gate_y_raw.dtype), 0.0, 1.0)
@@ -1033,8 +1017,16 @@ def resolve_moe_gate_pcr(
         )
 
     blend_mode = str(getattr(args, "w_blend_mode", "multiply")).lower()
+    w_support_correction = torch.zeros_like(gate_y)
+    risk_diff_correction = torch.zeros_like(gate_y)
     if w_mode == "none":
         y_eff = gate_y
+    elif is_learnedw2_mode(w_mode):
+        w2_lambda = float(getattr(args, "w2_lambda", 0.5))
+        w2_risk_gamma = float(getattr(args, "w2_risk_gamma", 0.5))
+        w_support_correction = w2_lambda * (w - 0.5)
+        risk_diff_correction = w2_risk_gamma * (risk_a - risk_f)
+        y_eff = torch.clamp(gate_y + w_support_correction + risk_diff_correction, 0.0, 1.0)
     elif blend_mode == "mix":
         y_eff = torch.clamp(0.5 * gate_y + 0.5 * (1.0 - w), 0.0, 1.0)
     else:
@@ -1054,6 +1046,9 @@ def resolve_moe_gate_pcr(
         "clearance_A": clearance_a,
         "risk_F": risk_f,
         "risk_A": risk_a,
+        "w_support_correction": w_support_correction,
+        "risk_diff_correction": risk_diff_correction,
+        "fusion_formula_version": get_pcr_fusion_formula_version(w_mode),
         "row_current_valid": diag["row_current_valid"],
         "row_not_released": diag["row_not_released"],
         "cmd_cos": diag["cmd_cos"],
@@ -1068,7 +1063,7 @@ def build_row_aware_w_aux_targets(
     args: argparse.Namespace,
     gate_diag: Dict[str, torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Build high-confidence labels for learned-w suppression."""
+    """Build high-confidence labels for learned-w suppression/support semantics."""
     w_ref = gate_diag["w"]
     row_not_released = gate_diag.get("row_not_released", torch.zeros_like(w_ref))
     risk_f = gate_diag["risk_F"]
@@ -1082,7 +1077,8 @@ def build_row_aware_w_aux_targets(
     avoid_safer = (risk_f - risk_a) > margin
     command_conflict = cmd_cos < cos_thr
     valid = row_active & follow_risky & avoid_safer & command_conflict
-    label = torch.ones_like(w_ref)
+    # Old learned-w: w=1 suppresses follow. learnedw2: w=0 supports avoid.
+    label = torch.zeros_like(w_ref) if is_learnedw2_mode(getattr(args, "w_mode", "none")) else torch.ones_like(w_ref)
     return label.detach(), valid.detach()
 
 
@@ -1155,6 +1151,15 @@ def format_pcr_variant_tag(args: argparse.Namespace) -> str:
         if bool(getattr(args, "pcr_w_aux_enable", False)):
             parts.append(f"rowrel_aux{float(getattr(args, 'pcr_w_aux_coef', 0.0)):g}")
         return "_".join(parts)
+    if w_mode == "learnedw2":
+        parts = [
+            "learnedw2",
+            f"lam{float(getattr(args, 'w2_lambda', 0.5)):g}",
+            f"gam{float(getattr(args, 'w2_risk_gamma', 0.5)):g}",
+        ]
+        if bool(getattr(args, "pcr_w_aux_enable", False)):
+            parts.append(f"rowrel_aux{float(getattr(args, 'pcr_w_aux_coef', 0.0)):g}")
+        return "_".join(parts)
     return w_mode
 
 
@@ -1178,16 +1183,31 @@ def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.Argu
         selected = "geom"
     elif bool(getattr(args, "wlearned", False)):
         selected = "learned"
+    elif bool(getattr(args, "wlearned2", False)):
+        selected = "learnedw2"
 
     explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
     if selected is not None and ("w_mode" in explicit) and str(getattr(args, "w_mode", "")) != selected:
         parser.error(
-            f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned 之一"
+            f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一"
         )
     if selected is not None:
         args.w_mode = selected
-        if selected == "learned" and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
+        if selected in ("learned", "learnedw2") and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
             args.pcr_w_aux_enable = True
+
+
+def apply_train_pcr_ckpt_alias(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
+    pcr_ckpt = getattr(args, "pcr_ckpt", None)
+    if not pcr_ckpt:
+        return
+    teacher_ckpt = getattr(args, "teacher_ckpt", None)
+    if "teacher_ckpt" in explicit and teacher_ckpt and os.path.abspath(str(teacher_ckpt)) != os.path.abspath(str(pcr_ckpt)):
+        parser.error("--pcr_ckpt 与历史参数 --teacher_ckpt 指向不同文件；请只保留 --pcr_ckpt")
+    args.teacher_ckpt = pcr_ckpt
+    explicit["teacher_ckpt"] = pcr_ckpt
+    setattr(args, "_cli_explicit_arg_values", explicit)
 
 
 def apply_common_train_defaults(args: argparse.Namespace) -> None:
@@ -1240,6 +1260,8 @@ EXPERIMENT_META_REPLAY_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
+    "w2_lambda",
+    "w2_risk_gamma",
     "w_disable_gate_safe_clamp",
     "pcr_w_aux_enable",
     "pcr_w_aux_coef",
@@ -1255,11 +1277,28 @@ RUNTIME_ABLATION_ARG_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
+    "w2_lambda",
+    "w2_risk_gamma",
     "w_disable_gate_safe_clamp",
 )
 LEARNED_W_FEATURE_DIM = 16
-LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_row_release_v2"
+LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_no_priv_row_v3"
 FUSION_FORMULA_VERSION = "pcr_shared_w_multiply_v1"
+LEARNED_W2_FUSION_FORMULA_VERSION = "pcr_learnedw2_support_riskdiff_v1"
+
+
+def is_learned_w_mode(w_mode: Any) -> bool:
+    return str(w_mode).strip().lower() in ("learned", "learnedw2")
+
+
+def is_learnedw2_mode(w_mode: Any) -> bool:
+    return str(w_mode).strip().lower() == "learnedw2"
+
+
+def get_pcr_fusion_formula_version(w_mode: Any) -> str:
+    return LEARNED_W2_FUSION_FORMULA_VERSION if is_learnedw2_mode(w_mode) else FUSION_FORMULA_VERSION
+
+
 CHECKPOINT_CONTRACT_KEY_PATHS = (
     "aff_stack",
     "decimation",
@@ -1300,6 +1339,8 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "w_mode",
     "w_tau",
     "w_blend_mode",
+    "w2_lambda",
+    "w2_risk_gamma",
     "w_disable_gate_safe_clamp",
     "pcr_w_aux_enable",
     "pcr_w_aux_coef",
@@ -1497,7 +1538,7 @@ def collect_runtime_observation_contract(
         effective_depth_hz = 1.0 / (low_level_dt * float(capture_interval))
     high_level_dt = float(getattr(env, "high_level_dt", 0.0))
     w_mode = str(getattr(args, "w_mode", "none")).lower()
-    learned_w_enabled = bool(w_mode == "learned" and getattr(args, "skill", "follow") == "moe")
+    learned_w_enabled = bool(is_learned_w_mode(w_mode) and getattr(args, "skill", "follow") == "moe")
     return {
         "use_avoid_local_map": bool(getattr(args, "skill", "follow") in ("avoid", "moe")),
         "gate_learned_w_feature_dim": LEARNED_W_FEATURE_DIM if learned_w_enabled else 0,
@@ -1507,7 +1548,11 @@ def collect_runtime_observation_contract(
         "gate_uses_riskA": learned_w_enabled,
         "gate_uses_cmd_cos": learned_w_enabled,
         "gate_uses_conflict_score": learned_w_enabled,
-        "gate_uses_row_not_released": learned_w_enabled,
+        "gate_uses_row_not_released": False,
+        "gate_row_not_released_actor_value": 0.0 if learned_w_enabled else None,
+        "gate_w_aux_uses_row_not_released": bool(
+            learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
+        ),
         "affordance_map_size": int(getattr(env, "affordance_map_size", get_vision_native_output_size())),
         "affordance_map_extent_m": float(getattr(env, "affordance_map_extent", 0.0)),
         "affordance_origin_mode": str(getattr(env, "affordance_origin_mode", "base_center")),
@@ -3752,12 +3797,6 @@ class HierarchicalHexapodEnv:
         # 1.6 添加上一时刻实际执行命令（解决后处理变化率记忆的非马尔可夫性）
         if hasattr(self, "post_processor") and getattr(self.post_processor, "last_cmd", None) is not None:
             obs_dict['state'] = torch.cat([obs_dict['state'], self.post_processor.last_cmd.detach().clone()], dim=1)
-        if bool(getattr(self.env, "s_avoid_enabled", False)) and hasattr(self, "forced_forward_speed"):
-            obs_dict['state'] = torch.cat(
-                [obs_dict['state'], self.forced_forward_speed.detach().clone().unsqueeze(1)],
-                dim=1,
-            )
-
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
             obs_dict['goal'] = self.env.goal_buf.clone()
@@ -5275,7 +5314,7 @@ def train(args):
     
     skill = getattr(args, "skill", "follow")
     if args.mode == "student" and not getattr(args, "teacher_ckpt", None):
-        raise ValueError("Student 模式必须提供 --teacher_ckpt，避免把纯视觉从头训练误记为蒸馏实验。")
+        raise ValueError("Student 模式必须提供 --pcr_ckpt，避免把纯视觉从头训练误记为蒸馏实验。")
     if args.mode == "student" and skill == "moe":
         raise ValueError("当前未实现 Gate 的 student 蒸馏训练链路，禁止使用 --mode student --skill moe。")
     use_avoid_local_map = skill in ("avoid", "moe")
@@ -5466,7 +5505,7 @@ def train(args):
     # 创建 Policy (V5)
     is_gate = skill == "moe"
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
-    gate_learned_w_enabled = bool(is_gate and str(getattr(args, "w_mode", "none")).lower() == "learned")
+    gate_learned_w_enabled = bool(is_gate and is_learned_w_mode(getattr(args, "w_mode", "none")))
     action_dim = (2 if gate_learned_w_enabled else 1) if is_gate else 3
     policy_goal_dim = goal_dim + (LEARNED_W_FEATURE_DIM if gate_learned_w_enabled else 0)
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
@@ -5553,6 +5592,7 @@ def train(args):
             "use_follow_expert",
             "moe_use_student_aff",
             "gate_use_difficulty",
+            "pcr_ckpt",
             "aff_stack",
             "beta",
             "t1_goal_occlusion",
@@ -5580,6 +5620,8 @@ def train(args):
             "w_mode",
             "w_tau",
             "w_blend_mode",
+            "w2_lambda",
+            "w2_risk_gamma",
             "w_disable_gate_safe_clamp",
             "moe_expert_deterministic",
             "disable_risk_scale",
@@ -5588,7 +5630,7 @@ def train(args):
             "decimation",
         ]
         meta = {key: _normalize_meta_value(getattr(args, key, None)) for key in tracked_keys}
-        for key in ("teacher_ckpt", "vision_ckpt", "follow_ckpt", "avoid_ckpt", "low_level_ckpt"):
+        for key in ("pcr_ckpt", "teacher_ckpt", "vision_ckpt", "follow_ckpt", "avoid_ckpt", "low_level_ckpt"):
             if meta.get(key):
                 meta[key] = os.path.abspath(str(meta[key]))
         meta["sim2real_sensor_target"] = "Intel RealSense D435i"
@@ -5599,13 +5641,17 @@ def train(args):
         meta["obs_contract_version"] = (
             LEARNED_W_OBS_CONTRACT_VERSION if gate_learned_w_enabled else "base_gate_v1"
         )
-        meta["fusion_formula_version"] = FUSION_FORMULA_VERSION
+        meta["fusion_formula_version"] = get_pcr_fusion_formula_version(getattr(args, "w_mode", "none"))
         meta["uses_cmd_features"] = bool(gate_learned_w_enabled)
         meta["uses_riskF"] = bool(gate_learned_w_enabled)
         meta["uses_riskA"] = bool(gate_learned_w_enabled)
         meta["uses_cmd_cos"] = bool(gate_learned_w_enabled)
         meta["uses_conflict_score"] = bool(gate_learned_w_enabled)
-        meta["uses_row_not_released"] = bool(gate_learned_w_enabled)
+        meta["uses_row_not_released"] = False
+        meta["gate_row_not_released_actor_value"] = 0.0 if gate_learned_w_enabled else None
+        meta["w_aux_uses_row_not_released"] = bool(
+            gate_learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
+        )
         meta["pcr_w_aux_enable"] = bool(getattr(args, "pcr_w_aux_enable", False))
         meta["pcr_w_aux_coef"] = float(getattr(args, "pcr_w_aux_coef", 0.0))
         meta["pcr_w_aux_risk_f_threshold"] = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
@@ -5828,14 +5874,15 @@ def train(args):
         if compute_s0_follow_expert_cmd is None:
             raise RuntimeError("Gate 模式下解析式 follow expert 不可用。")
         follow_model = None
+        ckpt = torch.load(args.avoid_ckpt, map_location=device)
         avoid_aff_channels = AVOID_LOCAL_MAP_CHANNELS * aff_stack
+        avoid_expert_state_dim = infer_checkpoint_state_dim(ckpt) or state_dim
         avoid_model = CmdVelExpert(
             affordance_channels=avoid_aff_channels,
-            state_dim=state_dim,
+            state_dim=avoid_expert_state_dim,
             goal_dim=goal_dim,
             cmd_scale=cmd_scale,
         ).to(device)
-        ckpt = torch.load(args.avoid_ckpt, map_location=device)
         ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
         _check_aux_model_meta(
             ckpt_meta,
@@ -6022,6 +6069,11 @@ def train(args):
                 bootstrap_policy_goal = bootstrap_goal
                 if gate_learned_w_enabled:
                     bootstrap_expert_state = _get_moe_expert_state_inputs(bootstrap_state)
+                    bootstrap_avoid_state = match_state_dim(
+                        bootstrap_expert_state,
+                        avoid_expert_state_dim,
+                        label="gate_bootstrap_avoid_state",
+                    )
                     bootstrap_cmd_f = _compute_moe_follow_cmd_from_goal(
                         bootstrap_expert_state,
                         bootstrap_goal,
@@ -6029,7 +6081,7 @@ def train(args):
                     )
                     bootstrap_cmd_a, _ = avoid_model.get_action(
                         bootstrap_aff_stack,
-                        bootstrap_expert_state,
+                        bootstrap_avoid_state,
                         bootstrap_obs['goal'],
                         bootstrap_difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
@@ -6230,6 +6282,8 @@ def train(args):
         gate_y_gap_sum = torch.zeros((), device=device)
         gate_clearance_f_sum = torch.zeros((), device=device)
         gate_risk_f_sum = torch.zeros((), device=device)
+        gate_w_support_correction_sum = torch.zeros((), device=device)
+        gate_risk_diff_correction_sum = torch.zeros((), device=device)
         gate_conflict_score_sum = torch.zeros((), device=device)
         gate_w_conflict_cross_sum = torch.zeros((), device=device)
         gate_w_sq_sum = torch.zeros((), device=device)
@@ -6595,6 +6649,11 @@ def train(args):
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
                 moe_expert_state = _get_moe_expert_state_inputs(state)
+                moe_avoid_state = match_state_dim(
+                    moe_expert_state,
+                    avoid_expert_state_dim,
+                    label="gate_rollout_avoid_state",
+                )
                 with torch.no_grad():
                     cmd_f = _compute_moe_follow_cmd_from_goal(
                         moe_expert_state,
@@ -6602,7 +6661,7 @@ def train(args):
                         reset_mask_prev,
                     )
                     cmd_a, _ = avoid_model.get_action(
-                        moe_avoid_aff_stack_buf, moe_expert_state, goal_raw, avoid_difficulty,
+                        moe_avoid_aff_stack_buf, moe_avoid_state, goal_raw, avoid_difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True))
                     )
                     cmd_f, cmd_f_bad = _sanitize_or_fail_action_tensor(
@@ -6755,6 +6814,8 @@ def train(args):
                             post_info["clearance_A"] = gate_diag["clearance_A"].detach().clone()
                             post_info["risk_F"] = gate_diag["risk_F"].detach().clone()
                             post_info["risk_A"] = gate_diag["risk_A"].detach().clone()
+                            post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
+                            post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
                             post_info["row_not_released"] = row_not_released_step.detach().clone()
                             post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                             post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
@@ -7041,6 +7102,8 @@ def train(args):
                     gate_y_gap_sum += torch.abs(gate_diag["y_eff"] - gate_diag["gate_y_raw"]).sum()
                     gate_clearance_f_sum += gate_diag["clearance_F"].sum()
                     gate_risk_f_sum += gate_diag["risk_F"].sum()
+                    gate_w_support_correction_sum += gate_diag["w_support_correction"].sum()
+                    gate_risk_diff_correction_sum += gate_diag["risk_diff_correction"].sum()
                     conflict_score = gate_diag.get("conflict_score", torch.zeros_like(gate_diag["w"]))
                     gate_conflict_score_sum += conflict_score.sum()
                     gate_w_conflict_cross_sum += (gate_diag["w"] * conflict_score).sum()
@@ -7618,6 +7681,11 @@ def train(args):
                 policy_goal_next = goal
                 if gate_learned_w_enabled:
                     moe_expert_state_next = _get_moe_expert_state_inputs(state)
+                    moe_avoid_state_next = match_state_dim(
+                        moe_expert_state_next,
+                        avoid_expert_state_dim,
+                        label="gate_bootstrap_next_avoid_state",
+                    )
                     cmd_f_next = _compute_moe_follow_cmd_from_goal(
                         moe_expert_state_next,
                         goal,
@@ -7625,7 +7693,7 @@ def train(args):
                     )
                     cmd_a_next, _ = avoid_model.get_action(
                         aff_stack_bootstrap,
-                        moe_expert_state_next,
+                        moe_avoid_state_next,
                         obs_dict['goal'],
                         difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
@@ -8141,6 +8209,8 @@ def train(args):
         gate_y_gap_mean = (gate_y_gap_sum / total_samples).item() if is_gate else 0.0
         gate_clearance_f_mean = (gate_clearance_f_sum / total_samples).item() if is_gate else 0.0
         gate_risk_f_mean = (gate_risk_f_sum / total_samples).item() if is_gate else 0.0
+        gate_w_support_correction_mean = (gate_w_support_correction_sum / total_samples).item() if is_gate else 0.0
+        gate_risk_diff_correction_mean = (gate_risk_diff_correction_sum / total_samples).item() if is_gate else 0.0
         gate_conflict_score_mean = (gate_conflict_score_sum / total_samples).item() if is_gate else 0.0
         gate_w_std = 0.0
         gate_conflict_w_corr = 0.0
@@ -8483,6 +8553,8 @@ def train(args):
                 writer.add_scalar('PCR/Gate/WLowConflictMean', gate_low_conflict_w_mean, iteration)
                 writer.add_scalar('PCR/Gate/SuppHighConflictMean', gate_high_conflict_supp_mean, iteration)
                 writer.add_scalar('PCR/Gate/SuppLowConflictMean', gate_low_conflict_supp_mean, iteration)
+                writer.add_scalar('PCR/Gate/WSupportCorrectionMean', gate_w_support_correction_mean, iteration)
+                writer.add_scalar('PCR/Gate/RiskDiffCorrectionMean', gate_risk_diff_correction_mean, iteration)
             writer.add_scalar('PCR/Gate/ConflictMean', pcr_conflict_mean, iteration)
             writer.add_scalar('PCR/Gate/ConflictYCorr', pcr_conflict_y_corr, iteration)
             writer.add_scalar('PCR/Reward/Core', reward_term_means.get('pcr_core', 0.0), iteration)
@@ -8519,6 +8591,8 @@ def train(args):
             writer.add_scalar('Stats/GateWAuxValidRolloutRate', w_aux_valid_rollout_rate, iteration)
             writer.add_scalar('Stats/GateFollowClearance', gate_clearance_f_mean, iteration)
             writer.add_scalar('Stats/GateFollowRisk', gate_risk_f_mean, iteration)
+            writer.add_scalar('Stats/GateWSupportCorrection', gate_w_support_correction_mean, iteration)
+            writer.add_scalar('Stats/GateRiskDiffCorrection', gate_risk_diff_correction_mean, iteration)
             writer.add_scalar('Stats/GateYEffChange', gate_y_change_mean, iteration)
         if gate_learned_w_enabled:
             writer.add_scalar('Loss/WAux', w_aux_loss_sum / max(num_updates, 1), iteration)
@@ -8641,6 +8715,7 @@ def train(args):
                 gate_line = f"""{'Gate raw/eff/w/Δeff:':>{pad}} {gate_y_raw_mean:.3f} / {gate_y_mean:.3f} / {gate_w_mean:.3f} / {gate_y_change_mean:.3f}\n"""
                 gate_line += f"""{'Gate gap(clamp/w/total):':>{pad}} {gate_y_clamp_gap_mean:.3f} / {gate_y_w_gap_mean:.3f} / {gate_y_gap_mean:.3f}\n"""
                 gate_line += f"""{'Gate clrF/riskF:':>{pad}} {gate_clearance_f_mean:.3f} / {gate_risk_f_mean:.3f}\n"""
+                gate_line += f"""{'Gate corr(w/risk):':>{pad}} {gate_w_support_correction_mean:.3f} / {gate_risk_diff_correction_mean:.3f}\n"""
                 gate_line += f"""{'Gate rowNR w(on/off):':>{pad}} {gate_row_not_released_rate:.3f} / {gate_row_not_released_w_mean:.3f} / {gate_row_released_w_mean:.3f}\n"""
                 if gate_learned_w_enabled:
                     gate_line += f"""{'Gate wAux loss/valid:':>{pad}} {w_aux_loss_sum / max(num_updates, 1):.4f} / {w_aux_valid_rollout_rate:.3f}\n"""
@@ -8899,8 +8974,10 @@ if __name__ == "__main__":
     # Checkpoints
     parser.add_argument('--low_level_ckpt', type=str, default=DEFAULT_LOWLEVEL_CKPT,
                         help=f'底层控制器路径（默认 {DEFAULT_LOWLEVEL_CKPT}）')
+    parser.add_argument('--pcr_ckpt', type=str, default=None,
+                        help='PCR 主策略 checkpoint 路径；训练侧用于 student/加载 teacher 时，等价于历史 --teacher_ckpt')
     parser.add_argument('--teacher_ckpt', type=str, default=None,
-                        help='(Student) Teacher 模型路径')
+                        help='历史兼容参数；PCR 主策略请优先使用 --pcr_ckpt')
     parser.add_argument('--follow_ckpt', type=str, default=None,
                         help='旧参数保留；当前 moe 默认使用解析式 follow expert，不再需要该项')
     parser.add_argument('--avoid_ckpt', type=str, default=None,
@@ -8957,8 +9034,8 @@ if __name__ == "__main__":
                         help='Gate 训练早期启用安全 clamp')
     parser.add_argument('--gate_safe_max', type=float, default=0.3,
                         help='安全 clamp 的最大 y 值')
-    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned'],
-                        help='PCR 冲突先验模式：none=y-only，geom=解析 w，learned=策略输出 w')
+    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned', 'learnedw2'],
+                        help='PCR w 模式：learned 保留旧 suppression 公式；learnedw2 使用终版 support+riskdiff 公式')
     w_alias_group = parser.add_mutually_exclusive_group()
     w_alias_group.add_argument('--yonly', action='store_true',
                                help='PCR MoE-y 训练别名，等价于 --w_mode none')
@@ -8966,10 +9043,16 @@ if __name__ == "__main__":
                                help='PCR geom-w 训练别名，等价于 --w_mode geom')
     w_alias_group.add_argument('--wlearned', action='store_true',
                                help='PCR learned-w 训练别名，默认同时启用 row-aware w_aux')
+    w_alias_group.add_argument('--wlearned2', action='store_true',
+                               help='PCR learnedw2 训练别名，自动使用终版 w 公式并默认启用匹配的 row-aware w_aux')
     parser.add_argument('--w_tau', type=float, default=0.25,
                         help='w_geom 衰减尺度（米）；越小表示更早把近障碍判为高冲突')
     parser.add_argument('--w_blend_mode', type=str, default='multiply', choices=['multiply', 'mix'],
                         help='w 与 gate_y 的融合方式：multiply=y*(1-w)，mix=0.5*y+0.5*(1-w)')
+    parser.add_argument('--w2_lambda', type=float, default=0.5,
+                        help='learnedw2 的 follow-support w 修正系数')
+    parser.add_argument('--w2_risk_gamma', type=float, default=0.5,
+                        help='learnedw2 的 risk_A-risk_F 修正系数')
     parser.add_argument('--w_disable_gate_safe_clamp', action='store_true',
                         help='当 w_mode!=none 时关闭旧 gate_safe_clamp，避免双重安全干预')
     parser.add_argument('--pcr_w_aux_enable', action='store_true',
@@ -8987,7 +9070,7 @@ if __name__ == "__main__":
     parser.add_argument('--moe_expert_deterministic', action='store_true',
                         help='Gate 训练时专家使用确定性输出')
     parser.add_argument('--gate_use_difficulty', action='store_true',
-                        help='Gate 使用 difficulty 作为输入（特权信息）')
+                        help='Gate 使用 actor 局部图计算出的 difficulty 作为输入')
     parser.add_argument('--moe_use_student_aff', action='store_true',
                         help='moe 模式强制使用 student affordance（与部署一致）')
     parser.add_argument('--disable_risk_scale', action='store_true',
@@ -9005,7 +9088,7 @@ if __name__ == "__main__":
     parser.add_argument('--egpo_lr_post', type=float, default=1.5e-4,
                         help='EGPO 接口结束后学习率（alpha<=0 时生效）')
     parser.add_argument('--use_follow_expert', action='store_true',
-                        help='follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --teacher_ckpt）')
+                        help='follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --pcr_ckpt）')
     parser.add_argument(
         '--allow_nonfinite_recovery',
         action='store_true',
@@ -9038,6 +9121,7 @@ if __name__ == "__main__":
     args.task = normalize_task_name(getattr(args, "task", ""))
     args._unknown_cli = list(unknown)
     capture_cli_explicit_arg_values(args, parser)
+    apply_train_pcr_ckpt_alias(args, parser)
     apply_train_w_alias_defaults(args, parser)
     apply_common_train_defaults(args)
     

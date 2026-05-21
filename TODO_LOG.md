@@ -60,6 +60,24 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-21 PCR learnedw2 终版 w 公式验证
+
+- [ ] [P0] 新增 `learnedw2` 作为独立终版 w 公式实验线：保留旧 `learnedw` 单向 suppression 语义，`learnedw2` 自动使用 follow-support + risk-difference 公式、匹配监督语义、checkpoint 公式版本与 train/play/eval 识别，先做短训一致性验收再决定是否开长训。
+
+## 2026-05-20 PCR realplay 实机部署入口
+
+- [x] ~~[P0] 新增 `pcr_realplay.py` 作为 learned-w 策略实机部署主入口：支持 fake 输入、ROS1 dry-run、策略加载、输入口径检查、命令限幅与 ROS cmd 输出，默认不发运动命令。~~
+
+## 2026-05-20 PCR sim2real 输入对齐
+
+- [x] ~~[P0] 新增 RealSense/YOLO 到 PCR 策略输入的检查脚本：固定相机正前方对应机器人 `+Y`，按 D435i 下俯角生成 `goal/follow_goal=(x_right,y_forward)`、`local_map_2ch` 与 `actor_difficulty`，为后续 ROS1 数据传递接入做口径验收。~~
+
+## 2026-05-20 PCR learned-w 实机可得输入收口
+
+- [x] ~~[P0] 从 learned-w actor 输入中移除真实 `row_not_released`，保留固定 0 占位维度；真实 `row_not_released` 只允许用于 w_aux 监督、日志与诊断，避免仿真特权信息污染实机策略。~~
+- [x] ~~[P0] 将 MoE 解析 follow expert 收口到 `state + goal_buf` 计算，不再优先读取仿真 `target_world`，避免 `cmd_F` 特征携带实机不可得的目标真值。~~
+- [x] ~~[P0] 审清 follow / avoid / PCR 各 actor 输入边界：部署可得量才能进 actor，训练阶段专用量只允许留在 critic、监督标签或日志。~~
+
 ## 2026-05-19 PCR learned-w 行内释放安全收口
 
 - [x] ~~[P0] 将近期 PCR w 主线切到 `learned-w + row_not_released + row-aware w_aux`：保持当前 `w` 单向压 follow 语义和 `y_eff = y_raw * (1 - w)` 不变，先解决当前障碍行未释放前过早追目标导致的侧向碰撞；暂缓双向 follow-support 公式、learned beta 与大范围奖励改动。~~
@@ -120,6 +138,7 @@
 
 - [x] ~~[P0] 新增 `w_mode=learned` 作为第三个 PCR 对照：GatePolicy 输出 `y` 与 `w` 两维，`w` 的输入显式包含 follow/avoid 命令、`risk_F/risk_A`、命令夹角与 `conflict_score`，并与 `yonly / geom-w` 共用同一套 PCR 融合公式和 eval/play 口径~~
 - [x] ~~[P0] 将 PCR 训练、eval 与机制图输出命名收口到策略特征标签：训练目录、eval 目录和 figures 子目录必须包含 `yonly / geomw_w* / learnedw_rowrel_aux*` 等关键信息，并为 PCR 常用训练参数提供默认值，减少命令行重复项和误填风险~~
+- [x] ~~[P0] 将 PCR w 机制图脚本收口为 `yonly / geom-w / learned-w` 任意两组或三组同图对照，避免新增 learned-w 后只能固定画单一组合。~~
 
 ## 2026-03-30 avoid 连续避障收口阶段
 
@@ -2003,3 +2022,13 @@
 
 - [x] Must: 将 `eval_highlevel.py` 的论文主成功指标改为“无碰撞逐行通过进度得分”：通过 1 行记 `1/总行数`，通过多行累加；严格整回合成功仅保留为诊断字段
 - [x] Must: 同步修改 PCR w 机制图脚本，图 C 不再画互斥 success/collision 堆叠，而是画逐行进度得分与碰撞率，避免误导论文结论
+
+## 2026-05-21 PCR ckpt 参数统一
+
+- [x] Must: 将 train/play/eval 的 PCR 主策略 checkpoint 入口统一收口为 `--pcr_ckpt`，`teacher_ckpt/ckpt` 仅保留为历史兼容入口
+- [x] Must: play/eval 默认复用训练侧 `agents/low_level_best.pt` 与 `agents/avoid_best.pt`，并根据 `pcr_ckpt` 的 metadata / actor 输出维度自动识别 `w_mode`
+
+## 2026-05-21 PCR 实机输入体检
+
+- [x] Must: 将 `real_pcr_input_check.py` 从整框删除目标人改为 bbox 内按目标深度薄层 mask，避免把被跟随目标当作普通障碍，同时保留目标后方真实障碍
+- [x] Must: 输出 `target_lost / target_too_close / depth_invalid_ratio` 等安全状态，作为 ROS1 接入前的实机输入验收字段

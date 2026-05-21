@@ -45,6 +45,123 @@ def _ckpt_meta_from_obj(ckpt_obj) -> Optional[dict]:
     return None
 
 
+def _argv_has_option(raw_argv, *option_names: str) -> bool:
+    options = set(option_names)
+    for token in raw_argv:
+        if not isinstance(token, str) or not token.startswith("--"):
+            continue
+        if token.split("=", 1)[0] in options:
+            return True
+    return False
+
+
+def _record_play_runtime_override(args, key: str, value) -> None:
+    explicit_values = dict(getattr(args, "_cli_explicit_arg_values", {}) or {})
+    explicit_values[key] = value
+    setattr(args, "_cli_explicit_arg_values", explicit_values)
+    runtime_overrides = dict(getattr(args, "_runtime_ablation_cli_overrides", {}) or {})
+    if key in th.RUNTIME_ABLATION_ARG_KEYS:
+        runtime_overrides[key] = value
+    setattr(args, "_runtime_ablation_cli_overrides", runtime_overrides)
+
+
+def _selected_play_w_alias(args) -> Optional[str]:
+    selected = []
+    if bool(getattr(args, "yonly", False)):
+        selected.append("none")
+    if bool(getattr(args, "wgeom", False)):
+        selected.append("geom")
+    if bool(getattr(args, "wlearned", False)):
+        selected.append("learned")
+    if bool(getattr(args, "wlearned2", False)):
+        selected.append("learnedw2")
+    if len(selected) > 1:
+        raise ValueError("请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一")
+    return selected[0] if selected else None
+
+
+def _infer_play_w_mode_from_ckpt(path: Optional[str]) -> Tuple[Optional[str], str]:
+    if path is None or str(path).strip() == "":
+        return None, "no teacher ckpt"
+    if not os.path.exists(path):
+        return None, f"ckpt not found: {path}"
+    ckpt_obj = torch.load(path, map_location="cpu")
+    meta = _ckpt_meta_from_obj(ckpt_obj)
+    actor_dim = th.infer_checkpoint_gate_action_dim(ckpt_obj, meta)
+    meta_mode = None
+    if isinstance(meta, dict):
+        for key in ("trained_w_mode", "w_mode", "pcr_w_mode"):
+            value = meta.get(key, None)
+            if value is None:
+                continue
+            value = str(value).strip().lower()
+            if value in ("none", "geom", "learned", "learnedw2"):
+                meta_mode = value
+                break
+            if value in ("yonly", "moe-y"):
+                meta_mode = "none"
+                break
+    if actor_dim == 2:
+        if meta_mode in ("learned", "learnedw2"):
+            return meta_mode, f"metadata trained_w_mode={meta_mode}, actor_output_dim=2"
+        if meta_mode is not None:
+            return "learned", f"actor_output_dim=2 overrides metadata {meta_mode}"
+        return "learned", "actor_output_dim=2"
+    if actor_dim == 1:
+        if meta_mode == "geom":
+            return "geom", "metadata trained_w_mode=geom"
+        if meta_mode in ("none", "learned", "learnedw2"):
+            return meta_mode, f"metadata trained_w_mode={meta_mode}"
+        return "none", "actor_output_dim=1 without geom metadata; default yonly"
+    if meta_mode is not None:
+        return meta_mode, f"metadata trained_w_mode={meta_mode}"
+    return None, "no usable actor_output_dim or w metadata"
+
+
+def _apply_play_common_defaults(args, raw_argv) -> None:
+    pcr_ckpt = getattr(args, "pcr_ckpt", None)
+    teacher_ckpt_explicit = _argv_has_option(raw_argv, "--teacher_ckpt")
+    if pcr_ckpt:
+        if teacher_ckpt_explicit and getattr(args, "teacher_ckpt", None) and os.path.abspath(str(args.teacher_ckpt)) != os.path.abspath(str(pcr_ckpt)):
+            raise ValueError("--pcr_ckpt 与历史参数 --teacher_ckpt 指向不同文件；请只保留 --pcr_ckpt")
+        args.teacher_ckpt = pcr_ckpt
+    elif getattr(args, "teacher_ckpt", None):
+        args.pcr_ckpt = args.teacher_ckpt
+
+    if getattr(args, "task", None) == "s_pcr_line_avoid_basic":
+        if not _argv_has_option(raw_argv, "--skill"):
+            args.skill = "moe"
+        if not _argv_has_option(raw_argv, "--low_level_ckpt"):
+            args.low_level_ckpt = th.DEFAULT_LOWLEVEL_CKPT
+        if getattr(args, "skill", None) == "moe" and (not _argv_has_option(raw_argv, "--avoid_ckpt")):
+            args.avoid_ckpt = th.DEFAULT_AVOID_CKPT
+
+    selected = _selected_play_w_alias(args)
+    w_mode_explicit = _argv_has_option(raw_argv, "--w_mode")
+    if selected is not None:
+        if w_mode_explicit and str(getattr(args, "w_mode", "none")).lower() != selected:
+            raise ValueError(
+                f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一"
+            )
+        args.w_mode = selected
+        _record_play_runtime_override(args, "w_mode", selected)
+        print(f"[PlayHigh] w_mode={selected} from CLI alias")
+        return
+
+    if w_mode_explicit:
+        return
+
+    inferred, reason = _infer_play_w_mode_from_ckpt(getattr(args, "pcr_ckpt", None) or getattr(args, "teacher_ckpt", None))
+    if inferred is None:
+        print(f"[PlayHigh] w_mode auto infer skipped: {reason}; using w_mode={args.w_mode}")
+        return
+    args.w_mode = inferred
+    _record_play_runtime_override(args, "w_mode", inferred)
+    print(f"[PlayHigh] auto w_mode={inferred} ({reason})")
+    if inferred == "none" and "actor_output_dim=1 without geom metadata" in reason:
+        print("[PlayHigh] 如果这是 geom-w checkpoint，请显式加 --wgeom；一维 ckpt 不能仅靠网络结构区分 yonly/geom-w。")
+
+
 def _validate_expected_ckpt_meta(
     ckpt_meta: Optional[dict],
     *,
@@ -149,7 +266,8 @@ def compute_play_affordance_bundle(args, env, obs, vision_model=None):
 
 def _ensure_play_runtime_arg_defaults(args) -> None:
     defaults = {
-        "teacher_ckpt": getattr(args, "ckpt", None),
+        "pcr_ckpt": getattr(args, "ckpt", None),
+        "teacher_ckpt": getattr(args, "pcr_ckpt", getattr(args, "ckpt", None)),
         "camera_show": False,
         "camera_save": False,
         "camera_dir": "outputs/play_highlevel_camera",
@@ -179,8 +297,10 @@ def _ensure_play_runtime_arg_defaults(args) -> None:
     for key, value in defaults.items():
         if not hasattr(args, key):
             setattr(args, key, value)
-    if getattr(args, "teacher_ckpt", None) is None and hasattr(args, "ckpt"):
-        args.teacher_ckpt = args.ckpt
+    if getattr(args, "pcr_ckpt", None) is None and hasattr(args, "ckpt"):
+        args.pcr_ckpt = args.ckpt
+    if getattr(args, "teacher_ckpt", None) is None and getattr(args, "pcr_ckpt", None) is not None:
+        args.teacher_ckpt = args.pcr_ckpt
 
 
 def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
@@ -302,7 +422,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     avoid_state_dim = int(obs["state"].shape[1])
     if not expert_only_mode:
         if not args.teacher_ckpt:
-            raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
+            raise ValueError("非 expert-only 模式必须提供 --pcr_ckpt")
         if is_gate:
             if not args.avoid_ckpt:
                 raise ValueError("moe 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
@@ -310,7 +430,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
             gate_meta = _ckpt_meta_from_obj(gate_ckpt)
             gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
             gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, gate_meta)
-            expected_gate_action_dim = 2 if str(getattr(args, "w_mode", "none")).lower() == "learned" else 1
+            expected_gate_action_dim = 2 if th.is_learned_w_mode(getattr(args, "w_mode", "none")) else 1
             if gate_action_dim is not None and int(gate_action_dim) != expected_gate_action_dim:
                 raise ValueError(
                     f"gate ckpt actor_output_dim 与当前 play_w_mode 不一致: "
@@ -367,14 +487,15 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
                 "experiment_meta": avoid_meta,
             }
         else:
+            ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            policy_meta = _ckpt_meta_from_obj(ckpt)
+            gate_state_dim = th.infer_checkpoint_state_dim(ckpt) or gate_state_dim
             policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
-                state_dim=obs["state"].shape[1],
+                state_dim=gate_state_dim,
                 goal_dim=obs["goal"].shape[1],
                 cmd_scale=cmd_scale,
             ).to(device)
-            ckpt = torch.load(args.teacher_ckpt, map_location=device)
-            policy_meta = _ckpt_meta_from_obj(ckpt)
             _validate_expected_ckpt_meta(policy_meta, source_name="policy ckpt", expected_skill=skill, expected_mode=args.mode)
             th.validate_checkpoint_contract_compatibility(
                 th.build_runtime_contract_meta(args, env),
@@ -1828,20 +1949,21 @@ def parse_args():
     parser.add_argument(
         "--low_level_ckpt",
         type=str,
-        required=True,
+        default=th.DEFAULT_LOWLEVEL_CKPT,
         help="Low-level policy checkpoint path",
     )
-    parser.add_argument("--teacher_ckpt", type=str, default=None, help="Expert checkpoint path")
+    parser.add_argument("--pcr_ckpt", type=str, default=None, help="PCR main policy checkpoint path")
+    parser.add_argument("--teacher_ckpt", type=str, default=None, help="历史兼容参数；PCR 主策略请优先使用 --pcr_ckpt")
     parser.add_argument(
         "--skill",
         type=str,
-        default="follow",
+        default=None,
         choices=["follow", "avoid", "moe"],
-        help="Expert skill: follow / avoid / moe (gate)",
+        help="Expert skill: follow / avoid / moe (gate); PCR 默认自动使用 moe",
     )
     parser.add_argument("--follow_ckpt", type=str, default=None, help="旧参数保留；当前 moe 不再需要，因为 follow 使用解析式 expert")
     parser.add_argument("--avoid_ckpt", type=str, default=None, help="(moe) Avoid expert checkpoint")
-    parser.add_argument("--gate_use_difficulty", action="store_true", help="Gate 使用 difficulty 作为输入（特权信息）")
+    parser.add_argument("--gate_use_difficulty", action="store_true", help="Gate 使用 actor 局部图计算出的 difficulty 作为输入")
     parser.add_argument("--vision_ckpt", type=str, default=None, help="Student vision checkpoint path")
     parser.add_argument("--aff_stack", type=int, default=1, help="affordance 堆叠帧数 (短时记忆)")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
@@ -1865,9 +1987,16 @@ def parse_args():
         default=None,
         help="(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）",
     )
-    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom", "learned"], help="PCR 冲突先验模式")
+    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom", "learned", "learnedw2"], help="PCR w 模式")
+    w_alias_group = parser.add_mutually_exclusive_group()
+    w_alias_group.add_argument("--yonly", action="store_true", help="PCR MoE-y 回放别名，等价于 --w_mode none")
+    w_alias_group.add_argument("--wgeom", action="store_true", help="PCR geom-w 回放别名，等价于 --w_mode geom")
+    w_alias_group.add_argument("--wlearned", action="store_true", help="PCR learned-w 回放别名，等价于 --w_mode learned")
+    w_alias_group.add_argument("--wlearned2", action="store_true", help="PCR learnedw2 回放别名，等价于 --w_mode learnedw2")
     parser.add_argument("--w_tau", type=float, default=0.25, help="w_geom 衰减尺度（米）")
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"], help="w 与 gate_y 的融合方式")
+    parser.add_argument("--w2_lambda", type=float, default=0.5, help="learnedw2 follow-support 修正系数")
+    parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help="learnedw2 risk_A-risk_F 修正系数")
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true", help="当 w_mode!=none 时关闭旧 gate_safe_clamp")
     parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
@@ -1987,7 +2116,7 @@ def parse_args():
         "--use_follow_expert",
         action="store_true",
         default=False,
-        help="Follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --teacher_ckpt）",
+        help="Follow 专家直管输出：高层命令直接由 expert_s0_follow 生成（无需 --pcr_ckpt）",
     )
     parser.add_argument(
         "--force_cmd",
@@ -2010,8 +2139,6 @@ def parse_args():
         help="Flip heading_offset_rad sign for debug alignment",
     )
     args, unknown = parser.parse_known_args()
-    th.capture_cli_explicit_arg_values(args, parser)
-
     sys.argv = [sys.argv[0]] + unknown
     if not hasattr(args, "physics_engine"):
         args.physics_engine = gymapi.SIM_PHYSX
@@ -2045,6 +2172,10 @@ def parse_args():
         args.debug_cmd = True
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
+    if getattr(args, "skill", None) is None:
+        args.skill = "follow"
+    th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
+    _apply_play_common_defaults(args, raw_argv)
 
     return args
 
@@ -2295,7 +2426,7 @@ def main():
         print("[PlayHigh] cmd_source=force_cmd (--force_cmd)")
     if not expert_only_mode:
         if not args.teacher_ckpt:
-            raise ValueError("非 expert-only 模式必须提供 --teacher_ckpt")
+            raise ValueError("非 expert-only 模式必须提供 --pcr_ckpt")
         if is_gate:
             if not args.avoid_ckpt:
                 raise ValueError("moe 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
@@ -2303,7 +2434,7 @@ def main():
             gate_meta = _ckpt_meta_from_obj(gate_ckpt)
             gate_state_dim = th.infer_checkpoint_state_dim(gate_ckpt) or gate_state_dim
             gate_action_dim = th.infer_checkpoint_gate_action_dim(gate_ckpt, gate_meta)
-            expected_gate_action_dim = 2 if str(getattr(args, "w_mode", "none")).lower() == "learned" else 1
+            expected_gate_action_dim = 2 if th.is_learned_w_mode(getattr(args, "w_mode", "none")) else 1
             if gate_action_dim is not None and int(gate_action_dim) != expected_gate_action_dim:
                 raise ValueError(
                     f"gate ckpt actor_output_dim 与当前 play_w_mode 不一致: "
@@ -2373,14 +2504,15 @@ def main():
             }
             policy.eval()
         else:
+            ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            ckpt_meta = _ckpt_meta_from_obj(ckpt)
+            policy_state_dim = th.infer_checkpoint_state_dim(ckpt) or int(obs["state"].shape[1])
             policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
-                state_dim=obs["state"].shape[1],
+                state_dim=policy_state_dim,
                 goal_dim=obs["goal"].shape[1],
                 cmd_scale=cmd_scale,
             ).to(device)
-            ckpt = torch.load(args.teacher_ckpt, map_location=device)
-            ckpt_meta = _ckpt_meta_from_obj(ckpt)
             _validate_expected_ckpt_meta(
                 ckpt_meta,
                 source_name="policy ckpt",
@@ -2584,7 +2716,7 @@ def main():
                             deterministic=True,
                         )
                         gate_policy_goal = goal_input
-                        if str(getattr(args, "w_mode", "none")).lower() == "learned":
+                        if th.is_learned_w_mode(getattr(args, "w_mode", "none")):
                             gate_policy_goal, _ = th.build_learned_w_gate_goal(
                                 env,
                                 args,
@@ -2605,7 +2737,7 @@ def main():
                             gate_difficulty,
                             deterministic=deterministic,
                         )
-                        if str(getattr(args, "w_mode", "none")).lower() == "learned":
+                        if th.is_learned_w_mode(getattr(args, "w_mode", "none")):
                             gate_y_raw = gate_action[:, 0]
                             learned_w = gate_action[:, 1]
                         else:
@@ -2623,9 +2755,14 @@ def main():
                         gate_y = gate_diag["y_eff"]
                         cmd = gate_diag["cmd"]
                     else:
+                        policy_state = th.match_state_dim(
+                            obs["state"],
+                            policy_state_dim,
+                            label="play_policy_state",
+                        )
                         cmd, _ = policy.get_action(
                             aff_input,
-                            obs["state"],
+                            policy_state,
                             goal_input,
                             difficulty_input,
                             deterministic=deterministic,
@@ -2636,14 +2773,14 @@ def main():
                             difficulty_zero = torch.zeros_like(difficulty_input)
                             cmd_flip, _ = policy.get_action(
                                 aff_input_flip,
-                                obs["state"],
+                                policy_state,
                                 goal_input,
                                 difficulty_input,
                                 deterministic=True,
                             )
                             cmd_zero, _ = policy.get_action(
                                 aff_input_zero,
-                                obs["state"],
+                                policy_state,
                                 goal_input,
                                 difficulty_zero,
                                 deterministic=True,
@@ -2775,6 +2912,8 @@ def main():
                 post_info["cmd_gate_fused"] = gate_diag["cmd"].detach().clone()
                 post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
                 post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
+                post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
+                post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
             _update_e_s_metrics(e_s_metrics, env, obs_before_step, info, dones, step_idx, cmd)
             if e_s_metrics.get("enabled", False) and ((step_idx + 1) % e_s_metrics["autosave_steps"] == 0):
                 _export_e_s_metrics(e_s_metrics, final=False, stop_reason="autosave")

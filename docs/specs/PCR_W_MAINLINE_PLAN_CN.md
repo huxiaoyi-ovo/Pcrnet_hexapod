@@ -1,5 +1,35 @@
 # PCR w 主线近期任务计划
 
+## 0A. 2026-05-21 learnedw2 终版公式验证线
+
+当前保留 2026-05-19 的旧 `learnedw` 单向 suppression 版本作为历史对照，不在原名上偷换公式。
+
+新公式单独命名为：
+
+```text
+learnedw2
+```
+
+其最小验证口径固定为：
+
+```text
+w 是 follow-support prior；
+y_eff = clip(y + lambda * (w - 0.5) + gamma * (risk_A - risk_F), 0, 1)；
+旧 learnedw 的 w_aux 高冲突标签为 1；
+learnedw2 的 w_aux 高冲突标签为 0；
+checkpoint、训练目录、play、eval、figure 必须显式区分 learnedw 与 learnedw2。
+```
+
+这条线现在只先做一致性短训验收，先确认：
+
+```text
+公式版本没有和旧 learnedw 混用；
+w2 的 w / risk 两项修正能在日志和 eval 中看见；
+row-progress、episode collision、follow error 没有因公式口径错误直接崩掉。
+```
+
+短训通过后，再决定是否把 `learnedw2` 作为下一轮长训候选。
+
 ## 0. 2026-05-19 最新主线：learned-w 行内释放安全收口
 
 ### 0.1 当前判断
