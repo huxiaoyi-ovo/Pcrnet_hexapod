@@ -128,7 +128,7 @@ def _apply_play_common_defaults(args, raw_argv) -> None:
     elif getattr(args, "teacher_ckpt", None):
         args.pcr_ckpt = args.teacher_ckpt
 
-    if getattr(args, "task", None) == "s_pcr_line_avoid_basic":
+    if th.is_pcr_line_task_name(str(getattr(args, "task", ""))):
         if not _argv_has_option(raw_argv, "--skill"):
             args.skill = "moe"
         if not _argv_has_option(raw_argv, "--low_level_ckpt"):
@@ -342,6 +342,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="PlayHigh")
     _maybe_apply_e_s_corridor_overrides(args, env_cfg)
     _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
+    _maybe_apply_pcr_new_play_overrides(args, env_cfg)
     _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
 
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
@@ -1584,8 +1585,23 @@ def _maybe_apply_s_avoid_debug_overrides(args, env_cfg) -> None:
     terrain_cfg.avoid_spawn_body_plus_y_deg = target_deg
 
 
+def _maybe_apply_pcr_new_play_overrides(args, env_cfg) -> None:
+    if env_cfg is None or str(getattr(args, "task", "")) != "s_pcr_new":
+        return
+    nav_cfg = getattr(env_cfg, "navigation", None)
+    if nav_cfg is None:
+        return
+    # Play/eval should expose the final mixed 2D distribution immediately.
+    # Training keeps the configured episode-based schedule.
+    nav_cfg.pcr_new_curriculum_progress_override = 1.0
+    stage_override = getattr(args, "avoid_stage_override", None)
+    terrain_cfg = getattr(env_cfg, "terrain", None)
+    if stage_override is not None and terrain_cfg is not None:
+        terrain_cfg.pcr_new_force_stage = int(stage_override)
+
+
 def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
-    if str(getattr(args, "task", "")) not in ("s_avoid_basic", "s_pcr_line_avoid_basic"):
+    if str(getattr(args, "task", "")) not in ("s_avoid_basic", "s_pcr_line_avoid_basic", "s_pcr_new"):
         return
     stage_override = getattr(args, "avoid_stage_override", None)
     if stage_override is None:
@@ -1595,6 +1611,8 @@ def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
     if not hasattr(env.env, "s_avoid_stage") or not hasattr(env.env, "s_avoid_stage_per_env"):
         return
     stage_value = int(stage_override)
+    if hasattr(env.env, "cfg") and hasattr(env.env.cfg, "terrain"):
+        setattr(env.env.cfg.terrain, "pcr_new_force_stage", stage_value)
     env.env.s_avoid_stage = stage_value
     env.env.s_avoid_stage_per_env.fill_(stage_value)
     if hasattr(env.env, "extras") and isinstance(env.env.extras, dict):
@@ -2194,6 +2212,7 @@ def main():
         "s_follow_basic",
         "s_avoid_basic",
         "s_pcr_line_avoid_basic",
+        "s_pcr_new",
         "s_cylinder",
         "s_narrow_passage",
         "s_step_field",
@@ -2204,7 +2223,7 @@ def main():
     if not (args.task in supported_tasks or args.task.startswith("e_")):
         raise ValueError(
             "play_highlevel.py supports only "
-            "--task s_follow_basic/s_avoid_basic/s_pcr_line_avoid_basic/s_cylinder/"
+            "--task s_follow_basic/s_avoid_basic/s_pcr_line_avoid_basic/s_pcr_new/s_cylinder/"
             "s_narrow_passage/s_step_field/s_dense_obstacles/s_ood_holdout/s_calib "
             "or e_* paper scenes"
         )
@@ -2275,6 +2294,7 @@ def main():
         th.apply_observation_contract_to_env_cfg(env_cfg, primary_meta, context="PlayHigh")
         _maybe_apply_e_s_corridor_overrides(args, env_cfg)
         _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
+        _maybe_apply_pcr_new_play_overrides(args, env_cfg)
         _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
     is_pcr_demo_task = bool(getattr(env, "is_pcr_line_task", False))

@@ -1303,6 +1303,18 @@ class HexGround(LeggedRobot):
         )
         self.s_avoid_last_shrink_stage_episode = 0
         self.s_avoid_stage_presets = self._build_s_avoid_stage_presets()
+        self.pcr_new_curriculum_enabled = bool(
+            self.nav_cfg is not None and getattr(self.nav_cfg, "pcr_new_curriculum_enable", False)
+        )
+        self.pcr_new_curriculum_level = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
+        self.pcr_new_target_speed = torch.full(
+            (self.num_envs,),
+            float(getattr(self.nav_cfg, "moving_target_pcr_line_speed", 0.35)) if self.nav_cfg is not None else 0.35,
+            device=self.device,
+            dtype=torch.float,
+        )
         self.s_avoid_runtime_preset_stats = {
             1: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
             2: {"retry_total": 0.0, "sample_fail_total": 0.0, "passage_fail_total": 0.0, "min_y_gap_total": 0.0, "passage_depth_total": 0.0, "core_depth_total": 0.0, "count": 0.0},
@@ -1343,6 +1355,13 @@ class HexGround(LeggedRobot):
         self.extras["avoid_preset_min_y_gap_mean"] = 0.0
         self.extras["avoid_preset_passage_depth_mean"] = 0.0
         self.extras["avoid_preset_core_depth_mean"] = 0.0
+        self.extras["pcr_new_curriculum_enabled"] = float(self.pcr_new_curriculum_enabled)
+        self.extras["pcr_new_curriculum_progress"] = 0.0
+        self.extras["pcr_new_level_mean"] = 0.0
+        self.extras["pcr_new_target_speed_mean"] = 0.0
+        self.extras["pcr_new_row_count_mean"] = 0.0
+        for level_idx in range(4):
+            self.extras[f"pcr_new_level{level_idx}_ratio"] = 0.0
         self._update_s_avoid_preset_diag_extras()
         self._avoid_goal_stats_retry_total = 0.0
         self._avoid_goal_stats_retry_count = 0
@@ -2727,6 +2746,70 @@ class HexGround(LeggedRobot):
             return 0
         return int(stage_hists["collision"].maxlen)
 
+    def _pcr_new_curriculum_progress(self) -> float:
+        if not bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+            return 0.0
+        progress_override = getattr(self.nav_cfg, "pcr_new_curriculum_progress_override", None)
+        if progress_override is not None:
+            return float(np.clip(float(progress_override), 0.0, 1.0))
+        total_eps = float(getattr(self.nav_cfg, "pcr_new_curriculum_total_episodes", 120000))
+        total_eps = max(total_eps, 1.0)
+        return float(np.clip(float(self.s_avoid_total_completed_episodes) / total_eps, 0.0, 1.0))
+
+    def _pcr_new_curriculum_weights(self, progress: float) -> np.ndarray:
+        if progress < 0.25:
+            weights = (0.70, 0.30, 0.00, 0.00)
+        elif progress < 0.50:
+            weights = (0.30, 0.40, 0.30, 0.00)
+        elif progress < 0.75:
+            weights = (0.15, 0.30, 0.35, 0.20)
+        else:
+            weights = (0.10, 0.20, 0.30, 0.40)
+        arr = np.asarray(weights, dtype=np.float64)
+        arr = arr / max(float(arr.sum()), 1e-12)
+        return arr
+
+    def _sample_pcr_new_curriculum(self, env_id: int, episode_idx: int) -> Tuple[int, float, int]:
+        progress = self._pcr_new_curriculum_progress()
+        weights = self._pcr_new_curriculum_weights(progress)
+        seed0 = int(getattr(self.cfg.terrain, "avoid_seed", 7001))
+        rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131 + 7919)
+        level = int(rng.choice(np.arange(4, dtype=np.int64), p=weights))
+        if level == 0:
+            stage = 1
+            speed = float(rng.uniform(0.25, 0.40))
+        elif level == 1:
+            stage = 1
+            speed = float(rng.uniform(0.35, 0.55))
+        elif level == 2:
+            stage = 2
+            speed = float(rng.uniform(0.30, 0.55))
+        else:
+            stage = int(rng.choice([3, 4]))
+            speed = float(rng.uniform(0.35, 0.65))
+        stage_override = getattr(self.cfg.terrain, "pcr_new_force_stage", None)
+        if stage_override is not None:
+            stage = int(stage_override)
+        speed_override = getattr(self.nav_cfg, "pcr_new_force_target_speed", None)
+        if speed_override is not None:
+            speed = float(speed_override)
+        return stage, speed, level
+
+    def _update_pcr_new_curriculum_extras(self) -> None:
+        if not bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+            return
+        levels = self.pcr_new_curriculum_level.to(dtype=torch.float32)
+        stages = self.s_avoid_stage_per_env.to(dtype=torch.float32)
+        self.extras["pcr_new_curriculum_progress"] = float(self._pcr_new_curriculum_progress())
+        self.extras["pcr_new_level_mean"] = float(levels.mean().item()) if levels.numel() > 0 else 0.0
+        self.extras["pcr_new_target_speed_mean"] = (
+            float(self.pcr_new_target_speed.mean().item()) if self.pcr_new_target_speed.numel() > 0 else 0.0
+        )
+        self.extras["pcr_new_row_count_mean"] = float((stages + 1.0).mean().item()) if stages.numel() > 0 else 0.0
+        for level_idx in range(4):
+            ratio = (self.pcr_new_curriculum_level == int(level_idx)).to(dtype=torch.float32).mean()
+            self.extras[f"pcr_new_level{level_idx}_ratio"] = float(ratio.item())
+
     def _advance_s_avoid_stage(self, next_stage: int) -> None:
         next_stage = int(next_stage)
         if next_stage <= int(self.s_avoid_stage):
@@ -2831,6 +2914,11 @@ class HexGround(LeggedRobot):
                 int(self.s_avoid_stage_completed_episodes.get(int(stage_id), 0)) + 1
             )
         self.s_avoid_total_completed_episodes += len(flags)
+        if bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+            self._update_pcr_new_curriculum_extras()
+            self.extras["avoid_stage"] = float(torch.mode(self.s_avoid_stage_per_env).values.item())
+            self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
+            return
 
         current_stage = int(self.s_avoid_stage)
         stage_hists = self.s_avoid_stage_metric_hists.get(current_stage, None)
@@ -3473,7 +3561,12 @@ class HexGround(LeggedRobot):
         for env_id in env_ids.tolist():
             episode_idx = int(self.s_avoid_env_episode_count[env_id].item())
             self.s_avoid_env_episode_count[env_id] += 1
-            stage = self._resolve_s_avoid_stage(env_id, episode_idx=episode_idx)
+            if bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+                stage, speed, level = self._sample_pcr_new_curriculum(env_id, episode_idx=episode_idx)
+                self.pcr_new_curriculum_level[env_id] = int(level)
+                self.pcr_new_target_speed[env_id] = float(speed)
+            else:
+                stage = self._resolve_s_avoid_stage(env_id, episode_idx=episode_idx)
             self.s_avoid_stage_per_env[env_id] = int(stage)
 
             active, pos, quat = self._get_s_avoid_stage_template()
@@ -3558,6 +3651,7 @@ class HexGround(LeggedRobot):
             self.s_avoid_band_y_max[env_id] = band_y_max
 
         self._sync_s_avoid_obstacles(env_ids)
+        self._update_pcr_new_curriculum_extras()
     def _sync_s_avoid_obstacles(self, env_ids: torch.Tensor):
         if not self.s_avoid_enabled or env_ids.numel() == 0 or self.s_avoid_actor_indices is None:
             return
@@ -4427,6 +4521,10 @@ class HexGround(LeggedRobot):
         min_forward = float(getattr(self.nav_cfg, "moving_target_pcr_line_min_forward", 0.80))
         x_line = float(getattr(self.nav_cfg, "moving_target_pcr_line_x", -0.60))
         speed = float(getattr(self.nav_cfg, "moving_target_pcr_line_speed", 0.55))
+        if bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+            speed_t = self.pcr_new_target_speed[env_ids]
+        else:
+            speed_t = torch.full((env_ids.numel(),), speed, device=self.device, dtype=torch.float32)
 
         robot_local = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
         target_local = robot_local.clone()
@@ -4438,8 +4536,8 @@ class HexGround(LeggedRobot):
         self.target_vel_world[env_ids].zero_()
         self.target_heading[env_ids] = 0.0
         self.target_heading_des[env_ids] = 0.0
-        self.target_speed[env_ids] = speed
-        self.target_speed_des[env_ids] = speed
+        self.target_speed[env_ids] = speed_t
+        self.target_speed_des[env_ids] = speed_t
         self.target_line_finished[env_ids] = False
         self.goal_world[env_ids] = self.target_world[env_ids]
 
@@ -4449,19 +4547,23 @@ class HexGround(LeggedRobot):
         x_line = float(getattr(self.nav_cfg, "moving_target_pcr_line_x", -0.60))
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         end_local_y = self._get_pcr_line_target_end_local_y(env_ids)
+        if bool(getattr(self, "pcr_new_curriculum_enabled", False)):
+            speed_t = self.target_speed_des.clone()
+        else:
+            speed_t = torch.full((self.num_envs,), speed, device=self.device, dtype=torch.float32)
 
         pos_local = self.target_world - self.env_origins[:, :2]
         vel_local = torch.zeros_like(pos_local)
         pos_local[:, 0] = x_line
-        pos_local[:, 1] += speed * float(dt)
-        vel_local[:, 1] = speed
+        pos_local[:, 1] += speed_t * float(dt)
+        vel_local[:, 1] = speed_t
         self.target_line_finished |= pos_local[:, 1] >= end_local_y
 
         self.target_world[:] = self.env_origins[:, :2] + pos_local
         self.target_vel_world[:] = vel_local
         self.target_heading.zero_()
         self.target_heading_des.zero_()
-        self.target_speed[:] = speed
+        self.target_speed[:] = speed_t
         self.target_speed_des[:] = self.target_speed
         self.goal_world[:] = self.target_world
 

@@ -377,6 +377,8 @@ LEGACY_TASK_ALIASES = {
 }
 S0_FOLLOW_TASK_NAME = "s_follow_basic"
 PCR_LINE_TASK_NAME = "s_pcr_line_avoid_basic"
+PCR_NEW_TASK_NAME = "s_pcr_new"
+PCR_TASK_NAMES = (PCR_LINE_TASK_NAME, PCR_NEW_TASK_NAME)
 PCR_REQUIRED_NAV_ATTRS = (
     "follow_distance_desired",
     "follow_distance_min",
@@ -484,7 +486,7 @@ def is_s0_follow_task_name(task_name: str) -> bool:
 
 
 def is_pcr_line_task_name(task_name: str) -> bool:
-    return normalize_task_name(task_name) == PCR_LINE_TASK_NAME
+    return normalize_task_name(task_name) in PCR_TASK_NAMES
 
 
 def validate_pcr_reward_config(nav_cfg: Any, reward_cfg_dict: Dict[str, Any]) -> None:
@@ -1323,7 +1325,7 @@ def apply_common_train_defaults(args: argparse.Namespace) -> None:
     skill_raw = getattr(args, "skill", None)
     skill = str(skill_raw or "").lower()
     if not skill:
-        if task == "s_pcr_line_avoid_basic":
+        if is_pcr_line_task_name(task):
             skill = "moe"
         elif task.startswith("s_avoid"):
             skill = "avoid"
@@ -1335,7 +1337,7 @@ def apply_common_train_defaults(args: argparse.Namespace) -> None:
     _set_arg_if_not_explicit(args, "low_level_ckpt", DEFAULT_LOWLEVEL_CKPT)
     if skill == "moe":
         _set_arg_if_not_explicit(args, "avoid_ckpt", DEFAULT_AVOID_CKPT)
-    if task == "s_pcr_line_avoid_basic" and skill == "moe":
+    if is_pcr_line_task_name(task) and skill == "moe":
         _set_arg_if_not_explicit(args, "seed", 1)
         _set_arg_if_not_explicit(args, "num_envs", 256)
         _set_arg_if_not_explicit(args, "num_steps", 48)
@@ -1821,6 +1823,22 @@ def build_resolved_protocol(
         "aux_checkpoints": aux_sources or {},
         "vision_native_output_size": get_vision_native_output_size(),
     }
+    env_impl = getattr(env, "env", env)
+    nav_cfg = getattr(env_impl, "nav_cfg", None)
+    if bool(getattr(env_impl, "pcr_new_curriculum_enabled", False)):
+        progress_fn = getattr(env_impl, "_pcr_new_curriculum_progress", None)
+        progress = float(progress_fn()) if callable(progress_fn) else float("nan")
+        weights_fn = getattr(env_impl, "_pcr_new_curriculum_weights", None)
+        weights = weights_fn(progress) if callable(weights_fn) else ()
+        protocol["pcr_new_curriculum"] = {
+            "enabled": True,
+            "progress": progress,
+            "progress_override": getattr(nav_cfg, "pcr_new_curriculum_progress_override", None),
+            "total_episodes": getattr(nav_cfg, "pcr_new_curriculum_total_episodes", None),
+            "level_weights": [float(v) for v in list(weights)],
+            "force_stage": getattr(getattr(env_impl.cfg, "terrain", None), "pcr_new_force_stage", None),
+            "force_target_speed": getattr(nav_cfg, "pcr_new_force_target_speed", None),
+        }
     if extra:
         protocol.update(extra)
     return protocol
@@ -5413,7 +5431,7 @@ def train(args):
     recommended_by_skill = {
         "follow": ("s_follow_basic",),
         "avoid": ("s_avoid_basic", "s_cylinder", "s_narrow_passage", "s_step_field", "s_dense_obstacles"),
-        "moe": ("s_avoid_basic", "s_pcr_line_avoid_basic"),
+        "moe": ("s_avoid_basic", "s_pcr_line_avoid_basic", "s_pcr_new"),
     }
     eval_only_by_skill = {
         "avoid": ("s_ood_holdout", "s_ood_holdout_large"),
@@ -6575,6 +6593,11 @@ def train(args):
         avoid_preset_min_y_gap_mean_value = 0.0
         avoid_preset_passage_depth_mean_value = 0.0
         avoid_preset_core_depth_mean_value = 0.0
+        pcr_new_curriculum_enabled_value = 0.0
+        pcr_new_curriculum_progress_value = 0.0
+        pcr_new_target_speed_mean_value = 0.0
+        pcr_new_row_count_mean_value = 0.0
+        pcr_new_level_ratio_values = [0.0, 0.0, 0.0, 0.0]
         avoid_goal_retry_total_base = float(getattr(env.env, "_avoid_goal_stats_retry_total", 0.0))
         avoid_goal_retry_count_base = float(getattr(env.env, "_avoid_goal_stats_retry_count", 0.0))
         avoid_goal_fallback_count_base = float(getattr(env.env, "_avoid_goal_stats_fallback_count", 0.0))
@@ -7562,6 +7585,25 @@ def train(args):
                     avoid_preset_core_depth_mean_value = float(
                         extras.get("avoid_preset_core_depth_mean", avoid_preset_core_depth_mean_value)
                     )
+                    pcr_new_curriculum_enabled_value = float(
+                        extras.get("pcr_new_curriculum_enabled", pcr_new_curriculum_enabled_value)
+                    )
+                    pcr_new_curriculum_progress_value = float(
+                        extras.get("pcr_new_curriculum_progress", pcr_new_curriculum_progress_value)
+                    )
+                    pcr_new_target_speed_mean_value = float(
+                        extras.get("pcr_new_target_speed_mean", pcr_new_target_speed_mean_value)
+                    )
+                    pcr_new_row_count_mean_value = float(
+                        extras.get("pcr_new_row_count_mean", pcr_new_row_count_mean_value)
+                    )
+                    for pcr_new_level_idx in range(4):
+                        pcr_new_level_ratio_values[pcr_new_level_idx] = float(
+                            extras.get(
+                                f"pcr_new_level{pcr_new_level_idx}_ratio",
+                                pcr_new_level_ratio_values[pcr_new_level_idx],
+                            )
+                        )
                     avoid_stage_switch_event_value = float(
                         extras.get("avoid_stage_switch_event", avoid_stage_switch_event_value)
                     )
@@ -8648,6 +8690,12 @@ def train(args):
         writer.add_scalar('Stats/NearMissRatio', near_miss_ratio, iteration)
         writer.add_scalar('Stats/GateEffSwitchRate', gate_switch_rate_mean, iteration)
         writer.add_scalar('Stats/SceneDifficulty', d_scene, iteration)
+        if pcr_new_curriculum_enabled_value > 0.5:
+            writer.add_scalar('PCRNew/CurriculumProgress', pcr_new_curriculum_progress_value, iteration)
+            writer.add_scalar('PCRNew/TargetSpeedMean', pcr_new_target_speed_mean_value, iteration)
+            writer.add_scalar('PCRNew/RowCountMean', pcr_new_row_count_mean_value, iteration)
+            for pcr_new_level_idx, pcr_new_ratio in enumerate(pcr_new_level_ratio_values):
+                writer.add_scalar(f'PCRNew/Level{pcr_new_level_idx}Ratio', pcr_new_ratio, iteration)
         if is_avoid_output_task:
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
             writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
@@ -8918,7 +8966,14 @@ def train(args):
                           f"""{'Avoid obs-hit cand/strict/min:':>{pad}} {obstacle_contact_candidate_rate_mean:.3f} / {strict_obstacle_contact_rate_mean:.3f} / {obstacle_contact_candidate_min_clearance_mean:.3f}\n"""
                 )
             elif is_pcr_output_task:
+                pcr_new_line = ""
+                if pcr_new_curriculum_enabled_value > 0.5:
+                    pcr_new_line = (
+                        f"""{'PCR new progress/rows/speed:':>{pad}} {pcr_new_curriculum_progress_value:.3f} / {pcr_new_row_count_mean_value:.3f} / {pcr_new_target_speed_mean_value:.3f}\n"""
+                        f"""{'PCR new level ratios L0-L3:':>{pad}} {pcr_new_level_ratio_values[0]:.3f} / {pcr_new_level_ratio_values[1]:.3f} / {pcr_new_level_ratio_values[2]:.3f} / {pcr_new_level_ratio_values[3]:.3f}\n"""
+                    )
                 avoid_line = (
+                    f"""{pcr_new_line}"""
                     f"""{'PCR succ/cross/gap:':>{pad}} {pcr_success_rate_mean:.3f} / {pcr_robot_crossed_rate_mean:.3f} / {pcr_gap_success_per_episode_mean:.3f}\n"""
                     f"""{'PCR coll(ep/step)/followErr:':>{pad}} {episode_collision_rate_value:.3f} / {collision_rate_mean:.3f} / {pcr_follow_dist_error_value:.3f}\n"""
                     f"""{'PCR y low/high/corr:':>{pad}} {pcr_low_conflict_y_mean:.3f} / {pcr_high_conflict_y_mean:.3f} / {pcr_conflict_y_corr:.3f}\n"""

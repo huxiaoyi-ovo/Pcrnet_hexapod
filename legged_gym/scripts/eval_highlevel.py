@@ -148,6 +148,8 @@ def _apply_eval_avoid_stage_override(args, env, *, verbose: bool = True) -> None
     if not hasattr(env_impl, "s_avoid_stage") or not hasattr(env_impl, "s_avoid_stage_per_env"):
         return
     stage_value = int(stage_override)
+    if hasattr(env_impl, "cfg") and hasattr(env_impl.cfg, "terrain"):
+        setattr(env_impl.cfg.terrain, "pcr_new_force_stage", stage_value)
     env_impl.s_avoid_stage = stage_value
     env_impl.s_avoid_stage_per_env.fill_(stage_value)
     if hasattr(env_impl, "extras") and isinstance(env_impl.extras, dict):
@@ -1782,6 +1784,7 @@ class EvalRunner:
                 "episodes": int(self.args.episodes),
                 "num_envs": int(self.args.num_envs),
                 "pcr_play_env_alignment": bool(_is_pcr_eval_task(self.args)),
+                "pcr_new_curriculum": self.resolved_protocol.get("pcr_new_curriculum", None),
                 "avoid_stage_override": None if getattr(self.args, "avoid_stage_override", None) is None else int(self.args.avoid_stage_override),
                 "freeze_avoid_stage": bool(getattr(self.args, "freeze_avoid_stage", False)) or (
                     getattr(self.args, "avoid_stage_override", None) is not None

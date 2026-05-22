@@ -2041,4 +2041,10 @@
 ## 2026-05-21 PCR 可部署风险记忆
 
 - [x] Must: 新增可选 `--risk_memory`，用距离衰减的 `risk_F` 记忆替换 learned-w 旧 row slot，解决当前帧看不到侧边障碍时过早恢复跟随的问题
+
+## 2026-05-22 PCR 二维课程新场景
+
+- [x] Must: 新增 `s_pcr_new`，完全继承 `s_pcr_line_avoid_basic` 的奖励、gap、成功判据与 PCR 口径，只把训练分布改成目标速度范围 × 障碍行数的二维课程，用于先在 play/eval 中验证旧模型泛化，再决定是否重训主表对照。
+- [x] Must: 修正 `s_pcr_new` 在 play/eval 首回合的二维课程口径，确保旧模型泛化观察与 stage override 不被初始 reset 的早期课程分布污染。
+- [x] Must: 补齐 `s_pcr_new` 的训练分布日志与评测记录，直接输出课程进度、level 比例、目标速度和实际行数，避免长训与论文候选评测只剩旧 stage 读数。
 - [x] Must: 保持 `row_not_released` 只用于 `w_aux` 监督与诊断，不进入 actor，确保训练输入可实机复现

@@ -58,6 +58,8 @@ from .hex_v4.hex_scenes_config import (
     HexAvoidBasicCfgPPO,
     HexPCRLineAvoidBasicCfg,
     HexPCRLineAvoidBasicCfgPPO,
+    HexPCRNewCfg,
+    HexPCRNewCfgPPO,
     HexS1Cfg,
     HexS1CfgPPO,
     HexS1FollowCfg,
@@ -131,6 +133,7 @@ task_registry.register("hex_calib", HexGround, HexCalibCfg(), HexCalibCfgPPO())
 task_registry.register("s_follow_basic", HexGround, HexS0FollowCfg(), HexS0FollowCfgPPO())
 task_registry.register("s_avoid_basic", HexGround, HexAvoidBasicCfg(), HexAvoidBasicCfgPPO())
 task_registry.register("s_pcr_line_avoid_basic", HexGround, HexPCRLineAvoidBasicCfg(), HexPCRLineAvoidBasicCfgPPO())
+task_registry.register("s_pcr_new", HexGround, HexPCRNewCfg(), HexPCRNewCfgPPO())
 task_registry.register("s_avoid_basic_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())
 task_registry.register("s_cylinder", HexGround, HexS2Cfg(), HexS2CfgPPO())
 task_registry.register("s_cylinder_large", HexGround, HexS2LargeCfg(), HexS2LargeCfgPPO())

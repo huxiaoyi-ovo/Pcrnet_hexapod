@@ -702,6 +702,23 @@ class HexPCRLineAvoidBasicCfgPPO(HexGroundCfgPPO):
         experiment_name = "s_pcr_line_avoid_basic"
 
 
+class HexPCRNewCfg(HexPCRLineAvoidBasicCfg):
+    """
+    s_pcr_new:
+    Inherit s_pcr_line_avoid_basic and change only the training distribution:
+    a two-dimensional curriculum over target speed and obstacle-row count.
+    """
+
+    class navigation(HexPCRLineAvoidBasicCfg.navigation):
+        pcr_new_curriculum_enable = True
+        pcr_new_curriculum_total_episodes = 120000
+
+
+class HexPCRNewCfgPPO(HexPCRLineAvoidBasicCfgPPO):
+    class runner(HexPCRLineAvoidBasicCfgPPO.runner):
+        experiment_name = "s_pcr_new"
+
+
 class HexS1Cfg(HexGroundCfg):
     class env(HexGroundCfg.env):
         env_spacing = 12.0
