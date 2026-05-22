@@ -2787,6 +2787,12 @@ class HexGround(LeggedRobot):
         else:
             stage = int(rng.choice([3, 4]))
             speed = float(rng.uniform(0.35, 0.65))
+        if bool(getattr(self.nav_cfg, "pcr_new_generalize_enable", False)):
+            stage = 4
+            level = 3
+            speed_min = float(getattr(self.nav_cfg, "pcr_new_generalize_speed_min", 0.55))
+            speed_max = float(getattr(self.nav_cfg, "pcr_new_generalize_speed_max", 0.75))
+            speed = float(rng.uniform(min(speed_min, speed_max), max(speed_min, speed_max)))
         stage_override = getattr(self.cfg.terrain, "pcr_new_force_stage", None)
         if stage_override is not None:
             stage = int(stage_override)

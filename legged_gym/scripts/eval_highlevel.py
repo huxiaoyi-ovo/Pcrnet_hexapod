@@ -216,6 +216,61 @@ def _empty_risk_bin_state() -> list:
     ]
 
 
+def _privileged_conflict_diag(args, gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Build eval-only PCR conflict diagnostics from privileged row geometry."""
+    risk_ref = gate_diag["risk_F"]
+    zero = torch.zeros_like(risk_ref)
+    row_valid = gate_diag.get("row_current_valid", zero) > 0.5
+    row_front = gate_diag.get("current_row_front_edge", zero)
+    row_back = gate_diag.get("current_row_back_edge", zero)
+    robot_front = gate_diag.get("robot_front_y", zero)
+    robot_rear = gate_diag.get("robot_rear_y", zero)
+    cmd_f = gate_diag.get("cmd_f", None)
+    cmd_a = gate_diag.get("cmd_a", None)
+
+    follow_forward = zero
+    avoid_lateral_abs = zero
+    if torch.is_tensor(cmd_f) and cmd_f.shape[-1] >= 2:
+        follow_forward = cmd_f[:, 1].to(device=risk_ref.device, dtype=risk_ref.dtype)
+    if torch.is_tensor(cmd_a) and cmd_a.shape[-1] >= 1:
+        avoid_lateral_abs = torch.abs(cmd_a[:, 0].to(device=risk_ref.device, dtype=risk_ref.dtype))
+
+    pre_m = float(getattr(args, "priv_conflict_pre_m", 1.2))
+    post_m = float(getattr(args, "priv_conflict_post_m", 0.4))
+    obstacle_window = (
+        row_valid
+        & (robot_front > (row_front - pre_m))
+        & (robot_rear < (row_back + post_m))
+    )
+    follow_pressure = follow_forward > float(getattr(args, "priv_conflict_follow_thr", 0.20))
+    avoid_pressure = avoid_lateral_abs > float(getattr(args, "priv_conflict_avoid_thr", 0.10))
+    follow_score = torch.clamp((follow_forward - 0.15) / 0.30, min=0.0, max=1.0)
+    avoid_score = torch.clamp((avoid_lateral_abs - 0.05) / 0.25, min=0.0, max=1.0)
+    score = obstacle_window.to(dtype=risk_ref.dtype) * follow_score * avoid_score
+    high_mask = (
+        obstacle_window
+        & follow_pressure
+        & avoid_pressure
+        & (score > float(getattr(args, "priv_conflict_score_thr", 0.25)))
+    )
+
+    phase_code = torch.zeros_like(risk_ref)
+    approach = obstacle_window & (robot_front < row_front)
+    release = obstacle_window & (robot_rear > row_back)
+    inside = obstacle_window & (~approach) & (~release)
+    phase_code = torch.where(approach, torch.ones_like(phase_code), phase_code)
+    phase_code = torch.where(inside, torch.full_like(phase_code, 2.0), phase_code)
+    phase_code = torch.where(release, torch.full_like(phase_code, 3.0), phase_code)
+    return {
+        "priv_conflict_score": torch.clamp(score, 0.0, 1.0),
+        "priv_high_conflict": high_mask.to(dtype=risk_ref.dtype),
+        "priv_obstacle_window": obstacle_window.to(dtype=risk_ref.dtype),
+        "priv_follow_pressure": follow_pressure.to(dtype=risk_ref.dtype),
+        "priv_avoid_pressure": avoid_pressure.to(dtype=risk_ref.dtype),
+        "priv_conflict_phase": phase_code,
+    }
+
+
 def _compute_moe_follow_cmd_from_goal(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
@@ -298,6 +353,25 @@ class EpisodeAccumulator:
     high_risk_near_miss_steps: int = 0
     risk_bin_stats: list = field(default_factory=_empty_risk_bin_state)
     conflict_bin_stats: list = field(default_factory=_empty_risk_bin_state)
+    priv_conflict_bin_stats: list = field(default_factory=_empty_risk_bin_state)
+    priv_conflict_score_sum: float = 0.0
+    priv_conflict_steps: int = 0
+    priv_obstacle_window_steps: int = 0
+    priv_follow_pressure_steps: int = 0
+    priv_avoid_pressure_steps: int = 0
+    priv_conflict_y_raw_sum: float = 0.0
+    priv_conflict_y_eff_sum: float = 0.0
+    priv_conflict_w_sum: float = 0.0
+    priv_conflict_signed_w_sum: float = 0.0
+    priv_conflict_delta_y_sum: float = 0.0
+    priv_non_conflict_steps: int = 0
+    priv_non_conflict_delta_y_sum: float = 0.0
+    priv_window_phase_approach_steps: int = 0
+    priv_window_phase_inside_steps: int = 0
+    priv_window_phase_release_steps: int = 0
+    priv_conflict_phase_approach_steps: int = 0
+    priv_conflict_phase_inside_steps: int = 0
+    priv_conflict_phase_release_steps: int = 0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -825,6 +899,9 @@ class EvalRunner:
                     post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
                     post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                     post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
+                    priv_diag = _privileged_conflict_diag(self.args, gate_diag)
+                    for key, value in priv_diag.items():
+                        post_info[key] = value.detach().clone()
 
                 # Step-level energy and distance proxies.
                 torques = getattr(self.env.env, "torques", None)
@@ -940,6 +1017,12 @@ class EvalRunner:
                         risk_memory_t = post_info.get("risk_memory", None)
                         row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
+                        priv_conflict_t = post_info.get("priv_conflict_score", None)
+                        priv_high_conflict_t = post_info.get("priv_high_conflict", None)
+                        priv_obstacle_window_t = post_info.get("priv_obstacle_window", None)
+                        priv_follow_pressure_t = post_info.get("priv_follow_pressure", None)
+                        priv_avoid_pressure_t = post_info.get("priv_avoid_pressure", None)
+                        priv_conflict_phase_t = post_info.get("priv_conflict_phase", None)
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
                         clearance_pp_t = post_info.get("clearance_pp", None)
@@ -959,6 +1042,12 @@ class EvalRunner:
                         risk_memory_v = _safe_float(risk_memory_t[i].item(), default=0.0) if torch.is_tensor(risk_memory_t) else 0.0
                         row_not_released_v = _safe_float(row_not_released_t[i].item(), default=0.0) if torch.is_tensor(row_not_released_t) else 0.0
                         conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
+                        priv_conflict_v = _safe_float(priv_conflict_t[i].item(), default=0.0) if torch.is_tensor(priv_conflict_t) else 0.0
+                        priv_high_conflict_v = _safe_float(priv_high_conflict_t[i].item(), default=0.0) if torch.is_tensor(priv_high_conflict_t) else 0.0
+                        priv_obstacle_window_v = _safe_float(priv_obstacle_window_t[i].item(), default=0.0) if torch.is_tensor(priv_obstacle_window_t) else 0.0
+                        priv_follow_pressure_v = _safe_float(priv_follow_pressure_t[i].item(), default=0.0) if torch.is_tensor(priv_follow_pressure_t) else 0.0
+                        priv_avoid_pressure_v = _safe_float(priv_avoid_pressure_t[i].item(), default=0.0) if torch.is_tensor(priv_avoid_pressure_t) else 0.0
+                        priv_conflict_phase_v = int(round(_safe_float(priv_conflict_phase_t[i].item(), default=0.0))) if torch.is_tensor(priv_conflict_phase_t) else 0
                         clr_pp_v = float("nan")
                         safe_thr_v = float("nan")
                         near_miss_now = False
@@ -984,6 +1073,33 @@ class EvalRunner:
                         ai.risk_diff_correction_sum += risk_diff_corr_v
                         ai.risk_memory_sum += risk_memory_v
                         ai.row_not_released_sum += row_not_released_v
+                        ai.priv_conflict_score_sum += priv_conflict_v
+                        ai.priv_obstacle_window_steps += int(priv_obstacle_window_v > 0.5)
+                        ai.priv_follow_pressure_steps += int(priv_follow_pressure_v > 0.5)
+                        ai.priv_avoid_pressure_steps += int(priv_avoid_pressure_v > 0.5)
+                        if priv_conflict_phase_v == 1:
+                            ai.priv_window_phase_approach_steps += 1
+                        elif priv_conflict_phase_v == 2:
+                            ai.priv_window_phase_inside_steps += 1
+                        elif priv_conflict_phase_v == 3:
+                            ai.priv_window_phase_release_steps += 1
+                        delta_y_v = y_eff_v - gate_raw_v
+                        if priv_high_conflict_v > 0.5:
+                            ai.priv_conflict_steps += 1
+                            ai.priv_conflict_y_raw_sum += gate_raw_v
+                            ai.priv_conflict_y_eff_sum += y_eff_v
+                            ai.priv_conflict_w_sum += w_v
+                            ai.priv_conflict_signed_w_sum += signed_w_v
+                            ai.priv_conflict_delta_y_sum += delta_y_v
+                            if priv_conflict_phase_v == 1:
+                                ai.priv_conflict_phase_approach_steps += 1
+                            elif priv_conflict_phase_v == 2:
+                                ai.priv_conflict_phase_inside_steps += 1
+                            elif priv_conflict_phase_v == 3:
+                                ai.priv_conflict_phase_release_steps += 1
+                        else:
+                            ai.priv_non_conflict_steps += 1
+                            ai.priv_non_conflict_delta_y_sum += delta_y_v
                         if row_not_released_v > 0.5:
                             ai.row_not_released_w_sum += w_v
                             ai.row_not_released_steps += 1
@@ -1053,6 +1169,29 @@ class EvalRunner:
                             bin_state["risk_diff_correction_sum"] += risk_diff_corr_v
                             if near_miss_now:
                                 bin_state["near_miss_steps"] += 1
+                        priv_conflict_bin_idx = _risk_bin_index(priv_conflict_v)
+                        if priv_obstacle_window_v > 0.5 and priv_conflict_bin_idx is not None:
+                            bin_state = ai.priv_conflict_bin_stats[priv_conflict_bin_idx]
+                            suppression_v = gate_raw_v - y_eff_v
+                            bin_state["steps"] += 1
+                            bin_state["gate_y_raw_sum"] += gate_raw_v
+                            bin_state["gate_y_raw_sq_sum"] += gate_raw_v * gate_raw_v
+                            bin_state["y_eff_sum"] += y_eff_v
+                            bin_state["y_eff_sq_sum"] += y_eff_v * y_eff_v
+                            bin_state["suppression_sum"] += suppression_v
+                            bin_state["suppression_sq_sum"] += suppression_v * suppression_v
+                            bin_state["w_sum"] += w_v
+                            bin_state["w_sq_sum"] += w_v * w_v
+                            bin_state["signed_w_sum"] += signed_w_v
+                            bin_state["signed_w_active_sum"] += signed_w_active_v
+                            bin_state["risk_memory_sum"] += risk_memory_v
+                            bin_state["risk_f_sum"] += risk_f_v
+                            bin_state["risk_a_sum"] += risk_a_v
+                            bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
+                            bin_state["w_support_correction_sum"] += w_support_corr_v
+                            bin_state["risk_diff_correction_sum"] += risk_diff_corr_v
+                            if near_miss_now:
+                                bin_state["near_miss_steps"] += 1
 
                         cmd_f_v = [float("nan"), float("nan"), float("nan")]
                         cmd_a_v = [float("nan"), float("nan"), float("nan")]
@@ -1090,6 +1229,12 @@ class EvalRunner:
                                     "risk_memory": risk_memory_v,
                                     "row_not_released": row_not_released_v,
                                     "conflict_score": conflict_v,
+                                    "priv_conflict_score": priv_conflict_v,
+                                    "priv_high_conflict": int(priv_high_conflict_v > 0.5),
+                                    "priv_obstacle_window": int(priv_obstacle_window_v > 0.5),
+                                    "priv_follow_pressure": int(priv_follow_pressure_v > 0.5),
+                                    "priv_avoid_pressure": int(priv_avoid_pressure_v > 0.5),
+                                    "priv_conflict_phase": int(priv_conflict_phase_v),
                                     "clearance_pp": clr_pp_v,
                                     "near_miss": int(near_miss_now),
                                     "episode_collision": int(ai.episode_collision),
@@ -1186,6 +1331,18 @@ class EvalRunner:
                         if high_risk_steps > 0
                         else float("nan")
                     )
+                    priv_conflict_denom = float(max(ai.priv_conflict_steps, 1))
+                    priv_non_conflict_denom = float(max(ai.priv_non_conflict_steps, 1))
+                    priv_conflict_delta_y_mean = (
+                        ai.priv_conflict_delta_y_sum / priv_conflict_denom
+                        if ai.priv_conflict_steps > 0
+                        else float("nan")
+                    )
+                    priv_non_conflict_delta_y_mean = (
+                        ai.priv_non_conflict_delta_y_sum / priv_non_conflict_denom
+                        if ai.priv_non_conflict_steps > 0
+                        else float("nan")
+                    )
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
@@ -1241,6 +1398,55 @@ class EvalRunner:
                                 ai.row_released_w_sum / float(max(ai.row_released_steps, 1))
                                 if ai.row_released_steps > 0 else float("nan")
                             ),
+                            "priv_conflict_score_mean": ai.priv_conflict_score_sum / denom_steps,
+                            "priv_high_conflict_steps": ai.priv_conflict_steps,
+                            "priv_high_conflict_step_rate": ai.priv_conflict_steps / denom_steps,
+                            "priv_obstacle_window_rate": ai.priv_obstacle_window_steps / denom_steps,
+                            "priv_follow_pressure_rate": ai.priv_follow_pressure_steps / denom_steps,
+                            "priv_avoid_pressure_rate": ai.priv_avoid_pressure_steps / denom_steps,
+                            "priv_conflict_y_raw_mean": (
+                                ai.priv_conflict_y_raw_sum / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_y_eff_mean": (
+                                ai.priv_conflict_y_eff_sum / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_w_mean": (
+                                ai.priv_conflict_w_sum / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_signed_w_mean": (
+                                ai.priv_conflict_signed_w_sum / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_delta_y_mean": priv_conflict_delta_y_mean,
+                            "priv_non_conflict_delta_y_mean": priv_non_conflict_delta_y_mean,
+                            "conflict_suppression_index": (
+                                -priv_conflict_delta_y_mean
+                                if math.isfinite(priv_conflict_delta_y_mean) else float("nan")
+                            ),
+                            "relative_conflict_modulation": (
+                                priv_conflict_delta_y_mean - priv_non_conflict_delta_y_mean
+                                if math.isfinite(priv_conflict_delta_y_mean)
+                                and math.isfinite(priv_non_conflict_delta_y_mean)
+                                else float("nan")
+                            ),
+                            "priv_window_phase_approach_rate": ai.priv_window_phase_approach_steps / denom_steps,
+                            "priv_window_phase_inside_rate": ai.priv_window_phase_inside_steps / denom_steps,
+                            "priv_window_phase_release_rate": ai.priv_window_phase_release_steps / denom_steps,
+                            "priv_conflict_phase_approach_rate": (
+                                ai.priv_conflict_phase_approach_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_inside_rate": (
+                                ai.priv_conflict_phase_inside_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_release_rate": (
+                                ai.priv_conflict_phase_release_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
                             "rotate_only_rate": ai.rotate_only_steps / denom_steps,
@@ -1259,6 +1465,7 @@ class EvalRunner:
                             "high_risk_near_miss_rate": high_risk_near_miss_rate,
                             "risk_bin_stats": [dict(bin_state) for bin_state in ai.risk_bin_stats],
                             "conflict_bin_stats": [dict(bin_state) for bin_state in ai.conflict_bin_stats],
+                            "priv_conflict_bin_stats": [dict(bin_state) for bin_state in ai.priv_conflict_bin_stats],
                             "cmd_jerk_lin_mean": ai.cmd_jerk_lin_sum / denom_steps,
                             "cmd_jerk_ang_mean": ai.cmd_jerk_ang_sum / denom_steps,
                             "cmd_f_mean_x": ai.cmd_f_sum[0] / denom_steps,
@@ -1497,6 +1704,83 @@ class EvalRunner:
                 })
             return out
 
+        def _weighted_step_mean(sub_rows: List[Dict], mean_key: str, steps_key: str, fallback_steps: str = "steps_hl") -> float:
+            weighted_sum = 0.0
+            weight_sum = 0.0
+            for row in sub_rows:
+                value = _safe_float(row.get(mean_key, float("nan")), default=float("nan"))
+                steps = _safe_float(row.get(steps_key, row.get(fallback_steps, 0.0)), default=0.0)
+                if math.isfinite(value) and steps > 0.0:
+                    weighted_sum += value * steps
+                    weight_sum += steps
+            return weighted_sum / weight_sum if weight_sum > 0.0 else float("nan")
+
+        def _priv_conflict_summary(sub_rows: List[Dict]) -> Dict[str, float]:
+            total_steps = float(sum(max(0, int(r.get("steps_hl", 0) or 0)) for r in sub_rows))
+            high_steps = float(sum(max(0, int(r.get("priv_high_conflict_steps", 0) or 0)) for r in sub_rows))
+            non_conflict_steps = max(0.0, total_steps - high_steps)
+            delta_conflict = _weighted_step_mean(
+                sub_rows,
+                "priv_conflict_delta_y_mean",
+                "priv_high_conflict_steps",
+            )
+            weighted_sum = 0.0
+            weight_sum = 0.0
+            for row in sub_rows:
+                value = _safe_float(row.get("priv_non_conflict_delta_y_mean", float("nan")), default=float("nan"))
+                steps = max(
+                    0.0,
+                    _safe_float(row.get("steps_hl", 0.0), default=0.0)
+                    - _safe_float(row.get("priv_high_conflict_steps", 0.0), default=0.0),
+                )
+                if math.isfinite(value) and steps > 0.0:
+                    weighted_sum += value * steps
+                    weight_sum += steps
+            delta_non_conflict = weighted_sum / weight_sum if weight_sum > 0.0 else float("nan")
+            visited = [r for r in sub_rows if int(r.get("priv_high_conflict_steps", 0) or 0) > 0]
+            return {
+                "priv_high_conflict_steps": high_steps,
+                "priv_high_conflict_step_rate": high_steps / total_steps if total_steps > 0.0 else float("nan"),
+                "priv_non_conflict_steps": non_conflict_steps,
+                "priv_conflict_score_mean": _weighted_step_mean(sub_rows, "priv_conflict_score_mean", "steps_hl"),
+                "priv_obstacle_window_rate": _weighted_step_mean(sub_rows, "priv_obstacle_window_rate", "steps_hl"),
+                "priv_follow_pressure_rate": _weighted_step_mean(sub_rows, "priv_follow_pressure_rate", "steps_hl"),
+                "priv_avoid_pressure_rate": _weighted_step_mean(sub_rows, "priv_avoid_pressure_rate", "steps_hl"),
+                "priv_conflict_y_raw_mean": _weighted_step_mean(sub_rows, "priv_conflict_y_raw_mean", "priv_high_conflict_steps"),
+                "priv_conflict_y_eff_mean": _weighted_step_mean(sub_rows, "priv_conflict_y_eff_mean", "priv_high_conflict_steps"),
+                "priv_conflict_w_mean": _weighted_step_mean(sub_rows, "priv_conflict_w_mean", "priv_high_conflict_steps"),
+                "priv_conflict_signed_w_mean": _weighted_step_mean(sub_rows, "priv_conflict_signed_w_mean", "priv_high_conflict_steps"),
+                "priv_conflict_delta_y_mean": delta_conflict,
+                "priv_non_conflict_delta_y_mean": delta_non_conflict,
+                "conflict_suppression_index": -delta_conflict if math.isfinite(delta_conflict) else float("nan"),
+                "relative_conflict_modulation": (
+                    delta_conflict - delta_non_conflict
+                    if math.isfinite(delta_conflict) and math.isfinite(delta_non_conflict)
+                    else float("nan")
+                ),
+                "priv_window_phase_approach_rate": _weighted_step_mean(sub_rows, "priv_window_phase_approach_rate", "steps_hl"),
+                "priv_window_phase_inside_rate": _weighted_step_mean(sub_rows, "priv_window_phase_inside_rate", "steps_hl"),
+                "priv_window_phase_release_rate": _weighted_step_mean(sub_rows, "priv_window_phase_release_rate", "steps_hl"),
+                "priv_conflict_phase_approach_rate": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_approach_rate", "priv_high_conflict_steps"
+                ),
+                "priv_conflict_phase_inside_rate": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_inside_rate", "priv_high_conflict_steps"
+                ),
+                "priv_conflict_phase_release_rate": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_release_rate", "priv_high_conflict_steps"
+                ),
+                "priv_conflict_visited_episode_rate": len(visited) / float(max(1, len(sub_rows))),
+                "priv_conflict_visited_collision_rate": (
+                    sum(int(r.get("episode_collision", 0)) for r in visited) / float(len(visited))
+                    if visited else float("nan")
+                ),
+                "priv_conflict_visited_row_progress_mean": (
+                    sum(float(r.get("success", 0.0) or 0.0) for r in visited) / float(len(visited))
+                    if visited else float("nan")
+                ),
+            }
+
         success_scores = [float(r.get("success", 0.0)) for r in rows]
         full_task_success_flags = [int(r.get("full_task_success", 0)) for r in rows]
         success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
@@ -1578,6 +1862,8 @@ class EvalRunner:
         high_risk_overall = _high_risk_summary(rows)
         risk_bins_overall = _risk_bins_summary(rows)
         conflict_bins_overall = _risk_bins_summary(rows, "conflict_bin_stats")
+        priv_conflict_bins_overall = _risk_bins_summary(rows, "priv_conflict_bin_stats")
+        priv_conflict_overall = _priv_conflict_summary(rows)
 
         overall = {
             "episodes": total_eps,
@@ -1654,6 +1940,7 @@ class EvalRunner:
             "gate_region_y_eff_mean": float(np.mean(gate_region_y_eff)) if gate_region_y_eff else float("nan"),
             "gate_region_near_miss_rate_mean": float(np.mean(gate_region_near_miss)) if gate_region_near_miss else float("nan"),
             **high_risk_overall,
+            **priv_conflict_overall,
             "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
             "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
             "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
@@ -1706,6 +1993,7 @@ class EvalRunner:
             gate_region_y_eff_d = _clean([r.get("gate_region_y_eff_mean", float("nan")) for r in sub])
             gate_region_near_miss_d = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in sub])
             high_risk_d = _high_risk_summary(sub)
+            priv_conflict_d = _priv_conflict_summary(sub)
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             full_task_success_rate_d = float(sum(full_task_success_d) / max(1, n))
@@ -1769,6 +2057,7 @@ class EvalRunner:
                     float(np.mean(gate_region_near_miss_d)) if gate_region_near_miss_d else float("nan")
                 ),
                 **high_risk_d,
+                **priv_conflict_d,
                 "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
                 "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
@@ -1785,6 +2074,7 @@ class EvalRunner:
                 "num_envs": int(self.args.num_envs),
                 "pcr_play_env_alignment": bool(_is_pcr_eval_task(self.args)),
                 "pcr_new_curriculum": self.resolved_protocol.get("pcr_new_curriculum", None),
+                "generalize": bool(getattr(self.args, "generalize", False)),
                 "avoid_stage_override": None if getattr(self.args, "avoid_stage_override", None) is None else int(self.args.avoid_stage_override),
                 "freeze_avoid_stage": bool(getattr(self.args, "freeze_avoid_stage", False)) or (
                     getattr(self.args, "avoid_stage_override", None) is not None
@@ -1847,6 +2137,17 @@ class EvalRunner:
                 "timeseries_stride": int(getattr(self.args, "timeseries_stride", 1)),
                 "w_trigger_threshold": float(getattr(self.args, "w_trigger_threshold", 0.5)),
                 "gate_region_risk_threshold": float(getattr(self.args, "gate_region_risk_threshold", 0.5)),
+                "priv_conflict_definition": (
+                    "eval-only privileged conflict = row obstacle window AND Follow forward pressure "
+                    "AND Avoid lateral pressure"
+                ),
+                "priv_conflict_follow_thr": float(getattr(self.args, "priv_conflict_follow_thr", 0.20)),
+                "priv_conflict_avoid_thr": float(getattr(self.args, "priv_conflict_avoid_thr", 0.10)),
+                "priv_conflict_pre_m": float(getattr(self.args, "priv_conflict_pre_m", 1.2)),
+                "priv_conflict_post_m": float(getattr(self.args, "priv_conflict_post_m", 0.4)),
+                "priv_conflict_score_thr": float(getattr(self.args, "priv_conflict_score_thr", 0.25)),
+                "priv_conflict_bins_support": "obstacle_window_only",
+                "priv_conflict_phase_codes": {"0": "none", "1": "approach", "2": "inside", "3": "release"},
                 "pcr_ckpt": os.path.abspath(self.args.pcr_ckpt) if getattr(self.args, "pcr_ckpt", None) else None,
                 "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
                 "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
@@ -1862,9 +2163,10 @@ class EvalRunner:
             "by_difficulty": by_diff,
             "risk_bins": risk_bins_overall,
             "conflict_bins": conflict_bins_overall,
+            "priv_conflict_bins": priv_conflict_bins_overall,
             "resolved_protocol": self.resolved_protocol,
             "per_episode": [
-                {k: v for k, v in row.items() if k not in ("risk_bin_stats", "conflict_bin_stats")}
+                {k: v for k, v in row.items() if k not in ("risk_bin_stats", "conflict_bin_stats", "priv_conflict_bin_stats")}
                 for row in rows
             ],
         }
@@ -1931,6 +2233,26 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
+        "priv_conflict_score_mean",
+        "priv_high_conflict_steps",
+        "priv_high_conflict_step_rate",
+        "priv_obstacle_window_rate",
+        "priv_follow_pressure_rate",
+        "priv_avoid_pressure_rate",
+        "priv_conflict_y_raw_mean",
+        "priv_conflict_y_eff_mean",
+        "priv_conflict_w_mean",
+        "priv_conflict_signed_w_mean",
+        "priv_conflict_delta_y_mean",
+        "priv_non_conflict_delta_y_mean",
+        "conflict_suppression_index",
+        "relative_conflict_modulation",
+        "priv_window_phase_approach_rate",
+        "priv_window_phase_inside_rate",
+        "priv_window_phase_release_rate",
+        "priv_conflict_phase_approach_rate",
+        "priv_conflict_phase_inside_rate",
+        "priv_conflict_phase_release_rate",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
@@ -1964,6 +2286,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         row_out = dict(row)
         row_out.pop("risk_bin_stats", None)
         row_out.pop("conflict_bin_stats", None)
+        row_out.pop("priv_conflict_bin_stats", None)
         csv_rows.append(row_out)
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1995,6 +2318,12 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_memory",
             "row_not_released",
             "conflict_score",
+            "priv_conflict_score",
+            "priv_high_conflict",
+            "priv_obstacle_window",
+            "priv_follow_pressure",
+            "priv_avoid_pressure",
+            "priv_conflict_phase",
             "clearance_pp",
             "near_miss",
             "episode_collision",
@@ -2017,9 +2346,6 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
 
 
 def _write_mechanism_plots(metrics: Dict, out_dir: str) -> None:
-    risk_bins = metrics.get("risk_bins", [])
-    if not isinstance(risk_bins, list) or len(risk_bins) == 0:
-        return
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -2028,59 +2354,78 @@ def _write_mechanism_plots(metrics: Dict, out_dir: str) -> None:
         print(f"[Eval] mechanism plot skipped: matplotlib unavailable ({exc})", flush=True)
         return
 
-    labels = [str(b.get("bin", "")) for b in risk_bins]
-    xs = np.arange(len(labels), dtype=np.float32)
+    def _plot_bins(bin_key: str, title: str, xlabel: str, file_stem: str) -> None:
+        bins = metrics.get(bin_key, [])
+        if not isinstance(bins, list) or len(bins) == 0:
+            return
+        labels = [str(b.get("bin", "")) for b in bins]
+        xs = np.arange(len(labels), dtype=np.float32)
 
-    def vals(key: str) -> List[float]:
-        out = []
-        for item in risk_bins:
-            v = _safe_float(item.get(key, float("nan")), default=float("nan"))
-            out.append(v)
-        return out
+        def vals(key: str) -> List[float]:
+            return [_safe_float(item.get(key, float("nan")), default=float("nan")) for item in bins]
 
-    y_eff = vals("y_eff_mean")
-    w_vals = vals("w_mean")
-    success = vals("row_progress_success_mean")
-    collision = vals("collision_episode_rate")
-    steps = vals("steps")
-    episodes = vals("episode_count")
+        y_raw = vals("gate_y_raw_mean")
+        y_eff = vals("y_eff_mean")
+        suppression = vals("suppression_mean")
+        signed_w = vals("signed_w_mean")
+        success = vals("row_progress_success_mean")
+        collision = vals("collision_episode_rate")
+        steps = vals("steps")
+        episodes = vals("episode_count")
 
-    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.2), constrained_layout=True)
-    fig.suptitle("PCR Conflict Arbitration Mechanism by Follow-Risk Bin", fontsize=13)
+        fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.2), constrained_layout=True)
+        fig.suptitle(title, fontsize=13)
 
-    axes[0, 0].plot(xs, y_eff, marker="o", linewidth=2.0, color="#1f77b4")
-    axes[0, 0].set_title("Executed Follow Weight")
-    axes[0, 0].set_ylabel("y_eff mean")
-    axes[0, 0].set_ylim(0.0, 1.0)
+        axes[0, 0].plot(xs, y_raw, marker="o", linewidth=2.0, color="#5b7083", label="y_raw")
+        axes[0, 0].plot(xs, y_eff, marker="s", linewidth=2.0, color="#1f77b4", label="y_eff")
+        axes[0, 0].set_title("Follow Weight")
+        axes[0, 0].set_ylabel("mean")
+        axes[0, 0].set_ylim(0.0, 1.0)
+        axes[0, 0].legend(loc="best", frameon=False)
 
-    axes[0, 1].plot(xs, w_vals, marker="o", linewidth=2.0, color="#ff7f0e")
-    axes[0, 1].set_title("Conflict Prior")
-    axes[0, 1].set_ylabel("w mean")
-    axes[0, 1].set_ylim(0.0, 1.0)
+        axes[0, 1].plot(xs, suppression, marker="o", linewidth=2.0, color="#ff7f0e", label="y_raw - y_eff")
+        axes[0, 1].plot(xs, signed_w, marker="s", linewidth=2.0, color="#9467bd", label="signed_w")
+        axes[0, 1].axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
+        axes[0, 1].set_title("Conflict Modulation")
+        axes[0, 1].set_ylabel("mean")
+        axes[0, 1].legend(loc="best", frameon=False)
 
-    axes[1, 0].plot(xs, success, marker="o", linewidth=2.0, color="#2ca02c", label="row-progress score")
-    axes[1, 0].plot(xs, collision, marker="s", linewidth=2.0, color="#d62728", label="collision")
-    axes[1, 0].set_title("Row-Progress Score and Collision")
-    axes[1, 0].set_ylabel("score / rate")
-    axes[1, 0].set_ylim(0.0, 1.0)
-    axes[1, 0].legend(loc="best", frameon=False)
+        axes[1, 0].plot(xs, success, marker="o", linewidth=2.0, color="#2ca02c", label="row-progress score")
+        axes[1, 0].plot(xs, collision, marker="s", linewidth=2.0, color="#d62728", label="collision")
+        axes[1, 0].set_title("Row-Progress Score and Collision")
+        axes[1, 0].set_ylabel("score / rate")
+        axes[1, 0].set_ylim(0.0, 1.0)
+        axes[1, 0].legend(loc="best", frameon=False)
 
-    axes[1, 1].bar(xs - 0.18, steps, width=0.36, color="#9467bd", label="steps")
-    axes[1, 1].bar(xs + 0.18, episodes, width=0.36, color="#8c564b", label="episodes")
-    axes[1, 1].set_title("Bin Support")
-    axes[1, 1].set_ylabel("count")
-    axes[1, 1].legend(loc="best", frameon=False)
+        axes[1, 1].bar(xs - 0.18, steps, width=0.36, color="#9467bd", label="steps")
+        axes[1, 1].bar(xs + 0.18, episodes, width=0.36, color="#8c564b", label="episodes")
+        axes[1, 1].set_title("Bin Support")
+        axes[1, 1].set_ylabel("count")
+        axes[1, 1].legend(loc="best", frameon=False)
 
-    for ax in axes.reshape(-1):
-        ax.set_xticks(xs)
-        ax.set_xticklabels(labels, rotation=20, ha="right")
-        ax.grid(True, alpha=0.25)
-        ax.set_xlabel("risk_f bin")
+        for ax in axes.reshape(-1):
+            ax.set_xticks(xs)
+            ax.set_xticklabels(labels, rotation=20, ha="right")
+            ax.grid(True, alpha=0.25)
+            ax.set_xlabel(xlabel)
 
-    fig_path = os.path.join(out_dir, "mechanism_risk_bins.png")
-    fig.savefig(fig_path, dpi=220)
-    plt.close(fig)
-    print(f"[Eval] mechanism plot: {fig_path}", flush=True)
+        fig_path = os.path.join(out_dir, file_stem)
+        fig.savefig(fig_path, dpi=220)
+        plt.close(fig)
+        print(f"[Eval] mechanism plot: {fig_path}", flush=True)
+
+    _plot_bins(
+        "risk_bins",
+        "PCR Conflict Arbitration Mechanism by Follow-Risk Bin",
+        "risk_f bin",
+        "mechanism_risk_bins.png",
+    )
+    _plot_bins(
+        "priv_conflict_bins",
+        "PCR Conflict Arbitration Mechanism by Privileged Conflict Bin",
+        "privileged conflict score bin",
+        "mechanism_priv_conflict_bins.png",
+    )
 
 
 def parse_args():
@@ -2107,6 +2452,11 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=512)
     parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
     parser.add_argument("--stochastic", action="store_true", help="use stochastic policy sampling")
+    parser.add_argument(
+        "--generalize",
+        action="store_true",
+        help="s_pcr_new high-difficulty generalization eval: five rows, faster target, compressed row spacing",
+    )
     parser.add_argument(
         "--avoid_stage_override",
         type=int,
@@ -2162,6 +2512,11 @@ def parse_args():
         default=0.5,
         help="risk_F threshold used for narrow-gap/high-conflict region summaries",
     )
+    parser.add_argument("--priv_conflict_follow_thr", type=float, default=0.20)
+    parser.add_argument("--priv_conflict_avoid_thr", type=float, default=0.10)
+    parser.add_argument("--priv_conflict_pre_m", type=float, default=1.2)
+    parser.add_argument("--priv_conflict_post_m", type=float, default=0.4)
+    parser.add_argument("--priv_conflict_score_thr", type=float, default=0.25)
 
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--viewer", action="store_true", help="open Isaac Gym viewer during eval")
@@ -2169,6 +2524,10 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs/eval/highlevel")
 
     args, unknown = parser.parse_known_args()
+    if bool(getattr(args, "generalize", False)) and str(getattr(args, "task", "")) != "s_pcr_new":
+        parser.error("--generalize 仅支持 --task s_pcr_new")
+    if bool(getattr(args, "generalize", False)) and getattr(args, "avoid_stage_override", None) not in (None, 4):
+        parser.error("--generalize 固定 5 行障碍，只允许省略 --avoid_stage_override 或显式传 4")
     if not getattr(args, "pcr_ckpt", None) and getattr(args, "ckpt", None):
         args.pcr_ckpt = args.ckpt
     if not str(getattr(args, "pcr_ckpt", "") or "").strip():
@@ -2261,6 +2620,17 @@ def main():
         f"{overall['full_task_success_rate']:.4f} / {overall['strict_success_rate']:.4f} / "
         f"{overall['success_event_rate']:.4f} / {overall['success_event_and_collision_rate']:.4f} / "
         f"{overall['episode_collision_rate']:.4f} / {overall['timeout_or_other_rate']:.4f}"
+    )
+    print(
+        "Priv-conflict step/score/CSI/RCM: "
+        f"{overall['priv_high_conflict_step_rate']:.4f} / {overall['priv_conflict_score_mean']:.4f} / "
+        f"{overall['conflict_suppression_index']:.4f} / {overall['relative_conflict_modulation']:.4f}"
+    )
+    print(
+        "Priv-conflict signed_w/delta_y in/out: "
+        f"{overall['priv_conflict_signed_w_mean']:.4f} / "
+        f"{overall['priv_conflict_delta_y_mean']:.4f} / "
+        f"{overall['priv_non_conflict_delta_y_mean']:.4f}"
     )
     print(f"Follow MAE/RMSE [m]: {overall['follow_mae_m_mean']:.4f} / {overall['follow_rmse_m_mean']:.4f}")
     print(

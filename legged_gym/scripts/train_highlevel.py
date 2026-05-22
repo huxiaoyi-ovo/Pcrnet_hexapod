@@ -864,6 +864,10 @@ def _pcr_gate_command_conflict_diag(
     risk_a = env._risk_from_clearance(clearance_a, safe_d, free_d)
     row_current_valid = torch.zeros_like(risk_f)
     row_not_released = torch.zeros_like(risk_f)
+    current_row_front_edge = torch.zeros_like(risk_f)
+    current_row_back_edge = torch.zeros_like(risk_f)
+    robot_front_y = torch.zeros_like(risk_f)
+    robot_rear_y = torch.zeros_like(risk_f)
     if bool(getattr(env, "is_pcr_line_task", False)) and hasattr(env, "_compute_current_next_row_gap_state"):
         try:
             robot_pos = env.env.root_states[:, :3]
@@ -884,10 +888,12 @@ def _pcr_gate_command_conflict_diag(
             row_release_offset = float(getattr(env.reward_cfg, "avoid_row_release_offset", 0.20))
             robot_front_y = robot_pos[:, 1].to(device=cmd_f.device, dtype=cmd_f.dtype) + body_half_length
             robot_rear_y = robot_pos[:, 1].to(device=cmd_f.device, dtype=cmd_f.dtype) - body_half_length
+            current_row_front_edge = current_row_front_edge.to(device=cmd_f.device, dtype=cmd_f.dtype)
+            current_row_back_edge = current_row_back_edge.to(device=cmd_f.device, dtype=cmd_f.dtype)
             in_release_zone = (
                 current_row_valid.to(device=cmd_f.device)
-                & (robot_front_y >= current_row_front_edge.to(device=cmd_f.device, dtype=cmd_f.dtype))
-                & (robot_rear_y <= (current_row_back_edge.to(device=cmd_f.device, dtype=cmd_f.dtype) + row_release_offset))
+                & (robot_front_y >= current_row_front_edge)
+                & (robot_rear_y <= (current_row_back_edge + row_release_offset))
             )
             row_not_released = in_release_zone.to(dtype=cmd_f.dtype)
         except Exception as exc:
@@ -921,6 +927,10 @@ def _pcr_gate_command_conflict_diag(
         "risk_A": risk_a,
         "row_current_valid": row_current_valid,
         "row_not_released": row_not_released,
+        "current_row_front_edge": current_row_front_edge,
+        "current_row_back_edge": current_row_back_edge,
+        "robot_front_y": robot_front_y,
+        "robot_rear_y": robot_rear_y,
         "cmd_cos": cmd_cos,
         "conflict_score": torch.clamp(conflict_score, 0.0, 1.0),
         "post_safe_distance": torch.full_like(risk_f, safe_d),
@@ -1142,6 +1152,10 @@ def resolve_moe_gate_pcr(
         "fusion_formula_version": get_pcr_fusion_formula_version(w_mode),
         "row_current_valid": diag["row_current_valid"],
         "row_not_released": diag["row_not_released"],
+        "current_row_front_edge": diag["current_row_front_edge"],
+        "current_row_back_edge": diag["current_row_back_edge"],
+        "robot_front_y": diag["robot_front_y"],
+        "robot_rear_y": diag["robot_rear_y"],
         "risk_memory": risk_memory,
         "cmd_cos": diag["cmd_cos"],
         "conflict_score": diag["conflict_score"],
@@ -1838,6 +1852,17 @@ def build_resolved_protocol(
             "level_weights": [float(v) for v in list(weights)],
             "force_stage": getattr(getattr(env_impl.cfg, "terrain", None), "pcr_new_force_stage", None),
             "force_target_speed": getattr(nav_cfg, "pcr_new_force_target_speed", None),
+            "generalize": bool(getattr(nav_cfg, "pcr_new_generalize_enable", False)),
+            "generalize_speed_range": [
+                float(getattr(nav_cfg, "pcr_new_generalize_speed_min", 0.55)),
+                float(getattr(nav_cfg, "pcr_new_generalize_speed_max", 0.75)),
+            ] if bool(getattr(nav_cfg, "pcr_new_generalize_enable", False)) else None,
+            "generalize_row_spacing_ratio": getattr(
+                getattr(env_impl.cfg, "terrain", None),
+                "pcr_new_generalize_row_spacing_ratio",
+                None,
+            ),
+            "row_spacing_scale": getattr(getattr(env_impl.cfg, "terrain", None), "avoid_fixed_row_y_spacing_scale", None),
         }
     if extra:
         protocol.update(extra)

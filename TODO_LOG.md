@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-22 PCR w 真实冲突证据尺子
+
+- [x] ~~[P0] 将 PCR eval 的 w 机制统计从仅依赖 `risk_F / conflict_score` 扩展到 privileged obstacle-window 冲突口径：用障碍交互窗口、Follow 前进压力与 Avoid 横移压力生成 `priv_conflict_score / mask / phase`，先修正机制图和评测证据，不改当前策略训练主线。~~
+
 ## 2026-05-21 PCR learnedw2 终版 w 公式验证
 
 - [ ] [P0] 新增 `learnedw2` 作为独立 signed-w 公式实验线：保留旧 `learnedw` 单向 suppression 语义，`learnedw2` 使用 `w_s=2w-1` 的 signed conflict prior 与 `risk_A-risk_F` 安全修正；同步 `w_aux` 的 row/global 高置信样本，先做短训一致性验收再决定是否开长训。
@@ -2047,4 +2051,10 @@
 - [x] Must: 新增 `s_pcr_new`，完全继承 `s_pcr_line_avoid_basic` 的奖励、gap、成功判据与 PCR 口径，只把训练分布改成目标速度范围 × 障碍行数的二维课程，用于先在 play/eval 中验证旧模型泛化，再决定是否重训主表对照。
 - [x] Must: 修正 `s_pcr_new` 在 play/eval 首回合的二维课程口径，确保旧模型泛化观察与 stage override 不被初始 reset 的早期课程分布污染。
 - [x] Must: 补齐 `s_pcr_new` 的训练分布日志与评测记录，直接输出课程进度、level 比例、目标速度和实际行数，避免长训与论文候选评测只剩旧 stage 读数。
+- [x] Must: 给 `s_pcr_new` 增加 `--generalize` 高难评测口径，固定 5 行障碍、上移目标速度到 `[0.55,0.75]`，并将纵向行距压到主场景的 `0.85` 倍，用于论文泛化结果。
 - [x] Must: 保持 `row_not_released` 只用于 `w_aux` 监督与诊断，不进入 actor，确保训练输入可实机复现
+
+## 2026-05-22 PCR w 真实冲突评测收口
+
+- [x] Must: 将 `priv_conflict_bins` 收成障碍交互窗口内的真实冲突强度分桶，避免非冲突自由段混入论文机制图最低桶
+- [x] Must: 将障碍窗口阶段占比与高冲突阶段占比分开记录，并让旧 eval 输出在新冲突图入口处直接提示重跑

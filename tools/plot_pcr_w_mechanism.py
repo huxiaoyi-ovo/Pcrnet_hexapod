@@ -41,17 +41,22 @@ OUTCOME_FIELDS = [
 ]
 
 
-def _load_metrics(eval_dir: str) -> Dict:
+def _load_metrics(eval_dir: str, required_bins: Tuple[str, ...] = ("risk_bins",)) -> Dict:
     path = os.path.join(eval_dir, "metrics.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"metrics.json not found: {path}")
     with open(path, "r", encoding="utf-8") as f:
         metrics = json.load(f)
-    bins = metrics.get("risk_bins", None)
-    if not isinstance(bins, list) or len(bins) == 0:
+    missing_bins = []
+    for bin_key in dict.fromkeys(required_bins):
+        bins = metrics.get(bin_key, None)
+        if not isinstance(bins, list) or len(bins) == 0:
+            missing_bins.append(bin_key)
+    if missing_bins:
         raise ValueError(
-            f"{path} has no risk_bins. Re-run eval_highlevel.py with the latest code "
-            "before drawing the publication mechanism figure."
+            f"{path} has no required bin summaries {missing_bins}. "
+            "Re-run eval_highlevel.py with the latest conflict metrics, or choose "
+            "--main_bin/--mechanism_bin that exist in this eval output."
         )
     _validate_outcome_fields(metrics, path)
     return metrics
@@ -128,17 +133,21 @@ def _write_plot_data(
     labels: List[str],
     methods: List[Tuple[str, Dict, str]],
     min_steps: int,
+    bin_key: str,
 ) -> None:
     rows = []
     for method_key, metrics, method_name in methods:
-        for label, item in zip(labels, metrics["risk_bins"]):
+        for label, item in zip(labels, metrics[bin_key]):
             steps = int(_finite_float(item.get("steps", 0), 0.0))
             if steps < min_steps:
                 continue
             rows.append({
                 "method": method_name,
                 "method_key": method_key,
-                "risk_bin": label,
+                "bin_key": bin_key,
+                "bin": label,
+                "score_bin": label,
+                "risk_bin": label if bin_key == "risk_bins" else "",
                 "steps": steps,
                 "episode_count": int(_finite_float(item.get("episode_count", 0), 0.0)),
                 "gate_y_raw_mean": _finite_float(item.get("gate_y_raw_mean", float("nan"))),
@@ -221,7 +230,8 @@ def _selected_methods(args) -> List[Tuple[str, Dict, str]]:
         if not eval_dir:
             continue
         label = getattr(args, label_attr, "") or METHOD_STYLE[method_key]["label"]
-        methods.append((method_key, _load_metrics(eval_dir), label))
+        required_bins = (str(args.main_bin), str(args.mechanism_bin))
+        methods.append((method_key, _load_metrics(eval_dir, required_bins), label))
     if len(methods) < 2:
         raise ValueError(
             "PCR w mechanism figure needs at least two eval dirs among "
@@ -242,6 +252,16 @@ def _matched_bin_labels(methods: List[Tuple[str, Dict, str]], bin_key: str) -> L
     return labels
 
 
+def _bin_xlabel(bin_key: str) -> str:
+    if bin_key == "risk_bins":
+        return r"Follow-command risk $r_F$"
+    if bin_key == "conflict_bins":
+        return "Command conflict score"
+    if bin_key == "priv_conflict_bins":
+        return "Privileged conflict score"
+    return bin_key
+
+
 def _mechanism_series_for_method(
     metrics: Dict,
     method_key: str,
@@ -249,8 +269,8 @@ def _mechanism_series_for_method(
     bin_key: str = "risk_bins",
 ) -> Tuple[np.ndarray, np.ndarray, str]:
     if method_key == "learnedw2":
-        values, sems = _series(metrics, "w_support_correction_mean", "w_sem", min_steps, bin_key=bin_key)
-        return values, sems * 0.0, r"$\lambda w_s^\prime$"
+        values, sems = _series(metrics, "signed_w_active_mean", "w_sem", min_steps, bin_key=bin_key)
+        return values, sems * 0.0, r"$w_s^\prime$"
     if method_key == "learnedw":
         return (*_series(metrics, "w_mean", "w_sem", min_steps, bin_key=bin_key), r"$w$")
     if method_key == "geomw":
@@ -267,7 +287,7 @@ def draw_figure(args) -> Tuple[str, str]:
     import matplotlib.pyplot as plt
 
     methods = _selected_methods(args)
-    labels = _matched_bin_labels(methods, "risk_bins")
+    labels = _matched_bin_labels(methods, args.main_bin)
     has_learnedw = any(method_key in ("learnedw", "learnedw2") for method_key, _, _ in methods)
     has_learnedw2 = any(method_key == "learnedw2" for method_key, _, _ in methods)
 
@@ -303,10 +323,16 @@ def draw_figure(args) -> Tuple[str, str]:
 
     for method_key, metrics, label in methods:
         style = METHOD_STYLE[method_key]
-        y_eff, y_eff_sem = _series(metrics, "y_eff_mean", "y_eff_sem", args.min_steps)
-        suppression, suppression_sem = _series(metrics, "suppression_mean", "suppression_sem", args.min_steps)
-        _warn_sparse_series("A", label, y_eff, "risk_bins")
-        _warn_sparse_series("B", label, suppression, "risk_bins")
+        y_eff, y_eff_sem = _series(metrics, "y_eff_mean", "y_eff_sem", args.min_steps, bin_key=args.main_bin)
+        suppression, suppression_sem = _series(
+            metrics,
+            "suppression_mean",
+            "suppression_sem",
+            args.min_steps,
+            bin_key=args.main_bin,
+        )
+        _warn_sparse_series("A", label, y_eff, args.main_bin)
+        _warn_sparse_series("B", label, suppression, args.main_bin)
 
         ax_y.errorbar(
             x,
@@ -337,12 +363,12 @@ def draw_figure(args) -> Tuple[str, str]:
 
     ax_y.set_title("A. Executed follow weight")
     ax_y.set_ylabel(r"$y_{\mathrm{eff}}$")
-    ax_y.set_xlabel(r"Follow-command risk $r_F$")
+    ax_y.set_xlabel(_bin_xlabel(args.main_bin))
     ax_y.set_ylim(args.ymin, args.ymax)
 
     ax_supp.set_title("B. Follow-weight change")
     ax_supp.set_ylabel(r"$\Delta y = y_{\mathrm{raw}} - y_{\mathrm{eff}}$")
-    ax_supp.set_xlabel(r"Follow-command risk $r_F$")
+    ax_supp.set_xlabel(_bin_xlabel(args.main_bin))
     suppression_ymin = args.suppression_ymin
     if suppression_ymin is None:
         suppression_ymin = -0.45 if has_learnedw2 else 0.0
@@ -380,7 +406,7 @@ def draw_figure(args) -> Tuple[str, str]:
             )
         ax_conflict.set_title("C. Signed conflict correction")
         ax_conflict.set_ylabel(ylabel or r"$w$")
-        ax_conflict.set_xlabel(r"Follow-risk bin" if conflict_bin_key == "risk_bins" else r"Command conflict score")
+        ax_conflict.set_xlabel(_bin_xlabel(conflict_bin_key))
         ax_conflict.set_ylim(args.w_ymin, args.w_ymax)
         ax_conflict.axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
         ax_conflict.set_xticks(conflict_x)
@@ -444,7 +470,7 @@ def draw_figure(args) -> Tuple[str, str]:
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
 
-    _write_plot_data(out_dir, labels, methods, args.min_steps)
+    _write_plot_data(out_dir, labels, methods, args.min_steps, args.main_bin)
     return png_path, pdf_path
 
 
@@ -462,7 +488,7 @@ def parse_args():
     parser.add_argument("--geomw_label", default="MoE-y + geom-w", help="Legend label for geom-w.")
     parser.add_argument("--learnedw_label", default="MoE-y + learned-w", help="Legend label for learned-w.")
     parser.add_argument("--learnedw2_label", default="MoE-y + learnedw2", help="Legend label for learnedw2.")
-    parser.add_argument("--min_steps", type=int, default=50, help="Hide risk bins with fewer steps.")
+    parser.add_argument("--min_steps", type=int, default=50, help="Hide bins with fewer steps.")
     parser.add_argument("--dpi", type=int, default=400, help="PNG resolution.")
     parser.add_argument("--ymin", type=float, default=0.0)
     parser.add_argument("--ymax", type=float, default=1.0)
@@ -471,9 +497,15 @@ def parse_args():
     parser.add_argument("--w_ymin", type=float, default=-0.35)
     parser.add_argument("--w_ymax", type=float, default=0.35)
     parser.add_argument(
+        "--main_bin",
+        default="priv_conflict_bins",
+        choices=["risk_bins", "conflict_bins", "priv_conflict_bins"],
+        help="Bin source for the follow-weight and follow-weight-change panels.",
+    )
+    parser.add_argument(
         "--mechanism_bin",
-        default="risk_bins",
-        choices=["risk_bins", "conflict_bins"],
+        default="priv_conflict_bins",
+        choices=["risk_bins", "conflict_bins", "priv_conflict_bins"],
         help="Bin source for the signed-w mechanism panel.",
     )
     parser.add_argument("--rate_ymax", type=float, default=0.5)

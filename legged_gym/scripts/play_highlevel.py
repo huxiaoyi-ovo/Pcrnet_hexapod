@@ -1594,8 +1594,18 @@ def _maybe_apply_pcr_new_play_overrides(args, env_cfg) -> None:
     # Play/eval should expose the final mixed 2D distribution immediately.
     # Training keeps the configured episode-based schedule.
     nav_cfg.pcr_new_curriculum_progress_override = 1.0
-    stage_override = getattr(args, "avoid_stage_override", None)
     terrain_cfg = getattr(env_cfg, "terrain", None)
+    if bool(getattr(args, "generalize", False)):
+        if terrain_cfg is None:
+            raise ValueError("s_pcr_new --generalize requires terrain config.")
+        nav_cfg.pcr_new_generalize_enable = True
+        nav_cfg.pcr_new_generalize_speed_min = 0.55
+        nav_cfg.pcr_new_generalize_speed_max = 0.75
+        terrain_cfg.pcr_new_force_stage = 4
+        spacing = float(getattr(terrain_cfg, "avoid_fixed_row_y_spacing_scale", 1.0))
+        terrain_cfg.pcr_new_generalize_row_spacing_ratio = 0.85
+        terrain_cfg.avoid_fixed_row_y_spacing_scale = spacing * terrain_cfg.pcr_new_generalize_row_spacing_ratio
+    stage_override = getattr(args, "avoid_stage_override", None)
     if stage_override is not None and terrain_cfg is not None:
         terrain_cfg.pcr_new_force_stage = int(stage_override)
 
@@ -2077,6 +2087,11 @@ def parse_args():
         help="s_avoid_basic 回放阶段覆盖：固定查看指定课程阶段",
     )
     parser.add_argument(
+        "--generalize",
+        action="store_true",
+        help="s_pcr_new 高难泛化评测：5 行障碍、目标速度上移、纵向行距压缩",
+    )
+    parser.add_argument(
         "--expert_k_yaw",
         type=float,
         default=None,
@@ -2196,6 +2211,10 @@ def parse_args():
         args.debug_cmd = True
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
+    if bool(getattr(args, "generalize", False)) and args.task != "s_pcr_new":
+        parser.error("--generalize 仅支持 --task s_pcr_new")
+    if bool(getattr(args, "generalize", False)) and getattr(args, "avoid_stage_override", None) not in (None, 4):
+        parser.error("--generalize 固定 5 行障碍，只允许省略 --avoid_stage_override 或显式传 4")
     if getattr(args, "skill", None) is None:
         args.skill = "follow"
     th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
