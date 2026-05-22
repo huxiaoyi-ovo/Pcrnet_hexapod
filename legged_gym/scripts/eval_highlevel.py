@@ -202,6 +202,7 @@ def _empty_risk_bin_state() -> list:
             "w_sq_sum": 0.0,
             "signed_w_sum": 0.0,
             "signed_w_active_sum": 0.0,
+            "risk_memory_sum": 0.0,
             "risk_f_sum": 0.0,
             "risk_a_sum": 0.0,
             "risk_delta_sum": 0.0,
@@ -1019,6 +1020,7 @@ class EvalRunner:
                             bin_state["w_sq_sum"] += w_v * w_v
                             bin_state["signed_w_sum"] += signed_w_v
                             bin_state["signed_w_active_sum"] += signed_w_active_v
+                            bin_state["risk_memory_sum"] += risk_memory_v
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
@@ -1041,6 +1043,7 @@ class EvalRunner:
                             bin_state["w_sq_sum"] += w_v * w_v
                             bin_state["signed_w_sum"] += signed_w_v
                             bin_state["signed_w_active_sum"] += signed_w_active_v
+                            bin_state["risk_memory_sum"] += risk_memory_v
                             bin_state["risk_f_sum"] += risk_f_v
                             bin_state["risk_a_sum"] += risk_a_v
                             bin_state["risk_delta_sum"] += risk_f_v - risk_a_v
@@ -1402,6 +1405,7 @@ class EvalRunner:
                         "w_sq_sum",
                         "signed_w_sum",
                         "signed_w_active_sum",
+                        "risk_memory_sum",
                         "risk_f_sum",
                         "risk_a_sum",
                         "risk_delta_sum",
@@ -1456,6 +1460,7 @@ class EvalRunner:
                     "w_sem": _sem_from_sums(bins[idx]["w_sum"], bins[idx]["w_sq_sum"]),
                     "signed_w_mean": bins[idx]["signed_w_sum"] / float(steps) if steps > 0 else float("nan"),
                     "signed_w_active_mean": bins[idx]["signed_w_active_sum"] / float(steps) if steps > 0 else float("nan"),
+                    "risk_memory_mean": bins[idx]["risk_memory_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_f_mean": bins[idx]["risk_f_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_a_mean": bins[idx]["risk_a_sum"] / float(steps) if steps > 0 else float("nan"),
                     "risk_delta_mean": bins[idx]["risk_delta_sum"] / float(steps) if steps > 0 else float("nan"),

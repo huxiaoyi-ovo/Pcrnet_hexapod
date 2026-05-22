@@ -114,6 +114,15 @@ def _overall_rate(metrics: Dict, key: str) -> float:
     return _finite_float(metrics.get("overall", {}).get(key, float("nan")))
 
 
+def _warn_sparse_series(panel: str, method_label: str, values: np.ndarray, bin_key: str) -> None:
+    valid = int(np.isfinite(values).sum())
+    if valid <= 1:
+        print(
+            f"[Warn][plot] {panel}: {method_label} has only {valid} valid point(s) "
+            f"under {bin_key}; no visible line can be drawn."
+        )
+
+
 def _write_plot_data(
     out_dir: str,
     labels: List[str],
@@ -136,6 +145,12 @@ def _write_plot_data(
                 "y_eff_mean": _finite_float(item.get("y_eff_mean", float("nan"))),
                 "suppression_mean": _finite_float(item.get("suppression_mean", float("nan"))),
                 "w_mean": _finite_float(item.get("w_mean", float("nan"))),
+                "signed_w_mean": _finite_float(item.get("signed_w_mean", float("nan"))),
+                "signed_w_active_mean": _finite_float(item.get("signed_w_active_mean", float("nan"))),
+                "risk_memory_mean": _finite_float(item.get("risk_memory_mean", float("nan"))),
+                "risk_delta_mean": _finite_float(item.get("risk_delta_mean", float("nan"))),
+                "w_support_correction_mean": _finite_float(item.get("w_support_correction_mean", float("nan"))),
+                "risk_diff_correction_mean": _finite_float(item.get("risk_diff_correction_mean", float("nan"))),
                 "row_progress_score": _finite_float(item.get("row_progress_success_mean", float("nan"))),
                 "success_episode_rate": _finite_float(item.get("success_episode_rate", float("nan"))),
                 "success_event_episode_rate": _finite_float(item.get("success_event_episode_rate", float("nan"))),
@@ -227,6 +242,24 @@ def _matched_bin_labels(methods: List[Tuple[str, Dict, str]], bin_key: str) -> L
     return labels
 
 
+def _mechanism_series_for_method(
+    metrics: Dict,
+    method_key: str,
+    min_steps: int,
+    bin_key: str = "risk_bins",
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    if method_key == "learnedw2":
+        values, sems = _series(metrics, "w_support_correction_mean", "w_sem", min_steps, bin_key=bin_key)
+        return values, sems * 0.0, r"$\lambda w_s^\prime$"
+    if method_key == "learnedw":
+        return (*_series(metrics, "w_mean", "w_sem", min_steps, bin_key=bin_key), r"$w$")
+    if method_key == "geomw":
+        return (*_series(metrics, "w_mean", "w_sem", min_steps, bin_key=bin_key), r"$w$")
+    values = np.full(len(metrics.get(bin_key, [])), np.nan, dtype=np.float64)
+    sems = np.full_like(values, np.nan)
+    return values, sems, r"$w$"
+
+
 def draw_figure(args) -> Tuple[str, str]:
     import matplotlib
 
@@ -272,6 +305,8 @@ def draw_figure(args) -> Tuple[str, str]:
         style = METHOD_STYLE[method_key]
         y_eff, y_eff_sem = _series(metrics, "y_eff_mean", "y_eff_sem", args.min_steps)
         suppression, suppression_sem = _series(metrics, "suppression_mean", "suppression_sem", args.min_steps)
+        _warn_sparse_series("A", label, y_eff, "risk_bins")
+        _warn_sparse_series("B", label, suppression, "risk_bins")
 
         ax_y.errorbar(
             x,
@@ -280,9 +315,11 @@ def draw_figure(args) -> Tuple[str, str]:
             label=label,
             color=style["color"],
             marker=style["marker"],
+            linestyle="-",
             linewidth=2.0,
             markersize=5.0,
             capsize=2.5,
+            zorder=3,
         )
         ax_supp.errorbar(
             x,
@@ -291,9 +328,11 @@ def draw_figure(args) -> Tuple[str, str]:
             label=label,
             color=style["color"],
             marker=style["marker"],
+            linestyle="-",
             linewidth=2.0,
             markersize=5.0,
             capsize=2.5,
+            zorder=3,
         )
 
     ax_y.set_title("A. Executed follow weight")
@@ -312,11 +351,20 @@ def draw_figure(args) -> Tuple[str, str]:
         ax_supp.axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
 
     if ax_conflict is not None:
-        conflict_labels = _matched_bin_labels(methods, "conflict_bins")
+        conflict_bin_key = args.mechanism_bin
+        conflict_labels = _matched_bin_labels(methods, conflict_bin_key)
         conflict_x = np.arange(len(conflict_labels), dtype=np.float64)
+        ylabel = None
         for method_key, metrics, label in methods:
             style = METHOD_STYLE[method_key]
-            w_mean, w_sem = _series(metrics, "w_mean", "w_sem", args.min_steps, bin_key="conflict_bins")
+            w_mean, w_sem, ylabel_i = _mechanism_series_for_method(
+                metrics,
+                method_key,
+                args.min_steps,
+                bin_key=conflict_bin_key,
+            )
+            _warn_sparse_series("C", label, w_mean, conflict_bin_key)
+            ylabel = ylabel or ylabel_i
             ax_conflict.errorbar(
                 conflict_x,
                 w_mean,
@@ -324,14 +372,17 @@ def draw_figure(args) -> Tuple[str, str]:
                 label=label,
                 color=style["color"],
                 marker=style["marker"],
+                linestyle="-",
                 linewidth=2.0,
                 markersize=5.0,
                 capsize=2.5,
+                zorder=3,
             )
-        ax_conflict.set_title("C. Conflict-conditioned weight")
-        ax_conflict.set_ylabel(r"$w$")
-        ax_conflict.set_xlabel(r"Command conflict score")
+        ax_conflict.set_title("C. Signed conflict correction")
+        ax_conflict.set_ylabel(ylabel or r"$w$")
+        ax_conflict.set_xlabel(r"Follow-risk bin" if conflict_bin_key == "risk_bins" else r"Command conflict score")
         ax_conflict.set_ylim(args.w_ymin, args.w_ymax)
+        ax_conflict.axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
         ax_conflict.set_xticks(conflict_x)
         ax_conflict.set_xticklabels(conflict_labels, rotation=25, ha="right")
 
@@ -417,8 +468,14 @@ def parse_args():
     parser.add_argument("--ymax", type=float, default=1.0)
     parser.add_argument("--suppression_ymin", type=float, default=None)
     parser.add_argument("--suppression_ymax", type=float, default=0.45)
-    parser.add_argument("--w_ymin", type=float, default=0.0)
-    parser.add_argument("--w_ymax", type=float, default=1.0)
+    parser.add_argument("--w_ymin", type=float, default=-0.35)
+    parser.add_argument("--w_ymax", type=float, default=0.35)
+    parser.add_argument(
+        "--mechanism_bin",
+        default="risk_bins",
+        choices=["risk_bins", "conflict_bins"],
+        help="Bin source for the signed-w mechanism panel.",
+    )
     parser.add_argument("--rate_ymax", type=float, default=0.5)
     parser.add_argument("--outcome_label_min", type=float, default=0.055, help="Hide tiny stacked-bar labels below this rate.")
     parser.add_argument("--title", default="", help="Optional figure title.")
