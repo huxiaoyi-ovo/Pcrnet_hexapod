@@ -63,6 +63,7 @@
 ## 2026-05-22 PCR w 真实冲突证据尺子
 
 - [x] ~~[P0] 将 PCR eval 的 w 机制统计从仅依赖 `risk_F / conflict_score` 扩展到 privileged obstacle-window 冲突口径：用障碍交互窗口、Follow 前进压力与 Avoid 横移压力生成 `priv_conflict_score / mask / phase`，先修正机制图和评测证据，不改当前策略训练主线。~~
+- [x] ~~[P0] 收紧 PCR eval 的 privileged conflict 尺子：避免多行当前 row 交互窗口覆盖整段 episode，补 phase 内 `w / y_eff-y_raw` 统计与过宽窗口警告；该 row 真值尺子只用于评测诊断和训练期监督讨论，不进入 actor 输入。~~
 
 ## 2026-05-21 PCR learnedw2 终版 w 公式验证
 

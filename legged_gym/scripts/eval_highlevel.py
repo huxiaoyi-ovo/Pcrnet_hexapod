@@ -235,8 +235,8 @@ def _privileged_conflict_diag(args, gate_diag: Dict[str, torch.Tensor]) -> Dict[
     if torch.is_tensor(cmd_a) and cmd_a.shape[-1] >= 1:
         avoid_lateral_abs = torch.abs(cmd_a[:, 0].to(device=risk_ref.device, dtype=risk_ref.dtype))
 
-    pre_m = float(getattr(args, "priv_conflict_pre_m", 1.2))
-    post_m = float(getattr(args, "priv_conflict_post_m", 0.4))
+    pre_m = float(getattr(args, "priv_conflict_pre_m", 0.6))
+    post_m = float(getattr(args, "priv_conflict_post_m", 0.3))
     obstacle_window = (
         row_valid
         & (robot_front > (row_front - pre_m))
@@ -372,6 +372,15 @@ class EpisodeAccumulator:
     priv_conflict_phase_approach_steps: int = 0
     priv_conflict_phase_inside_steps: int = 0
     priv_conflict_phase_release_steps: int = 0
+    priv_conflict_phase_approach_w_sum: float = 0.0
+    priv_conflict_phase_inside_w_sum: float = 0.0
+    priv_conflict_phase_release_w_sum: float = 0.0
+    priv_conflict_phase_approach_signed_w_sum: float = 0.0
+    priv_conflict_phase_inside_signed_w_sum: float = 0.0
+    priv_conflict_phase_release_signed_w_sum: float = 0.0
+    priv_conflict_phase_approach_delta_y_sum: float = 0.0
+    priv_conflict_phase_inside_delta_y_sum: float = 0.0
+    priv_conflict_phase_release_delta_y_sum: float = 0.0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -1093,10 +1102,19 @@ class EvalRunner:
                             ai.priv_conflict_delta_y_sum += delta_y_v
                             if priv_conflict_phase_v == 1:
                                 ai.priv_conflict_phase_approach_steps += 1
+                                ai.priv_conflict_phase_approach_w_sum += w_v
+                                ai.priv_conflict_phase_approach_signed_w_sum += signed_w_v
+                                ai.priv_conflict_phase_approach_delta_y_sum += delta_y_v
                             elif priv_conflict_phase_v == 2:
                                 ai.priv_conflict_phase_inside_steps += 1
+                                ai.priv_conflict_phase_inside_w_sum += w_v
+                                ai.priv_conflict_phase_inside_signed_w_sum += signed_w_v
+                                ai.priv_conflict_phase_inside_delta_y_sum += delta_y_v
                             elif priv_conflict_phase_v == 3:
                                 ai.priv_conflict_phase_release_steps += 1
+                                ai.priv_conflict_phase_release_w_sum += w_v
+                                ai.priv_conflict_phase_release_signed_w_sum += signed_w_v
+                                ai.priv_conflict_phase_release_delta_y_sum += delta_y_v
                         else:
                             ai.priv_non_conflict_steps += 1
                             ai.priv_non_conflict_delta_y_sum += delta_y_v
@@ -1447,6 +1465,45 @@ class EvalRunner:
                                 ai.priv_conflict_phase_release_steps / priv_conflict_denom
                                 if ai.priv_conflict_steps > 0 else float("nan")
                             ),
+                            "priv_conflict_phase_approach_steps": ai.priv_conflict_phase_approach_steps,
+                            "priv_conflict_phase_inside_steps": ai.priv_conflict_phase_inside_steps,
+                            "priv_conflict_phase_release_steps": ai.priv_conflict_phase_release_steps,
+                            "priv_conflict_phase_approach_w_mean": (
+                                ai.priv_conflict_phase_approach_w_sum / float(ai.priv_conflict_phase_approach_steps)
+                                if ai.priv_conflict_phase_approach_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_inside_w_mean": (
+                                ai.priv_conflict_phase_inside_w_sum / float(ai.priv_conflict_phase_inside_steps)
+                                if ai.priv_conflict_phase_inside_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_release_w_mean": (
+                                ai.priv_conflict_phase_release_w_sum / float(ai.priv_conflict_phase_release_steps)
+                                if ai.priv_conflict_phase_release_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_approach_signed_w_mean": (
+                                ai.priv_conflict_phase_approach_signed_w_sum / float(ai.priv_conflict_phase_approach_steps)
+                                if ai.priv_conflict_phase_approach_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_inside_signed_w_mean": (
+                                ai.priv_conflict_phase_inside_signed_w_sum / float(ai.priv_conflict_phase_inside_steps)
+                                if ai.priv_conflict_phase_inside_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_release_signed_w_mean": (
+                                ai.priv_conflict_phase_release_signed_w_sum / float(ai.priv_conflict_phase_release_steps)
+                                if ai.priv_conflict_phase_release_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_approach_delta_y_mean": (
+                                ai.priv_conflict_phase_approach_delta_y_sum / float(ai.priv_conflict_phase_approach_steps)
+                                if ai.priv_conflict_phase_approach_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_inside_delta_y_mean": (
+                                ai.priv_conflict_phase_inside_delta_y_sum / float(ai.priv_conflict_phase_inside_steps)
+                                if ai.priv_conflict_phase_inside_steps > 0 else float("nan")
+                            ),
+                            "priv_conflict_phase_release_delta_y_mean": (
+                                ai.priv_conflict_phase_release_delta_y_sum / float(ai.priv_conflict_phase_release_steps)
+                                if ai.priv_conflict_phase_release_steps > 0 else float("nan")
+                            ),
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
                             "rotate_only_rate": ai.rotate_only_steps / denom_steps,
@@ -1769,6 +1826,33 @@ class EvalRunner:
                 ),
                 "priv_conflict_phase_release_rate": _weighted_step_mean(
                     sub_rows, "priv_conflict_phase_release_rate", "priv_high_conflict_steps"
+                ),
+                "priv_conflict_phase_approach_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_approach_w_mean", "priv_conflict_phase_approach_steps"
+                ),
+                "priv_conflict_phase_inside_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_inside_w_mean", "priv_conflict_phase_inside_steps"
+                ),
+                "priv_conflict_phase_release_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_release_w_mean", "priv_conflict_phase_release_steps"
+                ),
+                "priv_conflict_phase_approach_signed_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_approach_signed_w_mean", "priv_conflict_phase_approach_steps"
+                ),
+                "priv_conflict_phase_inside_signed_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_inside_signed_w_mean", "priv_conflict_phase_inside_steps"
+                ),
+                "priv_conflict_phase_release_signed_w_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_release_signed_w_mean", "priv_conflict_phase_release_steps"
+                ),
+                "priv_conflict_phase_approach_delta_y_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_approach_delta_y_mean", "priv_conflict_phase_approach_steps"
+                ),
+                "priv_conflict_phase_inside_delta_y_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_inside_delta_y_mean", "priv_conflict_phase_inside_steps"
+                ),
+                "priv_conflict_phase_release_delta_y_mean": _weighted_step_mean(
+                    sub_rows, "priv_conflict_phase_release_delta_y_mean", "priv_conflict_phase_release_steps"
                 ),
                 "priv_conflict_visited_episode_rate": len(visited) / float(max(1, len(sub_rows))),
                 "priv_conflict_visited_collision_rate": (
@@ -2143,8 +2227,8 @@ class EvalRunner:
                 ),
                 "priv_conflict_follow_thr": float(getattr(self.args, "priv_conflict_follow_thr", 0.20)),
                 "priv_conflict_avoid_thr": float(getattr(self.args, "priv_conflict_avoid_thr", 0.10)),
-                "priv_conflict_pre_m": float(getattr(self.args, "priv_conflict_pre_m", 1.2)),
-                "priv_conflict_post_m": float(getattr(self.args, "priv_conflict_post_m", 0.4)),
+                "priv_conflict_pre_m": float(getattr(self.args, "priv_conflict_pre_m", 0.6)),
+                "priv_conflict_post_m": float(getattr(self.args, "priv_conflict_post_m", 0.3)),
                 "priv_conflict_score_thr": float(getattr(self.args, "priv_conflict_score_thr", 0.25)),
                 "priv_conflict_bins_support": "obstacle_window_only",
                 "priv_conflict_phase_codes": {"0": "none", "1": "approach", "2": "inside", "3": "release"},
@@ -2253,6 +2337,18 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "priv_conflict_phase_approach_rate",
         "priv_conflict_phase_inside_rate",
         "priv_conflict_phase_release_rate",
+        "priv_conflict_phase_approach_steps",
+        "priv_conflict_phase_inside_steps",
+        "priv_conflict_phase_release_steps",
+        "priv_conflict_phase_approach_w_mean",
+        "priv_conflict_phase_inside_w_mean",
+        "priv_conflict_phase_release_w_mean",
+        "priv_conflict_phase_approach_signed_w_mean",
+        "priv_conflict_phase_inside_signed_w_mean",
+        "priv_conflict_phase_release_signed_w_mean",
+        "priv_conflict_phase_approach_delta_y_mean",
+        "priv_conflict_phase_inside_delta_y_mean",
+        "priv_conflict_phase_release_delta_y_mean",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
@@ -2514,8 +2610,18 @@ def parse_args():
     )
     parser.add_argument("--priv_conflict_follow_thr", type=float, default=0.20)
     parser.add_argument("--priv_conflict_avoid_thr", type=float, default=0.10)
-    parser.add_argument("--priv_conflict_pre_m", type=float, default=1.2)
-    parser.add_argument("--priv_conflict_post_m", type=float, default=0.4)
+    parser.add_argument(
+        "--priv_conflict_pre_m",
+        type=float,
+        default=0.6,
+        help="front-edge approach window [m] for eval-only privileged conflict evidence",
+    )
+    parser.add_argument(
+        "--priv_conflict_post_m",
+        type=float,
+        default=0.3,
+        help="rear-edge release window [m] for eval-only privileged conflict evidence",
+    )
     parser.add_argument("--priv_conflict_score_thr", type=float, default=0.25)
 
     parser.add_argument("--headless", action="store_true", default=True)
@@ -2632,6 +2738,23 @@ def main():
         f"{overall['priv_conflict_delta_y_mean']:.4f} / "
         f"{overall['priv_non_conflict_delta_y_mean']:.4f}"
     )
+    print(
+        "Priv-conflict phase signed_w approach/inside/release: "
+        f"{overall['priv_conflict_phase_approach_signed_w_mean']:.4f} / "
+        f"{overall['priv_conflict_phase_inside_signed_w_mean']:.4f} / "
+        f"{overall['priv_conflict_phase_release_signed_w_mean']:.4f}"
+    )
+    print(
+        "Priv-conflict phase delta_y approach/inside/release: "
+        f"{overall['priv_conflict_phase_approach_delta_y_mean']:.4f} / "
+        f"{overall['priv_conflict_phase_inside_delta_y_mean']:.4f} / "
+        f"{overall['priv_conflict_phase_release_delta_y_mean']:.4f}"
+    )
+    if overall["priv_obstacle_window_rate"] >= 0.95:
+        print(
+            "[Warn] privileged obstacle window covers almost the full eval trace; "
+            "tighten --priv_conflict_pre_m/--priv_conflict_post_m before using mechanism plots as paper evidence."
+        )
     print(f"Follow MAE/RMSE [m]: {overall['follow_mae_m_mean']:.4f} / {overall['follow_rmse_m_mean']:.4f}")
     print(
         "Time-to-success [s] mean/med/p95: "
