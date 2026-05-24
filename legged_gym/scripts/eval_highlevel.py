@@ -381,6 +381,20 @@ class EpisodeAccumulator:
     priv_conflict_phase_approach_delta_y_sum: float = 0.0
     priv_conflict_phase_inside_delta_y_sum: float = 0.0
     priv_conflict_phase_release_delta_y_sum: float = 0.0
+    target_bearing_abs_sum: float = 0.0
+    target_bearing_abs_max: float = 0.0
+    target_bearing_abs_samples: list = field(default_factory=list)
+    target_in_fov_steps: int = 0
+    target_near_fov_edge_steps: int = 0
+    target_lost_steps: int = 0
+    target_lost_current_steps: int = 0
+    target_lost_max_consecutive_steps: int = 0
+    target_lost_event: bool = False
+    target_conflict_bearing_abs_sum: float = 0.0
+    target_conflict_bearing_abs_max: float = 0.0
+    target_conflict_in_fov_steps: int = 0
+    target_conflict_near_fov_edge_steps: int = 0
+    target_conflict_lost_steps: int = 0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -789,6 +803,12 @@ class EvalRunner:
         w_trigger_threshold = float(getattr(self.args, "w_trigger_threshold", 0.5))
         gate_region_risk_threshold = float(getattr(self.args, "gate_region_risk_threshold", 0.5))
         progress_interval_s = max(0.0, float(getattr(self.args, "progress_interval_s", 5.0)))
+        target_rgb_half_fov_rad = math.radians(0.5 * float(getattr(self.args, "target_rgb_fov_deg", 69.4)))
+        target_fov_margin_rad = math.radians(float(getattr(self.args, "target_fov_margin_deg", 3.0)))
+        target_near_edge_margin_rad = math.radians(float(getattr(self.args, "target_near_fov_edge_margin_deg", 5.0)))
+        target_in_fov_limit_rad = max(1e-6, target_rgb_half_fov_rad - target_fov_margin_rad)
+        target_near_edge_start_rad = max(0.0, target_in_fov_limit_rad - target_near_edge_margin_rad)
+        target_lost_k = max(1, int(getattr(self.args, "target_lost_k_eval", 5)))
 
         global_episode_idx = 0
         eval_start_t = time.perf_counter()
@@ -854,6 +874,21 @@ class EvalRunner:
                     valid_follow = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
                 else:
                     valid_follow = freeze_timer <= 1e-6
+
+                follow_goal_obs = obs.get("follow_goal", obs.get("goal", None)) if isinstance(obs, dict) else None
+                if torch.is_tensor(follow_goal_obs) and follow_goal_obs.shape[-1] >= 2:
+                    target_bearing = torch.atan2(follow_goal_obs[:, 0], follow_goal_obs[:, 1])
+                    target_bearing_abs = torch.abs(target_bearing)
+                    target_in_fov = target_bearing_abs <= target_in_fov_limit_rad
+                    target_near_fov_edge = (
+                        (target_bearing_abs > target_near_edge_start_rad)
+                        & (target_bearing_abs <= target_in_fov_limit_rad)
+                    )
+                else:
+                    target_bearing = torch.full((self.env.num_envs,), float("nan"), device=self.device)
+                    target_bearing_abs = torch.full((self.env.num_envs,), float("nan"), device=self.device)
+                    target_in_fov = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+                    target_near_fov_edge = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
 
                 t_pol0 = time.perf_counter()
                 cmd_raw, gate_y, gate_diag = self._policy_step(
@@ -980,6 +1015,29 @@ class EvalRunner:
                     progress_val = float(np.clip(progress_val, 0.0, 1.0))
                     ai.progress_ratio_best = max(ai.progress_ratio_best, progress_val)
                     ai.progress_reached = ai.progress_reached or (progress_val > 0.0)
+
+                    target_bearing_v = _safe_float(target_bearing[i].item(), default=float("nan"))
+                    target_bearing_abs_v = _safe_float(target_bearing_abs[i].item(), default=float("nan"))
+                    target_in_fov_v = bool(target_in_fov[i].item())
+                    target_near_fov_edge_v = bool(target_near_fov_edge[i].item())
+                    if math.isfinite(target_bearing_abs_v):
+                        ai.target_bearing_abs_sum += target_bearing_abs_v
+                        ai.target_bearing_abs_max = max(ai.target_bearing_abs_max, target_bearing_abs_v)
+                        ai.target_bearing_abs_samples.append(target_bearing_abs_v)
+                    ai.target_in_fov_steps += int(target_in_fov_v)
+                    ai.target_near_fov_edge_steps += int(target_near_fov_edge_v)
+                    if target_in_fov_v:
+                        ai.target_lost_current_steps = 0
+                    else:
+                        ai.target_lost_steps += 1
+                        ai.target_lost_current_steps += 1
+                        ai.target_lost_max_consecutive_steps = max(
+                            ai.target_lost_max_consecutive_steps,
+                            ai.target_lost_current_steps,
+                        )
+                        if ai.target_lost_current_steps >= target_lost_k:
+                            ai.target_lost_event = True
+
                     collision_now = bool(episode_collision[i].item())
                     if collision_now and not ai.episode_collision:
                         ai.t_collision_s = float(ai.step_hl) * float(self.env.high_level_dt)
@@ -1100,6 +1158,15 @@ class EvalRunner:
                             ai.priv_conflict_w_sum += w_v
                             ai.priv_conflict_signed_w_sum += signed_w_v
                             ai.priv_conflict_delta_y_sum += delta_y_v
+                            if math.isfinite(target_bearing_abs_v):
+                                ai.target_conflict_bearing_abs_sum += target_bearing_abs_v
+                                ai.target_conflict_bearing_abs_max = max(
+                                    ai.target_conflict_bearing_abs_max,
+                                    target_bearing_abs_v,
+                                )
+                            ai.target_conflict_in_fov_steps += int(target_in_fov_v)
+                            ai.target_conflict_near_fov_edge_steps += int(target_near_fov_edge_v)
+                            ai.target_conflict_lost_steps += int(not target_in_fov_v)
                             if priv_conflict_phase_v == 1:
                                 ai.priv_conflict_phase_approach_steps += 1
                                 ai.priv_conflict_phase_approach_w_sum += w_v
@@ -1232,6 +1299,15 @@ class EvalRunner:
                                     "time_s": float(ai.step_hl) * float(self.env.high_level_dt),
                                     "progress": float(progress_val),
                                     "follow_err_m": follow_err_step,
+                                    "target_bearing_rad": target_bearing_v,
+                                    "target_bearing_abs_rad": target_bearing_abs_v,
+                                    "target_bearing_abs_deg": (
+                                        target_bearing_abs_v * 180.0 / math.pi
+                                        if math.isfinite(target_bearing_abs_v) else float("nan")
+                                    ),
+                                    "target_in_rgb_fov": int(target_in_fov_v),
+                                    "target_near_rgb_fov_edge": int(target_near_fov_edge_v),
+                                    "target_lost_current_steps": int(ai.target_lost_current_steps),
                                     "gate_y_raw": gate_raw_v,
                                     "y_eff": y_eff_v,
                                     "w": w_v,
@@ -1360,6 +1436,14 @@ class EvalRunner:
                         ai.priv_non_conflict_delta_y_sum / priv_non_conflict_denom
                         if ai.priv_non_conflict_steps > 0
                         else float("nan")
+                    )
+                    target_bearing_abs_p95 = (
+                        _quantile(ai.target_bearing_abs_samples, 0.95)
+                        if ai.target_bearing_abs_samples else float("nan")
+                    )
+                    target_conflict_bearing_abs_mean = (
+                        ai.target_conflict_bearing_abs_sum / priv_conflict_denom
+                        if ai.priv_conflict_steps > 0 else float("nan")
                     )
                     episode_rows.append(
                         {
@@ -1503,6 +1587,34 @@ class EvalRunner:
                             "priv_conflict_phase_release_delta_y_mean": (
                                 ai.priv_conflict_phase_release_delta_y_sum / float(ai.priv_conflict_phase_release_steps)
                                 if ai.priv_conflict_phase_release_steps > 0 else float("nan")
+                            ),
+                            "target_bearing_abs_mean": (
+                                ai.target_bearing_abs_sum / float(len(ai.target_bearing_abs_samples))
+                                if ai.target_bearing_abs_samples else float("nan")
+                            ),
+                            "target_bearing_abs_p95": target_bearing_abs_p95,
+                            "target_bearing_abs_max": ai.target_bearing_abs_max,
+                            "target_in_rgb_fov_rate": ai.target_in_fov_steps / denom_steps,
+                            "target_near_rgb_fov_edge_rate": ai.target_near_fov_edge_steps / denom_steps,
+                            "target_lost_step_rate": ai.target_lost_steps / denom_steps,
+                            "target_lost_episode": int(ai.target_lost_event),
+                            "target_lost_max_consecutive_steps": ai.target_lost_max_consecutive_steps,
+                            "target_bearing_abs_mean_in_priv_conflict": target_conflict_bearing_abs_mean,
+                            "target_bearing_abs_max_in_priv_conflict": (
+                                ai.target_conflict_bearing_abs_max
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "target_in_fov_rate_in_priv_conflict": (
+                                ai.target_conflict_in_fov_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "target_near_fov_edge_rate_in_priv_conflict": (
+                                ai.target_conflict_near_fov_edge_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
+                            ),
+                            "target_lost_rate_in_priv_conflict": (
+                                ai.target_conflict_lost_steps / priv_conflict_denom
+                                if ai.priv_conflict_steps > 0 else float("nan")
                             ),
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
@@ -1865,6 +1977,49 @@ class EvalRunner:
                 ),
             }
 
+        def _target_fov_summary(sub_rows: List[Dict]) -> Dict[str, float]:
+            lost_episodes = sum(int(r.get("target_lost_episode", 0) or 0) for r in sub_rows)
+            max_lost = _clean([r.get("target_lost_max_consecutive_steps", float("nan")) for r in sub_rows])
+            bearing_max_vals = _clean([r.get("target_bearing_abs_max", float("nan")) for r in sub_rows])
+            bearing_conflict_max_vals = _clean([
+                r.get("target_bearing_abs_max_in_priv_conflict", float("nan")) for r in sub_rows
+            ])
+            bearing_mean = _weighted_step_mean(sub_rows, "target_bearing_abs_mean", "steps_hl")
+            bearing_p95 = _weighted_step_mean(sub_rows, "target_bearing_abs_p95", "steps_hl")
+            bearing_conflict_mean = _weighted_step_mean(
+                sub_rows, "target_bearing_abs_mean_in_priv_conflict", "priv_high_conflict_steps"
+            )
+            return {
+                "target_bearing_abs_mean": bearing_mean,
+                "target_bearing_abs_p95": bearing_p95,
+                "target_bearing_abs_max": max(bearing_max_vals) if bearing_max_vals else float("nan"),
+                "target_bearing_abs_deg_mean": bearing_mean * 180.0 / math.pi,
+                "target_bearing_abs_deg_p95": bearing_p95 * 180.0 / math.pi,
+                "target_bearing_abs_deg_max": (
+                    max(bearing_max_vals) * 180.0 / math.pi if bearing_max_vals else float("nan")
+                ),
+                "target_in_rgb_fov_rate": _weighted_step_mean(sub_rows, "target_in_rgb_fov_rate", "steps_hl"),
+                "target_near_rgb_fov_edge_rate": _weighted_step_mean(sub_rows, "target_near_rgb_fov_edge_rate", "steps_hl"),
+                "target_lost_step_rate": _weighted_step_mean(sub_rows, "target_lost_step_rate", "steps_hl"),
+                "target_lost_episode_rate": lost_episodes / float(max(1, len(sub_rows))),
+                "target_lost_max_consecutive_steps_mean": float(np.mean(max_lost)) if max_lost else float("nan"),
+                "target_lost_max_consecutive_steps_max": max(max_lost) if max_lost else float("nan"),
+                "target_bearing_abs_mean_in_priv_conflict": bearing_conflict_mean,
+                "target_bearing_abs_deg_mean_in_priv_conflict": bearing_conflict_mean * 180.0 / math.pi,
+                "target_bearing_abs_max_in_priv_conflict": (
+                    max(bearing_conflict_max_vals) if bearing_conflict_max_vals else float("nan")
+                ),
+                "target_in_fov_rate_in_priv_conflict": _weighted_step_mean(
+                    sub_rows, "target_in_fov_rate_in_priv_conflict", "priv_high_conflict_steps"
+                ),
+                "target_near_fov_edge_rate_in_priv_conflict": _weighted_step_mean(
+                    sub_rows, "target_near_fov_edge_rate_in_priv_conflict", "priv_high_conflict_steps"
+                ),
+                "target_lost_rate_in_priv_conflict": _weighted_step_mean(
+                    sub_rows, "target_lost_rate_in_priv_conflict", "priv_high_conflict_steps"
+                ),
+            }
+
         success_scores = [float(r.get("success", 0.0)) for r in rows]
         full_task_success_flags = [int(r.get("full_task_success", 0)) for r in rows]
         success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
@@ -1948,6 +2103,7 @@ class EvalRunner:
         conflict_bins_overall = _risk_bins_summary(rows, "conflict_bin_stats")
         priv_conflict_bins_overall = _risk_bins_summary(rows, "priv_conflict_bin_stats")
         priv_conflict_overall = _priv_conflict_summary(rows)
+        target_fov_overall = _target_fov_summary(rows)
 
         overall = {
             "episodes": total_eps,
@@ -2025,6 +2181,7 @@ class EvalRunner:
             "gate_region_near_miss_rate_mean": float(np.mean(gate_region_near_miss)) if gate_region_near_miss else float("nan"),
             **high_risk_overall,
             **priv_conflict_overall,
+            **target_fov_overall,
             "switch_rate_mean": float(np.mean(switch_vals)) if switch_vals else float("nan"),
             "near_miss_rate_mean": float(np.mean(near_miss_vals)) if near_miss_vals else float("nan"),
             "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
@@ -2078,6 +2235,7 @@ class EvalRunner:
             gate_region_near_miss_d = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in sub])
             high_risk_d = _high_risk_summary(sub)
             priv_conflict_d = _priv_conflict_summary(sub)
+            target_fov_d = _target_fov_summary(sub)
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
             full_task_success_rate_d = float(sum(full_task_success_d) / max(1, n))
@@ -2142,6 +2300,7 @@ class EvalRunner:
                 ),
                 **high_risk_d,
                 **priv_conflict_d,
+                **target_fov_d,
                 "switch_rate_mean": float(np.mean(switch_d)) if switch_d else float("nan"),
                 "near_miss_rate_mean": float(np.mean(near_miss_d)) if near_miss_d else float("nan"),
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
@@ -2232,6 +2391,11 @@ class EvalRunner:
                 "priv_conflict_score_thr": float(getattr(self.args, "priv_conflict_score_thr", 0.25)),
                 "priv_conflict_bins_support": "obstacle_window_only",
                 "priv_conflict_phase_codes": {"0": "none", "1": "approach", "2": "inside", "3": "release"},
+                "target_observability_definition": "bearing=atan2(x_right,y_forward); RGB FOV is used for YOLO-style target visibility",
+                "target_rgb_fov_deg": float(getattr(self.args, "target_rgb_fov_deg", 69.4)),
+                "target_fov_margin_deg": float(getattr(self.args, "target_fov_margin_deg", 3.0)),
+                "target_near_fov_edge_margin_deg": float(getattr(self.args, "target_near_fov_edge_margin_deg", 5.0)),
+                "target_lost_k_eval": int(getattr(self.args, "target_lost_k_eval", 5)),
                 "pcr_ckpt": os.path.abspath(self.args.pcr_ckpt) if getattr(self.args, "pcr_ckpt", None) else None,
                 "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
                 "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
@@ -2349,6 +2513,26 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "priv_conflict_phase_approach_delta_y_mean",
         "priv_conflict_phase_inside_delta_y_mean",
         "priv_conflict_phase_release_delta_y_mean",
+        "target_bearing_abs_mean",
+        "target_bearing_abs_p95",
+        "target_bearing_abs_max",
+        "target_bearing_abs_deg_mean",
+        "target_bearing_abs_deg_p95",
+        "target_bearing_abs_deg_max",
+        "target_in_rgb_fov_rate",
+        "target_near_rgb_fov_edge_rate",
+        "target_lost_step_rate",
+        "target_lost_episode",
+        "target_lost_episode_rate",
+        "target_lost_max_consecutive_steps",
+        "target_lost_max_consecutive_steps_mean",
+        "target_lost_max_consecutive_steps_max",
+        "target_bearing_abs_mean_in_priv_conflict",
+        "target_bearing_abs_deg_mean_in_priv_conflict",
+        "target_bearing_abs_max_in_priv_conflict",
+        "target_in_fov_rate_in_priv_conflict",
+        "target_near_fov_edge_rate_in_priv_conflict",
+        "target_lost_rate_in_priv_conflict",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
@@ -2399,6 +2583,12 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "time_s",
             "progress",
             "follow_err_m",
+            "target_bearing_rad",
+            "target_bearing_abs_rad",
+            "target_bearing_abs_deg",
+            "target_in_rgb_fov",
+            "target_near_rgb_fov_edge",
+            "target_lost_current_steps",
             "gate_y_raw",
             "y_eff",
             "w",
@@ -2608,6 +2798,10 @@ def parse_args():
         default=0.5,
         help="risk_F threshold used for narrow-gap/high-conflict region summaries",
     )
+    parser.add_argument("--target_rgb_fov_deg", type=float, default=69.4)
+    parser.add_argument("--target_fov_margin_deg", type=float, default=3.0)
+    parser.add_argument("--target_near_fov_edge_margin_deg", type=float, default=5.0)
+    parser.add_argument("--target_lost_k_eval", type=int, default=5)
     parser.add_argument("--priv_conflict_follow_thr", type=float, default=0.20)
     parser.add_argument("--priv_conflict_avoid_thr", type=float, default=0.10)
     parser.add_argument(
@@ -2749,6 +2943,14 @@ def main():
         f"{overall['priv_conflict_phase_approach_delta_y_mean']:.4f} / "
         f"{overall['priv_conflict_phase_inside_delta_y_mean']:.4f} / "
         f"{overall['priv_conflict_phase_release_delta_y_mean']:.4f}"
+    )
+    print(
+        "Target FOV in/all/lost/maxLost/bearing p95[deg]: "
+        f"{overall['target_in_rgb_fov_rate']:.4f} / "
+        f"{overall['target_in_fov_rate_in_priv_conflict']:.4f} / "
+        f"{overall['target_lost_step_rate']:.4f} / "
+        f"{overall['target_lost_max_consecutive_steps_max']:.0f} / "
+        f"{overall['target_bearing_abs_deg_p95']:.2f}"
     )
     if overall["priv_obstacle_window_rate"] >= 0.95:
         print(

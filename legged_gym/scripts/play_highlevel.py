@@ -3261,9 +3261,16 @@ def main():
                             row_not_released_dbg = float(row_not_released_t[env_idx].detach().cpu().item())
                     cmd_f_str = "None" if cmd_f_dbg is None else np.array2string(cmd_f_dbg, precision=3, floatmode="fixed")
                     cmd_a_str = "None" if cmd_a_dbg is None else np.array2string(cmd_a_dbg, precision=3, floatmode="fixed")
+                    target_bearing_deg_dbg = float("nan")
+                    target_in_rgb_fov_dbg = 0
+                    if follow_goal_dbg is not None and len(follow_goal_dbg) >= 2:
+                        target_bearing_rad_dbg = math.atan2(float(follow_goal_dbg[0]), float(follow_goal_dbg[1]))
+                        target_bearing_deg_dbg = math.degrees(target_bearing_rad_dbg)
+                        target_in_rgb_fov_dbg = int(abs(target_bearing_deg_dbg) <= (69.4 * 0.5 - 3.0))
                     print(
                         "[PlayHigh][PCR] step={} follow_dist={:.3f} follow_goal={} target_xy={} robot_xy={} "
-                        "gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} conflict={:.3f} rowNR={:.1f} "
+                        "target_bearing={:.1f}deg inFOV={} gate(raw/eff/w)={:.3f}/{:.3f}/{:.3f} "
+                        "conflict={:.3f} rowNR={:.1f} "
                         "reward(core/gate/gap)={:.3f}/{:.3f}/{:.3f} follow(err/q)={:.3f}/{:.3f} "
                         "flags(target_finish/follow_lost)={}/{}".format(
                             step_idx,
@@ -3271,6 +3278,8 @@ def main():
                             np.array2string(follow_goal_dbg, precision=3, floatmode="fixed"),
                             np.array2string(target_xy_dbg, precision=3, floatmode="fixed"),
                             np.array2string(robot_xy_dbg, precision=3, floatmode="fixed"),
+                            target_bearing_deg_dbg,
+                            target_in_rgb_fov_dbg,
                             gate_raw_val,
                             y_eff_dbg,
                             gate_w_val,

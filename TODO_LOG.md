@@ -2059,3 +2059,7 @@
 
 - [x] Must: 将 `priv_conflict_bins` 收成障碍交互窗口内的真实冲突强度分桶，避免非冲突自由段混入论文机制图最低桶
 - [x] Must: 将障碍窗口阶段占比与高冲突阶段占比分开记录，并让旧 eval 输出在新冲突图入口处直接提示重跑
+
+## 2026-05-24 PCR 目标可观测性评测
+
+- [x] Must: 在 PCR eval/play 中补充目标 bearing 与 RGB-FOV 可见性诊断，先判断 memory / learnedw2 是否通过牺牲目标视野换取通过率；本轮不修改训练奖励、w 公式或 actor 输入
