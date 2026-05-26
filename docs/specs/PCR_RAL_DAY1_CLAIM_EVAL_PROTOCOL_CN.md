@@ -240,7 +240,7 @@ Table 2：PCR 内部 w 机制消融。
 
 - `priv_conflict_*` 表示 row-command conflict：机器人在障碍行窗口内，Follow 有前进压力，Avoid 有横移压力。它证明“发生了 Follow/Avoid 行为冲突”，但不等价于 Follow 路径已经危险。
 - `unsafe_conflict_*` 表示 unsafe command conflict：对 `cmd_F / cmd_A / cmd_S` 三个外生候选命令做短时几何风险对比，要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复。它用于定位真正危险的 Follow 候选，不直接规定 learned-w 必须压低 Follow。
-- `avoid_conflict_*` 表示 `C_avoid`：`C_unsafe` 中 `Avoid` 的任务效用高于 `Stop/Slow`，效用同时考虑风险、前向推进和目标距离拉开代价，用于判断哪些危险窗口确实该由 Follow/Avoid 仲裁处理。
+- `avoid_conflict_*` 表示 `C_avoid`：`C_unsafe` 中 `Avoid` 的任务效用高于 `Stop/Slow`，效用同时考虑风险、带上限的横移打开通路收益、Stop/Slow 前向保距收益和目标距离拉开代价，用于判断哪些危险窗口确实该由 Follow/Avoid 仲裁处理。
 - `stop_conflict_*` 表示 `C_stop`：`C_unsafe` 中 Stop/Slow 的任务效用不低于 Avoid，这部分不强行归因给 w，应交给 beta 或安全后处理解释。
 
 行：

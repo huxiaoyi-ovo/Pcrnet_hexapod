@@ -112,7 +112,7 @@ Internal PCR ablations：
 
 - `priv_conflict_*`：row-command conflict，只说明障碍行窗口里 Follow 和 Avoid 候选动作发生分歧。
 - `unsafe_conflict_*`：unsafe command conflict，用 `cmd_F / cmd_A / cmd_S` 三候选短时几何风险对比定义，同时要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复；它定位危险 Follow 候选，但不预设 learned-w 必须压低 Follow。
-- `avoid_conflict_*`：`C_avoid`，表示危险冲突里 Avoid 的任务效用高于 Stop/Slow；效用同时考虑风险、前向推进和目标距离拉开代价，避免 Stop 因为风险最低天然吞掉所有 unsafe。
+- `avoid_conflict_*`：`C_avoid`，表示危险冲突里 Avoid 的任务效用高于 Stop/Slow；效用同时考虑风险、带上限的横移打开通路收益、Stop/Slow 前向保距收益和目标距离拉开代价，避免 Stop 因为风险最低天然吞掉所有 unsafe。
 - `stop_conflict_*`：`C_stop`，表示 Stop/Slow 的任务效用不低于 Avoid，不能强行归因给 w，应在 beta 或安全后处理里解释。
 
 列：
@@ -295,9 +295,9 @@ Internal PCR ablations：
 
 验收：
 
-- 能回答：HighConflict 中 `signed_w` 是否朝 avoid 方向变化？
-- 能回答：`y_eff` 是否相对 `y_raw` 在高冲突窗口被压低？
-- 能回答：安全收益是否来自真实冲突窗口，而不是全程压 Follow？
+- 能回答：HighConflict 中 `signed_w / delta_y / CSI` 的真实调制方向是什么。
+- 能回答：`y_eff` 相对 `y_raw` 是压 Follow 还是支持 Follow。
+- 能回答：安全收益是否来自真实冲突窗口的自适应调制，而不是全程固定偏向某一专家。
 
 止损条件：
 

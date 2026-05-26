@@ -370,9 +370,9 @@ def _privileged_conflict_diag(
         target_speed = target_speed.to(device=risk_ref.device, dtype=risk_ref.dtype)
     else:
         target_speed = torch.zeros_like(risk_ref)
-    cmd_a_forward = (
-        cmd_a[:, 1].to(device=risk_ref.device, dtype=risk_ref.dtype)
-        if torch.is_tensor(cmd_a) and cmd_a.shape[-1] >= 2
+    cmd_a_lateral_abs = (
+        torch.abs(cmd_a[:, 0].to(device=risk_ref.device, dtype=risk_ref.dtype))
+        if torch.is_tensor(cmd_a) and cmd_a.shape[-1] >= 1
         else zero
     )
     cmd_s_forward = (
@@ -380,16 +380,18 @@ def _privileged_conflict_diag(
         if torch.is_tensor(cmd_s) and cmd_s.shape[-1] >= 2
         else zero
     )
-    avoid_progress = torch.clamp(cmd_a_forward, min=0.0) * horizon_s
+    lateral_opening_cap = max(1e-3, float(getattr(args, "conflict_utility_lateral_opening_cap_m", 0.45)))
+    avoid_lateral_opening = torch.clamp(cmd_a_lateral_abs * horizon_s, max=lateral_opening_cap)
     stop_progress = torch.clamp(cmd_s_forward, min=0.0) * horizon_s
-    avoid_target_gap_growth = torch.clamp(target_speed - torch.clamp(cmd_a_forward, min=0.0), min=0.0) * horizon_s
+    avoid_target_gap_growth = target_speed * horizon_s
     stop_target_gap_growth = torch.clamp(target_speed - torch.clamp(cmd_s_forward, min=0.0), min=0.0) * horizon_s
     progress_gain = float(getattr(args, "conflict_utility_progress_gain", 0.25))
+    lateral_gain = float(getattr(args, "conflict_utility_lateral_gain", 0.35))
     target_gap_cost = float(getattr(args, "conflict_utility_target_gap_cost", 0.35))
     risk_cost = float(getattr(args, "conflict_utility_risk_cost", 1.0))
     utility_a = (
         -risk_cost * risk_a
-        + progress_gain * avoid_progress
+        + lateral_gain * avoid_lateral_opening
         - target_gap_cost * avoid_target_gap_growth
     )
     utility_s = (
@@ -431,6 +433,8 @@ def _privileged_conflict_diag(
         "utility_A": utility_a.to(dtype=risk_ref.dtype),
         "utility_S": utility_s.to(dtype=risk_ref.dtype),
         "utility_A_minus_S": (utility_a - utility_s).to(dtype=risk_ref.dtype),
+        "avoid_lateral_opening": avoid_lateral_opening.to(dtype=risk_ref.dtype),
+        "stop_forward_progress": stop_progress.to(dtype=risk_ref.dtype),
         "avoid_target_gap_growth": avoid_target_gap_growth.to(dtype=risk_ref.dtype),
         "stop_target_gap_growth": stop_target_gap_growth.to(dtype=risk_ref.dtype),
         "target_recoverable_for_conflict": target_recoverable.to(dtype=risk_ref.dtype),
@@ -1360,6 +1364,8 @@ class EvalRunner:
                         utility_a_t = post_info.get("utility_A", None)
                         utility_s_t = post_info.get("utility_S", None)
                         utility_a_minus_s_t = post_info.get("utility_A_minus_S", None)
+                        avoid_lateral_opening_t = post_info.get("avoid_lateral_opening", None)
+                        stop_forward_progress_t = post_info.get("stop_forward_progress", None)
                         avoid_gap_growth_t = post_info.get("avoid_target_gap_growth", None)
                         stop_gap_growth_t = post_info.get("stop_target_gap_growth", None)
                         cmd_f_t = post_info.get("cmd_F", None)
@@ -1406,6 +1412,8 @@ class EvalRunner:
                         utility_a_v = _safe_float(utility_a_t[i].item(), default=float("nan")) if torch.is_tensor(utility_a_t) else float("nan")
                         utility_s_v = _safe_float(utility_s_t[i].item(), default=float("nan")) if torch.is_tensor(utility_s_t) else float("nan")
                         utility_a_minus_s_v = _safe_float(utility_a_minus_s_t[i].item(), default=float("nan")) if torch.is_tensor(utility_a_minus_s_t) else float("nan")
+                        avoid_lateral_opening_v = _safe_float(avoid_lateral_opening_t[i].item(), default=float("nan")) if torch.is_tensor(avoid_lateral_opening_t) else float("nan")
+                        stop_forward_progress_v = _safe_float(stop_forward_progress_t[i].item(), default=float("nan")) if torch.is_tensor(stop_forward_progress_t) else float("nan")
                         avoid_gap_growth_v = _safe_float(avoid_gap_growth_t[i].item(), default=float("nan")) if torch.is_tensor(avoid_gap_growth_t) else float("nan")
                         stop_gap_growth_v = _safe_float(stop_gap_growth_t[i].item(), default=float("nan")) if torch.is_tensor(stop_gap_growth_t) else float("nan")
                         clr_pp_v = float("nan")
@@ -1677,6 +1685,8 @@ class EvalRunner:
                                     "utility_a": utility_a_v,
                                     "utility_s": utility_s_v,
                                     "utility_a_minus_s": utility_a_minus_s_v,
+                                    "avoid_lateral_opening": avoid_lateral_opening_v,
+                                    "stop_forward_progress": stop_forward_progress_v,
                                     "avoid_target_gap_growth": avoid_gap_growth_v,
                                     "stop_target_gap_growth": stop_gap_growth_v,
                                     "follow_weight": y_eff_v,
@@ -3126,13 +3136,16 @@ class EvalRunner:
                 ),
                 "avoid_conflict_definition": (
                     "C_avoid = C_unsafe AND utility_A > utility_S + margin; "
-                    "utility = -risk_cost*risk + progress_gain*forward_progress - target_gap_cost*target_gap_growth"
+                    "utility_A = -risk_cost*risk_A + lateral_gain*lateral_opening - target_gap_cost*target_gap_growth; "
+                    "utility_S = -risk_cost*risk_S + progress_gain*forward_progress - target_gap_cost*target_gap_growth"
                 ),
                 "stop_conflict_definition": "C_stop = C_unsafe AND C_avoid is false",
                 "conflict_rollout_horizon_s": float(getattr(self.args, "conflict_rollout_horizon_s", 1.2)),
                 "conflict_rollout_tube_radius_m": float(getattr(self.args, "conflict_rollout_tube_radius_m", 0.25)),
                 "conflict_utility_risk_cost": float(getattr(self.args, "conflict_utility_risk_cost", 1.0)),
                 "conflict_utility_progress_gain": float(getattr(self.args, "conflict_utility_progress_gain", 0.25)),
+                "conflict_utility_lateral_gain": float(getattr(self.args, "conflict_utility_lateral_gain", 0.35)),
+                "conflict_utility_lateral_opening_cap_m": float(getattr(self.args, "conflict_utility_lateral_opening_cap_m", 0.45)),
                 "conflict_utility_target_gap_cost": float(getattr(self.args, "conflict_utility_target_gap_cost", 0.35)),
                 "conflict_utility_margin": float(getattr(self.args, "conflict_utility_margin", 0.03)),
                 "conflict_stop_candidate": str(getattr(self.args, "conflict_stop_candidate", "stop")),
@@ -3141,6 +3154,7 @@ class EvalRunner:
                 "unsafe_conflict_risk_margin": float(getattr(self.args, "unsafe_conflict_risk_margin", 0.05)),
                 "unsafe_conflict_cmd_cos_thr": float(getattr(self.args, "unsafe_conflict_cmd_cos_thr", 0.5)),
                 "unsafe_conflict_avoid_stop_margin": float(getattr(self.args, "unsafe_conflict_avoid_stop_margin", 0.03)),
+                "unsafe_conflict_avoid_stop_margin_status": "legacy unused; use conflict_utility_margin",
                 "unsafe_conflict_min_steps": int(getattr(self.args, "unsafe_conflict_min_steps", 3)),
                 "priv_conflict_bins_support": "obstacle_window_only",
                 "priv_conflict_phase_codes": {"0": "none", "1": "approach", "2": "inside", "3": "release"},
@@ -3425,6 +3439,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "utility_a",
             "utility_s",
             "utility_a_minus_s",
+            "avoid_lateral_opening",
+            "stop_forward_progress",
             "avoid_target_gap_growth",
             "stop_target_gap_growth",
             "follow_weight",
@@ -3707,12 +3723,19 @@ def parse_args():
     parser.add_argument("--unsafe_conflict_risk_f_thr", type=float, default=0.25)
     parser.add_argument("--unsafe_conflict_risk_margin", type=float, default=0.05)
     parser.add_argument("--unsafe_conflict_cmd_cos_thr", type=float, default=0.5)
-    parser.add_argument("--unsafe_conflict_avoid_stop_margin", type=float, default=0.03)
+    parser.add_argument(
+        "--unsafe_conflict_avoid_stop_margin",
+        type=float,
+        default=0.03,
+        help="legacy unused; C_avoid/C_stop now uses --conflict_utility_margin",
+    )
     parser.add_argument("--unsafe_conflict_min_steps", type=int, default=3)
     parser.add_argument("--conflict_rollout_horizon_s", type=float, default=1.2)
     parser.add_argument("--conflict_rollout_tube_radius_m", type=float, default=0.25)
     parser.add_argument("--conflict_utility_risk_cost", type=float, default=1.0)
     parser.add_argument("--conflict_utility_progress_gain", type=float, default=0.25)
+    parser.add_argument("--conflict_utility_lateral_gain", type=float, default=0.35)
+    parser.add_argument("--conflict_utility_lateral_opening_cap_m", type=float, default=0.45)
     parser.add_argument("--conflict_utility_target_gap_cost", type=float, default=0.35)
     parser.add_argument("--conflict_utility_margin", type=float, default=0.03)
     parser.add_argument("--conflict_stop_candidate", choices=("stop", "slow"), default="stop")
