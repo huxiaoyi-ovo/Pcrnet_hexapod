@@ -1528,8 +1528,14 @@ class EvalRunner:
                                 -priv_conflict_delta_y_mean
                                 if math.isfinite(priv_conflict_delta_y_mean) else float("nan")
                             ),
+                            "conflict_selective_suppression": (
+                                priv_non_conflict_delta_y_mean - priv_conflict_delta_y_mean
+                                if math.isfinite(priv_conflict_delta_y_mean)
+                                and math.isfinite(priv_non_conflict_delta_y_mean)
+                                else float("nan")
+                            ),
                             "relative_conflict_modulation": (
-                                priv_conflict_delta_y_mean - priv_non_conflict_delta_y_mean
+                                priv_non_conflict_delta_y_mean - priv_conflict_delta_y_mean
                                 if math.isfinite(priv_conflict_delta_y_mean)
                                 and math.isfinite(priv_non_conflict_delta_y_mean)
                                 else float("nan")
@@ -1922,8 +1928,13 @@ class EvalRunner:
                 "priv_conflict_delta_y_mean": delta_conflict,
                 "priv_non_conflict_delta_y_mean": delta_non_conflict,
                 "conflict_suppression_index": -delta_conflict if math.isfinite(delta_conflict) else float("nan"),
+                "conflict_selective_suppression": (
+                    delta_non_conflict - delta_conflict
+                    if math.isfinite(delta_conflict) and math.isfinite(delta_non_conflict)
+                    else float("nan")
+                ),
                 "relative_conflict_modulation": (
-                    delta_conflict - delta_non_conflict
+                    delta_non_conflict - delta_conflict
                     if math.isfinite(delta_conflict) and math.isfinite(delta_non_conflict)
                     else float("nan")
                 ),
@@ -2494,6 +2505,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "priv_conflict_delta_y_mean",
         "priv_non_conflict_delta_y_mean",
         "conflict_suppression_index",
+        "conflict_selective_suppression",
         "relative_conflict_modulation",
         "priv_window_phase_approach_rate",
         "priv_window_phase_inside_rate",
@@ -2922,9 +2934,11 @@ def main():
         f"{overall['episode_collision_rate']:.4f} / {overall['timeout_or_other_rate']:.4f}"
     )
     print(
-        "Priv-conflict step/score/CSI/RCM: "
+        "Priv-conflict step/score/CSI/CSS/RCM: "
         f"{overall['priv_high_conflict_step_rate']:.4f} / {overall['priv_conflict_score_mean']:.4f} / "
-        f"{overall['conflict_suppression_index']:.4f} / {overall['relative_conflict_modulation']:.4f}"
+        f"{overall['conflict_suppression_index']:.4f} / "
+        f"{overall['conflict_selective_suppression']:.4f} / "
+        f"{overall['relative_conflict_modulation']:.4f}"
     )
     print(
         "Priv-conflict signed_w/delta_y in/out: "

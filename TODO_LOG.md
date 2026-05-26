@@ -60,6 +60,17 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-26 RAL 投稿自查标准与两周冲刺计划
+
+- [x] ~~[P0] 将《论文写作自查清单》作为后续 PCR 实验、实机与论文准备的统一参考标准，并在 `docs/reference/` 中保存原始 PDF 与两周 RAL 冲刺计划；后续默认以 HighConflict 机制证据、主表公平对照、多 seed 统计、D435i 输入 dry-run 和实机安全验收判断 RAL 准备度。~~
+- [x] ~~[P0] 完成 Day 1 论文主张与评测协议收口：新增 `docs/specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md`，固定当前 RAL 主张为 command-conditioned conflict prior `w` 改善真实 HighConflict 窗口仲裁，并写清主表、机制表、图表与 Day 2 评测命令模板。~~
+- [x] ~~[P0] 曾将 `docs/reference/pcr_net_ral_cn.md` 按 Day 1 实验口径误收窄为 `w` 单点主张；该口径已撤回，只保留为两周证据补强标准，不再替代 PCR-Net 初稿的完整论文叙事。~~
+- [x] ~~[P0] 恢复 `docs/reference/pcr_net_ral_cn.md` 的论文型口径：中文初稿继续以 PCR-Net 的 `y + w + beta + Command Post-Processor` 为主张，两周实验计划只作为证据补强与终稿收缩标准，不替代论文叙事本身。~~
+- [x] ~~[P0] Day 1 口径最终确认：论文主张先完整写、终稿按证据收缩；主场景用 `s_pcr_line_avoid_basic` 产数；贡献排序为 PCR-Net 框架第一、`w` 第二、`beta` 第三；两周内必须产出 `beta` Pareto；实机目标冲真实低速跟随避障演示；Day 1 产物同时修协议文档和论文初稿标注。~~
+- [x] ~~[P0] Day 1 论文对照口径进一步收口：主表三条为 `yonly / geom-w / learned-w`，其中 `learned-w` 是论文主贡献，`geom-w` 是强规则基线，`yonly` 是无冲突先验基线；`risk_memory` 归入 learned-w 的最终实现优化，不单列第四个 baseline。~~
+- [x] ~~[P0] Day 1 主表口径升级为两层对比：外部 comparative baselines 至少包括 `Monolithic PPO`、`Reactive Safety Override`、`DWA-inspired Local Rollout`，内部 PCR ablation variants 为 `PCR-yonly / PCR-geomw / PCR-learnedw`；若时间不足，最低主表保留 `Monolithic PPO + Reactive Safety Override + PCR-yonly + PCR-geomw + PCR-learnedw` 五组。~~
+- [x] ~~[P0] 修正 PCR eval 机制指标解释口径：`relative_conflict_modulation` 改为正向指标，并新增 `conflict_selective_suppression`；后续论文表格统一按 `CSI > 0` 表示高冲突压 Follow、`CSS/RCM > 0` 表示抑制主要集中在高冲突窗口，避免把正确数据解释成相反结论。~~
+
 ## 2026-05-22 PCR w 真实冲突证据尺子
 
 - [x] ~~[P0] 将 PCR eval 的 w 机制统计从仅依赖 `risk_F / conflict_score` 扩展到 privileged obstacle-window 冲突口径：用障碍交互窗口、Follow 前进压力与 Avoid 横移压力生成 `priv_conflict_score / mask / phase`，先修正机制图和评测证据，不改当前策略训练主线。~~

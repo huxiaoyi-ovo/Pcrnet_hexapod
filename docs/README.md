@@ -20,8 +20,13 @@
 
 ## 已归位文档（第二阶段）
 
+- `docs/specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md`
+- `docs/specs/PCR_W_MAINLINE_PLAN_CN.md`
+- `docs/specs/PCR_THEORY_DEFINITIONS_CN.md`
 - `docs/operations/训练指令.txt`
 - `docs/operations/PHASE_SWITCHING_GUIDE.md`
+- `docs/reference/RAL_PCR_TWO_WEEK_PLAN_CN.md`
+- `docs/reference/论文写作自查清单.pdf`
 - `docs/reference/参数一览表.md`
 - `docs/reference/ROBOT_SPECS.md`
 - `docs/archive/思路设计.md`

@@ -6,3 +6,5 @@
 
 - `docs/reference/参数一览表.md`
 - `docs/reference/ROBOT_SPECS.md`
+- `docs/reference/论文写作自查清单.pdf`
+- `docs/reference/RAL_PCR_TWO_WEEK_PLAN_CN.md`

@@ -7,6 +7,10 @@
 - 技术方案基准：
   - `技术方案/hexapod_RAL_complete_technical_spec_v7.md`
   - `技术方案/hexapod_RAL_integrated_final_v7.md`
+- PCR RAL 冲刺规范：
+  - `docs/specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md`
+  - `docs/specs/PCR_W_MAINLINE_PLAN_CN.md`
+  - `docs/specs/PCR_THEORY_DEFINITIONS_CN.md`
 - 执行与里程碑：`TODO_LOG.md`
 - 调试口径：`DEBUG_SUMMARY_CN.md`
 - 会话交接：`CONTEXT_HANDOFF_SUMMARY.md`
@@ -21,6 +25,9 @@
 - 参考参数：
   - `docs/reference/参数一览表.md`
   - `docs/reference/ROBOT_SPECS.md`
+- RAL 自查与计划：
+  - `docs/reference/论文写作自查清单.pdf`
+  - `docs/reference/RAL_PCR_TWO_WEEK_PLAN_CN.md`
 
 ## 历史参考（Archive）
 
