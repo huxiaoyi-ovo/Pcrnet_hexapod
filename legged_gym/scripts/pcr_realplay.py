@@ -910,7 +910,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--ros_node_name", default="pcr_realplay")
     parser.add_argument("--target_topic", default="/pcr/target_state", help="Float32MultiArray: [x_right,y_forward,v_right,v_forward,valid,target_too_close,depth_invalid]; last two fields optional")
-    parser.add_argument("--local_map_topic", default="/pcr/local_map_2ch", help="Float32MultiArray: flattened (2,16,16)")
+    parser.add_argument("--local_map_topic", default="/pcr/local_map_2ch", help="Float32MultiArray: flattened (2,32,32) by default")
     parser.add_argument("--state_topic", default="", help="optional Float32MultiArray robot state; zeros if omitted")
     parser.add_argument("--row_not_released_topic", default="", help="optional Float32 diagnostic only; learned-w actor always receives zero row-release feature")
     parser.add_argument("--cmd_topic", default="/cmd_vel")
@@ -919,7 +919,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ros_linear_y_left_positive", action="store_true", help="publish Twist.linear.y = -cmd_x_right")
 
     parser.add_argument("--map_channels", type=int, default=2)
-    parser.add_argument("--map_size", type=int, default=16)
+    parser.add_argument("--map_size", type=int, default=32)
     parser.add_argument("--map_extent_m", type=float, default=3.0)
     parser.add_argument("--difficulty_radius_m", type=float, default=2.0)
     parser.add_argument("--aff_stack", type=int, default=1, help="fallback only; checkpoint usually overrides")

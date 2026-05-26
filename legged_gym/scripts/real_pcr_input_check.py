@@ -224,11 +224,12 @@ def build_local_map_from_depth(
     args: argparse.Namespace,
     person_bbox: Optional[np.ndarray],
     person_depth_m: float,
-) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, float]:
+) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, float, np.ndarray]:
     map_size = int(args.map_size)
     map_extent = float(args.map_extent_m)
     cell = map_extent / float(map_size)
     occ = np.zeros((map_size, map_size), dtype=np.float32)
+    observed = np.zeros((map_size, map_size), dtype=np.float32)
     h, w = depth_raw.shape[:2]
     stride = max(1, int(args.depth_stride))
     target_mask = build_target_depth_mask(depth_raw, depth_scale, person_bbox, person_depth_m, args)
@@ -256,27 +257,45 @@ def build_local_map_from_depth(
         down_body = y_cam * cos_p + z * sin_p
         height = float(args.camera_height_m) - down_body
 
-        is_obstacle = (
-            (height >= float(args.obstacle_min_height_m))
-            & (height <= float(args.obstacle_max_height_m))
-            & (x_right >= -0.5 * map_extent)
+        in_map = (
+            (x_right >= -0.5 * map_extent)
             & (x_right < 0.5 * map_extent)
             & (y_forward >= 0.0)
             & (y_forward < map_extent)
         )
+        ix_seen = np.floor((x_right[in_map] + 0.5 * map_extent) / cell).astype(np.int32)
+        iy_seen = np.floor(y_forward[in_map] / cell).astype(np.int32)
+        ix_seen = np.clip(ix_seen, 0, map_size - 1)
+        iy_seen = np.clip(iy_seen, 0, map_size - 1)
+        observed[ix_seen, iy_seen] = 1.0
+
+        obstacle_mode = str(args.obstacle_mode).lower()
+        if obstacle_mode == "height_band":
+            is_obstacle = (
+                (height >= float(args.obstacle_min_height_m))
+                & (height <= float(args.obstacle_max_height_m))
+                & in_map
+            )
+        elif obstacle_mode == "non_person_non_ground":
+            is_obstacle = (height > float(args.ground_remove_height_m)) & in_map
+        else:
+            raise ValueError(f"Unsupported obstacle_mode: {args.obstacle_mode}")
         ix = np.floor((x_right[is_obstacle] + 0.5 * map_extent) / cell).astype(np.int32)
         iy = np.floor(y_forward[is_obstacle] / cell).astype(np.int32)
         ix = np.clip(ix, 0, map_size - 1)
         iy = np.clip(iy, 0, map_size - 1)
         occ[ix, iy] = 1.0
 
-    free_mask = (occ < 0.5).astype(np.uint8)
-    dist_cells = cv2.distanceTransform(free_mask, cv2.DIST_L2, 3).astype(np.float32)
-    clearance_m = dist_cells * cell
-    clearance = np.clip(clearance_m / max(float(args.clearance_free_m), 1e-6), 0.0, 1.0)
-    local_map_2ch = np.stack([occ, clearance], axis=0).astype(np.float32)
+    radius_cells = int(math.ceil(float(args.robot_clearance_m) / max(cell, 1e-6)))
+    if radius_cells > 0:
+        kernel = np.ones((2 * radius_cells + 1, 2 * radius_cells + 1), dtype=np.uint8)
+        inflated_occ = cv2.dilate((occ > 0.5).astype(np.uint8), kernel, iterations=1)
+    else:
+        inflated_occ = (occ > 0.5).astype(np.uint8)
+    passable = ((inflated_occ <= 0) & (occ < 0.5)).astype(np.float32)
+    local_map_2ch = np.stack([occ, passable], axis=0).astype(np.float32)
     actor_difficulty = compute_actor_difficulty(local_map_2ch, map_extent, float(args.difficulty_radius_m))
-    return local_map_2ch, clearance_m.astype(np.float32), actor_difficulty, target_mask, depth_invalid_ratio
+    return local_map_2ch, passable.astype(np.float32), actor_difficulty, target_mask, depth_invalid_ratio, observed
 
 
 def build_target_depth_mask(
@@ -368,45 +387,90 @@ def draw_debug(
     local_map_2ch: np.ndarray,
     actor_difficulty: float,
     target_mask: np.ndarray,
+    observed_map: np.ndarray,
     depth_invalid_ratio: float,
     args: argparse.Namespace,
 ) -> np.ndarray:
-    canvas = color_bgr.copy()
+    rgb_panel = color_bgr.copy()
     if target.bbox_xyxy is not None:
         x1, y1, x2, y2 = [int(v) for v in target.bbox_xyxy]
         color = (0, 255, 0) if target.valid else (0, 200, 255)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(rgb_panel, (x1, y1), (x2, y2), color, 2)
     text = (
         f"valid={int(target.valid)} x_right={target.x_right:.2f} "
         f"y_fwd={target.y_forward:.2f} v=({target.v_right:.2f},{target.v_forward:.2f})"
     )
-    cv2.putText(canvas, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-    cv2.putText(canvas, f"difficulty={actor_difficulty:.3f}", (12, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    cv2.putText(rgb_panel, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    cv2.putText(rgb_panel, f"difficulty={actor_difficulty:.3f}", (12, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
     status = (
         f"d={target_distance_m(target):.2f} tooClose={int(target.valid and target_distance_m(target) < float(args.target_min_distance_m))} "
-        f"lost={int(not target.valid)} depthBad={depth_invalid_ratio:.2f}"
+        f"lost={int(not target.valid)} depthBad={depth_invalid_ratio:.2f} mode={args.obstacle_mode}"
     )
-    cv2.putText(canvas, status, (12, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    cv2.putText(rgb_panel, status, (12, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
     occ = (np.clip(local_map_2ch[0], 0.0, 1.0) * 255.0).astype(np.uint8)
-    clearance = (np.clip(local_map_2ch[1], 0.0, 1.0) * 255.0).astype(np.uint8)
+    safety = (np.clip(local_map_2ch[1], 0.0, 1.0) * 255.0).astype(np.uint8)
     mask_vis = (target_mask.astype(np.uint8) * 255)
-    occ_img = cv2.resize(occ.T, (180, 180), interpolation=cv2.INTER_NEAREST)
-    clr_img = cv2.resize(clearance.T, (180, 180), interpolation=cv2.INTER_NEAREST)
-    occ_color = cv2.applyColorMap(occ_img, cv2.COLORMAP_HOT)
-    clr_color = cv2.applyColorMap(clr_img, cv2.COLORMAP_VIRIDIS)
-    mask_small = cv2.resize(mask_vis, (180, 180), interpolation=cv2.INTER_NEAREST)
+    map_panel_px = max(160, int(args.debug_map_px))
+    observed = (np.clip(observed_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+    occ_img = cv2.resize(occ.T, (map_panel_px, map_panel_px), interpolation=cv2.INTER_NEAREST)
+    clr_img = cv2.resize(safety.T, (map_panel_px, map_panel_px), interpolation=cv2.INTER_NEAREST)
+    obs_img = cv2.resize(observed.T, (map_panel_px, map_panel_px), interpolation=cv2.INTER_NEAREST)
+    occ_color = np.zeros((map_panel_px, map_panel_px, 3), dtype=np.uint8)
+    free_cells = (obs_img > 0) & (clr_img > 127)
+    blocked_cells = (obs_img > 0) & (occ_img > 127)
+    occ_color[free_cells] = (255, 255, 255)
+    occ_color[blocked_cells] = (0, 0, 255)
+    clr_color = cv2.cvtColor(clr_img, cv2.COLOR_GRAY2BGR)
+    mask_small = cv2.resize(mask_vis, (map_panel_px, map_panel_px), interpolation=cv2.INTER_NEAREST)
     mask_color = cv2.applyColorMap(mask_small, cv2.COLORMAP_OCEAN)
-    h, w = canvas.shape[:2]
-    if h >= 280 and w >= 390:
-        canvas[100:280, 10:190] = occ_color
-        canvas[100:280, 200:380] = clr_color
-        cv2.putText(canvas, "occ", (14, 276), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(canvas, "clear", (204, 276), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    if h >= 470 and w >= 190:
-        canvas[290:470, 10:190] = mask_color
-        cv2.putText(canvas, "target mask", (14, 466), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    gap = 12
+    label_h = 28
+    side_w = 2 * map_panel_px + gap
+    side_h = 2 * (map_panel_px + label_h) + gap
+    rgb_h, rgb_w = rgb_panel.shape[:2]
+    canvas_h = max(rgb_h, side_h)
+    canvas_w = rgb_w + gap + side_w
+    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    canvas[:rgb_h, :rgb_w] = rgb_panel
+
+    def paste_panel(img: np.ndarray, x: int, y: int, label: str) -> None:
+        canvas[y:y + map_panel_px, x:x + map_panel_px] = img
+        cv2.putText(
+            canvas,
+            label,
+            (x + 6, y + map_panel_px + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+        )
+
+    x0 = rgb_w + gap
+    y0 = 0
+    paste_panel(occ_color, x0, y0, "free/obstacle map")
+    paste_panel(clr_color, x0 + map_panel_px + gap, y0, "safety map")
+    paste_panel(mask_color, x0, y0 + map_panel_px + label_h + gap, "target mask")
+
+    legend_x = x0 + map_panel_px + gap
+    legend_y = y0 + map_panel_px + label_h + gap + 30
+    cv2.putText(canvas, "policy input", (legend_x, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(canvas, "map: white=free", (legend_x, legend_y + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    cv2.putText(canvas, "map: red=obstacle", (legend_x, legend_y + 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    cv2.putText(canvas, "map: black=unknown/blocked", (legend_x, legend_y + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    cv2.putText(canvas, "safety: white=passable", (legend_x, legend_y + 118), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
     return canvas
+
+
+def prepare_display_image(image: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    scale = max(float(args.display_scale), 0.1)
+    if abs(scale - 1.0) < 1e-6:
+        return image
+    h, w = image.shape[:2]
+    new_w = max(1, int(round(float(w) * scale)))
+    new_h = max(1, int(round(float(h) * scale)))
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
 
 def save_snapshot(
@@ -438,13 +502,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera_height_m", type=float, default=0.45)
     parser.add_argument("--target_depth_patch", type=int, default=10)
     parser.add_argument("--max_lost_frames", type=int, default=5)
-    parser.add_argument("--map_size", type=int, default=16)
+    parser.add_argument("--map_size", type=int, default=32)
     parser.add_argument("--map_extent_m", type=float, default=3.0)
     parser.add_argument("--depth_stride", type=int, default=4)
     parser.add_argument("--min_depth_m", type=float, default=0.25)
     parser.add_argument("--max_depth_m", type=float, default=3.0)
     parser.add_argument("--obstacle_min_height_m", type=float, default=0.06)
     parser.add_argument("--obstacle_max_height_m", type=float, default=1.20)
+    parser.add_argument("--obstacle_mode", type=str, default="non_person_non_ground", choices=["non_person_non_ground", "height_band"])
+    parser.add_argument("--ground_remove_height_m", type=float, default=0.04)
+    parser.add_argument("--robot_clearance_m", type=float, default=0.27)
     parser.add_argument("--clearance_free_m", type=float, default=0.57)
     parser.add_argument("--difficulty_radius_m", type=float, default=2.0)
     parser.add_argument("--keep_person_in_map", action="store_true")
@@ -454,6 +521,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth_invalid_ratio_stop", type=float, default=0.60)
     parser.add_argument("--print_hz", type=float, default=5.0)
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--display_scale", type=float, default=1.6)
+    parser.add_argument("--debug_map_px", type=int, default=320)
     parser.add_argument("--save_dir", type=str, default="")
     parser.add_argument("--save_every", type=int, default=0)
     return parser.parse_args()
@@ -480,6 +549,9 @@ def main() -> None:
 
     frame_idx = 0
     last_print = 0.0
+    window_name = "Real PCR input check"
+    if args.show:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     print(
         "[RealPCR] started. Policy frame: goal_buf=(x_right,y_forward), "
         "camera forward is robot +Y. ROS1 is not enabled in this checker."
@@ -498,7 +570,14 @@ def main() -> None:
 
             bbox, conf, _fresh = tracker.detect(color)
             target = tracker.estimate(depth_raw, depth_scale, intrin, bbox, conf)
-            local_map_2ch, _clearance_m, actor_difficulty, target_mask, depth_invalid_ratio = build_local_map_from_depth(
+            (
+                local_map_2ch,
+                _clearance_m,
+                actor_difficulty,
+                target_mask,
+                depth_invalid_ratio,
+                observed_map,
+            ) = build_local_map_from_depth(
                 depth_raw,
                 depth_scale,
                 intrin,
@@ -531,6 +610,9 @@ def main() -> None:
                     "local_map_shape": list(obs["local_map_2ch"].shape),
                     "occ_mean": float(local_map_2ch[0].mean()),
                     "clearance_mean": float(local_map_2ch[1].mean()),
+                    "safety_mean": float(local_map_2ch[1].mean()),
+                    "observed_mean": float(observed_map.mean()),
+                    "inflated_blocked_mean": float((local_map_2ch[1] < 0.5).mean()),
                     "target_mask_ratio": float(target_mask.mean()),
                     "depth_invalid_ratio": float(depth_invalid_ratio),
                     "depth_invalid": bool(depth_invalid),
@@ -560,10 +642,11 @@ def main() -> None:
                     local_map_2ch,
                     actor_difficulty,
                     target_mask,
+                    observed_map,
                     depth_invalid_ratio,
                     args,
                 )
-                cv2.imshow("Real PCR input check", debug)
+                cv2.imshow(window_name, prepare_display_image(debug, args))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             frame_idx += 1
