@@ -180,17 +180,26 @@ def _sanitize_array(values: np.ndarray, *, shape: Tuple[int, ...], name: str) ->
 
 def _actor_difficulty_from_local_map(local_map_2ch: np.ndarray, map_extent_m: float, radius_m: float) -> float:
     occ = np.clip(local_map_2ch[0], 0.0, 1.0)
-    clearance = np.clip(local_map_2ch[1], 0.0, 1.0)
+    safety = np.clip(local_map_2ch[1], 0.0, 1.0)
     n = int(occ.shape[0])
     cell = float(map_extent_m) / float(max(n, 1))
     x_centers = np.linspace(-0.5 * map_extent_m + 0.5 * cell, 0.5 * map_extent_m - 0.5 * cell, n)
     y_centers = np.linspace(0.5 * cell, map_extent_m - 0.5 * cell, n)
     grid_x, grid_y = np.meshgrid(x_centers, y_centers, indexing="ij")
-    mask = ((grid_x ** 2 + grid_y ** 2) <= max(float(radius_m), 1e-3) ** 2).astype(np.float32)
-    denom = max(float(mask.sum()), 1.0)
-    occ_ratio = float((occ * mask).sum() / denom)
-    clearance_cost = float(((1.0 - clearance) * mask).sum() / denom)
-    return float(np.clip(0.5 * occ_ratio + 0.5 * clearance_cost, 0.0, 1.0))
+    dist = np.sqrt(grid_x ** 2 + grid_y ** 2)
+    radius = max(float(radius_m), 1e-3)
+    mask = (dist <= radius).astype(np.float32)
+    blocked = np.maximum(occ, 1.0 - safety)
+    blocked_in_radius = blocked * mask
+    if np.any(blocked_in_radius > 0.5):
+        nearest_blocked_m = float(np.min(dist[blocked_in_radius > 0.5]))
+        near_risk = float(np.clip((radius - nearest_blocked_m) / radius, 0.0, 1.0))
+    else:
+        near_risk = 0.0
+    distance_weight = np.clip((radius - dist) / radius, 0.0, 1.0) ** 2
+    weighted_denom = max(float((distance_weight * mask).sum()), 1.0)
+    weighted_blocked = float((blocked * distance_weight * mask).sum() / weighted_denom)
+    return float(np.clip(0.75 * near_risk + 0.25 * weighted_blocked, 0.0, 1.0))
 
 
 class RealPcrPolicyShim:
