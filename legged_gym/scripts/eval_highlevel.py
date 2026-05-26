@@ -364,13 +364,47 @@ def _privileged_conflict_diag(
     else:
         target_recoverable = target_in_fov.to(device=risk_ref.device, dtype=torch.bool)
 
+    horizon_s = max(1e-3, float(getattr(args, "conflict_rollout_horizon_s", 1.2)))
+    target_speed = getattr(getattr(env, "env", None), "target_speed", None)
+    if torch.is_tensor(target_speed):
+        target_speed = target_speed.to(device=risk_ref.device, dtype=risk_ref.dtype)
+    else:
+        target_speed = torch.zeros_like(risk_ref)
+    cmd_a_forward = (
+        cmd_a[:, 1].to(device=risk_ref.device, dtype=risk_ref.dtype)
+        if torch.is_tensor(cmd_a) and cmd_a.shape[-1] >= 2
+        else zero
+    )
+    cmd_s_forward = (
+        cmd_s[:, 1].to(device=risk_ref.device, dtype=risk_ref.dtype)
+        if torch.is_tensor(cmd_s) and cmd_s.shape[-1] >= 2
+        else zero
+    )
+    avoid_progress = torch.clamp(cmd_a_forward, min=0.0) * horizon_s
+    stop_progress = torch.clamp(cmd_s_forward, min=0.0) * horizon_s
+    avoid_target_gap_growth = torch.clamp(target_speed - torch.clamp(cmd_a_forward, min=0.0), min=0.0) * horizon_s
+    stop_target_gap_growth = torch.clamp(target_speed - torch.clamp(cmd_s_forward, min=0.0), min=0.0) * horizon_s
+    progress_gain = float(getattr(args, "conflict_utility_progress_gain", 0.25))
+    target_gap_cost = float(getattr(args, "conflict_utility_target_gap_cost", 0.35))
+    risk_cost = float(getattr(args, "conflict_utility_risk_cost", 1.0))
+    utility_a = (
+        -risk_cost * risk_a
+        + progress_gain * avoid_progress
+        - target_gap_cost * avoid_target_gap_growth
+    )
+    utility_s = (
+        -risk_cost * risk_s
+        + progress_gain * stop_progress
+        - target_gap_cost * stop_target_gap_growth
+    )
+
     risk_alt = torch.minimum(risk_a, risk_s)
     unsafe_follow = risk_f > float(getattr(args, "unsafe_conflict_risk_f_thr", 0.25))
     safe_candidate_better = (risk_f - risk_alt) > float(getattr(args, "unsafe_conflict_risk_margin", 0.05))
     command_disagree = cmd_cos < float(getattr(args, "unsafe_conflict_cmd_cos_thr", 0.5))
     unsafe_raw = obstacle_window & unsafe_follow & safe_candidate_better & command_disagree & target_recoverable
-    prefer_margin = float(getattr(args, "unsafe_conflict_avoid_stop_margin", 0.03))
-    avoid_raw = unsafe_raw & ((risk_s - risk_a) > prefer_margin)
+    prefer_margin = float(getattr(args, "conflict_utility_margin", 0.03))
+    avoid_raw = unsafe_raw & ((utility_a - utility_s) > prefer_margin)
     stop_raw = unsafe_raw & (~avoid_raw)
 
     phase_code = torch.zeros_like(risk_ref)
@@ -394,6 +428,11 @@ def _privileged_conflict_diag(
         "risk_rollout_F": risk_f.to(dtype=risk_ref.dtype),
         "risk_rollout_A": risk_a.to(dtype=risk_ref.dtype),
         "risk_rollout_S": risk_s.to(dtype=risk_ref.dtype),
+        "utility_A": utility_a.to(dtype=risk_ref.dtype),
+        "utility_S": utility_s.to(dtype=risk_ref.dtype),
+        "utility_A_minus_S": (utility_a - utility_s).to(dtype=risk_ref.dtype),
+        "avoid_target_gap_growth": avoid_target_gap_growth.to(dtype=risk_ref.dtype),
+        "stop_target_gap_growth": stop_target_gap_growth.to(dtype=risk_ref.dtype),
         "target_recoverable_for_conflict": target_recoverable.to(dtype=risk_ref.dtype),
         "unsafe_high_conflict_raw": unsafe_raw.to(dtype=risk_ref.dtype),
         "avoid_high_conflict_raw": avoid_raw.to(dtype=risk_ref.dtype),
@@ -1318,6 +1357,11 @@ class EvalRunner:
                         risk_roll_f_t = post_info.get("risk_rollout_F", None)
                         risk_roll_a_t = post_info.get("risk_rollout_A", None)
                         risk_roll_s_t = post_info.get("risk_rollout_S", None)
+                        utility_a_t = post_info.get("utility_A", None)
+                        utility_s_t = post_info.get("utility_S", None)
+                        utility_a_minus_s_t = post_info.get("utility_A_minus_S", None)
+                        avoid_gap_growth_t = post_info.get("avoid_target_gap_growth", None)
+                        stop_gap_growth_t = post_info.get("stop_target_gap_growth", None)
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
                         cmd_s_t = post_info.get("cmd_S", None)
@@ -1359,6 +1403,11 @@ class EvalRunner:
                         risk_roll_f_v = _safe_float(risk_roll_f_t[i].item(), default=risk_f_v) if torch.is_tensor(risk_roll_f_t) else risk_f_v
                         risk_roll_a_v = _safe_float(risk_roll_a_t[i].item(), default=risk_a_v) if torch.is_tensor(risk_roll_a_t) else risk_a_v
                         risk_roll_s_v = _safe_float(risk_roll_s_t[i].item(), default=float("nan")) if torch.is_tensor(risk_roll_s_t) else float("nan")
+                        utility_a_v = _safe_float(utility_a_t[i].item(), default=float("nan")) if torch.is_tensor(utility_a_t) else float("nan")
+                        utility_s_v = _safe_float(utility_s_t[i].item(), default=float("nan")) if torch.is_tensor(utility_s_t) else float("nan")
+                        utility_a_minus_s_v = _safe_float(utility_a_minus_s_t[i].item(), default=float("nan")) if torch.is_tensor(utility_a_minus_s_t) else float("nan")
+                        avoid_gap_growth_v = _safe_float(avoid_gap_growth_t[i].item(), default=float("nan")) if torch.is_tensor(avoid_gap_growth_t) else float("nan")
+                        stop_gap_growth_v = _safe_float(stop_gap_growth_t[i].item(), default=float("nan")) if torch.is_tensor(stop_gap_growth_t) else float("nan")
                         clr_pp_v = float("nan")
                         safe_thr_v = float("nan")
                         near_miss_now = False
@@ -1625,6 +1674,11 @@ class EvalRunner:
                                     "risk_rollout_a": risk_roll_a_v,
                                     "risk_rollout_s": risk_roll_s_v,
                                     "risk_rollout_gap_f_min_as": risk_roll_f_v - min(risk_roll_a_v, risk_roll_s_v),
+                                    "utility_a": utility_a_v,
+                                    "utility_s": utility_s_v,
+                                    "utility_a_minus_s": utility_a_minus_s_v,
+                                    "avoid_target_gap_growth": avoid_gap_growth_v,
+                                    "stop_target_gap_growth": stop_gap_growth_v,
                                     "follow_weight": y_eff_v,
                                     "avoid_weight": 1.0 - y_eff_v,
                                     "csi": gate_raw_v - y_eff_v,
@@ -1690,6 +1744,7 @@ class EvalRunner:
                     final_collision = bool(ai.episode_collision)
                     row_progress_success = float(np.clip(ai.progress_ratio_best, 0.0, 1.0))
                     full_task_success = bool((row_progress_success >= 1.0 - 1e-6) and (not final_collision))
+                    task_success = bool(strict_terminal_success)
                     success_event_and_collision = bool(success_event and final_collision)
                     collision_only = bool(final_collision and row_progress_success <= 1e-6)
                     timeout_or_other = bool((row_progress_success <= 1e-6) and (not final_collision))
@@ -1795,7 +1850,8 @@ class EvalRunner:
                         {
                             "episode_id": global_episode_idx,
                             "difficulty": float(d),
-                            "success": row_progress_success,
+                            "success": int(task_success),
+                            "task_success": int(task_success),
                             "row_progress_success": row_progress_success,
                             "full_task_success": int(full_task_success),
                             "strict_success": int(strict_terminal_success),
@@ -2250,6 +2306,7 @@ class EvalRunner:
                     "episodes": set(),
                     "success": set(),
                     "success_score_sum": 0.0,
+                    "row_progress_sum": 0.0,
                     "success_event": set(),
                     "collision": set(),
                     "progress": set(),
@@ -2288,9 +2345,11 @@ class EvalRunner:
                     ):
                         bins[idx][key] += float(row_bin.get(key, 0.0) or 0.0)
                     episode_sets[idx]["episodes"].add(row_idx)
-                    row_success_score = float(row.get("success", 0.0) or 0.0)
-                    episode_sets[idx]["success_score_sum"] += row_success_score
-                    if row_success_score > 1e-6:
+                    task_success_score = float(row.get("task_success", row.get("success", 0.0)) or 0.0)
+                    row_progress_score = float(row.get("row_progress_success", 0.0) or 0.0)
+                    episode_sets[idx]["success_score_sum"] += task_success_score
+                    episode_sets[idx]["row_progress_sum"] += row_progress_score
+                    if task_success_score > 1e-6:
                         episode_sets[idx]["success"].add(row_idx)
                     if int(row.get("success_event", 0)):
                         episode_sets[idx]["success_event"].add(row_idx)
@@ -2346,7 +2405,7 @@ class EvalRunner:
                         else float("nan")
                     ),
                     "row_progress_success_mean": (
-                        episode_sets[idx]["success_score_sum"] / float(episode_count)
+                        episode_sets[idx]["row_progress_sum"] / float(episode_count)
                         if episode_count > 0
                         else float("nan")
                     ),
@@ -2650,7 +2709,8 @@ class EvalRunner:
                 ),
             }
 
-        success_scores = [float(r.get("success", 0.0)) for r in rows]
+        task_success_flags = [int(r.get("task_success", r.get("success", 0))) for r in rows]
+        row_progress_scores = [float(r.get("row_progress_success", 0.0)) for r in rows]
         full_task_success_flags = [int(r.get("full_task_success", 0)) for r in rows]
         success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
         success_event_and_collision_flags = [int(r.get("success_event_and_collision", r.get("success_and_collision", 0))) for r in rows]
@@ -2716,7 +2776,8 @@ class EvalRunner:
         )
 
         total_eps = len(rows)
-        success_score_sum = float(sum(success_scores))
+        task_success_eps = int(sum(task_success_flags))
+        row_progress_success_sum = float(sum(row_progress_scores))
         full_task_success_eps = int(sum(full_task_success_flags))
         strict_success_eps = int(sum(int(r.get("strict_success", 0)) for r in rows))
         success_event_eps = int(sum(success_event_flags))
@@ -2724,7 +2785,8 @@ class EvalRunner:
         collision_only_eps = int(sum(collision_only_flags))
         timeout_or_other_eps = int(sum(timeout_or_other_flags))
         collision_eps = int(sum(episode_collision))
-        success_rate = float(success_score_sum / max(1, total_eps))
+        task_success_rate = float(task_success_eps / max(1, total_eps))
+        row_progress_success_mean = float(row_progress_success_sum / max(1, total_eps))
         full_task_success_rate = float(full_task_success_eps / max(1, total_eps))
         success_event_rate = float(success_event_eps / max(1, total_eps))
         collision_rate = float(collision_eps / max(1, total_eps))
@@ -2744,9 +2806,9 @@ class EvalRunner:
 
         overall = {
             "episodes": total_eps,
-            "success_episodes": success_score_sum,
-            "task_success_episodes": success_score_sum,
-            "row_progress_success_sum": success_score_sum,
+            "success_episodes": task_success_eps,
+            "task_success_episodes": task_success_eps,
+            "row_progress_success_sum": row_progress_success_sum,
             "full_task_success_episodes": full_task_success_eps,
             "strict_success_episodes": strict_success_eps,
             "success_event_episodes": success_event_eps,
@@ -2754,9 +2816,9 @@ class EvalRunner:
             "success_and_collision_episodes": success_event_and_collision_eps,
             "timeout_or_other_episodes": timeout_or_other_eps,
             "collision_only_episodes": collision_only_eps,
-            "success_rate": success_rate,
-            "task_success_rate": success_rate,
-            "row_progress_success_mean": success_rate,
+            "success_rate": task_success_rate,
+            "task_success_rate": task_success_rate,
+            "row_progress_success_mean": row_progress_success_mean,
             "full_task_success_rate": full_task_success_rate,
             "strict_success_rate": float(strict_success_eps / max(1, total_eps)),
             "success_event_rate": success_event_rate,
@@ -2765,7 +2827,7 @@ class EvalRunner:
             "timeout_or_other_rate": timeout_or_other_rate,
             "collision_only_rate": collision_only_rate,
             "outcome_total_rate": outcome_total_rate,
-            "fail_ratio": float(1.0 - success_rate),
+            "fail_ratio": float(1.0 - task_success_rate),
             "follow_mae_m_mean": float(np.mean(follow_mae)) if follow_mae else float("nan"),
             "follow_rmse_m_mean": float(np.mean(follow_rmse)) if follow_rmse else float("nan"),
             "time_to_success_s_mean": float(np.mean(tts)) if tts else float("nan"),
@@ -2839,7 +2901,8 @@ class EvalRunner:
         unique_d = sorted(set(float(r["difficulty"]) for r in rows))
         for d in unique_d:
             sub = [r for r in rows if float(r["difficulty"]) == float(d)]
-            succ = [float(r.get("success", 0.0)) for r in sub]
+            succ = [int(r.get("task_success", r.get("success", 0))) for r in sub]
+            row_progress_d = _clean([r.get("row_progress_success", float("nan")) for r in sub])
             full_task_success_d = [int(r.get("full_task_success", 0)) for r in sub]
             strict_success_d = [int(r.get("strict_success", 0)) for r in sub]
             success_event_d = [int(r.get("success_event", r["success"])) for r in sub]
@@ -2885,6 +2948,7 @@ class EvalRunner:
             target_fov_d = _target_fov_summary(sub)
             n = len(sub)
             sr = float(sum(succ) / max(1, n))
+            row_progress_mean_d = float(np.mean(row_progress_d)) if row_progress_d else float("nan")
             full_task_success_rate_d = float(sum(full_task_success_d) / max(1, n))
             success_event_rate_d = float(sum(success_event_d) / max(1, n))
             success_event_collision_rate_d = float(sum(success_event_collision_d) / max(1, n))
@@ -2894,7 +2958,7 @@ class EvalRunner:
                 "episodes": n,
                 "success_rate": sr,
                 "task_success_rate": sr,
-                "row_progress_success_mean": sr,
+                "row_progress_success_mean": row_progress_mean_d,
                 "full_task_success_rate": full_task_success_rate_d,
                 "strict_success_rate": float(sum(strict_success_d) / max(1, n)),
                 "success_event_rate": success_event_rate_d,
@@ -2989,11 +3053,15 @@ class EvalRunner:
                 "deterministic_policy": bool(not self.args.stochastic),
                 "mass_kg_for_cot": float(self.mass_kg),
                 "success_definition": (
+                    "success/task_success = env PCR semantic success_mask: final row crossed, "
+                    "target distance inside follow band, and no episode collision"
+                ),
+                "row_progress_success_definition": (
                     "row_progress_success = max episode s_avoid_row_success_mask; each safely completed "
-                    "obstacle row contributes 1 / total_rows"
+                    "obstacle row contributes 1 / total_rows; diagnostic only"
                 ),
                 "full_task_success_definition": "row_progress_success == 1.0 and no episode collision",
-                "strict_success_definition": "env/play success_mask, kept as a diagnostic only",
+                "strict_success_definition": "env/play success_mask; equal to task_success for PCR eval",
                 "success_event_source": "info.success_mask > s_avoid_episode_success_flags > success_bonus",
                 "outcome_categories": ["full_row_score", "partial_row_score", "collision", "timeout_or_other"],
                 "aff_stack": int(self.args.aff_stack),
@@ -3056,10 +3124,17 @@ class EvalRunner:
                     "eval-only unsafe command conflict = row obstacle window AND rollout risk_F above threshold "
                     "AND risk_F-min(risk_A,risk_S) above margin AND command disagreement AND target recoverable"
                 ),
-                "avoid_conflict_definition": "C_avoid = C_unsafe AND rollout risk_A is lower than risk_S by margin",
+                "avoid_conflict_definition": (
+                    "C_avoid = C_unsafe AND utility_A > utility_S + margin; "
+                    "utility = -risk_cost*risk + progress_gain*forward_progress - target_gap_cost*target_gap_growth"
+                ),
                 "stop_conflict_definition": "C_stop = C_unsafe AND C_avoid is false",
                 "conflict_rollout_horizon_s": float(getattr(self.args, "conflict_rollout_horizon_s", 1.2)),
                 "conflict_rollout_tube_radius_m": float(getattr(self.args, "conflict_rollout_tube_radius_m", 0.25)),
+                "conflict_utility_risk_cost": float(getattr(self.args, "conflict_utility_risk_cost", 1.0)),
+                "conflict_utility_progress_gain": float(getattr(self.args, "conflict_utility_progress_gain", 0.25)),
+                "conflict_utility_target_gap_cost": float(getattr(self.args, "conflict_utility_target_gap_cost", 0.35)),
+                "conflict_utility_margin": float(getattr(self.args, "conflict_utility_margin", 0.03)),
                 "conflict_stop_candidate": str(getattr(self.args, "conflict_stop_candidate", "stop")),
                 "conflict_stop_slow_ratio": float(getattr(self.args, "conflict_stop_slow_ratio", 0.2)),
                 "unsafe_conflict_risk_f_thr": float(getattr(self.args, "unsafe_conflict_risk_f_thr", 0.25)),
@@ -3119,6 +3194,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "episode_id",
         "difficulty",
         "success",
+        "task_success",
         "row_progress_success",
         "full_task_success",
         "strict_success",
@@ -3346,6 +3422,11 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "risk_rollout_a",
             "risk_rollout_s",
             "risk_rollout_gap_f_min_as",
+            "utility_a",
+            "utility_s",
+            "utility_a_minus_s",
+            "avoid_target_gap_growth",
+            "stop_target_gap_growth",
             "follow_weight",
             "avoid_weight",
             "csi",
@@ -3436,7 +3517,7 @@ def _write_mechanism_plots(metrics: Dict, out_dir: str) -> None:
         suppression = vals("suppression_mean")
         w = vals("w_mean")
         signed_w = vals("signed_w_mean")
-        success = vals("row_progress_success_mean")
+        success = vals("task_success_rate")
         collision = vals("collision_episode_rate")
         steps = vals("steps")
         episodes = vals("episode_count")
@@ -3630,6 +3711,10 @@ def parse_args():
     parser.add_argument("--unsafe_conflict_min_steps", type=int, default=3)
     parser.add_argument("--conflict_rollout_horizon_s", type=float, default=1.2)
     parser.add_argument("--conflict_rollout_tube_radius_m", type=float, default=0.25)
+    parser.add_argument("--conflict_utility_risk_cost", type=float, default=1.0)
+    parser.add_argument("--conflict_utility_progress_gain", type=float, default=0.25)
+    parser.add_argument("--conflict_utility_target_gap_cost", type=float, default=0.35)
+    parser.add_argument("--conflict_utility_margin", type=float, default=0.03)
     parser.add_argument("--conflict_stop_candidate", choices=("stop", "slow"), default="stop")
     parser.add_argument("--conflict_stop_slow_ratio", type=float, default=0.2)
 
@@ -3731,7 +3816,10 @@ def main():
     print("Independent Eval Complete")
     print(f"Output: {out_dir}")
     print("-" * 72)
-    print(f"Row-progress success: {overall['row_progress_success_mean']:.4f}")
+    print(
+        f"Task success / row-progress: "
+        f"{overall['task_success_rate']:.4f} / {overall['row_progress_success_mean']:.4f}"
+    )
     print(
         "Episode diagnostics full/strict/event/event+collision/collision/zero-progress-timeout: "
         f"{overall['full_task_success_rate']:.4f} / {overall['strict_success_rate']:.4f} / "

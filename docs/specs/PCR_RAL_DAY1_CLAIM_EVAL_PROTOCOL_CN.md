@@ -25,7 +25,7 @@ PCR-Net uses y + w + beta + Command Post-Processor to achieve predictive, interp
 中文展开：
 
 ```text
-在六足机器人移动目标跟随与局部避障冲突场景中，PCR-Net 将 Follow/Avoid 仲裁拆成三部分：门控权重 y 负责结构性选择，learned-w 负责从候选命令与局部风险中学习短未来冲突先验，风险预算 beta 联动指令后处理器负责安全-效率取舍。当前两周实验的主线是证明 learned-w 相比 yonly 和 geom-w 能更好地处理真实高冲突窗口，同时必须补 beta Pareto 和实机低速演示证据。
+在六足机器人移动目标跟随与局部避障冲突场景中，PCR-Net 将 Follow/Avoid 仲裁拆成三部分：门控权重 y 负责结构性选择，learned-w 负责从候选命令与局部风险中学习短未来冲突先验，风险预算 beta 联动指令后处理器负责安全-效率取舍。当前两周实验的主线是证明 learned-w 相比 yonly 和 geom-w 能在真实高冲突窗口中自适应调制仲裁：既避免 yonly 的危险硬跟随，也避免规则避障的过度保守，从而保持任务推进、降低碰撞并改善目标跟随质量。
 ```
 
 这次 RAL 版本不主张：
@@ -70,7 +70,7 @@ Internal PCR ablations：
 贡献表述：
 
 ```text
-We introduce learned-w, a learned command-conditioned conflict prior that predicts short-horizon Follow/Avoid conflicts from candidate expert commands and local risk observations.
+We introduce learned-w, a learned command-conditioned conflict prior that adaptively modulates Follow/Avoid arbitration from candidate expert commands and local risk observations, preserving task progress while maintaining safety under geometric conflict.
 ```
 
 这是本文主贡献。必须用 `yonly / geom-w / learned-w` 三组主表、机制表和时间序列支撑。
@@ -79,7 +79,7 @@ We introduce learned-w, a learned command-conditioned conflict prior that predic
 
 - `PCR-learnedw` 相比 `PCR-yonly` 明显降低碰撞或 near-miss。
 - `PCR-learnedw` 相比 `PCR-geomw` 在至少一个主指标或机制指标上有优势，且跟随误差和目标视野不明显恶化。
-- `learned-w` 的优势能在 HighConflict 时间序列里解释，不只是表格偶然变好。
+- `learned-w` 的优势能在 HighConflict 时间序列里解释，不只是表格偶然变好；解释不预设一定压低 Follow，允许表现为 progress-preserving Follow-support。
 
 ### C2：PCR-Net 前瞻式冲突消解框架
 
@@ -239,9 +239,9 @@ Table 2：PCR 内部 w 机制消融。
 注意：机制证据分两层。
 
 - `priv_conflict_*` 表示 row-command conflict：机器人在障碍行窗口内，Follow 有前进压力，Avoid 有横移压力。它证明“发生了 Follow/Avoid 行为冲突”，但不等价于 Follow 路径已经危险。
-- `unsafe_conflict_*` 表示 unsafe command conflict：对 `cmd_F / cmd_A / cmd_S` 三个外生候选命令做短时几何风险对比，要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复。它才用于证明“Follow 在该窗口应被压低”。
-- `avoid_conflict_*` 表示 `C_avoid`：`C_unsafe` 中横移避让比 Stop/Slow 候选更安全，用于证明 learned-w 对 Follow/Avoid 仲裁本体的贡献。
-- `stop_conflict_*` 表示 `C_stop`：`C_unsafe` 中 Stop/Slow 候选不差于横移避让，这部分不能强行归因给 w，应交给 beta 或安全后处理解释。
+- `unsafe_conflict_*` 表示 unsafe command conflict：对 `cmd_F / cmd_A / cmd_S` 三个外生候选命令做短时几何风险对比，要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复。它用于定位真正危险的 Follow 候选，不直接规定 learned-w 必须压低 Follow。
+- `avoid_conflict_*` 表示 `C_avoid`：`C_unsafe` 中 `Avoid` 的任务效用高于 `Stop/Slow`，效用同时考虑风险、前向推进和目标距离拉开代价，用于判断哪些危险窗口确实该由 Follow/Avoid 仲裁处理。
+- `stop_conflict_*` 表示 `C_stop`：`C_unsafe` 中 Stop/Slow 的任务效用不低于 Avoid，这部分不强行归因给 w，应交给 beta 或安全后处理解释。
 
 行：
 
@@ -286,13 +286,13 @@ Table 2：PCR 内部 w 机制消融。
 
 关键判断：
 
-- `conflict_suppression_index > 0` 表示高冲突中 Follow 权重被压低。
-- `conflict_selective_suppression > 0` 表示这种压低主要集中在高冲突窗口，而不是全程保守。
-- `relative_conflict_modulation` 与 `conflict_selective_suppression` 同号同义，按正向指标解释；越大表示高冲突窗口相对非冲突窗口的选择性抑制越强。
+- `conflict_suppression_index > 0` 表示高冲突中 Follow 权重被压低；`conflict_suppression_index < 0` 表示 learned-w 在该窗口增强 Follow。
+- `conflict_selective_suppression > 0` 表示压低 Follow 主要集中在高冲突窗口；若为负，则解释为选择性 Follow-support，不得写成避障抑制。
+- `relative_conflict_modulation` 与 `conflict_selective_suppression` 同号同义；正值表示高冲突窗口相对非冲突窗口更压 Follow，负值表示更支持 Follow。
 - `priv_conflict_signed_w_mean` 只对 `PCR-learnedw / learnedw2` 解释；对 `PCR-geomw` 不作为机制结论。
 - `PCR-geomw` 机制图看 `w` 与 `y_raw-y_eff`；`PCR-yonly` 机制图只看 `y_raw-y_eff`。
-- 论文里“learned-w 在危险冲突中抑制 Follow”的结论必须由 `unsafe_conflict_*` 支撑，不能只用 `priv_conflict_*` 支撑。
-- 论文里“w 对 Follow/Avoid 仲裁真正有贡献”的核心证据优先看 `avoid_conflict_suppression_index > 0`、`avoid_conflict_signed_w_mean < 0`，同时整体 `collision / near_miss` 下降且 `follow_mae / target_lost` 不明显恶化。
+- 论文当前主张不写“learned-w 一定在危险冲突中抑制 Follow”；若 `CSI < 0` 且成功率/碰撞/跟随误差更好，应写成 learned-w 学到 progress-preserving Follow-support。
+- 论文里“w 对 Follow/Avoid 仲裁真正有贡献”的核心证据优先看 `PCR-learnedw` 在 `task_success_rate / episode_collision_rate / follow_mae_m_mean` 上优于 `yonly / geom-w`，并用 `signed_w / delta_y / CSI` 解释它到底是在 avoid-support 还是 follow-support。
 
 ## 8.5 beta Pareto 字段
 

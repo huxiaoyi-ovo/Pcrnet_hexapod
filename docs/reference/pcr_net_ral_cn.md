@@ -11,7 +11,7 @@
 本文档作为 RAL 中文初稿，当前按完整 PCR-Net 论文叙事写作：`y + w + beta + Command Post-Processor`。两周实验不替代论文主张，而是为主张补证据。
 
 - **主张层**：PCR-Net 是面向足式机器人人体跟随的前瞻式冲突消解框架。
-- **核心证据层**：主表分两层写：外部对比 `Monolithic PPO / Reactive Safety Override / DWA-inspired Local Rollout`，内部消融 `PCR-yonly / PCR-geomw / PCR-learnedw`；优先证明 `PCR-learnedw` 相比外部常规方法和强规则 `PCR-geomw` 更能处理真实高冲突窗口。
+- **核心证据层**：主表分两层写：外部对比 `Monolithic PPO / Reactive Safety Override / DWA-inspired Local Rollout`，内部消融 `PCR-yonly / PCR-geomw / PCR-learnedw`；优先证明 `PCR-learnedw` 相比外部常规方法和强规则 `PCR-geomw` 更能在真实高冲突窗口中保持任务推进与安全。
 - **实现口径**：`risk_memory` 归入 `learned-w` 的最终实现优化，不单列第四个 baseline。
 - **必须补齐层**：外部 baseline、内部三组消融、`beta_sweep / Pareto`、主表多 seed、机制时间序列、D435i 输入链路和真实低速演示。
 - **终稿收缩规则**：如果某个组件证据不足，终稿降低其主张强度；不把未完成实验写成已完成结论。
@@ -63,7 +63,7 @@ $$
 ### 贡献
 
 1. 提出一个面向足式机器人人体跟随的**前瞻式冲突消解框架**，将跟随专家、避障专家和高层门控统一到可解释的 Follow/Avoid 仲裁形式中。
-2. 提出**学习式命令条件化冲突估计器** `learned-w`，通过候选跟随/避障指令和局部风险预测短未来冲突，并相对手工 `geom-w` 基线验证学习先验的必要性。
+2. 提出**学习式命令条件化仲裁调制器** `learned-w`，通过候选跟随/避障指令和局部风险学习短未来冲突下的自适应调制，并相对手工 `geom-w` 基线验证学习先验的必要性。
 3. 提出**风险预算 $\beta$ 联动的指令后处理器**，将速度、平滑性和安全距离约束组织为可扫描的保守度轴，用于形成风险-效率 Pareto 曲线并支持部署时调节。
 4. 在 Isaac Gym 六足平台和 D435i 输入链路上验证 PCR-Net，报告消融、机制分析、风险-效率曲线和真实输入 dry-run；其中 HighConflict、CSI、RCM 等指标作为证据工具服务于上述主张，而不是替代主张本身。
 
@@ -292,7 +292,7 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 | PCR-geomw | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
 | PCR-learnedw | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
 
-**预期趋势**：`PCR-learnedw` 应比 `Monolithic PPO` 更可解释、比 `Reactive Safety Override` 更少保守停滞、比 `DWA-inspired Local Rollout` 更适合动态目标跟随；在内部消融中，它应比 `PCR-yonly` 更早压低危险跟随，比 `PCR-geomw` 更能处理几何规则难以覆盖的高冲突窗口。
+**预期趋势**：`PCR-learnedw` 应比 `Monolithic PPO` 更可解释、比 `Reactive Safety Override` 更少保守停滞、比 `DWA-inspired Local Rollout` 更适合动态目标跟随；在内部消融中，它应比 `PCR-yonly` 显著降低碰撞并提高任务成功率，比 `PCR-geomw` 更好地保持目标跟随质量。若机制图显示 `learned-w` 增强 Follow，则论文解释为 progress-preserving arbitration，而不是危险时一律压低 Follow。
 
 ### C. 前瞻提前量分析
 
@@ -309,7 +309,7 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 
 在 $\beta = \{0.0, 0.25, 0.5, 0.75, 1.0\}$ 五个值下评估 `PCR-learnedw`，绘制碰撞率 vs. 成功率 Pareto 前沿（图4）。
 
-关键观察：`PCR-learnedw` 的 Pareto 前沿应优于 `PCR-yonly` 和 `PCR-geomw` 的固定设置：对于相近碰撞率，保持更高任务成功率或更低跟随误差。这种优势直接归因于 $w$ 的前瞻偏置，它使门控策略更早开始转向避障，为平滑导航留出更多时间和空间。
+关键观察：`PCR-learnedw` 的 Pareto 前沿应优于 `PCR-yonly` 和 `PCR-geomw` 的固定设置：对于相近碰撞率，保持更高任务成功率或更低跟随误差。这种优势归因于 $w$ 的命令条件化调制：它可以在确需避障时降低危险 Follow，也可以在几何冲突但仍可推进的窗口中避免过度保守。
 
 ### E. 外部基线对比
 

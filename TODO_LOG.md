@@ -74,6 +74,8 @@
 - [x] ~~[P0] 优化 PCR 机制图显示比例：Conflict Modulation 子图改为自适应 y 轴以显示小量级调制差异，Bin Support 改用 steps/episodes 双轴显示，避免真实差异被固定 0-1 或单 count 轴压扁。~~
 - [x] ~~[P0] 修正 PCR eval 冲突证据分层：保留 `priv_conflict_*` 作为 row-command conflict，只证明障碍行窗口内 Follow/Avoid 候选动作分歧；新增 `unsafe_conflict_*`，要求 `risk_F` 高、`risk_F-risk_A` 高且命令分歧明显，后续“危险冲突中抑制 Follow”的论文结论必须优先由 unsafe 指标支撑。~~
 - [x] ~~[P0] 升级 PCR eval 危险冲突证据链：`unsafe_conflict_*` 改为 `cmd_F / cmd_A / cmd_S` 三候选短时风险对比，并新增 `avoid_conflict_* / stop_conflict_*`；后续证明 w 贡献优先看 `C_avoid` 上的 `signed_w < 0`、`delta_y < 0`、`CSI > 0`，`C_stop` 不强行归因给 w。~~
+- [x] ~~[P0] 根据 0.6 m/s 压力评测修正 learned-w 论文口径：当前主张改为 adaptive / progress-preserving arbitration，不再预设 learned-w 必须在高危冲突中压低 Follow；若 `signed_w > 0、CSI < 0` 但任务成功率、碰撞率、跟随误差更好，解释为 learned-w 学到 Follow-support 调制。~~
+- [x] ~~[P0] 修正 `C_avoid/C_stop` 评测定义：由 risk-only 改为 utility-based，效用同时考虑候选命令风险、前向推进和目标距离拉开代价，避免 Stop 因风险最低天然吞掉所有 unsafe conflict。~~
 
 ## 2026-05-22 PCR w 真实冲突证据尺子
 

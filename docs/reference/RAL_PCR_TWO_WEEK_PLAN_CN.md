@@ -10,7 +10,7 @@
 PCR-Net 用 y + w + beta + Command Post-Processor 在足式机器人人体跟随与局部避障冲突中实现前瞻式、可解释、可调节的运行时冲突消解。
 ```
 
-两周内的证据重点优先放在 `learned-w`：证明学习式命令条件化冲突先验相比 `yonly` 和 `geom-w` 更能处理真实高冲突窗口。`risk_memory` 视为 learned-w 最终实现里的短时风险记忆优化，不单列为第四个 baseline。主表分两层：外部 comparative baselines 用于回答“为什么不是常规方法”，PCR internal ablations 用于回答“为什么 learned-w 必要”。`beta` 不做 learned beta 训练，但保留为风险预算与后处理器联动的论文组成，并尽量通过 `beta_sweep / Pareto` 给出支持证据。Student、完整视觉退化矩阵和大规模 OOD 仍作为后续扩展或补充讨论。
+两周内的证据重点优先放在 `learned-w`：证明学习式命令条件化冲突先验相比 `yonly` 和 `geom-w` 更能在真实高冲突窗口中自适应调制仲裁。当前 0.6 m/s 压力评测的工作假设是：learned-w 可能表现为 progress-preserving Follow-support，而不是简单的危险时压低 Follow。`risk_memory` 视为 learned-w 最终实现里的短时风险记忆优化，不单列为第四个 baseline。主表分两层：外部 comparative baselines 用于回答“为什么不是常规方法”，PCR internal ablations 用于回答“为什么 learned-w 必要”。`beta` 不做 learned beta 训练，但保留为风险预算与后处理器联动的论文组成，并尽量通过 `beta_sweep / Pareto` 给出支持证据。Student、完整视觉退化矩阵和大规模 OOD 仍作为后续扩展或补充讨论。
 
 ## 2. 判定标准
 
@@ -111,9 +111,9 @@ Internal PCR ablations：
 机制证据分两层：
 
 - `priv_conflict_*`：row-command conflict，只说明障碍行窗口里 Follow 和 Avoid 候选动作发生分歧。
-- `unsafe_conflict_*`：unsafe command conflict，用 `cmd_F / cmd_A / cmd_S` 三候选短时几何风险对比定义，同时要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复；论文安全结论优先看这一层。
-- `avoid_conflict_*`：`C_avoid`，表示危险冲突里横移避让比 Stop/Slow 候选更安全，是证明 w 对 Follow/Avoid 仲裁贡献的主指标。
-- `stop_conflict_*`：`C_stop`，表示 Stop/Slow 不差于横移避让，不能强行归因给 w，应在 beta 或安全后处理里解释。
+- `unsafe_conflict_*`：unsafe command conflict，用 `cmd_F / cmd_A / cmd_S` 三候选短时几何风险对比定义，同时要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复；它定位危险 Follow 候选，但不预设 learned-w 必须压低 Follow。
+- `avoid_conflict_*`：`C_avoid`，表示危险冲突里 Avoid 的任务效用高于 Stop/Slow；效用同时考虑风险、前向推进和目标距离拉开代价，避免 Stop 因为风险最低天然吞掉所有 unsafe。
+- `stop_conflict_*`：`C_stop`，表示 Stop/Slow 的任务效用不低于 Avoid，不能强行归因给 w，应在 beta 或安全后处理里解释。
 
 列：
 
@@ -152,13 +152,13 @@ Internal PCR ablations：
 
 解释口径：
 
-- `priv_conflict_delta_y_mean = y_eff - y_raw`，高冲突窗口内越负，表示越偏向 Avoid。
-- `conflict_suppression_index = -priv_conflict_delta_y_mean`，正值表示高冲突中压低 Follow。
+- `priv_conflict_delta_y_mean = y_eff - y_raw`；负值表示偏向 Avoid，正值表示偏向 Follow。
+- `conflict_suppression_index = -priv_conflict_delta_y_mean`；正值表示高冲突中压低 Follow，负值表示 learned-w 在该窗口支持 Follow。
 - `conflict_selective_suppression = priv_non_conflict_delta_y_mean - priv_conflict_delta_y_mean`。
 - `relative_conflict_modulation` 与 `conflict_selective_suppression` 同号同义；正值表示抑制主要发生在高冲突窗口，不能再按旧口径解释为“越负越好”。
 - 图表中 `signed_w` 只用于 `learnedw2`；`geom-w` 图看 `w` 和 `y_raw-y_eff`，`yonly` 图只看 `y_raw-y_eff`。
-- “learned-w 抑制危险 Follow”必须看 `unsafe_conflict_suppression_index > 0`，不能只看 `priv_conflict_*`。
-- “w 对 Follow/Avoid 仲裁本体有贡献”必须优先看 `avoid_conflict_suppression_index > 0`、`avoid_conflict_signed_w_mean < 0`，并同时保证 `collision / near_miss` 下降、`follow_mae / target_lost` 不明显变差。
+- 当前主张不写“learned-w 一定抑制危险 Follow”；若 `CSI < 0` 且任务成功率、碰撞率、跟随误差更好，应解释为 learned-w 学到 progress-preserving Follow-support。
+- “w 对 Follow/Avoid 仲裁本体有贡献”优先看 `PCR-learnedw` 在 `task_success_rate / episode_collision_rate / follow_mae_m_mean` 上优于 `yonly / geom-w`，再用 `signed_w / delta_y / CSI` 解释调制方向。
 
 ### Table 3：补充泛化
 
