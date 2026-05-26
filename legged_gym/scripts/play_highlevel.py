@@ -2113,6 +2113,18 @@ def parse_args():
         help="s_pcr_new 高难泛化评测：5 行障碍、目标速度上移、纵向行距压缩",
     )
     parser.add_argument(
+        "--pcr_line_target_speed",
+        type=float,
+        default=None,
+        help="覆盖 s_pcr_line_avoid_basic 脚本目标速度，单位 m/s",
+    )
+    parser.add_argument(
+        "--pcr_line_target_speed_scale",
+        type=float,
+        default=None,
+        help="按倍率覆盖 s_pcr_line_avoid_basic 默认脚本目标速度",
+    )
+    parser.add_argument(
         "--expert_k_yaw",
         type=float,
         default=None,
@@ -2236,6 +2248,11 @@ def parse_args():
         parser.error("--generalize 仅支持 --task s_pcr_new")
     if bool(getattr(args, "generalize", False)) and getattr(args, "avoid_stage_override", None) not in (None, 4):
         parser.error("--generalize 固定 5 行障碍，只允许省略 --avoid_stage_override 或显式传 4")
+    if (
+        getattr(args, "pcr_line_target_speed", None) is not None
+        and getattr(args, "pcr_line_target_speed_scale", None) is not None
+    ):
+        parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
     if getattr(args, "skill", None) is None:
         args.skill = "follow"
     th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
