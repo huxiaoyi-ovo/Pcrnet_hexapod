@@ -343,6 +343,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     _maybe_apply_e_s_corridor_overrides(args, env_cfg)
     _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
     _maybe_apply_pcr_new_play_overrides(args, env_cfg)
+    _maybe_apply_pcr_line_play_overrides(args, env_cfg)
     _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
 
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
@@ -1610,6 +1611,26 @@ def _maybe_apply_pcr_new_play_overrides(args, env_cfg) -> None:
         terrain_cfg.pcr_new_force_stage = int(stage_override)
 
 
+def _maybe_apply_pcr_line_play_overrides(args, env_cfg) -> None:
+    if env_cfg is None or str(getattr(args, "task", "")) != "s_pcr_line_avoid_basic":
+        return
+    nav_cfg = getattr(env_cfg, "navigation", None)
+    if nav_cfg is None:
+        return
+    base_speed = float(getattr(nav_cfg, "moving_target_pcr_line_speed", 0.35))
+    speed = getattr(args, "pcr_line_target_speed", None)
+    scale = getattr(args, "pcr_line_target_speed_scale", None)
+    if speed is None and scale is None:
+        return
+    if speed is None:
+        speed = base_speed * float(scale)
+    nav_cfg.moving_target_pcr_line_speed = float(speed)
+    print(
+        f"[PlayHigh] s_pcr_line_avoid_basic target speed override: "
+        f"{base_speed:.3f} -> {float(speed):.3f} m/s"
+    )
+
+
 def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
     if str(getattr(args, "task", "")) not in ("s_avoid_basic", "s_pcr_line_avoid_basic", "s_pcr_new"):
         return
@@ -2314,6 +2335,7 @@ def main():
         _maybe_apply_e_s_corridor_overrides(args, env_cfg)
         _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
         _maybe_apply_pcr_new_play_overrides(args, env_cfg)
+        _maybe_apply_pcr_line_play_overrides(args, env_cfg)
         _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
     is_pcr_demo_task = bool(getattr(env, "is_pcr_line_task", False))

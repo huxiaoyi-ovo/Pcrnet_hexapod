@@ -236,6 +236,13 @@ Internal PCR ablations：
 
 Table 2：PCR 内部 w 机制消融。
 
+注意：机制证据分两层。
+
+- `priv_conflict_*` 表示 row-command conflict：机器人在障碍行窗口内，Follow 有前进压力，Avoid 有横移压力。它证明“发生了 Follow/Avoid 行为冲突”，但不等价于 Follow 路径已经危险。
+- `unsafe_conflict_*` 表示 unsafe command conflict：对 `cmd_F / cmd_A / cmd_S` 三个外生候选命令做短时几何风险对比，要求 `risk_F` 高、`risk_F - min(risk_A, risk_S)` 高、命令方向分歧明显、目标仍可恢复。它才用于证明“Follow 在该窗口应被压低”。
+- `avoid_conflict_*` 表示 `C_avoid`：`C_unsafe` 中横移避让比 Stop/Slow 候选更安全，用于证明 learned-w 对 Follow/Avoid 仲裁本体的贡献。
+- `stop_conflict_*` 表示 `C_stop`：`C_unsafe` 中 Stop/Slow 候选不差于横移避让，这部分不能强行归因给 w，应交给 beta 或安全后处理解释。
+
 行：
 
 - `PCR-yonly`
@@ -244,24 +251,48 @@ Table 2：PCR 内部 w 机制消融。
 
 列：
 
-- `priv_conflict_signed_w_mean`
+- `priv_conflict_w_mean`
+- `priv_conflict_signed_w_mean`（只用于 `PCR-learnedw / learnedw2`，`PCR-yonly` 与 `PCR-geomw` 不用它解释）
 - `priv_conflict_delta_y_mean`
 - `conflict_suppression_index`
 - `conflict_selective_suppression`
 - `relative_conflict_modulation`
-- `priv_conflict_phase_approach_signed_w_mean`
-- `priv_conflict_phase_inside_signed_w_mean`
-- `priv_conflict_phase_release_signed_w_mean`
+- `priv_conflict_phase_approach_w_mean`
+- `priv_conflict_phase_inside_w_mean`
+- `priv_conflict_phase_release_w_mean`
+- `priv_conflict_phase_approach_signed_w_mean`（只用于 `PCR-learnedw / learnedw2`）
+- `priv_conflict_phase_inside_signed_w_mean`（只用于 `PCR-learnedw / learnedw2`）
+- `priv_conflict_phase_release_signed_w_mean`（只用于 `PCR-learnedw / learnedw2`）
 - `priv_conflict_phase_approach_delta_y_mean`
 - `priv_conflict_phase_inside_delta_y_mean`
 - `priv_conflict_phase_release_delta_y_mean`
+- `unsafe_conflict_step_rate`
+- `unsafe_conflict_signed_w_mean`
+- `unsafe_conflict_delta_y_mean`
+- `unsafe_conflict_suppression_index`
+- `unsafe_conflict_selective_suppression`
+- `unsafe_relative_conflict_modulation`
+- `unsafe_conflict_phase_approach_delta_y_mean`
+- `unsafe_conflict_phase_inside_delta_y_mean`
+- `unsafe_conflict_phase_release_delta_y_mean`
+- `avoid_conflict_step_rate`
+- `avoid_conflict_signed_w_mean`
+- `avoid_conflict_delta_y_mean`
+- `avoid_conflict_suppression_index`
+- `stop_conflict_step_rate`
+- `stop_conflict_delta_y_mean`
+- `risk_rollout_f_mean / risk_rollout_a_mean / risk_rollout_s_mean`
+- `risk_rollout_gap_f_min_as_mean`
 
 关键判断：
 
 - `conflict_suppression_index > 0` 表示高冲突中 Follow 权重被压低。
 - `conflict_selective_suppression > 0` 表示这种压低主要集中在高冲突窗口，而不是全程保守。
 - `relative_conflict_modulation` 与 `conflict_selective_suppression` 同号同义，按正向指标解释；越大表示高冲突窗口相对非冲突窗口的选择性抑制越强。
-- `priv_conflict_signed_w_mean` 对 `PCR-learnedw` 应朝避障方向变化。
+- `priv_conflict_signed_w_mean` 只对 `PCR-learnedw / learnedw2` 解释；对 `PCR-geomw` 不作为机制结论。
+- `PCR-geomw` 机制图看 `w` 与 `y_raw-y_eff`；`PCR-yonly` 机制图只看 `y_raw-y_eff`。
+- 论文里“learned-w 在危险冲突中抑制 Follow”的结论必须由 `unsafe_conflict_*` 支撑，不能只用 `priv_conflict_*` 支撑。
+- 论文里“w 对 Follow/Avoid 仲裁真正有贡献”的核心证据优先看 `avoid_conflict_suppression_index > 0`、`avoid_conflict_signed_w_mean < 0`，同时整体 `collision / near_miss` 下降且 `follow_mae / target_lost` 不明显恶化。
 
 ## 8.5 beta Pareto 字段
 

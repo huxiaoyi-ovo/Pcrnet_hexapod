@@ -70,6 +70,10 @@
 - [x] ~~[P0] Day 1 论文对照口径进一步收口：主表三条为 `yonly / geom-w / learned-w`，其中 `learned-w` 是论文主贡献，`geom-w` 是强规则基线，`yonly` 是无冲突先验基线；`risk_memory` 归入 learned-w 的最终实现优化，不单列第四个 baseline。~~
 - [x] ~~[P0] Day 1 主表口径升级为两层对比：外部 comparative baselines 至少包括 `Monolithic PPO`、`Reactive Safety Override`、`DWA-inspired Local Rollout`，内部 PCR ablation variants 为 `PCR-yonly / PCR-geomw / PCR-learnedw`；若时间不足，最低主表保留 `Monolithic PPO + Reactive Safety Override + PCR-yonly + PCR-geomw + PCR-learnedw` 五组。~~
 - [x] ~~[P0] 修正 PCR eval 机制指标解释口径：`relative_conflict_modulation` 改为正向指标，并新增 `conflict_selective_suppression`；后续论文表格统一按 `CSI > 0` 表示高冲突压 Follow、`CSS/RCM > 0` 表示抑制主要集中在高冲突窗口，避免把正确数据解释成相反结论。~~
+- [x] ~~[P0] 修正 PCR 机制图字段口径：`signed_w` 只在 `learnedw2` 图和论文解释中使用；`geom-w` 图改画原始 `w` 与 `y_raw-y_eff`，`yonly` 图只画 `y_raw-y_eff`，避免在非 signed-w 方法上出现全零 `signed_w` 造成误读。~~
+- [x] ~~[P0] 优化 PCR 机制图显示比例：Conflict Modulation 子图改为自适应 y 轴以显示小量级调制差异，Bin Support 改用 steps/episodes 双轴显示，避免真实差异被固定 0-1 或单 count 轴压扁。~~
+- [x] ~~[P0] 修正 PCR eval 冲突证据分层：保留 `priv_conflict_*` 作为 row-command conflict，只证明障碍行窗口内 Follow/Avoid 候选动作分歧；新增 `unsafe_conflict_*`，要求 `risk_F` 高、`risk_F-risk_A` 高且命令分歧明显，后续“危险冲突中抑制 Follow”的论文结论必须优先由 unsafe 指标支撑。~~
+- [x] ~~[P0] 升级 PCR eval 危险冲突证据链：`unsafe_conflict_*` 改为 `cmd_F / cmd_A / cmd_S` 三候选短时风险对比，并新增 `avoid_conflict_* / stop_conflict_*`；后续证明 w 贡献优先看 `C_avoid` 上的 `signed_w < 0`、`delta_y < 0`、`CSI > 0`，`C_stop` 不强行归因给 w。~~
 
 ## 2026-05-22 PCR w 真实冲突证据尺子
 
