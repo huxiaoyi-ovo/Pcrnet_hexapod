@@ -329,19 +329,42 @@ def build_target_depth_mask(
     return mask
 
 
-def compute_actor_difficulty(local_map_2ch: np.ndarray, map_extent: float, radius_m: float) -> float:
+def compute_actor_difficulty_stats(local_map_2ch: np.ndarray, map_extent: float, radius_m: float) -> Dict[str, float]:
     occ = np.clip(local_map_2ch[0], 0.0, 1.0)
-    clearance = np.clip(local_map_2ch[1], 0.0, 1.0)
+    safety = np.clip(local_map_2ch[1], 0.0, 1.0)
     n = occ.shape[0]
     cell = map_extent / float(n)
     x_centers = np.linspace(-0.5 * map_extent + 0.5 * cell, 0.5 * map_extent - 0.5 * cell, n)
     y_centers = np.linspace(0.5 * cell, map_extent - 0.5 * cell, n)
     grid_x, grid_y = np.meshgrid(x_centers, y_centers, indexing="ij")
-    radial_mask = ((grid_x ** 2 + grid_y ** 2) <= max(radius_m, 1e-3) ** 2).astype(np.float32)
-    denom = max(float(radial_mask.sum()), 1.0)
-    occ_ratio = float((occ * radial_mask).sum() / denom)
-    clearance_cost = float(((1.0 - clearance) * radial_mask).sum() / denom)
-    return float(np.clip(0.5 * occ_ratio + 0.5 * clearance_cost, 0.0, 1.0))
+    dist = np.sqrt(grid_x ** 2 + grid_y ** 2)
+    radius = max(float(radius_m), 1e-3)
+    radial_mask = (dist <= radius).astype(np.float32)
+    blocked = np.maximum(occ, 1.0 - safety)
+    blocked_in_radius = blocked * radial_mask
+    has_blocked = bool(np.any(blocked_in_radius > 0.5))
+    if has_blocked:
+        nearest_blocked_m = float(np.min(dist[blocked_in_radius > 0.5]))
+        near_risk = float(np.clip((radius - nearest_blocked_m) / radius, 0.0, 1.0))
+    else:
+        nearest_blocked_m = float("inf")
+        near_risk = 0.0
+    # Keep a density term, but make the nearest blocked/safety cell dominate.
+    # This makes the printed difficulty monotonic when the same obstacle moves closer.
+    distance_weight = np.clip((radius - dist) / radius, 0.0, 1.0) ** 2
+    weighted_denom = max(float((distance_weight * radial_mask).sum()), 1.0)
+    weighted_blocked = float((blocked * distance_weight * radial_mask).sum() / weighted_denom)
+    difficulty = float(np.clip(0.75 * near_risk + 0.25 * weighted_blocked, 0.0, 1.0))
+    return {
+        "actor_difficulty": difficulty,
+        "nearest_blocked_m": nearest_blocked_m,
+        "near_risk": near_risk,
+        "weighted_blocked": weighted_blocked,
+    }
+
+
+def compute_actor_difficulty(local_map_2ch: np.ndarray, map_extent: float, radius_m: float) -> float:
+    return float(compute_actor_difficulty_stats(local_map_2ch, map_extent, radius_m)["actor_difficulty"])
 
 
 def target_distance_m(target: TargetEstimate) -> float:
@@ -598,6 +621,11 @@ def main() -> None:
                 target_distance = target_distance_m(target)
                 target_too_close = bool(target.valid and target_distance < float(args.target_min_distance_m))
                 depth_invalid = bool(depth_invalid_ratio > float(args.depth_invalid_ratio_stop))
+                difficulty_stats = compute_actor_difficulty_stats(
+                    local_map_2ch,
+                    float(args.map_extent_m),
+                    float(args.difficulty_radius_m),
+                )
                 msg = {
                     "target_valid": bool(target.valid),
                     "target_lost": bool(not target.valid),
@@ -607,9 +635,11 @@ def main() -> None:
                     "target_depth_m": float(target.depth_m),
                     "target_vel": [float(target.v_right), float(target.v_forward)],
                     "actor_difficulty": float(actor_difficulty),
+                    "nearest_blocked_m": float(difficulty_stats["nearest_blocked_m"]),
+                    "near_risk": float(difficulty_stats["near_risk"]),
+                    "weighted_blocked": float(difficulty_stats["weighted_blocked"]),
                     "local_map_shape": list(obs["local_map_2ch"].shape),
                     "occ_mean": float(local_map_2ch[0].mean()),
-                    "clearance_mean": float(local_map_2ch[1].mean()),
                     "safety_mean": float(local_map_2ch[1].mean()),
                     "observed_mean": float(observed_map.mean()),
                     "inflated_blocked_mean": float((local_map_2ch[1] < 0.5).mean()),
@@ -625,6 +655,9 @@ def main() -> None:
                         "target_distance_m",
                         "local_map_2ch",
                         "actor_difficulty",
+                        "nearest_blocked_m",
+                        "near_risk",
+                        "weighted_blocked",
                         "depth_invalid_ratio",
                         "depth_invalid",
                     ],

@@ -77,6 +77,7 @@
 - [x] ~~[P0] 根据 0.6 m/s 压力评测修正 learned-w 论文口径：当前主张改为 adaptive / progress-preserving arbitration，不再预设 learned-w 必须在高危冲突中压低 Follow；若 `signed_w > 0、CSI < 0` 但任务成功率、碰撞率、跟随误差更好，解释为 learned-w 学到 Follow-support 调制。~~
 - [x] ~~[P0] 修正 `C_avoid/C_stop` 评测定义：由 risk-only 改为 utility-based，效用同时考虑候选命令风险、前向推进和目标距离拉开代价，避免 Stop 因风险最低天然吞掉所有 unsafe conflict。~~
 - [x] ~~[P0] 修正 `C_avoid/C_stop` utility 二次审查问题：`cmd_A` 是横移避障，不能用前向分量衡量 Avoid 任务收益；正式评测改为风险 + 带上限的 Avoid 横移打开通路收益 + Stop/Slow 前向保距收益 + 目标距离拉开代价，并标注旧 `unsafe_conflict_avoid_stop_margin` 为 legacy unused。~~
+- [x] ~~[P0] 修正 D435i 实机输入 difficulty 口径：`local_map_2ch[1]` 是 passable/safety，不再按平均 safety/occupancy 粗略估难度；`real_pcr_input_check.py` 与 `pcr_realplay.py` 同步改为最近 blocked 距离主导 + 距离加权 blocked 密度，保证同一障碍越靠近机器人时 `nearest_blocked_m` 降低、`near_risk/actor_difficulty` 升高。~~
 
 ## 2026-05-22 PCR w 真实冲突证据尺子
 
