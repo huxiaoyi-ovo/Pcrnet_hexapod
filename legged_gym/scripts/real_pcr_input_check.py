@@ -292,7 +292,9 @@ def build_local_map_from_depth(
         inflated_occ = cv2.dilate((occ > 0.5).astype(np.uint8), kernel, iterations=1)
     else:
         inflated_occ = (occ > 0.5).astype(np.uint8)
-    passable = ((inflated_occ <= 0) & (occ < 0.5)).astype(np.float32)
+    passable_raw = ((inflated_occ <= 0) & (occ < 0.5)).astype(np.float32)
+    # Match sim visible_mask semantics: unseen cells are not treated as free.
+    passable = passable_raw * (observed > 0.5).astype(np.float32)
     local_map_2ch = np.stack([occ, passable], axis=0).astype(np.float32)
     actor_difficulty = compute_actor_difficulty(local_map_2ch, map_extent, float(args.difficulty_radius_m))
     return local_map_2ch, passable.astype(np.float32), actor_difficulty, target_mask, depth_invalid_ratio, observed
@@ -642,6 +644,9 @@ def main() -> None:
                     "occ_mean": float(local_map_2ch[0].mean()),
                     "safety_mean": float(local_map_2ch[1].mean()),
                     "observed_mean": float(observed_map.mean()),
+                    "unknown_mean": float((observed_map < 0.5).mean()),
+                    "observed_blocked_mean": float(((observed_map > 0.5) & (local_map_2ch[1] < 0.5)).mean()),
+                    "unknown_blocked_mean": float(((observed_map < 0.5) & (local_map_2ch[1] < 0.5)).mean()),
                     "inflated_blocked_mean": float((local_map_2ch[1] < 0.5).mean()),
                     "target_mask_ratio": float(target_mask.mean()),
                     "depth_invalid_ratio": float(depth_invalid_ratio),
