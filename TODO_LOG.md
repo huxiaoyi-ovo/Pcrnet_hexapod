@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-28 PCR 主表多 seed 评测批量入口
+
+- [x] ~~[P0] 补齐 PCR 主表评测批量入口：固定 `0.35/0.50/0.60m/s × yonly/geomw/learned-w × 多 seed`，保留每组原始 `metrics.json/csv/timeseries`，同时输出论文主表单 seed 行与 mean/std 汇总，避免继续手工拼表污染评测口径。~~
+
 ## 2026-05-26 RAL 投稿自查标准与两周冲刺计划
 
 - [x] ~~[P0] 将《论文写作自查清单》作为后续 PCR 实验、实机与论文准备的统一参考标准，并在 `docs/reference/` 中保存原始 PDF 与两周 RAL 冲刺计划；后续默认以 HighConflict 机制证据、主表公平对照、多 seed 统计、D435i 输入 dry-run 和实机安全验收判断 RAL 准备度。~~
