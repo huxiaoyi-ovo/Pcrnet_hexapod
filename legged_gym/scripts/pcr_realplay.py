@@ -13,6 +13,10 @@ ROS Twist publishing maps this to:
     linear.y  <- cmd_x_right
     angular.z <- cmd_yaw
 
+The real hexapod upper computer can also consume /usr/command
+(interface/joy_command).  In that mode PCR remains a high-level velocity source
+and the verified src_real low-level runner still drives the motors.
+
 The default is dry-run: no motion command is published unless --publish_cmd is
 set explicitly.
 """
@@ -31,17 +35,27 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
+if DEPLOY_DIR not in sys.path:
+    sys.path.insert(0, DEPLOY_DIR)
+
+
+SIM_ROBOT_BODY_WIDTH_M = 0.25
+SIM_ROBOT_BODY_LENGTH_M = 0.40
+SIM_ROBOT_SWING_ABDUCTION_M = 0.15
+SIM_FIXED_LAYOUT_ROBOT_CLEARANCE_M = 0.27
 
 
 @dataclass
 class RealInputSnapshot:
     target: Optional[np.ndarray] = None
     local_map_2ch: Optional[np.ndarray] = None
+    risk_blocked_map: Optional[np.ndarray] = None
+    policy_visible_map: Optional[np.ndarray] = None
     state: Optional[np.ndarray] = None
     row_not_released: Optional[float] = None
+    actor_difficulty: Optional[float] = None
+    front_distance_risk: Optional[float] = None
     target_too_close: bool = False
     depth_invalid: bool = False
     target_stamp: float = 0.0
@@ -202,6 +216,24 @@ def _actor_difficulty_from_local_map(local_map_2ch: np.ndarray, map_extent_m: fl
     return float(np.clip(0.75 * near_risk + 0.25 * weighted_blocked, 0.0, 1.0))
 
 
+def _resolve_robot_clearance_m(args: argparse.Namespace) -> float:
+    override = float(args.robot_clearance_m)
+    if override > 0.0:
+        return override
+    body_half_width = 0.5 * float(args.robot_body_width_m)
+    return max(
+        0.0,
+        body_half_width
+        + float(args.robot_swing_abduction_m)
+        + float(args.robot_depth_noise_margin_m)
+        + float(args.robot_extra_safety_margin_m),
+    )
+
+
+def _clearance_radius_cells(clearance_m: float, cell_m: float) -> int:
+    return int(math.ceil(float(clearance_m) / max(float(cell_m), 1e-6)))
+
+
 class RealPcrPolicyShim:
     """Small environment-like object required by PCR gate helpers."""
 
@@ -277,6 +309,8 @@ class PcrRealplay:
         self.prev_cmd = np.zeros(3, dtype=np.float32)
         self.prev_cmd_stamp = time.time()
         self.risk_memory = None
+        self.risk_f_filter = None
+        self.risk_a_filter = None
         self.bridge = RealPcrPolicyShim(args, self.torch, self.device)
         self._load_models()
 
@@ -284,11 +318,11 @@ class PcrRealplay:
         self.cmd_pub = None
         self.debug_pub = None
         self._ros_msg_classes = {}
-        if not args.fake_input:
+        if not args.fake_input and (not args.obs_file or args.publish_cmd):
             self._setup_ros()
 
     def _load_models(self) -> None:
-        from rsl_rl.algorithms.high_level_planner import CmdVelExpert, GatePolicy
+        from high_level_planner import CmdVelExpert, GatePolicy
 
         for path_name in ("pcr_ckpt", "avoid_ckpt"):
             path = getattr(self.args, path_name)
@@ -390,27 +424,42 @@ class PcrRealplay:
             from std_msgs.msg import Float32, Float32MultiArray, String
         except ImportError as exc:
             raise SystemExit("ROS1 Python packages are required unless --fake_input is used.") from exc
+        JoyCommand = None
+        if str(self.args.cmd_backend).lower() == "usr_command" and bool(self.args.publish_cmd):
+            try:
+                from interface.msg import joy_command as JoyCommand
+            except ImportError as exc:
+                raise SystemExit(
+                    "cmd_backend=usr_command requires the src_real/interface ROS package; "
+                    "source the catkin workspace before running pcr_realplay.py."
+                ) from exc
         self.rospy = rospy
         self._ros_msg_classes = {
             "Twist": Twist,
             "Float32": Float32,
             "Float32MultiArray": Float32MultiArray,
             "String": String,
+            "JoyCommand": JoyCommand,
         }
         rospy.init_node(self.args.ros_node_name, anonymous=False)
-        rospy.Subscriber(self.args.target_topic, Float32MultiArray, self._target_cb, queue_size=1)
-        rospy.Subscriber(self.args.local_map_topic, Float32MultiArray, self._local_map_cb, queue_size=1)
-        if self.args.state_topic:
+        if not self.args.obs_file:
+            rospy.Subscriber(self.args.target_topic, Float32MultiArray, self._target_cb, queue_size=1)
+            rospy.Subscriber(self.args.local_map_topic, Float32MultiArray, self._local_map_cb, queue_size=1)
+        if self.args.state_topic and not self.args.obs_file:
             rospy.Subscriber(self.args.state_topic, Float32MultiArray, self._state_cb, queue_size=1)
-        if self.args.row_not_released_topic:
+        if self.args.row_not_released_topic and not self.args.obs_file:
             rospy.Subscriber(self.args.row_not_released_topic, Float32, self._row_cb, queue_size=1)
         self.debug_pub = rospy.Publisher(self.args.debug_topic, String, queue_size=1)
         if self.args.publish_cmd:
-            self.cmd_pub = rospy.Publisher(self.args.cmd_topic, Twist, queue_size=1)
+            if str(self.args.cmd_backend).lower() == "usr_command":
+                self.cmd_pub = rospy.Publisher(self.args.usr_command_topic, JoyCommand, queue_size=1)
+            else:
+                self.cmd_pub = rospy.Publisher(self.args.cmd_topic, Twist, queue_size=1)
         print(
             "[PCRRealplay] ROS ready: "
-            f"target={self.args.target_topic}, local_map={self.args.local_map_topic}, "
-            f"state={self.args.state_topic or '<zeros>'}, publish_cmd={self.args.publish_cmd}",
+            f"input={'obs_file' if self.args.obs_file else self.args.target_topic + ' + ' + self.args.local_map_topic}, "
+            f"state={self.args.state_topic or '<zeros>'}, publish_cmd={self.args.publish_cmd}, "
+            f"cmd_backend={self.args.cmd_backend}",
             flush=True,
         )
 
@@ -424,6 +473,7 @@ class PcrRealplay:
             self.snapshot.target = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
             self.snapshot.target_too_close = False
             self.snapshot.depth_invalid = True
+            self.snapshot.actor_difficulty = None
             self.snapshot.target_stamp = time.time()
             return
         if not np.isfinite(data[:5]).all():
@@ -434,11 +484,17 @@ class PcrRealplay:
             self.snapshot.target = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
             self.snapshot.target_too_close = False
             self.snapshot.depth_invalid = True
+            self.snapshot.actor_difficulty = None
             self.snapshot.target_stamp = time.time()
             return
         self.snapshot.target = data[:5].copy()
         self.snapshot.target_too_close = bool(data[5] > 0.5) if data.size >= 6 else False
         self.snapshot.depth_invalid = bool(data[6] > 0.5) if data.size >= 7 else False
+        self.snapshot.actor_difficulty = (
+            float(np.clip(data[7], 0.0, 1.0))
+            if data.size >= 8 and np.isfinite(data[7])
+            else None
+        )
         self.snapshot.target_stamp = time.time()
 
     def _local_map_cb(self, msg) -> None:
@@ -482,14 +538,24 @@ class PcrRealplay:
             ix = int(np.clip(round((self.args.fake_obstacle_x + 0.5 * self.args.map_extent_m) / self.args.map_extent_m * self.args.map_size), 0, self.args.map_size - 1))
             iy = int(np.clip(round(self.args.fake_obstacle_y / self.args.map_extent_m * self.args.map_size), 0, self.args.map_size - 1))
             local_map[0, ix, iy] = 1.0
-            local_map[1, max(0, ix - 1):min(self.args.map_size, ix + 2), max(0, iy - 1):min(self.args.map_size, iy + 2)] = 0.0
+            cell_m = float(self.args.map_extent_m) / float(max(int(self.args.map_size), 1))
+            radius_cells = _clearance_radius_cells(_resolve_robot_clearance_m(self.args), cell_m)
+            local_map[
+                1,
+                max(0, ix - radius_cells):min(self.args.map_size, ix + radius_cells + 1),
+                max(0, iy - radius_cells):min(self.args.map_size, iy + radius_cells + 1),
+            ] = 0.0
         state = np.zeros((int(self.args.state_dim),), dtype=np.float32)
         now = time.time()
         return RealInputSnapshot(
             target=target,
             local_map_2ch=local_map,
+            risk_blocked_map=None,
+            policy_visible_map=None,
             state=state,
             row_not_released=float(self.args.row_not_released_default),
+            actor_difficulty=None,
+            front_distance_risk=None,
             target_too_close=False,
             depth_invalid=False,
             target_stamp=now,
@@ -498,9 +564,71 @@ class PcrRealplay:
             row_stamp=now,
         )
 
+    def _file_snapshot(self) -> RealInputSnapshot:
+        path = self.args.obs_file
+        if not path or not os.path.exists(path):
+            raise RealPcrRuntimeError(f"obs_file missing: {path}")
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            raise RealPcrRuntimeError(f"obs_file unreadable: {exc}") from exc
+        target = np.asarray(payload.get("target_state", []), dtype=np.float32).reshape(-1)
+        if target.size < 5:
+            raise RealPcrRuntimeError("obs_file target_state must have at least 5 values")
+        local_flat = np.asarray(payload.get("local_map_2ch", []), dtype=np.float32).reshape(-1)
+        expected = int(self.args.map_channels * self.args.map_size * self.args.map_size)
+        if local_flat.size != expected:
+            raise RealPcrRuntimeError(f"obs_file local_map size mismatch: got {local_flat.size}, expected {expected}")
+        risk_flat = np.asarray(payload.get("risk_blocked_map", []), dtype=np.float32).reshape(-1)
+        risk_map = None
+        if risk_flat.size > 0:
+            risk_expected = int(self.args.map_size * self.args.map_size)
+            if risk_flat.size != risk_expected:
+                raise RealPcrRuntimeError(
+                    f"obs_file risk_blocked_map size mismatch: got {risk_flat.size}, expected {risk_expected}"
+                )
+            risk_map = risk_flat.reshape(1, self.args.map_size, self.args.map_size).copy()
+        visible_flat = np.asarray(payload.get("policy_visible_map", []), dtype=np.float32).reshape(-1)
+        visible_map = None
+        if visible_flat.size > 0:
+            visible_expected = int(self.args.map_size * self.args.map_size)
+            if visible_flat.size != visible_expected:
+                raise RealPcrRuntimeError(
+                    f"obs_file policy_visible_map size mismatch: got {visible_flat.size}, expected {visible_expected}"
+                )
+            visible_map = visible_flat.reshape(1, self.args.map_size, self.args.map_size).copy()
+        stamp = float(payload.get("stamp", os.path.getmtime(path)))
+        return RealInputSnapshot(
+            target=target[:5].copy(),
+            local_map_2ch=local_flat.reshape(self.args.map_channels, self.args.map_size, self.args.map_size).copy(),
+            risk_blocked_map=risk_map,
+            policy_visible_map=visible_map,
+            state=np.zeros((self.gate_state_dim,), dtype=np.float32),
+            row_not_released=float(self.args.row_not_released_default),
+            actor_difficulty=(
+                float(np.clip(target[7], 0.0, 1.0))
+                if target.size >= 8 and np.isfinite(target[7])
+                else None
+            ),
+            front_distance_risk=(
+                float(np.clip(payload["front_distance_risk"], 0.0, 1.0))
+                if "front_distance_risk" in payload and np.isfinite(float(payload["front_distance_risk"]))
+                else None
+            ),
+            target_too_close=bool(target[5] > 0.5) if target.size >= 6 else False,
+            depth_invalid=bool(target[6] > 0.5) if target.size >= 7 else False,
+            target_stamp=stamp,
+            local_map_stamp=stamp,
+            state_stamp=time.time(),
+            row_stamp=stamp,
+        )
+
     def _get_snapshot(self) -> RealInputSnapshot:
         if self.args.fake_input:
             return self._fake_snapshot()
+        if self.args.obs_file:
+            return self._file_snapshot()
         return self.snapshot
 
     def _build_tensors(self, snap: RealInputSnapshot):
@@ -521,6 +649,20 @@ class PcrRealplay:
             shape=(self.args.map_channels, self.args.map_size, self.args.map_size),
             name="local_map_2ch",
         )
+        if snap.risk_blocked_map is not None:
+            risk_np = _sanitize_array(
+                snap.risk_blocked_map,
+                shape=(1, self.args.map_size, self.args.map_size),
+                name="risk_blocked_map",
+            )
+        else:
+            risk_np = local_np[:1].copy()
+        if snap.policy_visible_map is not None:
+            _sanitize_array(
+                snap.policy_visible_map,
+                shape=(1, self.args.map_size, self.args.map_size),
+                name="policy_visible_map",
+            )
         if snap.state is None or (now - snap.state_stamp) > float(self.args.state_timeout_s):
             if not self.args.allow_missing_state:
                 raise RealPcrRuntimeError("state input missing or stale")
@@ -535,26 +677,37 @@ class PcrRealplay:
             row_not_released = float(self.args.row_not_released_default)
         self.bridge.row_not_released_value = float(np.clip(row_not_released, 0.0, 1.0))
 
-        actor_difficulty = _actor_difficulty_from_local_map(
-            local_np,
-            float(self.args.map_extent_m),
-            float(self.args.difficulty_radius_m),
-        )
+        if snap.actor_difficulty is not None and np.isfinite(float(snap.actor_difficulty)):
+            actor_difficulty = float(np.clip(float(snap.actor_difficulty), 0.0, 1.0))
+        else:
+            actor_difficulty = _actor_difficulty_from_local_map(
+                local_np,
+                float(self.args.map_extent_m),
+                float(self.args.difficulty_radius_m),
+            )
 
         torch_mod = self.torch
         goal = torch_mod.as_tensor(goal_np, device=self.device, dtype=torch_mod.float32)
         local = torch_mod.as_tensor(local_np[None, :, :, :], device=self.device, dtype=torch_mod.float32)
+        risk_map = torch_mod.as_tensor(risk_np[None, :, :, :], device=self.device, dtype=torch_mod.float32)
         state = torch_mod.as_tensor(state_np[None, :], device=self.device, dtype=torch_mod.float32)
         difficulty = torch_mod.as_tensor([actor_difficulty], device=self.device, dtype=torch_mod.float32)
+        front_distance_risk = (
+            float(np.clip(float(snap.front_distance_risk), 0.0, 1.0))
+            if snap.front_distance_risk is not None and np.isfinite(float(snap.front_distance_risk))
+            else 0.0
+        )
         return (
             state,
             goal,
             local,
+            risk_map,
             difficulty,
             target_valid,
             bool(snap.target_too_close),
             bool(snap.depth_invalid),
             actor_difficulty,
+            front_distance_risk,
         )
 
     def _stack_map(self, local_map):
@@ -581,17 +734,42 @@ class PcrRealplay:
         self.risk_memory = torch_mod.maximum(torch_mod.clamp(risk_f, 0.0, 1.0), self.risk_memory * decay).detach()
         return self.risk_memory
 
-    def _learned_w_goal(self, base_goal, aff_map, cmd_f, cmd_a, state_tensor):
+    def _filter_real_risks(self, risk_f, risk_a):
+        torch_mod = self.torch
+        decay = float(getattr(self.args, "risk_scalar_decay", 0.75))
+        decay = float(np.clip(decay, 0.0, 0.999))
+        risk_f = torch_mod.clamp(risk_f, 0.0, 1.0)
+        risk_a = torch_mod.clamp(risk_a, 0.0, 1.0)
+        if not bool(getattr(self.args, "real_risk_filter", True)):
+            self.risk_f_filter = risk_f.detach()
+            self.risk_a_filter = risk_a.detach()
+            return risk_f, risk_a
+        if self.risk_f_filter is None or self.risk_f_filter.shape != risk_f.shape:
+            self.risk_f_filter = torch_mod.zeros_like(risk_f)
+        if self.risk_a_filter is None or self.risk_a_filter.shape != risk_a.shape:
+            self.risk_a_filter = torch_mod.zeros_like(risk_a)
+        filt_f = torch_mod.maximum(risk_f, self.risk_f_filter.to(risk_f.device, risk_f.dtype) * decay)
+        filt_a = torch_mod.maximum(risk_a, self.risk_a_filter.to(risk_a.device, risk_a.dtype) * decay)
+        self.risk_f_filter = filt_f.detach()
+        self.risk_a_filter = filt_a.detach()
+        return filt_f, filt_a
+
+    def _learned_w_goal(self, base_goal, aff_map, risk_aff_map, cmd_f, cmd_a, state_tensor, front_distance_risk):
         torch_mod = self.torch
         cmd_a_eff = cmd_a.clone()
         if cmd_a_eff.shape[-1] >= 2:
             cmd_a_eff[:, 1] = 0.0
         if cmd_a_eff.shape[-1] >= 3:
             cmd_a_eff[:, 2] = 0.0
-        clearance_f = self.bridge._compute_clearance_along_cmd(aff_map, cmd_f[:, :2])
-        clearance_a = self.bridge._compute_clearance_along_cmd(aff_map, cmd_a_eff[:, :2])
-        risk_f = self.bridge._risk_from_clearance(clearance_f, self.args.cmd_safe_dist, self.args.cmd_free_dist)
-        risk_a = self.bridge._risk_from_clearance(clearance_a, self.args.cmd_safe_dist, self.args.cmd_free_dist)
+        risk_source_map = risk_aff_map if risk_aff_map is not None else aff_map[:, :1, :, :]
+        clearance_f = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_f[:, :2])
+        clearance_a = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_a_eff[:, :2])
+        risk_f_raw = self.bridge._risk_from_clearance(clearance_f, self.args.cmd_safe_dist, self.args.cmd_free_dist)
+        risk_a_raw = self.bridge._risk_from_clearance(clearance_a, self.args.cmd_safe_dist, self.args.cmd_free_dist)
+        front_risk = torch_mod.full_like(risk_f_raw, float(np.clip(front_distance_risk, 0.0, 1.0)))
+        forward_active = cmd_f[:, 1] > float(getattr(self.args, "risk_forward_cmd_thr", 0.02))
+        risk_f_raw = torch_mod.where(forward_active, torch_mod.maximum(risk_f_raw, front_risk), risk_f_raw)
+        risk_f, risk_a = self._filter_real_risks(risk_f_raw, risk_a_raw)
         lin_f = cmd_f[:, :2]
         lin_a = cmd_a_eff[:, :2]
         norm_f = torch_mod.norm(lin_f, dim=1)
@@ -627,6 +805,9 @@ class PcrRealplay:
             "clearance_A": clearance_a,
             "risk_F": risk_f,
             "risk_A": risk_a,
+            "risk_F_raw": risk_f_raw,
+            "risk_A_raw": risk_a_raw,
+            "front_distance_risk": front_risk,
             "risk_memory": risk_memory,
             "row_not_released": row_not_released,
             "cmd_cos": cmd_cos,
@@ -679,9 +860,20 @@ class PcrRealplay:
         }
 
     def policy_step(self, snap: RealInputSnapshot) -> Dict[str, Any]:
-        from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd
+        from expert_s0_follow import compute_s0_follow_expert_cmd
 
-        state, goal, local_map, difficulty, target_valid, target_too_close, depth_invalid, actor_difficulty = self._build_tensors(snap)
+        (
+            state,
+            goal,
+            local_map,
+            risk_map,
+            difficulty,
+            target_valid,
+            target_too_close,
+            depth_invalid,
+            actor_difficulty,
+            front_distance_risk,
+        ) = self._build_tensors(snap)
         local_stack = self._stack_map(local_map)
         torch_mod = self.torch
         with torch_mod.no_grad():
@@ -712,7 +904,15 @@ class PcrRealplay:
                 difficulty,
                 deterministic=True,
             )
-            gate_goal, diag = self._learned_w_goal(goal, local_map, cmd_f, cmd_a, gate_state)
+            gate_goal, diag = self._learned_w_goal(
+                goal,
+                local_map,
+                risk_map,
+                cmd_f,
+                cmd_a,
+                gate_state,
+                front_distance_risk,
+            )
             gate_goal = _match_2d_tensor(gate_goal, self.gate_goal_dim, torch_mod, label="real_gate_goal")
             gate_action, _ = self.gate_policy.get_action(
                 local_stack[:, : self.gate_aff_channels, :, :],
@@ -738,6 +938,8 @@ class PcrRealplay:
             target_too_close=target_too_close,
             depth_invalid=depth_invalid,
         )
+        cell_m = float(self.args.map_extent_m) / float(max(int(self.args.map_size), 1))
+        robot_clearance_m = _resolve_robot_clearance_m(self.args)
         result = {
             "cmd_policy": cmd_np,
             "cmd_safe": safe_cmd,
@@ -745,6 +947,10 @@ class PcrRealplay:
             "target_too_close": bool(target_too_close),
             "depth_invalid": bool(depth_invalid),
             "actor_difficulty": float(actor_difficulty),
+            "map_cell_m": float(cell_m),
+            "robot_clearance_m": float(robot_clearance_m),
+            "robot_clearance_cells": int(_clearance_radius_cells(robot_clearance_m, cell_m)),
+            "has_real_risk_map": bool(snap.risk_blocked_map is not None),
             "safety": safety,
         }
         for key in (
@@ -762,6 +968,9 @@ class PcrRealplay:
             "clearance_A",
             "risk_F",
             "risk_A",
+            "risk_F_raw",
+            "risk_A_raw",
+            "front_distance_risk",
             "risk_memory",
             "row_not_released",
             "cmd_cos",
@@ -817,8 +1026,25 @@ class PcrRealplay:
             self.prev_cmd[:] = 0.0
         return safe.astype(np.float32), {"reasons": reasons, "dry_run": not bool(self.args.publish_cmd)}
 
+    def _build_usr_command_payload(self, cmd: np.ndarray) -> Dict[str, float]:
+        cmd = np.asarray(cmd, dtype=np.float32).reshape(3)
+        x_scale = max(abs(float(self.args.usr_command_x_scale)), 1e-6)
+        y_scale = max(abs(float(self.args.usr_command_y_scale)), 1e-6)
+        yaw_scale = max(abs(float(self.args.usr_command_yaw_scale)), 1e-6)
+        x_vec = float(np.clip(cmd[0] / x_scale, -float(self.args.usr_command_limit), float(self.args.usr_command_limit)))
+        y_vec = float(np.clip(cmd[1] / y_scale, -float(self.args.usr_command_limit), float(self.args.usr_command_limit)))
+        w_twist = float(np.clip(cmd[2] / yaw_scale, -float(self.args.usr_command_limit), float(self.args.usr_command_limit)))
+        moving = bool(abs(x_vec) > 1e-4 or abs(y_vec) > 1e-4 or abs(w_twist) > 1e-4)
+        return {
+            "x_vec": x_vec,
+            "y_vec": y_vec,
+            "w_twist": w_twist,
+            "moving": moving,
+        }
+
     def publish_or_print(self, result: Dict[str, Any]) -> None:
         cmd = np.asarray(result["cmd_safe"], dtype=np.float32).reshape(3)
+        usr_command = self._build_usr_command_payload(cmd)
         payload = {
             "cmd_policy": np.asarray(result["cmd_policy"], dtype=np.float32).round(4).tolist(),
             "cmd_safe": cmd.round(4).tolist(),
@@ -827,13 +1053,22 @@ class PcrRealplay:
                 "linear_y_left": float(-cmd[0]) if self.args.ros_linear_y_left_positive else float(cmd[0]),
                 "angular_z": float(cmd[2]),
             },
+            "usr_command": usr_command,
             "y": float(result["gate_y"]),
             "w": float(result["w"]),
             "y_eff": float(result["y_eff"]),
             "risk_F": float(result["risk_F"]),
             "risk_A": float(result["risk_A"]),
+            "risk_F_raw": float(result.get("risk_F_raw", result["risk_F"])),
+            "risk_A_raw": float(result.get("risk_A_raw", result["risk_A"])),
+            "front_distance_risk": float(result.get("front_distance_risk", 0.0)),
             "risk_memory": float(result["risk_memory"]),
             "row_not_released": float(result["row_not_released"]),
+            "clearance_F": float(result.get("clearance_F", 0.0)),
+            "clearance_A": float(result.get("clearance_A", 0.0)),
+            "conflict_score": float(result.get("conflict_score", 0.0)),
+            "actor_difficulty": float(result.get("actor_difficulty", 0.0)),
+            "risk_source": "risk_blocked_map" if result.get("has_real_risk_map", False) else "local_occ_fallback",
             "target_valid": bool(result["target_valid"]),
             "target_too_close": bool(result.get("target_too_close", False)),
             "depth_invalid": bool(result.get("depth_invalid", False)),
@@ -846,11 +1081,26 @@ class PcrRealplay:
             msg.data = json.dumps(payload, ensure_ascii=False)
             self.debug_pub.publish(msg)
         if self.rospy is not None and self.cmd_pub is not None and self.args.publish_cmd:
-            twist = self._ros_msg_classes["Twist"]()
-            twist.linear.x = float(cmd[1])
-            twist.linear.y = float(-cmd[0]) if self.args.ros_linear_y_left_positive else float(cmd[0])
-            twist.angular.z = float(cmd[2])
-            self.cmd_pub.publish(twist)
+            if str(self.args.cmd_backend).lower() == "usr_command":
+                joy = self._ros_msg_classes["JoyCommand"]()
+                joy.set_init = False
+                joy.moving = bool(usr_command["moving"])
+                joy.disable_pump = False
+                joy.disable_torque = False
+                joy.action_valve = False
+                joy.stop = False
+                joy.change_mode = False
+                joy.x_vec = float(usr_command["x_vec"])
+                joy.y_vec = float(usr_command["y_vec"])
+                joy.z_vec = 0.0
+                joy.w_twist = float(usr_command["w_twist"])
+                self.cmd_pub.publish(joy)
+            else:
+                twist = self._ros_msg_classes["Twist"]()
+                twist.linear.x = float(cmd[1])
+                twist.linear.y = float(-cmd[0]) if self.args.ros_linear_y_left_positive else float(cmd[0])
+                twist.angular.z = float(cmd[2])
+                self.cmd_pub.publish(twist)
 
     def run_once(self) -> Dict[str, Any]:
         snap = self._get_snapshot()
@@ -862,6 +1112,29 @@ class PcrRealplay:
         if self.args.fake_input:
             for _ in range(max(1, int(self.args.fake_steps))):
                 self.run_once()
+                time.sleep(1.0 / max(float(self.args.rate_hz), 1e-6))
+            return
+        if self.args.obs_file:
+            while True:
+                try:
+                    self.run_once()
+                except RealPcrRuntimeError as exc:
+                    zero = {
+                        "cmd_policy": np.zeros(3, dtype=np.float32),
+                        "cmd_safe": np.zeros(3, dtype=np.float32),
+                        "target_valid": False,
+                        "target_too_close": False,
+                        "depth_invalid": True,
+                        "gate_y": 0.0,
+                        "w": 0.0,
+                        "y_eff": 0.0,
+                        "risk_F": 0.0,
+                        "risk_A": 0.0,
+                        "risk_memory": 0.0,
+                        "row_not_released": 0.0,
+                        "safety": {"reasons": [str(exc)], "dry_run": not bool(self.args.publish_cmd)},
+                    }
+                    self.publish_or_print(zero)
                 time.sleep(1.0 / max(float(self.args.rate_hz), 1e-6))
             return
         if self.rospy is None:
@@ -893,8 +1166,8 @@ class PcrRealplay:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCR learned-w real robot ROS1 runner")
     parser.add_argument("--pcr_ckpt", required=True, type=str, help="learned-w gate checkpoint")
-    parser.add_argument("--avoid_ckpt", default="agents/avoid_best.pt", type=str)
-    parser.add_argument("--lowlevel_ckpt", default="agents/low_level_best.pt", type=str, help="path hint for deployment record")
+    parser.add_argument("--avoid_ckpt", default=os.path.join(DEPLOY_DIR, "checkpoints", "avoid_best.pt"), type=str)
+    parser.add_argument("--lowlevel_ckpt", default=os.path.join(DEPLOY_DIR, "checkpoints", "low_level_best.pt"), type=str, help="path hint for deployment record")
     parser.add_argument("--w_mode", default="auto", choices=["auto", "learned", "learnedw2"])
     parser.add_argument("--w_blend_mode", default="multiply", choices=["multiply", "mix"])
     parser.add_argument("--signed_w_lambda", type=float, default=0.30)
@@ -916,26 +1189,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fake_obstacle", action="store_true")
     parser.add_argument("--fake_obstacle_x", type=float, default=0.0)
     parser.add_argument("--fake_obstacle_y", type=float, default=1.0)
+    parser.add_argument("--obs_file", type=str, default="", help="read latest PCR observation JSON without ROS")
 
     parser.add_argument("--ros_node_name", default="pcr_realplay")
-    parser.add_argument("--target_topic", default="/pcr/target_state", help="Float32MultiArray: [x_right,y_forward,v_right,v_forward,valid,target_too_close,depth_invalid]; last two fields optional")
+    parser.add_argument("--target_topic", default="/pcr/target_state", help="Float32MultiArray: [x_right,y_forward,v_right,v_forward,valid,target_too_close,depth_invalid,actor_difficulty]; last three fields optional")
     parser.add_argument("--local_map_topic", default="/pcr/local_map_2ch", help="Float32MultiArray: flattened (2,32,32) by default")
     parser.add_argument("--state_topic", default="", help="optional Float32MultiArray robot state; zeros if omitted")
     parser.add_argument("--row_not_released_topic", default="", help="optional Float32 diagnostic only; learned-w actor always receives zero row-release feature")
+    parser.add_argument("--cmd_backend", default="twist", choices=["twist", "usr_command"], help="publish Twist or src_real interface/joy_command")
     parser.add_argument("--cmd_topic", default="/cmd_vel")
+    parser.add_argument("--usr_command_topic", default="/usr/command")
     parser.add_argument("--debug_topic", default="/pcr_realplay/debug")
-    parser.add_argument("--publish_cmd", action="store_true", help="actually publish Twist; default is dry-run")
+    parser.add_argument("--publish_cmd", action="store_true", help="actually publish motion command; default is dry-run")
     parser.add_argument("--ros_linear_y_left_positive", action="store_true", help="publish Twist.linear.y = -cmd_x_right")
+    parser.add_argument("--usr_command_x_scale", type=float, default=1.6, help="run_agent2.py maps x_vec by this factor")
+    parser.add_argument("--usr_command_y_scale", type=float, default=2.4, help="run_agent2.py maps y_vec by this factor")
+    parser.add_argument("--usr_command_yaw_scale", type=float, default=0.375, help="run_agent2.py maps w_twist by this factor")
+    parser.add_argument("--usr_command_limit", type=float, default=1.0)
 
     parser.add_argument("--map_channels", type=int, default=2)
     parser.add_argument("--map_size", type=int, default=32)
     parser.add_argument("--map_extent_m", type=float, default=3.0)
     parser.add_argument("--difficulty_radius_m", type=float, default=2.0)
+    parser.add_argument("--robot_clearance_m", type=float, default=SIM_FIXED_LAYOUT_ROBOT_CLEARANCE_M, help="effective map inflation radius; <=0 uses robot geometry")
+    parser.add_argument("--robot_body_width_m", type=float, default=SIM_ROBOT_BODY_WIDTH_M)
+    parser.add_argument("--robot_body_length_m", type=float, default=SIM_ROBOT_BODY_LENGTH_M)
+    parser.add_argument("--robot_swing_abduction_m", type=float, default=SIM_ROBOT_SWING_ABDUCTION_M)
+    parser.add_argument("--robot_depth_noise_margin_m", type=float, default=0.03)
+    parser.add_argument("--robot_extra_safety_margin_m", type=float, default=0.02)
     parser.add_argument("--aff_stack", type=int, default=1, help="fallback only; checkpoint usually overrides")
     parser.add_argument("--state_dim", type=int, default=9, help="fallback only; checkpoint usually overrides")
     parser.add_argument("--row_not_released_default", type=float, default=0.0, help="diagnostic only; not fed to learned-w actor")
     parser.add_argument("--cmd_safe_dist", type=float, default=0.25)
     parser.add_argument("--cmd_free_dist", type=float, default=0.60)
+    parser.add_argument("--risk_forward_cmd_thr", type=float, default=0.02)
+    parser.add_argument("--risk_scalar_decay", type=float, default=0.75)
+    parser.add_argument("--no_real_risk_filter", dest="real_risk_filter", action="store_false")
+    parser.set_defaults(real_risk_filter=True)
 
     parser.add_argument("--rate_hz", type=float, default=10.0)
     parser.add_argument("--input_timeout_s", type=float, default=0.5)
