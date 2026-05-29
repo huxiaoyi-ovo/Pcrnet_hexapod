@@ -1,0 +1,2343 @@
+<sdf version='1.7'>
+  <model name='hexapod_model703'>
+    <link name='dummy_link'>
+      <inertial>
+        <pose>0 0.005884 0.000757 0 -0 0</pose>
+        <mass>2.4764</mass>
+        <inertia>
+          <ixx>0.0096325</ixx>
+          <ixy>-8.9857e-08</ixy>
+          <ixz>-2.7461e-20</ixz>
+          <iyy>0.0029826</iyy>
+          <iyz>9.65618e-20</iyz>
+          <izz>0.011766</izz>
+        </inertia>
+      </inertial>
+      <collision name='dummy_link_fixed_joint_lump__body_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.2 0.44 0.05</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='dummy_link_fixed_joint_lump__body_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/body.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>-0.1 -0.22 0 0 -0 3.14159</pose>
+      <parent>dummy_link</parent>
+      <child>l_lb_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_thigh'>
+      <pose relative_to='j_lb_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lb_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_knee' type='revolute'>
+      <pose relative_to='l_lb_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_lb_thigh</parent>
+      <child>l_lb_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_knee'>
+      <pose relative_to='j_lb_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lb_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_ankle' type='revolute'>
+      <pose relative_to='l_lb_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_lb_knee</parent>
+      <child>l_lb_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_ankle'>
+      <pose relative_to='j_lb_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lb_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_foot' type='revolute'>
+      <pose relative_to='l_lb_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_lb_ankle</parent>
+      <child>l_lb_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_foot'>
+      <pose relative_to='j_lb_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lb_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_ball1' type='revolute'>
+      <pose relative_to='l_lb_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_lb_foot</parent>
+      <child>l_lb_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_ball1'>
+      <pose relative_to='j_lb_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lb_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_ball2' type='revolute'>
+      <pose relative_to='l_lb_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_lb_ball1</parent>
+      <child>l_lb_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_ball2'>
+      <pose relative_to='j_lb_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lb_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lb_suck' type='revolute'>
+      <pose relative_to='l_lb_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_lb_ball2</parent>
+      <child>l_lb_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lb_suck'>
+      <pose relative_to='j_lb_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lb_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_lb_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_lb_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>lb_contacts</bumperTopicName>
+          <frameName>l_lb_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='j_lf_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>-0.1 0.22 0 0 -0 3.14159</pose>
+      <parent>dummy_link</parent>
+      <child>l_lf_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_thigh'>
+      <pose relative_to='j_lf_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lf_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_knee' type='revolute'>
+      <pose relative_to='l_lf_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_lf_thigh</parent>
+      <child>l_lf_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_knee'>
+      <pose relative_to='j_lf_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lf_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_ankle' type='revolute'>
+      <pose relative_to='l_lf_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_lf_knee</parent>
+      <child>l_lf_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_ankle'>
+      <pose relative_to='j_lf_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lf_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_foot' type='revolute'>
+      <pose relative_to='l_lf_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_lf_ankle</parent>
+      <child>l_lf_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_foot'>
+      <pose relative_to='j_lf_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lf_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_ball1' type='revolute'>
+      <pose relative_to='l_lf_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_lf_foot</parent>
+      <child>l_lf_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_ball1'>
+      <pose relative_to='j_lf_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lf_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_ball2' type='revolute'>
+      <pose relative_to='l_lf_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_lf_ball1</parent>
+      <child>l_lf_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_ball2'>
+      <pose relative_to='j_lf_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lf_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lf_suck' type='revolute'>
+      <pose relative_to='l_lf_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_lf_ball2</parent>
+      <child>l_lf_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lf_suck'>
+      <pose relative_to='j_lf_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lf_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_lf_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_lf_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>lf_contacts</bumperTopicName>
+          <frameName>l_lf_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='j_lm_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>-0.1 0 0 0 -0 3.14159</pose>
+      <parent>dummy_link</parent>
+      <child>l_lm_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_thigh'>
+      <pose relative_to='j_lm_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lm_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_knee' type='revolute'>
+      <pose relative_to='l_lm_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_lm_thigh</parent>
+      <child>l_lm_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_knee'>
+      <pose relative_to='j_lm_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lm_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_ankle' type='revolute'>
+      <pose relative_to='l_lm_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_lm_knee</parent>
+      <child>l_lm_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_ankle'>
+      <pose relative_to='j_lm_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lm_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_foot' type='revolute'>
+      <pose relative_to='l_lm_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_lm_ankle</parent>
+      <child>l_lm_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_foot'>
+      <pose relative_to='j_lm_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_lm_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_l_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_ball1' type='revolute'>
+      <pose relative_to='l_lm_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_lm_foot</parent>
+      <child>l_lm_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_ball1'>
+      <pose relative_to='j_lm_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lm_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_ball2' type='revolute'>
+      <pose relative_to='l_lm_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_lm_ball1</parent>
+      <child>l_lm_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_ball2'>
+      <pose relative_to='j_lm_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_lm_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_lm_suck' type='revolute'>
+      <pose relative_to='l_lm_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_lm_ball2</parent>
+      <child>l_lm_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_lm_suck'>
+      <pose relative_to='j_lm_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_lm_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_lm_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_lm_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>lm_contacts</bumperTopicName>
+          <frameName>l_lm_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='j_rb_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>0.1 -0.22 0 0 -0 0</pose>
+      <parent>dummy_link</parent>
+      <child>l_rb_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_thigh'>
+      <pose relative_to='j_rb_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rb_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_knee' type='revolute'>
+      <pose relative_to='l_rb_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_rb_thigh</parent>
+      <child>l_rb_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_knee'>
+      <pose relative_to='j_rb_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rb_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_ankle' type='revolute'>
+      <pose relative_to='l_rb_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_rb_knee</parent>
+      <child>l_rb_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_ankle'>
+      <pose relative_to='j_rb_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rb_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_foot' type='revolute'>
+      <pose relative_to='l_rb_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_rb_ankle</parent>
+      <child>l_rb_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_foot'>
+      <pose relative_to='j_rb_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rb_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_ball1' type='revolute'>
+      <pose relative_to='l_rb_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_rb_foot</parent>
+      <child>l_rb_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_ball1'>
+      <pose relative_to='j_rb_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rb_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_ball2' type='revolute'>
+      <pose relative_to='l_rb_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_rb_ball1</parent>
+      <child>l_rb_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_ball2'>
+      <pose relative_to='j_rb_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rb_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rb_suck' type='revolute'>
+      <pose relative_to='l_rb_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_rb_ball2</parent>
+      <child>l_rb_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rb_suck'>
+      <pose relative_to='j_rb_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rb_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_rb_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_rb_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>rb_contacts</bumperTopicName>
+          <frameName>l_rb_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='j_rf_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>0.1 0.22 0 0 -0 0</pose>
+      <parent>dummy_link</parent>
+      <child>l_rf_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_thigh'>
+      <pose relative_to='j_rf_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rf_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_knee' type='revolute'>
+      <pose relative_to='l_rf_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_rf_thigh</parent>
+      <child>l_rf_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_knee'>
+      <pose relative_to='j_rf_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rf_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_ankle' type='revolute'>
+      <pose relative_to='l_rf_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_rf_knee</parent>
+      <child>l_rf_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_ankle'>
+      <pose relative_to='j_rf_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rf_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_foot' type='revolute'>
+      <pose relative_to='l_rf_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_rf_ankle</parent>
+      <child>l_rf_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_foot'>
+      <pose relative_to='j_rf_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rf_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_ball1' type='revolute'>
+      <pose relative_to='l_rf_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_rf_foot</parent>
+      <child>l_rf_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_ball1'>
+      <pose relative_to='j_rf_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rf_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_ball2' type='revolute'>
+      <pose relative_to='l_rf_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_rf_ball1</parent>
+      <child>l_rf_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_ball2'>
+      <pose relative_to='j_rf_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rf_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rf_suck' type='revolute'>
+      <pose relative_to='l_rf_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_rf_ball2</parent>
+      <child>l_rf_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rf_suck'>
+      <pose relative_to='j_rf_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rf_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_rf_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_rf_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>rf_contacts</bumperTopicName>
+          <frameName>l_rf_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='j_rm_thigh' type='revolute'>
+      <pose relative_to='dummy_link'>0.1 0 0 0 -0 0</pose>
+      <parent>dummy_link</parent>
+      <child>l_rm_thigh</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_thigh'>
+      <pose relative_to='j_rm_thigh'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.064022 0.000961 0.000579 0 -0 0</pose>
+        <mass>0.46413</mass>
+        <inertia>
+          <ixx>0.00019278</ixx>
+          <ixy>-5.2257e-08</ixy>
+          <ixz>-1.4788e-07</ixz>
+          <iyy>0.00018924</iyy>
+          <iyz>2.2903e-08</iyz>
+          <izz>0.00017553</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_thigh_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rm_thigh_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_thigh.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_knee' type='revolute'>
+      <pose relative_to='l_rm_thigh'>0.072 0 0 1.5708 -0 0</pose>
+      <parent>l_rm_thigh</parent>
+      <child>l_rm_knee</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_knee'>
+      <pose relative_to='j_rm_knee'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.066501 0.003382 0.00219 0 -0 0</pose>
+        <mass>0.095847</mass>
+        <inertia>
+          <ixx>1.9167e-05</ixx>
+          <ixy>-1.9727e-07</ixy>
+          <ixz>-4.5905e-09</ixz>
+          <iyy>0.00017199</iyy>
+          <iyz>4.1768e-09</iyz>
+          <izz>0.00016755</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_knee_collision'>
+        <pose>0.036 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rm_knee_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_knee.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_ankle' type='revolute'>
+      <pose relative_to='l_rm_knee'>0.13 0 0 0 -0 0</pose>
+      <parent>l_rm_knee</parent>
+      <child>l_rm_ankle</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_ankle'>
+      <pose relative_to='j_rm_ankle'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.023693 3.2e-05 -0.000773 0 -0 0</pose>
+        <mass>0.48858</mass>
+        <inertia>
+          <ixx>0.00016687</ixx>
+          <ixy>3.1511e-07</ixy>
+          <ixz>-5.2998e-07</ixz>
+          <iyy>0.00048588</iyy>
+          <iyz>-5.087e-08</iyz>
+          <izz>0.00049222</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_ankle_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rm_ankle_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_ankle.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_foot' type='revolute'>
+      <pose relative_to='l_rm_ankle'>0.17 0 0 0 -0 0</pose>
+      <parent>l_rm_ankle</parent>
+      <child>l_rm_foot</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1.5708</lower>
+          <upper>1.5708</upper>
+          <effort>1</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_foot'>
+      <pose relative_to='j_rm_foot'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.000457 -4e-06 -0.001356 0 -0 0</pose>
+        <mass>0.028</mass>
+        <inertia>
+          <ixx>3.8123e-06</ixx>
+          <ixy>6.652e-15</ixy>
+          <ixz>7.2428e-09</ixz>
+          <iyy>3.163e-06</iyy>
+          <iyz>-2.2356e-13</iyz>
+          <izz>1.1087e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_foot_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.01 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name='l_rm_foot_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_r_foot.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_ball1' type='revolute'>
+      <pose relative_to='l_rm_foot'>0.002 0 0 -1.5708 0 0</pose>
+      <parent>l_rm_foot</parent>
+      <child>l_rm_ball1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_ball1'>
+      <pose relative_to='j_rm_ball1'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_ball1_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rm_ball1_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_ball2' type='revolute'>
+      <pose relative_to='l_rm_ball1'>0 0 0 0 1.5708 0</pose>
+      <parent>l_rm_ball1</parent>
+      <child>l_rm_ball2</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.261799</lower>
+          <upper>0.261799</upper>
+          <effort>18</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <damping>0</damping>
+          <friction>0.02</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_ball2'>
+      <pose relative_to='j_rm_ball2'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1.96e-06</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.96e-06</iyy>
+          <iyz>0</iyz>
+          <izz>1.96e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_ball2_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.007</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name='l_rm_ball2_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>0.004</radius>
+          </sphere>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='j_rm_suck' type='revolute'>
+      <pose relative_to='l_rm_ball2'>0 0 0 3.14159 0 3.14159</pose>
+      <parent>l_rm_ball2</parent>
+      <child>l_rm_suck</child>
+      <axis>
+        <xyz>0 0 -1</xyz>
+        <limit>
+          <lower>-3</lower>
+          <upper>3</upper>
+          <effort>10</effort>
+          <velocity>5.864</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='l_rm_suck'>
+      <pose relative_to='j_rm_suck'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-5.3e-05 1e-06 -0.023883 0 -0 0</pose>
+        <mass>0.064402</mass>
+        <inertia>
+          <ixx>2.5392e-05</ixx>
+          <ixy>-1.0544e-09</ixy>
+          <ixz>-6.2147e-09</ixz>
+          <iyy>2.5323e-05</iyy>
+          <iyz>9.4676e-11</iyz>
+          <izz>4.2031e-05</izz>
+        </inertia>
+      </inertial>
+      <collision name='l_rm_suck_collision'>
+        <pose>0 0 -0.04 0 -0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.025</length>
+            <radius>0.04</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <kp>8000</kp>
+              <kd>100</kd>
+            </ode>
+          </contact>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name='l_rm_suck_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://hexapod_model703/meshes/l_lf_suck.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <self_collide>0</self_collide>
+      <sensor name='{suffix}_contacts' type='contact'>
+        <update_rate>100</update_rate>
+        <contact>
+          <collision>l_rm_suck_collision</collision>
+          <topic>__default_topic__</topic>
+        </contact>
+        <plugin name='gazebo_ros_bumper_controller' filename='libgazebo_ros_bumper.so'>
+          <robotNamespace>/hexapod_model703</robotNamespace>
+          <bumperTopicName>rm_contacts</bumperTopicName>
+          <frameName>l_rm_suck</frameName>
+        </plugin>
+      </sensor>
+    </link>
+    <static>0</static>
+    <plugin name='gazebo_ros_control' filename='libgazebo_ros_control.so'>
+      <robotNamespace>/hexapod_model703</robotNamespace>
+    </plugin>
+  </model>
+</sdf>

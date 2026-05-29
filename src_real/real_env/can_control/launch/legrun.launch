@@ -1,0 +1,8 @@
+<launch>
+<rosparam file="$(find servo)/param/servo.yaml" command="load"/>
+<node pkg="can_control" type="start_left.py" name="start_left" output="screen" /> 
+<node pkg="can_control" type="start_right.py" name="start_right" output="screen" /> 
+<!-- <node pkg="can_control" type="sub_cur2one_topic.py" name="sub_cur2one_topic" output="screen" />  -->
+
+<!-- <node pkg="servo" type="WritePos" name="WritePos" output="screen" />  -->
+</launch>

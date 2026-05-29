@@ -1,0 +1,8 @@
+LF_servo: 0
+LM_servo: 0
+LB_servo: 0
+
+#+out -in
+RF_servo: 0
+RM_servo: -60
+RB_servo: 0

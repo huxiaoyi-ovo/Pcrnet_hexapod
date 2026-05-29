@@ -1,0 +1,158 @@
+hex_v4:
+  joint_state_controller:
+    type: joint_state_controller/JointStateController
+    publish_rate: 100
+
+
+  lf_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}
+  lm_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}   
+  lb_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}
+  rf_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}
+  rm_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}       
+  rb_thigh:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_thigh
+    pid: {p: 600, i: 0.0 , d: 1.3}
+
+    # 
+  lf_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_knee
+    pid: {p: 750.0, i: 0 , d: 1.5} 
+  lm_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_knee
+    pid: {p: 750.0, i: 0 , d: 1.5} 
+  lb_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_knee
+    pid: {p: 750.0, i: 0 , d: 1.5} 
+  rf_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_knee
+    pid: {p: 750.0, i: 0 , d: 1.5}    
+  rm_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_knee
+    pid: {p: 750.0, i: 0 , d: 1.5}   
+  rb_knee:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_knee
+    pid: {p: 750.0, i: 0 , d: 1.5}   
+    # 
+
+  lf_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2}
+  lm_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2} 
+  lb_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2}
+  rf_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2}
+  rm_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2}
+  rb_ankle:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_ankle
+    pid: {p: 550.0, i: 0 , d: 1.2}
+
+  lf_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_foot
+    pid: {p: 100, i: 0 , d: 0.05}
+  lm_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_foot
+    pid: {p: 100, i: 0 , d: 0.05} 
+  lb_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_foot
+    pid: {p: 100, i: 0 , d: 0.05}
+  rf_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_foot
+    pid: {p: 100, i: 0 , d: 0.05}
+  rm_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_foot
+    pid: {p: 100, i: 0 , d: 0.05}
+  rb_foot:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_foot
+    pid: {p: 100, i: 0 , d: 0.05}
+
+    
+  lf_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_ball1
+    pid: {p: 10, i: 0 , d: 0.0} 
+  lm_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_ball1
+    pid: {p: 10, i: 0 , d: 0.0} 
+  lb_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_ball1
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rf_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_ball1
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rm_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_ball1
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rb_ball1:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_ball1
+    pid: {p: 10, i: 0 , d: 0.0}    
+
+  lf_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_lf_ball2
+    pid: {p: 10, i: 0 , d: 0.0} 
+  lm_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_lm_ball2
+    pid: {p: 10, i: 0 , d: 0.0} 
+  lb_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_lb_ball2
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rf_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_rf_ball2
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rm_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_rm_ball2
+    pid: {p: 10, i: 0 , d: 0.0} 
+  rb_ball2:
+    type: effort_controllers/JointPositionController
+    joint: j_rb_ball2
+    pid: {p: 10, i: 0 , d: 0.0}    

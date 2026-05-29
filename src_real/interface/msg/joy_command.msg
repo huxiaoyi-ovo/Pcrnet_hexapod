@@ -1,0 +1,11 @@
+bool set_init
+bool moving
+bool disable_pump
+bool disable_torque
+bool action_valve
+bool stop
+bool change_mode
+float64 x_vec
+float64 y_vec
+float64 z_vec
+float64 w_twist

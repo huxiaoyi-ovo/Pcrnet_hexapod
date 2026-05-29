@@ -1,0 +1,37 @@
+<launch>
+
+    <rosparam file="$(find sim_env)/model/hex_v4/config/ros_control.yaml" command="load"/>
+    <rosparam file="$(find sim_env)/model/hex_v4/config/robot_config.yaml" command="load"/>
+
+    <node pkg="controller_manager" type="spawner" name="contorller_spawner" respawn="false"
+    output="screen" ns="/hex_v4" args="lf_thigh lf_knee lf_ankle lf_foot lf_ball1 lf_ball2
+                                           lm_thigh lm_knee lm_ankle lm_foot lm_ball1 lm_ball2
+                                           lb_thigh lb_knee lb_ankle lb_foot lb_ball1 lb_ball2
+                                           rf_thigh rf_knee rf_ankle rf_foot rf_ball1 rf_ball2
+                                           rm_thigh rm_knee rm_ankle rm_foot rm_ball1 rm_ball2
+                                           rb_thigh rb_knee rb_ankle rb_foot rb_ball1 rb_ball2"/>
+    <!-- <node pkg="controller_manager" type="spawner" name="contorller_spawner" respawn="false"
+    output="screen" ns="/hex_v4" args="lf_thigh lf_knee lf_ankle lf_foot 
+                                           lm_thigh lm_knee lm_ankle lm_foot 
+                                           lb_thigh lb_knee lb_ankle lb_foot 
+                                           rf_thigh rf_knee rf_ankle rf_foot 
+                                           rm_thigh rm_knee rm_ankle rm_foot 
+                                           rb_thigh rb_knee rb_ankle rb_foot "/> -->
+    <param name="/robot_description" command="cat $(find sim_env)/model/hex_v4/urdf/hex_v4.urdf"/>
+
+      
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+      <!-- <arg name="world_name" value="$(find blade_model)/empty_gazebo.world"/> -->
+    </include>
+
+
+    <node name="spawn_model" pkg="gazebo_ros" type="spawn_model"
+          args="-file $(find sim_env)/model/hex_v4/urdf/hex_v4.urdf -urdf -x 0 -y 0 -z 0.4 -model hex_v4"
+          output="screen" />
+
+    <!-- <node name="spawn_cuves" pkg="gazebo_ros" type="spawn_model" 
+          args="-file $(find sim_env)/model/angles_wall/angles_wall.urdf -urdf -z 2 -y 7 -model angles_wall" 
+          output="screen" /> -->
+
+      <!-- <include file="$(find hexapod_model121)/launch/display.launch"/> -->
+</launch>

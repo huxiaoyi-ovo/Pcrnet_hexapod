@@ -1,0 +1,84 @@
+#机器人关节角度限制
+MIN_THIGH:  -18
+MAX_THIGH:  18
+MIN_KNEE:   -90
+MAX_KNEE:   100
+MIN_ANKLE:  -150
+MAX_ANKLE:  30
+#机器人连杆长度
+L_1: 0.072
+L_2: 0.13
+L_3: 0.17
+#机器人腿部安装位置
+OFFSET_X: 0.1
+OFFSET_Y: 0.22
+OFFSET_LEN: 0.1
+#机器人足端活动范围限制
+ope_range: [0.18,0.25,-0.06,0.06,-0.12,0.035]
+#机器人足端加持活动范围
+# ope_range: [-0.085,0.27,-0.07,0.07,-0.18,0.05]
+#机器人足端运动范围多面体顶点[x1 y1 z1 x2 y2 z2 ...]
+# vertexes: [0.215,0,0.12, 0.25,0,0.12, 0.17,0,0, 0.25,0,0, 
+          #  0.25,0,-0.12, 0.1,0,-0.12, 0.1,0,-0.2,
+          #  0,0,-0.1, 0,0,-0.18,
+          #  -0.06,0,-0.07, -0.03,0,-0.17]
+vertexes: [0.18,0,0.2, 0.26,0,0.2, 0.15,0,0, 0.26,0,0, 
+           0.26,0,-0.2, 0.08,0,-0.075, 0.12,0,-0.27,
+           0,0,-0.075, 0,0,-0.27,
+           -0.05,0,-0.075, -0.05,0,-0.18]
+polyhedron_h1: 0.055
+polyhedron_h2: 0.03
+polyhedron_h3: 0.03 
+#机器人运动参数设置
+SIGMA:          0.005
+VEC_VERTICAL:  0.2
+VEC_ADJ:        0.25
+VEC_RETRACE:    0.4
+VEC_X_MAX:      0.2
+VEC_Y_MAX:      0.3
+VEC_Z_MAX:      0.1
+OMEGA_ADJ:      0.2
+OMEGA_MOVE:     0.6
+#最大负载限制
+LOAD_MAX: 65
+
+#机器人正常行走时球铰链在thigh系中z轴的坐标
+SUPPORT_H: -0.13
+#机器人移动过程中支撑脚落脚点与thigh关节之间的水平距离
+SUPPORT_LEN: 0.19
+
+#机器人摆动腿收回时,球铰链在thigh系中z轴的坐标
+RETRACE_H: -0.01
+RETRACE_LEN: 0.19
+
+
+#吸盘吸附和释放的延时 S
+RELEASE_TIME: 0.2
+
+CLAMP_H: -0.11
+CLAMP_RETRACE_LEN: 0.02
+CLAMP_SUPPORT_LEN: -0.06
+
+
+
+#机器人模型名称
+robot_name: "hex_v4"
+
+
+#机器人关节Kp控制器参数
+KP: 85
+
+
+#Gait choose
+# GAIT: "Tetrapod"
+# GAIT: "Tripod"
+GAIT: "Tripod_slow"
+
+use_neg: 0
+
+
+#记录数据
+
+#运行模式
+mode: "sim"
+# mode: "real"

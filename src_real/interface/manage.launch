@@ -1,0 +1,48 @@
+<launch>
+
+    <arg name="mode" default="real"/>
+    <arg name="platform" default="gazebo"/>
+
+    <node pkg="interface" type="joy_ctrl" name="joy_ctrl" output="screen"/>
+    <node pkg="joy" type="joy_node" name="joy_node" output="screen"/>
+
+
+    
+    <!-- 仿真 -->
+    <group if="$(eval 'true' if arg('mode')=='sim' else 'false')">
+        <!-- 仿真平台选择 gazebo -->
+        <group if="$(eval 'true' if arg('platform')=='gazebo' else 'false')">
+            <!-- 仿真吸附力 -->
+            <node pkg="interface" type="pv_interface" name="pv_interface" output="screen" args="simu"/>
+            <!-- 控制gazebo仿真电机节点 -->
+            <node pkg="interface" type="motor_interface" name="motor_interface" args="simu" output="screen"/>
+        </group>
+        <!-- 仿真平台选择 isaac_gym -->
+        <group if="$(eval 'true' if arg('platform')=='isaac_gym' else 'false')">
+           
+        </group>
+    </group>
+
+    <!-- 实物 -->
+    <group if="$(eval 'true' if arg('mode')=='real' else 'false')">
+        <!-- 机器人控制节点 -->
+        <!-- <node pkg="interface" type="run_curv_adapt.py" name="run_curv_adapt" output="screen"/> -->
+        <node pkg = "interface" type="run_agent2.py" name="run_agent2" output="screen" args="--agent=base_line200.pt"/>
+        <!-- 电机节点 -->
+         <!-- <include file="$(find can_control)/launch/legrun.launch"/> -->
+
+    </group>
+
+       
+    <!-- 手柄控制节点 -->
+    <!-- <node pkg="interface" type="joy_simu.py" name="joy_simu.py" output="screen"/> -->
+
+
+    <!-- 键盘控制节点 -->
+    <!-- <node pkg="interface" type="joy_simu.py" name="joy_simu" output="screen"/> -->
+    <!-- <node pkg="interface" type="keyboard_joy.py" name="keyboard_joy" output="screen"/> -->
+
+    <!-- 机器人凸包与关节rviz可视化节点 -->
+    <!--<node pkg="interface" type="vis_robot_state" name="vis_robot_state" output="screen"/>-->
+
+</launch>

@@ -1,0 +1,25 @@
+<launch>
+
+    <arg name="mode" default="sim"/>
+    <arg name="platform" default="gazebo"/>
+
+
+    <rosparam file="$(find sim_env)/model/hex_v4/config/robot_config.yaml" command="load"/>
+
+    <node pkg="curv_adapt" type="curv_adapt" name="curv_adapt" args="$(arg mode)" output="screen"/>
+    
+    <!-- 启动机器人控制与本体感知 -->
+    <include file="$(find interface)/interface.launch">
+        <arg name="mode" value="$(arg mode)"/>
+        <arg name="platform" value="$(arg platform)"/>
+    </include>
+
+
+    <!-- 启动仿真环境与机器人 -->
+    <group if="$(eval 'true' if arg('mode')=='sim' else 'false')">
+        <include file="$(find sim_env)/gazebo/hex_v4.launch"/>
+    </group>
+
+
+
+</launch>

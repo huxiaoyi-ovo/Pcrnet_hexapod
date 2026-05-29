@@ -1,0 +1,6 @@
+<launch>
+<node pkg="tf" type="static_transform_publisher" name="tf_broadcaster1" args="0 0 0 0 0 0 map odom 100" />
+<node pkg="tf" type="static_transform_publisher" name="tf_broadcaster2" args="0 0 0 0 0 0 odom lidar 100" />
+<node pkg="tf" type="static_transform_publisher" name="tf_broadcaster3" args="0 0 0 0 0 0 map  wall 100" />
+<!-- <node pkg="tf" type="static_transform_publisher" name="tf_broadcaster4" args="1 2 3 0 0 0 base_link odom 100" /> -->
+</launch>

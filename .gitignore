@@ -41,7 +41,6 @@ build/
 代码执行缓存区.md
 .cache/
 outputs/eval/
-src_real/
 
 # 5. 系统垃圾
 .DS_Store

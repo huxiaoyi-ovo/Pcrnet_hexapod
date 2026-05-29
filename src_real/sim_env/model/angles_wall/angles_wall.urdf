@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="angles_wall">
+  <link name="world"/>
+  <joint name="fixed" type="fixed">
+    <parent link="world"/>
+    <child link="angles_wall"/>
+  </joint>
+  <link
+    name="angles_wall">
+    <inertial>
+      <origin
+        xyz="2.7335 -12.023 -0.1345"
+        rpy="0 0 0" />
+      <mass
+        value="14385" />
+      <inertia
+        ixx="114910"
+        ixy="-31.158"
+        ixz="-12252"
+        iyy="281270"
+        iyz="0.87095"
+        izz="204760" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sim_env/model/angles_wall/angles_wall.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sim_env/model/angles_wall/angles_wall.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <gazebo reference="angles_wall">
+    <mu1>100</mu1>
+    <mu2>100</mu2>
+    <kp>80000.0</kp>
+    <kd>200.0</kd>
+  </gazebo>
+</robot>
