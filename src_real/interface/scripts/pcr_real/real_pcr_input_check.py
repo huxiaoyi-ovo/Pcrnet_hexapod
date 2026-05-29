@@ -918,6 +918,7 @@ def setup_ros_publishers(args: argparse.Namespace):
         return None
     try:
         import rospy
+        from std_msgs.msg import Float32
         from std_msgs.msg import Float32MultiArray
     except ImportError as exc:
         raise SystemExit(
@@ -926,24 +927,48 @@ def setup_ros_publishers(args: argparse.Namespace):
     rospy.init_node(args.ros_node_name, anonymous=False)
     target_pub = rospy.Publisher(args.target_topic, Float32MultiArray, queue_size=1)
     local_map_pub = rospy.Publisher(args.local_map_topic, Float32MultiArray, queue_size=1)
+    risk_blocked_pub = rospy.Publisher(args.risk_blocked_topic, Float32MultiArray, queue_size=1)
+    policy_visible_pub = rospy.Publisher(args.policy_visible_topic, Float32MultiArray, queue_size=1)
+    front_distance_risk_pub = rospy.Publisher(args.front_distance_risk_topic, Float32, queue_size=1)
     print(
         "[RealPCR] ROS publishers ready: "
-        f"target={args.target_topic}, local_map={args.local_map_topic}",
+        f"target={args.target_topic}, local_map={args.local_map_topic}, "
+        f"risk_blocked={args.risk_blocked_topic}, policy_visible={args.policy_visible_topic}, "
+        f"front_distance_risk={args.front_distance_risk_topic}",
         flush=True,
     )
-    return rospy, Float32MultiArray, target_pub, local_map_pub
+    return (
+        rospy,
+        Float32,
+        Float32MultiArray,
+        target_pub,
+        local_map_pub,
+        risk_blocked_pub,
+        policy_visible_pub,
+        front_distance_risk_pub,
+    )
 
 
 def publish_policy_obs(ros_ctx, obs: Dict[str, np.ndarray]) -> None:
     if ros_ctx is None:
         return
-    _rospy, Float32MultiArray, target_pub, local_map_pub = ros_ctx
+    (
+        _rospy,
+        Float32,
+        Float32MultiArray,
+        target_pub,
+        local_map_pub,
+        risk_blocked_pub,
+        policy_visible_pub,
+        front_distance_risk_pub,
+    ) = ros_ctx
     goal = np.asarray(obs["goal"], dtype=np.float32).reshape(1, 2)[0]
     target_vel = np.asarray(obs["target_vel"], dtype=np.float32).reshape(1, 2)[0]
     target_valid = float(bool(np.asarray(obs["target_valid"]).reshape(-1)[0]))
     target_too_close = float(bool(np.asarray(obs["target_too_close"]).reshape(-1)[0]))
     depth_invalid = float(bool(np.asarray(obs["depth_invalid"]).reshape(-1)[0]))
     actor_difficulty = float(np.asarray(obs["actor_difficulty"], dtype=np.float32).reshape(-1)[0])
+    front_distance_risk = float(np.asarray(obs["front_distance_risk"], dtype=np.float32).reshape(-1)[0])
 
     target_msg = Float32MultiArray()
     target_msg.data = [
@@ -955,11 +980,21 @@ def publish_policy_obs(ros_ctx, obs: Dict[str, np.ndarray]) -> None:
         target_too_close,
         depth_invalid,
         actor_difficulty,
+        front_distance_risk,
     ]
     local_msg = Float32MultiArray()
     local_msg.data = np.asarray(obs["local_map_2ch"], dtype=np.float32).reshape(-1).tolist()
+    risk_msg = Float32MultiArray()
+    risk_msg.data = np.asarray(obs["risk_blocked_map"], dtype=np.float32).reshape(-1).tolist()
+    visible_msg = Float32MultiArray()
+    visible_msg.data = np.asarray(obs["policy_visible_map"], dtype=np.float32).reshape(-1).tolist()
+    front_msg = Float32()
+    front_msg.data = front_distance_risk
     target_pub.publish(target_msg)
     local_map_pub.publish(local_msg)
+    risk_blocked_pub.publish(risk_msg)
+    policy_visible_pub.publish(visible_msg)
+    front_distance_risk_pub.publish(front_msg)
 
 
 def write_policy_obs_file(path: str, obs: Dict[str, np.ndarray]) -> None:
@@ -1058,6 +1093,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ros_node_name", type=str, default="real_pcr_input")
     parser.add_argument("--target_topic", type=str, default="/pcr/target_state")
     parser.add_argument("--local_map_topic", type=str, default="/pcr/local_map_2ch")
+    parser.add_argument("--risk_blocked_topic", type=str, default="/pcr/risk_blocked_map")
+    parser.add_argument("--policy_visible_topic", type=str, default="/pcr/policy_visible_map")
+    parser.add_argument("--front_distance_risk_topic", type=str, default="/pcr/front_distance_risk")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--display_scale", type=float, default=1.6)
     parser.add_argument("--debug_map_px", type=int, default=320)

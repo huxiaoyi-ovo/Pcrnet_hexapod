@@ -14,16 +14,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-METHOD_ORDER = ["yonly", "geomw", "learnedw"]
+METHOD_ORDER = ["yonly", "geomw", "learnedw", "rule_override", "mono_ppo"]
 METHOD_LABEL = {
     "yonly": "Y-only",
     "geomw": "Geom-w",
     "learnedw": "Learned-w",
+    "rule_override": "Rule-Override",
+    "mono_ppo": "Mono-PPO",
 }
 METHOD_COLOR = {
     "yonly": "#6b7280",
     "geomw": "#2563eb",
     "learnedw": "#dc2626",
+    "rule_override": "#059669",
+    "mono_ppo": "#7c3aed",
 }
 
 
@@ -37,10 +41,27 @@ def _safe_float(value, default=float("nan")):
 
 def _method_from_row(row):
     method = str(row.get("Method", "")).strip().lower()
+    method = method.replace("-", "_")
+    if method == "rule":
+        method = "rule_override"
+    if method == "monoppo":
+        method = "mono_ppo"
     if method:
+        return method
+    variant = str(row.get("policy_variant", "")).strip().lower().replace("-", "_")
+    if variant:
+        method = variant
+        if method in ("rule", "ruleoverride"):
+            return "rule_override"
+        if method in ("mono", "monoppo"):
+            return "mono_ppo"
         return method
     w_mode = str(row.get("w_mode", "")).strip().lower()
     source = str(row.get("source", "")).lower()
+    if "rule_override" in source or "rule-override" in source:
+        return "rule_override"
+    if "mono_ppo" in source or "mono-ppo" in source:
+        return "mono_ppo"
     if "learnedw" in source or w_mode in ("learned", "learnedw2"):
         return "learnedw"
     if "geomw" in source or w_mode == "geom":
@@ -133,8 +154,8 @@ def _write_plot_data(path, perf_rows, risk_rows):
         "Collision Rate Std",
         "Tracking MAE",
         "Tracking MAE Std",
-        "Conflict Rate",
-        "Conflict Rate Std",
+        "Command Conflict Rate",
+        "Command Conflict Rate Std",
         "Avoidance Choice Rate",
         "Avoidance Choice Rate Std",
         "Forward Risk",
@@ -156,8 +177,8 @@ def _write_plot_data(path, perf_rows, risk_rows):
                 "Collision Rate Std": row.get("collision_std", ""),
                 "Tracking MAE": row.get("follow_mae_mean", ""),
                 "Tracking MAE Std": row.get("follow_mae_std", ""),
-                "Conflict Rate": row.get("unsafe_rate_mean", ""),
-                "Conflict Rate Std": row.get("unsafe_rate_std", ""),
+                "Command Conflict Rate": row.get("unsafe_rate_mean", ""),
+                "Command Conflict Rate Std": row.get("unsafe_rate_std", ""),
                 "Avoidance Choice Rate": row.get("c_avoid_rate_mean", ""),
                 "Avoidance Choice Rate Std": row.get("c_avoid_rate_std", ""),
                 "Forward Risk": risk.get("forward_risk_mean", ""),
@@ -193,31 +214,18 @@ def _draw_line(ax, xs, ys, es, method, label=None):
 
 
 def plot_conflict(perf_rows, risk_rows, output):
-    risk_plot_rows = []
-    for row in perf_rows:
-        risk = risk_rows.get((row["speed"], row["method"]), {})
-        if risk:
-            merged = dict(row)
-            merged.update(risk)
-            risk_plot_rows.append(merged)
-
-    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.9), constrained_layout=True)
+    fig, ax = plt.subplots(1, 1, figsize=(4.9, 3.9), constrained_layout=True)
     for method in METHOD_ORDER:
         xs, ys, es = _series(perf_rows, method, "unsafe_rate_mean", "unsafe_rate_std")
-        _draw_line(axes[0], xs, ys, es, method)
-        xs, ys, es = _series(risk_plot_rows, method, "forward_risk_mean", "forward_risk_std")
-        _draw_line(axes[1], xs, ys, es, method)
+        _draw_line(ax, xs, ys, es, method)
 
-    axes[0].set_title("Conflict Rate")
-    axes[0].set_ylabel("Rate")
-    axes[1].set_title("Forward Risk")
-    axes[1].set_ylabel("Risk")
-    for ax in axes:
-        ax.set_xlabel("Target Speed (m/s)")
-        ax.set_xticks([0.35, 0.50, 0.60])
-        ax.grid(True, alpha=0.25)
-        ax.set_ylim(bottom=0.0)
-    axes[0].legend(frameon=False, loc="best")
+    ax.set_title("Command Conflict Rate")
+    ax.set_ylabel("Rate")
+    ax.set_xlabel("Target Speed (m/s)")
+    ax.set_xticks([0.35, 0.50, 0.60])
+    ax.grid(True, alpha=0.25)
+    ax.set_ylim(bottom=0.0)
+    ax.legend(frameon=False, loc="best")
     fig.savefig(output, dpi=220)
     plt.close(fig)
 

@@ -148,6 +148,40 @@
   - 人由 YOLO bbox 内目标深度薄层 mask 排除；其他非人、非地板深度点作为障碍。
   - 地板必须排除；当前用简化高度阈值，后续需要标定相机外参。
 
+- D9: PCR 主实验 baseline 收口为五策略对比。
+  - 最终主表方法：
+    ```text
+    Y-only
+    Geom-w
+    Learned-w
+    Mono-PPO
+    Rule-Override
+    ```
+  - `Y-only / Geom-w / Learned-w` 回答内部 `w` 消融问题。
+  - `Mono-PPO` 回答“为什么不直接训练统一策略”。
+  - `Rule-Override` 回答“为什么不用简单安全规则覆盖”。
+  - 不再优先扩展内部 `E2E gate` 消融，也不优先接 DWA / TEB / MPC。
+
+- D10: Rule-Override 先于 Mono-PPO 实现。
+  - Rule-Override 是无需训练的强规则 baseline，应先补进 0.35 / 0.50 / 0.60 × 3 seeds 评测。
+  - 规则必须保留 slow-forward 和 yaw-preserve，避免变成弱 baseline：
+    ```text
+    risk_gap = risk_F - risk_A
+    s = sigmoid(k * (risk_gap - margin))
+    if risk_F > hard_thr:
+        s = max(s, s_min)
+
+    cmd_x   = s * cmd_A_x
+    cmd_y   = (1 - s + slow_ratio * s) * cmd_F_y
+    cmd_yaw = (1 - yaw_keep_loss * s) * cmd_F_yaw
+    ```
+  - 默认参数：
+    ```text
+    k=8, margin=0.10, hard_thr=0.60, s_min=0.70,
+    slow_ratio=0.20, yaw_keep_loss=0.50
+    ```
+  - Mono-PPO 后做，必须公平训练：同场景、同 curriculum、同 seeds、同训练步数、同底层策略、同 action limit、同 eval 协议，且只吃 deployable observation，不吃 `cmd_F/cmd_A/risk_F/risk_A`。
+
 ## 5. 当前代码与结构（Code Map）
 
 - `legged_gym/scripts/train_highlevel.py`
@@ -213,6 +247,9 @@
   - FOV / target observability 已上升为论文级约束。
   - D435i 输入检查脚本已能显示 RGB、目标 mask、障碍/安全图，并能输出真实输入字段。
   - `real_pcr_input_check.py` 与 `pcr_realplay.py` 默认 `map_size` 已从 16 改为 32，对齐当前训练口径。
+  - `0.35 / 0.50 / 0.60 × Y-only / Geom-w / Learned-w × 3 seeds` 主表已拼好，结果支持 learned-w 在中高速下显著降低碰撞并保持成功率。
+  - 速度曲线图已收口：主图只保留 `Command Conflict Rate` 与 `Success Rate / Collision Rate / Tracking MAE`；`Forward Risk` 仅保存在画图数据中备用，不进正文主图。
+  - baseline 设计已确定：先做 `Rule-Override`，再做 `Mono-PPO`，形成五策略主实验。
   - 语法检查曾通过：
     ```bash
     python3 -m py_compile legged_gym/scripts/real_pcr_input_check.py legged_gym/scripts/pcr_realplay.py
@@ -220,15 +257,17 @@
     ```
 
 - 进行中：
+  - 正在准备接入 `Rule-Override` eval 分支：在 `cmd_F/cmd_A/risk_F/risk_A` 已经算完后替代原 PCR `y_eff` 融合，不进入 learned-w 逻辑。
   - 正在把 D435i 生成的 `local_map_2ch` 与仿真 `occupancy/passable` 口径完全对齐。
-  - 正在判断真实相机下空地、箱子、人旁边箱子的 `occ_mean / safety_mean / observed_mean / inflated_blocked_mean` 是否合理。
   - 正在准备把相机脚本输出接入 `pcr_realplay.py` dry-run。
 
 - 未开始：
+  - `Rule-Override` 的三速度三 seed 评测与五策略图表更新。
+  - `Mono-PPO` 训练分支、checkpoint meta、训练命令和公平性审查。
   - `real_pcr_input_check.py --ros1_publish` 发布 `/pcr/target_state` 与 `/pcr/local_map_2ch`。
   - 真实相机输入驱动 `pcr_realplay.py` dry-run。
   - 小速度真实机器人运动测试。
-  - 用新高冲突尺子重新跑 yonly / learnedw2 / memory 的完整对比并出机制图。
+  - 五策略最终主表与机制表拆分：主性能表五策略都报，机制表中 Mono-PPO 的 `CSI@C_avoid` 记为 `N/A`。
 
 ## 7. 已知问题与风险（Known Issues & Risks）
 
@@ -312,6 +351,9 @@
 ## 9. 待办清单（Next Actions / TODO）
 
 - [P0] 用新高冲突尺子重新评测 yonly、learnedw2、learnedw2+risk_memory，并输出 `CSI/RCM/signed_w/y_eff-y_raw` 对比。
+- [P0] 先实现 `Rule-Override` eval 分支并跑 0.35 / 0.50 / 0.60 × 3 seeds，补出第四个方法的主表和速度曲线。
+- [P0] 扩展汇总表和画图脚本到五策略顺序：`Y-only / Geom-w / Learned-w / Mono-PPO / Rule-Override`。
+- [P0] 设计并实现 `Mono-PPO` 训练分支，保证同场景、同预算、同 seeds、同 eval 协议，且不输入专家命令或专家风险。
 - [P0] 给 `real_pcr_input_check.py` 增加 `--ros1_publish`，发布 `/pcr/target_state` 与 `/pcr/local_map_2ch`。
 - [P0] 确保目标丢失时 ROS 输出为 `valid=0`、`goal/vel=0`、`target_lost=true`，禁止 NaN 进入策略。
 - [P0] 用真实相机输入跑 `pcr_realplay.py` dry-run，确认能打印 `cmd_F / cmd_A / y / w / y_eff / cmd_safe`。
@@ -324,6 +366,6 @@
 
 ## 10. 需要新会话首先回答的三个问题（Top Questions）
 
-1. 现在是先接 ROS1 dry-run，还是先用新高冲突尺子重跑 yonly / learnedw2 / memory 对比？
-2. 当前真实相机的三组静态验收里，`occ_mean / safety_mean / inflated_blocked_mean` 是否已经符合仿真口径？
-3. learnedw2 或 risk_memory 在 `HighConflict` 窗口内是否真的表现为 `signed_w<0`、`y_eff<y_raw`，还是只是整体 follow bias？
+1. Rule-Override 应接在 `eval_highlevel.py` 哪个最小分支，才能复用现有 `cmd_F/cmd_A/risk_F/risk_A` 且不污染 learned-w 路径？
+2. Mono-PPO 训练分支应复用现有哪个 actor 观测构造，才能做到 deployable observation 公平对比？
+3. 现在是先跑 Rule-Override 三速度三 seed，还是先接 ROS1 dry-run 做实机输入闭环？

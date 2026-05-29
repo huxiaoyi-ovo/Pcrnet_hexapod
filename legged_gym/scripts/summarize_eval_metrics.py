@@ -17,6 +17,7 @@ PAPER_METRICS: List[Tuple[str, str]] = [
     ("C_avoid Rate", "avoid_conflict_step_rate"),
     ("CSI@C_avoid", "avoid_conflict_suppression_index"),
 ]
+METHOD_ORDER = ["yonly", "geomw", "learnedw", "rule_override", "mono_ppo"]
 
 
 def _find_metrics_json(paths: List[str]) -> List[str]:
@@ -43,6 +44,7 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "mode": protocol.get("mode", ""),
         "skill": protocol.get("skill", ""),
         "seed": protocol.get("seed", ""),
+        "policy_variant": protocol.get("policy_variant", ""),
         "beta": protocol.get("beta", ""),
         "w_mode": protocol.get("w_mode", ""),
         "w_tau": protocol.get("w_tau", ""),
@@ -73,6 +75,14 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "risk_rollout_a_mean": overall.get("risk_rollout_a_mean", ""),
         "risk_rollout_s_mean": overall.get("risk_rollout_s_mean", ""),
         "risk_rollout_gap_f_min_as_mean": overall.get("risk_rollout_gap_f_min_as_mean", ""),
+        "rule_s_mean": overall.get("rule_s_mean", ""),
+        "rule_follow_scale_mean": overall.get("rule_follow_scale_mean", ""),
+        "rule_yaw_scale_mean": overall.get("rule_yaw_scale_mean", ""),
+        "rule_follow_suppression_mean": overall.get("rule_follow_suppression_mean", ""),
+        "rule_s_at_avoid_conflict": overall.get("rule_s_at_avoid_conflict", ""),
+        "rule_follow_scale_at_avoid_conflict": overall.get("rule_follow_scale_at_avoid_conflict", ""),
+        "rule_yaw_scale_at_avoid_conflict": overall.get("rule_yaw_scale_at_avoid_conflict", ""),
+        "rule_follow_suppression_at_avoid_conflict": overall.get("rule_follow_suppression_at_avoid_conflict", ""),
         "switch_rate_mean": overall.get("switch_rate_mean", ""),
         "near_miss_rate_mean": overall.get("near_miss_rate_mean", ""),
         "cmd_jerk_lin_mean": overall.get("cmd_jerk_lin_mean", ""),
@@ -129,6 +139,10 @@ def _method_from_protocol(protocol: Dict, src_path: str = "") -> str:
     variant = str(protocol.get("policy_variant", "") or "").strip().lower()
     w_mode = str(protocol.get("w_mode", "") or "").strip().lower()
     text = f"{variant} {w_mode} {src_path}".lower()
+    if "rule_override" in text or "rule-override" in text:
+        return "rule_override"
+    if "mono_ppo" in text or "mono-ppo" in text:
+        return "mono_ppo"
     if "learnedw2" in text or "learnedw" in text or w_mode in ("learned", "learnedw2"):
         return "learnedw"
     if "geomw" in text or w_mode == "geom":
@@ -168,16 +182,24 @@ def _primary_checkpoint(metrics: Dict) -> str:
 def _paper_row(metrics: Dict, src_path: str) -> Dict:
     protocol = metrics.get("protocol", {})
     overall = metrics.get("overall", {})
+    method = _method_from_protocol(protocol, src_path)
+    conflict_metrics_available = bool(protocol.get("conflict_metrics_available", method != "mono_ppo"))
+    mechanism_metrics_available = bool(protocol.get("mechanism_metrics_available", method != "mono_ppo"))
     row = {
         "Speed": _speed_from_protocol(protocol),
-        "Method": _method_from_protocol(protocol, src_path),
+        "Method": method,
         "Seed": protocol.get("seed", ""),
         "Num Episodes": overall.get("episodes", protocol.get("episodes", "")),
         "Checkpoint": _primary_checkpoint(metrics),
         "Source": src_path,
     }
     for title, key in PAPER_METRICS:
-        row[title] = overall.get(key, "")
+        if title in ("Unsafe Rate", "C_avoid Rate") and not conflict_metrics_available:
+            row[title] = ""
+        elif title == "CSI@C_avoid" and not mechanism_metrics_available:
+            row[title] = ""
+        else:
+            row[title] = overall.get(key, "")
     return row
 
 
@@ -199,7 +221,15 @@ def _dedupe_latest(rows: List[Dict]) -> List[Dict]:
     for row in selected.values():
         row.pop("_mtime", None)
         out.append(row)
-    return sorted(out, key=lambda r: (float(r.get("Speed", 0.0) or 0.0), str(r.get("Method", "")), int(r.get("Seed", 0) or 0)))
+    return sorted(out, key=lambda r: (float(r.get("Speed", 0.0) or 0.0), _method_sort_key(str(r.get("Method", ""))), int(r.get("Seed", 0) or 0)))
+
+
+def _method_sort_key(method: str) -> Tuple[int, str]:
+    m = str(method).strip().lower()
+    try:
+        return METHOD_ORDER.index(m), m
+    except ValueError:
+        return len(METHOD_ORDER), m
 
 
 def _write_paper_tables(metric_files: List[str], args) -> None:
@@ -258,7 +288,7 @@ def _aggregate_paper_rows(rows: List[Dict]) -> List[Dict]:
         groups.setdefault(key, []).append(row)
 
     out = []
-    for (speed, method), group in sorted(groups.items(), key=lambda kv: (float(kv[0][0] or 0.0), kv[0][1])):
+    for (speed, method), group in sorted(groups.items(), key=lambda kv: (float(kv[0][0] or 0.0), _method_sort_key(kv[0][1]))):
         agg = {
             "Speed": speed,
             "Method": method,

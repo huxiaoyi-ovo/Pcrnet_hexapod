@@ -3,6 +3,7 @@ project(interface)
 
 
 find_package(catkin REQUIRED COMPONENTS
+  geometry_msgs
   roscpp
   rospy
   std_msgs
@@ -21,7 +22,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES interface
-#  CATKIN_DEPENDS roscpp rospy std_msgs
+  CATKIN_DEPENDS geometry_msgs roscpp rospy std_msgs message_runtime
 #  DEPENDS system_lib
 )
 
@@ -39,6 +40,11 @@ add_executable(joy_ctrl src/joy_ctrl.cpp)
 add_executable(motor_interface src/motor_interface.cpp)
 add_executable(pv_interface src/pv_interface.cpp)
 add_executable(vis_robot_state src/vis_robot_state.cpp)
+
+add_dependencies(joy_ctrl ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(motor_interface ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(pv_interface ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(vis_robot_state ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(joy_ctrl
   ${catkin_LIBRARIES}
@@ -60,4 +66,8 @@ catkin_install_python(PROGRAMS
   ${py_file2}
   ${py_file3}
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

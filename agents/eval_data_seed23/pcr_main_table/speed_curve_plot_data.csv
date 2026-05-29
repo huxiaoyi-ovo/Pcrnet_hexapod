@@ -1,4 +1,4 @@
-Speed,Method,Success Rate,Success Rate Std,Collision Rate,Collision Rate Std,Tracking MAE,Tracking MAE Std,Conflict Rate,Conflict Rate Std,Avoidance Choice Rate,Avoidance Choice Rate Std,Forward Risk,Forward Risk Std,Forward Risk N
+Speed,Method,Success Rate,Success Rate Std,Collision Rate,Collision Rate Std,Tracking MAE,Tracking MAE Std,Command Conflict Rate,Command Conflict Rate Std,Avoidance Choice Rate,Avoidance Choice Rate Std,Forward Risk,Forward Risk Std,Forward Risk N
 0.35,Y-only,0.979,0.004,0.021,0.004,0.217,0.001,0.184,0.001,0.062,0.001,0.35452068168828094,0.0014518186763121056,3
 0.35,Geom-w,0.969,0.013,0.031,0.013,0.171,0.001,0.176,0.002,0.061,0.001,0.3462780835341624,0.001143913905368953,3
 0.35,Learned-w,0.987,0.009,0.013,0.009,0.12,0.001,0.21,0.001,0.068,0.001,0.36565401952768745,0.001369543416651002,3

@@ -452,6 +452,51 @@ def _privileged_conflict_diag(
     }
 
 
+def _compute_rule_override_cmd(
+    args,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+    risk_f: torch.Tensor,
+    risk_a: torch.Tensor,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Reactive safety rule that replaces learned PCR arbitration at eval time."""
+    # Internal high-level command convention:
+    # cmd[..., 0] = x_right / lateral
+    # cmd[..., 1] = y_forward / forward
+    # cmd[..., 2] = yaw
+    risk_gap = risk_f - risk_a
+    k = float(getattr(args, "rule_k", 8.0))
+    margin = float(getattr(args, "rule_margin", 0.10))
+    hard_thr = float(getattr(args, "rule_hard_thr", 0.60))
+    s_min = float(getattr(args, "rule_s_min", 0.70))
+    slow_ratio = float(getattr(args, "rule_slow_ratio", 0.20))
+    yaw_keep_loss = float(getattr(args, "rule_yaw_keep_loss", 0.50))
+
+    s = torch.sigmoid(k * (risk_gap - margin))
+    s_min_t = torch.full_like(s, s_min)
+    s = torch.where(risk_f > hard_thr, torch.maximum(s, s_min_t), s)
+    s = torch.clamp(s, 0.0, 1.0)
+
+    follow_scale = torch.clamp(1.0 - s + slow_ratio * s, 0.0, 1.0)
+    yaw_scale = torch.clamp(1.0 - yaw_keep_loss * s, 0.0, 1.0)
+
+    cmd = torch.zeros_like(cmd_f)
+    if cmd.shape[-1] >= 1 and cmd_a.shape[-1] >= 1:
+        cmd[:, 0] = s * cmd_a[:, 0]
+    if cmd.shape[-1] >= 2 and cmd_f.shape[-1] >= 2:
+        cmd[:, 1] = follow_scale * cmd_f[:, 1]
+    if cmd.shape[-1] >= 3 and cmd_f.shape[-1] >= 3:
+        cmd[:, 2] = yaw_scale * cmd_f[:, 2]
+
+    return cmd, {
+        "rule_s": s,
+        "rule_risk_gap": risk_gap,
+        "rule_follow_scale": follow_scale,
+        "rule_yaw_scale": yaw_scale,
+        "rule_follow_suppression": 1.0 - follow_scale,
+    }
+
+
 def _compute_moe_follow_cmd_from_goal(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
@@ -519,6 +564,15 @@ class EpisodeAccumulator:
     w_support_correction_sum: float = 0.0
     risk_diff_correction_sum: float = 0.0
     risk_memory_sum: float = 0.0
+    rule_s_sum: float = 0.0
+    rule_risk_gap_sum: float = 0.0
+    rule_follow_scale_sum: float = 0.0
+    rule_yaw_scale_sum: float = 0.0
+    rule_follow_suppression_sum: float = 0.0
+    rule_avoid_conflict_s_sum: float = 0.0
+    rule_avoid_conflict_follow_scale_sum: float = 0.0
+    rule_avoid_conflict_yaw_scale_sum: float = 0.0
+    rule_avoid_conflict_follow_suppression_sum: float = 0.0
     row_not_released_sum: float = 0.0
     row_not_released_w_sum: float = 0.0
     row_not_released_steps: int = 0
@@ -641,6 +695,7 @@ class EvalRunner:
         self.env = runtime.env
 
         self.aff_stack = max(int(getattr(self.args, "aff_stack", 1)), 1)
+        self.is_mono_ppo = bool(getattr(self.args, "mono_ppo", False))
         self.aff_stack_buf = None
         self.follow_aff_stack_buf = None
         self.avoid_aff_stack_buf = None
@@ -836,10 +891,14 @@ class EvalRunner:
             info["policy_total"] = total
             info["policy_trainable"] = trainable
 
-        if self.avoid_model is not None:
+        if self.avoid_model is not None and not self.is_mono_ppo:
             total, trainable = _count_params(self.avoid_model)
             info["avoid_total"] = total
             info["avoid_trainable"] = trainable
+        elif self.avoid_model is not None and self.is_mono_ppo:
+            total, trainable = _count_params(self.avoid_model)
+            info["diagnostic_avoid_total"] = total
+            info["diagnostic_avoid_trainable"] = trainable
 
         if self.vision_model is not None:
             total, trainable = _count_params(self.vision_model)
@@ -897,7 +956,7 @@ class EvalRunner:
         policy_aff_stack = torch.zeros_like(aff_stack) if bool(getattr(self.args, "zero_local_map", False)) else aff_stack
         difficulty_input = torch.zeros_like(difficulty) if bool(getattr(self.args, "zero_local_map", False)) else difficulty
 
-        if self.args.skill == "moe":
+        if self.args.skill == "moe" and not self.is_mono_ppo:
             if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:
                 raise ValueError("MoE eval requires avoid affordance inputs and gate affordance map.")
             avoid_aff_input = (
@@ -979,6 +1038,28 @@ class EvalRunner:
                     cmd_a,
                     learned_w=learned_w,
                 )
+                if bool(getattr(self.args, "rule_override", False)):
+                    cmd_rule, rule_info = _compute_rule_override_cmd(
+                        self.args,
+                        gate_diag["cmd_f"],
+                        gate_diag["cmd_a"],
+                        gate_diag["risk_F"],
+                        gate_diag["risk_A"],
+                    )
+                    follow_scale = rule_info["rule_follow_scale"]
+                    zero = torch.zeros_like(follow_scale)
+                    one = torch.ones_like(follow_scale)
+                    gate_diag["cmd"] = cmd_rule
+                    gate_diag["gate_y_raw"] = one
+                    gate_diag["gate_y"] = one
+                    gate_diag["gate_y_safe"] = one
+                    gate_diag["y_eff"] = follow_scale
+                    gate_diag["w"] = torch.full_like(follow_scale, 0.5)
+                    gate_diag["signed_w"] = zero
+                    gate_diag["signed_w_active"] = zero
+                    gate_diag["w_support_correction"] = zero
+                    gate_diag["risk_diff_correction"] = zero
+                    gate_diag.update(rule_info)
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
         with torch.no_grad():
@@ -987,6 +1068,8 @@ class EvalRunner:
                 self.gate_state_dim or int(state.shape[1]),
                 label="eval_policy_state",
             )
+            # Mono-PPO output convention:
+            # cmd[:, 0] = x_right / lateral, cmd[:, 1] = y_forward / forward, cmd[:, 2] = yaw.
             cmd, _ = self.policy.get_action(
                 policy_aff_stack,
                 policy_state,
@@ -994,6 +1077,78 @@ class EvalRunner:
                 difficulty_input,
                 deterministic=not self.args.stochastic,
             )
+            if self.is_mono_ppo and self.avoid_model is not None:
+                if avoid_aff_stack is None or avoid_difficulty is None:
+                    raise ValueError("Mono-PPO conflict diagnostics require avoid affordance inputs.")
+                avoid_aff_input = (
+                    torch.zeros_like(avoid_aff_stack)
+                    if bool(getattr(self.args, "zero_local_map", False))
+                    else avoid_aff_stack
+                )
+                avoid_difficulty_input = (
+                    torch.zeros_like(avoid_difficulty)
+                    if bool(getattr(self.args, "zero_local_map", False))
+                    else avoid_difficulty
+                )
+                target_avoid_state_dim = self.avoid_state_dim or int(state.shape[1])
+                expert_state = th.get_moe_expert_state_inputs(
+                    th.match_state_dim(state, target_avoid_state_dim, label="eval_mono_diag_expert_state")
+                )
+                cmd_f = ph._compute_moe_follow_cmd_from_goal(
+                    expert_state,
+                    goal,
+                    self.done_prev,
+                    tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()),
+                    env_ref=self.env,
+                )
+                cmd_a, _ = self.avoid_model.get_action(
+                    avoid_aff_input,
+                    expert_state,
+                    avoid_goal,
+                    avoid_difficulty_input,
+                    deterministic=True,
+                )
+                diag = th._pcr_gate_command_conflict_diag(
+                    self.env,
+                    self.args,
+                    gate_aff_map if gate_aff_map is not None else policy_aff_stack[:, :2],
+                    cmd_f,
+                    cmd_a,
+                )
+                nan = torch.full_like(diag["risk_F"], float("nan"))
+                zero = torch.zeros_like(diag["risk_F"])
+                gate_diag = {
+                    "gate_y_raw": nan,
+                    "gate_y": nan,
+                    "gate_y_safe": nan,
+                    "y_eff": nan,
+                    "w": nan,
+                    "cmd": cmd,
+                    "cmd_f": cmd_f,
+                    "cmd_a": diag["cmd_a_eff"],
+                    "clearance_F": diag["clearance_F"],
+                    "clearance_A": diag["clearance_A"],
+                    "risk_F": diag["risk_F"],
+                    "risk_A": diag["risk_A"],
+                    "signed_w": nan,
+                    "signed_w_active": nan,
+                    "w_support_correction": zero,
+                    "risk_diff_correction": zero,
+                    "fusion_formula_version": "none",
+                    "row_current_valid": diag["row_current_valid"],
+                    "row_not_released": diag["row_not_released"],
+                    "current_row_front_edge": diag["current_row_front_edge"],
+                    "current_row_back_edge": diag["current_row_back_edge"],
+                    "robot_front_y": diag["robot_front_y"],
+                    "robot_rear_y": diag["robot_rear_y"],
+                    "risk_memory": zero,
+                    "cmd_cos": diag["cmd_cos"],
+                    "conflict_score": diag["conflict_score"],
+                    "post_safe_distance": diag["post_safe_distance"],
+                    "post_free_distance": diag["post_free_distance"],
+                    "gate_safe_clamp_mask": torch.zeros_like(diag["risk_F"], dtype=torch.bool),
+                }
+                return cmd, None, gate_diag
         return cmd, None, None
 
     def _measure_inference_latency_ms(
@@ -1140,8 +1295,16 @@ class EvalRunner:
                 self.env.clearance_affordance_override = aff_for_post
                 self.env.clearance_override = None
                 self.env.reward_affordance_override = aff_for_post
-                gate_y_raw = gate_diag["gate_y_raw"] if isinstance(gate_diag, dict) else None
-                pcr_risk_override = gate_diag.get("risk_F", None) if isinstance(gate_diag, dict) else None
+                gate_y_raw = (
+                    gate_diag["gate_y_raw"]
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo
+                    else None
+                )
+                pcr_risk_override = (
+                    gate_diag.get("risk_F", None)
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo
+                    else None
+                )
                 next_obs, rewards, dones, info = self.env.step(
                     cmd_raw,
                     gate_y,
@@ -1170,6 +1333,15 @@ class EvalRunner:
                     post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
                     post_info["cmd_cos"] = gate_diag["cmd_cos"].detach().clone()
                     post_info["conflict_score"] = gate_diag["conflict_score"].detach().clone()
+                    for key in (
+                        "rule_s",
+                        "rule_risk_gap",
+                        "rule_follow_scale",
+                        "rule_yaw_scale",
+                        "rule_follow_suppression",
+                    ):
+                        if key in gate_diag:
+                            post_info[key] = gate_diag[key].detach().clone()
                     priv_diag = _privileged_conflict_diag(
                         self.args,
                         self.env,
@@ -1338,6 +1510,11 @@ class EvalRunner:
                         w_support_corr_t = post_info.get("w_support_correction", None)
                         risk_diff_corr_t = post_info.get("risk_diff_correction", None)
                         risk_memory_t = post_info.get("risk_memory", None)
+                        rule_s_t = post_info.get("rule_s", None)
+                        rule_risk_gap_t = post_info.get("rule_risk_gap", None)
+                        rule_follow_scale_t = post_info.get("rule_follow_scale", None)
+                        rule_yaw_scale_t = post_info.get("rule_yaw_scale", None)
+                        rule_follow_suppression_t = post_info.get("rule_follow_suppression", None)
                         row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
                         priv_conflict_t = post_info.get("priv_conflict_score", None)
@@ -1386,6 +1563,11 @@ class EvalRunner:
                         w_support_corr_v = _safe_float(w_support_corr_t[i].item(), default=0.0) if torch.is_tensor(w_support_corr_t) else 0.0
                         risk_diff_corr_v = _safe_float(risk_diff_corr_t[i].item(), default=0.0) if torch.is_tensor(risk_diff_corr_t) else 0.0
                         risk_memory_v = _safe_float(risk_memory_t[i].item(), default=0.0) if torch.is_tensor(risk_memory_t) else 0.0
+                        rule_s_v = _safe_float(rule_s_t[i].item(), default=float("nan")) if torch.is_tensor(rule_s_t) else float("nan")
+                        rule_risk_gap_v = _safe_float(rule_risk_gap_t[i].item(), default=float("nan")) if torch.is_tensor(rule_risk_gap_t) else float("nan")
+                        rule_follow_scale_v = _safe_float(rule_follow_scale_t[i].item(), default=float("nan")) if torch.is_tensor(rule_follow_scale_t) else float("nan")
+                        rule_yaw_scale_v = _safe_float(rule_yaw_scale_t[i].item(), default=float("nan")) if torch.is_tensor(rule_yaw_scale_t) else float("nan")
+                        rule_follow_suppression_v = _safe_float(rule_follow_suppression_t[i].item(), default=float("nan")) if torch.is_tensor(rule_follow_suppression_t) else float("nan")
                         row_not_released_v = _safe_float(row_not_released_t[i].item(), default=0.0) if torch.is_tensor(row_not_released_t) else 0.0
                         conflict_v = _safe_float(conflict_t[i].item(), default=0.0) if torch.is_tensor(conflict_t) else 0.0
                         priv_conflict_v = _safe_float(priv_conflict_t[i].item(), default=0.0) if torch.is_tensor(priv_conflict_t) else 0.0
@@ -1448,6 +1630,16 @@ class EvalRunner:
                         ai.w_support_correction_sum += w_support_corr_v
                         ai.risk_diff_correction_sum += risk_diff_corr_v
                         ai.risk_memory_sum += risk_memory_v
+                        if math.isfinite(rule_s_v):
+                            ai.rule_s_sum += rule_s_v
+                        if math.isfinite(rule_risk_gap_v):
+                            ai.rule_risk_gap_sum += rule_risk_gap_v
+                        if math.isfinite(rule_follow_scale_v):
+                            ai.rule_follow_scale_sum += rule_follow_scale_v
+                        if math.isfinite(rule_yaw_scale_v):
+                            ai.rule_yaw_scale_sum += rule_yaw_scale_v
+                        if math.isfinite(rule_follow_suppression_v):
+                            ai.rule_follow_suppression_sum += rule_follow_suppression_v
                         ai.row_not_released_sum += row_not_released_v
                         ai.priv_conflict_score_sum += priv_conflict_v
                         ai.priv_obstacle_window_steps += int(priv_obstacle_window_v > 0.5)
@@ -1532,6 +1724,14 @@ class EvalRunner:
                             ai.avoid_conflict_w_sum += w_v
                             ai.avoid_conflict_signed_w_sum += signed_w_v
                             ai.avoid_conflict_delta_y_sum += delta_y_v
+                            if math.isfinite(rule_s_v):
+                                ai.rule_avoid_conflict_s_sum += rule_s_v
+                            if math.isfinite(rule_follow_scale_v):
+                                ai.rule_avoid_conflict_follow_scale_sum += rule_follow_scale_v
+                            if math.isfinite(rule_yaw_scale_v):
+                                ai.rule_avoid_conflict_yaw_scale_sum += rule_yaw_scale_v
+                            if math.isfinite(rule_follow_suppression_v):
+                                ai.rule_avoid_conflict_follow_suppression_sum += rule_follow_suppression_v
                         if stop_high_conflict_v > 0.5:
                             ai.stop_conflict_steps += 1
                             ai.stop_conflict_y_raw_sum += gate_raw_v
@@ -1695,6 +1895,11 @@ class EvalRunner:
                                     "w_support_correction": w_support_corr_v,
                                     "risk_diff_correction": risk_diff_corr_v,
                                     "risk_memory": risk_memory_v,
+                                    "rule_s": rule_s_v,
+                                    "rule_risk_gap": rule_risk_gap_v,
+                                    "rule_follow_scale": rule_follow_scale_v,
+                                    "rule_yaw_scale": rule_yaw_scale_v,
+                                    "rule_follow_suppression": rule_follow_suppression_v,
                                     "row_not_released": row_not_released_v,
                                     "conflict_score": conflict_v,
                                     "priv_conflict_score": priv_conflict_v,
@@ -1910,6 +2115,42 @@ class EvalRunner:
                             "w_support_correction_mean": ai.w_support_correction_sum / denom_steps,
                             "risk_diff_correction_mean": ai.risk_diff_correction_sum / denom_steps,
                             "risk_memory_mean": ai.risk_memory_sum / denom_steps,
+                            "rule_s_mean": (
+                                ai.rule_s_sum / denom_steps
+                                if bool(getattr(self.args, "rule_override", False)) else float("nan")
+                            ),
+                            "rule_risk_gap_mean": (
+                                ai.rule_risk_gap_sum / denom_steps
+                                if bool(getattr(self.args, "rule_override", False)) else float("nan")
+                            ),
+                            "rule_follow_scale_mean": (
+                                ai.rule_follow_scale_sum / denom_steps
+                                if bool(getattr(self.args, "rule_override", False)) else float("nan")
+                            ),
+                            "rule_yaw_scale_mean": (
+                                ai.rule_yaw_scale_sum / denom_steps
+                                if bool(getattr(self.args, "rule_override", False)) else float("nan")
+                            ),
+                            "rule_follow_suppression_mean": (
+                                ai.rule_follow_suppression_sum / denom_steps
+                                if bool(getattr(self.args, "rule_override", False)) else float("nan")
+                            ),
+                            "rule_s_at_avoid_conflict": (
+                                ai.rule_avoid_conflict_s_sum / avoid_conflict_denom
+                                if bool(getattr(self.args, "rule_override", False)) and ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "rule_follow_scale_at_avoid_conflict": (
+                                ai.rule_avoid_conflict_follow_scale_sum / avoid_conflict_denom
+                                if bool(getattr(self.args, "rule_override", False)) and ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "rule_yaw_scale_at_avoid_conflict": (
+                                ai.rule_avoid_conflict_yaw_scale_sum / avoid_conflict_denom
+                                if bool(getattr(self.args, "rule_override", False)) and ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "rule_follow_suppression_at_avoid_conflict": (
+                                ai.rule_avoid_conflict_follow_suppression_sum / avoid_conflict_denom
+                                if bool(getattr(self.args, "rule_override", False)) and ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
                             "row_not_released_rate": ai.row_not_released_sum / denom_steps,
                             "row_not_released_w_mean": (
                                 ai.row_not_released_w_sum / float(max(ai.row_not_released_steps, 1))
@@ -2756,6 +2997,15 @@ class EvalRunner:
         risk_rollout_gap_vals = _clean([r.get("risk_rollout_gap_f_min_as_mean", float("nan")) for r in rows])
         w_support_correction_vals = _clean([r.get("w_support_correction_mean", float("nan")) for r in rows])
         risk_diff_correction_vals = _clean([r.get("risk_diff_correction_mean", float("nan")) for r in rows])
+        rule_s_vals = _clean([r.get("rule_s_mean", float("nan")) for r in rows])
+        rule_risk_gap_vals = _clean([r.get("rule_risk_gap_mean", float("nan")) for r in rows])
+        rule_follow_scale_vals = _clean([r.get("rule_follow_scale_mean", float("nan")) for r in rows])
+        rule_yaw_scale_vals = _clean([r.get("rule_yaw_scale_mean", float("nan")) for r in rows])
+        rule_follow_suppression_vals = _clean([r.get("rule_follow_suppression_mean", float("nan")) for r in rows])
+        rule_s_at_avoid_vals = _clean([r.get("rule_s_at_avoid_conflict", float("nan")) for r in rows])
+        rule_follow_scale_at_avoid_vals = _clean([r.get("rule_follow_scale_at_avoid_conflict", float("nan")) for r in rows])
+        rule_yaw_scale_at_avoid_vals = _clean([r.get("rule_yaw_scale_at_avoid_conflict", float("nan")) for r in rows])
+        rule_follow_suppression_at_avoid_vals = _clean([r.get("rule_follow_suppression_at_avoid_conflict", float("nan")) for r in rows])
         row_not_released_vals = _clean([r.get("row_not_released_rate", float("nan")) for r in rows])
         row_not_released_w_vals = _clean([r.get("row_not_released_w_mean", float("nan")) for r in rows])
         row_released_w_vals = _clean([r.get("row_released_w_mean", float("nan")) for r in rows])
@@ -2873,6 +3123,23 @@ class EvalRunner:
             "risk_rollout_gap_f_min_as_mean": float(np.mean(risk_rollout_gap_vals)) if risk_rollout_gap_vals else float("nan"),
             "w_support_correction_mean": float(np.mean(w_support_correction_vals)) if w_support_correction_vals else float("nan"),
             "risk_diff_correction_mean": float(np.mean(risk_diff_correction_vals)) if risk_diff_correction_vals else float("nan"),
+            "rule_s_mean": float(np.mean(rule_s_vals)) if rule_s_vals else float("nan"),
+            "rule_risk_gap_mean": float(np.mean(rule_risk_gap_vals)) if rule_risk_gap_vals else float("nan"),
+            "rule_follow_scale_mean": float(np.mean(rule_follow_scale_vals)) if rule_follow_scale_vals else float("nan"),
+            "rule_yaw_scale_mean": float(np.mean(rule_yaw_scale_vals)) if rule_yaw_scale_vals else float("nan"),
+            "rule_follow_suppression_mean": (
+                float(np.mean(rule_follow_suppression_vals)) if rule_follow_suppression_vals else float("nan")
+            ),
+            "rule_s_at_avoid_conflict": float(np.mean(rule_s_at_avoid_vals)) if rule_s_at_avoid_vals else float("nan"),
+            "rule_follow_scale_at_avoid_conflict": (
+                float(np.mean(rule_follow_scale_at_avoid_vals)) if rule_follow_scale_at_avoid_vals else float("nan")
+            ),
+            "rule_yaw_scale_at_avoid_conflict": (
+                float(np.mean(rule_yaw_scale_at_avoid_vals)) if rule_yaw_scale_at_avoid_vals else float("nan")
+            ),
+            "rule_follow_suppression_at_avoid_conflict": (
+                float(np.mean(rule_follow_suppression_at_avoid_vals)) if rule_follow_suppression_at_avoid_vals else float("nan")
+            ),
             "row_not_released_rate_mean": float(np.mean(row_not_released_vals)) if row_not_released_vals else float("nan"),
             "row_not_released_w_mean": float(np.mean(row_not_released_w_vals)) if row_not_released_w_vals else float("nan"),
             "row_released_w_mean": float(np.mean(row_released_w_vals)) if row_released_w_vals else float("nan"),
@@ -3082,7 +3349,30 @@ class EvalRunner:
                 "gate_safe_max": float(getattr(self.args, "gate_safe_max", 0.3)),
                 "beta": None if self.args.beta is None else float(self.args.beta),
                 "w_mode": str(self.args.w_mode),
-                "policy_variant": {"none": "yonly", "geom": "geomw", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode)),
+                "policy_variant": (
+                    "mono_ppo"
+                    if bool(getattr(self.args, "mono_ppo", False))
+                    else "rule_override"
+                    if bool(getattr(self.args, "rule_override", False))
+                    else {"none": "yonly", "geom": "geomw", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
+                ),
+                "mono_ppo": bool(getattr(self.args, "mono_ppo", False)),
+                "uses_follow_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
+                "uses_avoid_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
+                "uses_pcr_gate": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
+                "uses_follow_expert_for_metrics": bool(self.args.skill == "moe"),
+                "uses_avoid_expert_for_metrics": bool(self.args.skill == "moe" and self.avoid_model is not None),
+                "conflict_metrics_available": bool(
+                    (not getattr(self.args, "mono_ppo", False))
+                    or (self.args.skill == "moe" and self.avoid_model is not None)
+                ),
+                "mechanism_metrics_available": bool(not getattr(self.args, "mono_ppo", False)),
+                "mono_ppo_conflict_metrics_note": (
+                    "For Mono-PPO, conflict rates are eval-only diagnostics computed from the same "
+                    "analytic Follow candidate and diagnostic Avoid candidate; they are not policy inputs."
+                    if bool(getattr(self.args, "mono_ppo", False)) else ""
+                ),
+                "cmd_output_convention": "[x_right, y_forward, yaw]",
                 "eval_w_mode": str(self.args.w_mode),
                 "trained_w_mode": (
                     self.policy_meta.get("trained_w_mode", self.policy_meta.get("w_mode", None))
@@ -3106,6 +3396,17 @@ class EvalRunner:
                 "signed_w_gamma_risk": float(getattr(self.args, "signed_w_gamma_risk", 0.15)),
                 "signed_w_margin": float(getattr(self.args, "signed_w_margin", 0.05)),
                 "w_disable_gate_safe_clamp": bool(self.args.w_disable_gate_safe_clamp),
+                "rule_override": bool(getattr(self.args, "rule_override", False)),
+                "rule_override_definition": (
+                    "Reactive safety baseline: deterministic risk-gap rule replaces PCR arbitration; "
+                    "it uses cmd_F/cmd_A/risk_F/risk_A but not learned y/w."
+                ),
+                "rule_k": float(getattr(self.args, "rule_k", 8.0)),
+                "rule_margin": float(getattr(self.args, "rule_margin", 0.10)),
+                "rule_hard_thr": float(getattr(self.args, "rule_hard_thr", 0.60)),
+                "rule_s_min": float(getattr(self.args, "rule_s_min", 0.70)),
+                "rule_slow_ratio": float(getattr(self.args, "rule_slow_ratio", 0.20)),
+                "rule_yaw_keep_loss": float(getattr(self.args, "rule_yaw_keep_loss", 0.50)),
                 "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
                 "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
                 "pcr_w_aux_risk_f_threshold": float(getattr(self.args, "pcr_w_aux_risk_f_threshold", 0.4)),
@@ -3253,6 +3554,15 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "w_support_correction_mean",
         "risk_diff_correction_mean",
         "risk_memory_mean",
+        "rule_s_mean",
+        "rule_risk_gap_mean",
+        "rule_follow_scale_mean",
+        "rule_yaw_scale_mean",
+        "rule_follow_suppression_mean",
+        "rule_s_at_avoid_conflict",
+        "rule_follow_scale_at_avoid_conflict",
+        "rule_yaw_scale_at_avoid_conflict",
+        "rule_follow_suppression_at_avoid_conflict",
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
@@ -3449,6 +3759,11 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "w_support_correction",
             "risk_diff_correction",
             "risk_memory",
+            "rule_s",
+            "rule_risk_gap",
+            "rule_follow_scale",
+            "rule_yaw_scale",
+            "rule_follow_suppression",
             "row_not_released",
             "conflict_score",
             "priv_conflict_score",
@@ -3611,6 +3926,7 @@ def parse_args():
     parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--skill", type=str, default="moe", choices=["follow", "avoid", "moe"])
+    parser.add_argument("--mono_ppo", action="store_true", help="PCR external baseline: direct cmd policy under --skill moe")
 
     parser.add_argument("--pcr_ckpt", type=str, default=None, help="PCR gate policy checkpoint")
     parser.add_argument("--ckpt", type=str, default=None, help=argparse.SUPPRESS)
@@ -3677,6 +3993,13 @@ def parse_args():
     parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
+    parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
+    parser.add_argument("--rule_k", type=float, default=8.0)
+    parser.add_argument("--rule_margin", type=float, default=0.10)
+    parser.add_argument("--rule_hard_thr", type=float, default=0.60)
+    parser.add_argument("--rule_s_min", type=float, default=0.70)
+    parser.add_argument("--rule_slow_ratio", type=float, default=0.20)
+    parser.add_argument("--rule_yaw_keep_loss", type=float, default=0.50)
     parser.add_argument("--risk_memory", action="store_true", help="use deployable temporal risk memory in learned-w row slot")
     parser.add_argument("--risk_memory_l_clear", type=float, default=0.40)
     parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"])
@@ -3758,8 +4081,17 @@ def parse_args():
     if not str(getattr(args, "pcr_ckpt", "") or "").strip():
         parser.error("缺少必须的 checkpoint 路径：--pcr_ckpt")
 
-    selected_w_mode = None
-    if args.yonly:
+    if bool(getattr(args, "mono_ppo", False)):
+        if args.skill != "moe":
+            parser.error("--mono_ppo 只支持 --skill moe")
+        if args.rule_override:
+            parser.error("--mono_ppo 不允许同时启用 --rule_override")
+        if any((args.yonly, args.wgeom, args.wlearned, args.wlearned2)):
+            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if args.w_mode is not None and str(args.w_mode).lower() != "none":
+            parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
+        selected_w_mode = "none"
+    elif args.yonly:
         selected_w_mode = "none"
     elif args.wgeom:
         selected_w_mode = "geom"
@@ -3785,7 +4117,8 @@ def parse_args():
     args.w_mode = selected_w_mode
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
-    for opt_name in ("avoid_ckpt", "lowlevel_ckpt"):
+    required_ckpts = ("lowlevel_ckpt",) if bool(getattr(args, "mono_ppo", False)) else ("avoid_ckpt", "lowlevel_ckpt")
+    for opt_name in required_ckpts:
         if not str(getattr(args, opt_name, "") or "").strip():
             parser.error(f"缺少必须的 checkpoint 路径：--{opt_name}")
     args.ckpt = args.pcr_ckpt
@@ -3830,7 +4163,16 @@ def main():
     metrics = runner.evaluate()
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    variant_tag = th.format_pcr_variant_tag(args)
+    if bool(getattr(args, "mono_ppo", False)):
+        variant_tag = "mono_ppo"
+    elif bool(getattr(args, "rule_override", False)):
+        variant_tag = (
+            f"rule_override_k{float(args.rule_k):g}_m{float(args.rule_margin):g}_"
+            f"h{float(args.rule_hard_thr):g}_smin{float(args.rule_s_min):g}_"
+            f"slow{float(args.rule_slow_ratio):g}_yawloss{float(args.rule_yaw_keep_loss):g}"
+        )
+    else:
+        variant_tag = th.format_pcr_variant_tag(args)
     out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")
     _write_outputs(metrics, out_dir)
 

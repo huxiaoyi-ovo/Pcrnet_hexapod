@@ -290,6 +290,7 @@ def _ensure_play_runtime_arg_defaults(args) -> None:
         "show_expert_cmd": False,
         "use_expert_cmd": False,
         "use_follow_expert": False,
+        "mono_ppo": False,
         "force_cmd": None,
         "heading_offset_override": None,
         "heading_offset_flip": False,
@@ -326,7 +327,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     th.import_modules()
     if args.mode == "student" and not args.vision_ckpt:
         raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
-    if args.mode == "student" and getattr(args, "skill", "follow") == "moe":
+    if args.mode == "student" and getattr(args, "skill", "follow") == "moe" and not bool(getattr(args, "mono_ppo", False)):
         raise ValueError("当前未实现 Gate 的 student 回放契约，禁止使用 --mode student --skill moe。")
     if getattr(args, "camera_show", False) and getattr(args, "headless", False):
         print("[PlayHigh] ⚠ camera_show requested but headless=True. Disabling.")
@@ -415,7 +416,13 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     aff_channels = aff_shape[0] * aff_stack
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     skill = getattr(args, "skill", "follow")
-    is_gate = skill == "moe"
+    is_mono_ppo = bool(getattr(args, "mono_ppo", False))
+    if is_mono_ppo and skill != "moe":
+        raise ValueError("--mono_ppo 只支持 --skill moe。")
+    if is_mono_ppo and args.mode != "teacher":
+        raise ValueError("--mono_ppo 当前只支持 --mode teacher。")
+    is_gate = skill == "moe" and not is_mono_ppo
+    env.disable_pcr_gate_aux = bool(is_mono_ppo)
     expert_only_mode = use_follow_expert or static_avoid_debug or (getattr(args, "force_cmd", None) is not None)
     policy = None
     avoid_policy = None
@@ -513,6 +520,36 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
                 "path": os.path.abspath(args.teacher_ckpt),
                 "experiment_meta": policy_meta,
             }
+            if is_mono_ppo and args.avoid_ckpt:
+                avoid_ckpt = torch.load(args.avoid_ckpt, map_location=device)
+                avoid_meta = _ckpt_meta_from_obj(avoid_ckpt)
+                avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim
+                avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
+                avoid_policy = th.CmdVelExpert(
+                    affordance_channels=avoid_aff_channels,
+                    state_dim=avoid_state_dim,
+                    goal_dim=obs["goal"].shape[1],
+                    cmd_scale=cmd_scale,
+                ).to(device)
+                _validate_expected_ckpt_meta(avoid_meta, source_name="diagnostic avoid ckpt", expected_skill="avoid", expected_mode=args.mode)
+                th.validate_checkpoint_contract_compatibility(
+                    th.build_runtime_contract_meta(args, env),
+                    avoid_meta,
+                    reference_name="current play runtime",
+                    candidate_name="diagnostic avoid ckpt",
+                    strict=True,
+                )
+                avoid_state = avoid_ckpt["model_state_dict"] if isinstance(avoid_ckpt, dict) and "model_state_dict" in avoid_ckpt else avoid_ckpt
+                th.load_high_level_state_dict_compat(
+                    avoid_policy,
+                    avoid_state,
+                    label=f"play_diagnostic_avoid:{os.path.basename(args.avoid_ckpt)}",
+                )
+                avoid_policy.eval()
+                resolved_protocol_aux["diagnostic_avoid_ckpt"] = {
+                    "path": os.path.abspath(args.avoid_ckpt),
+                    "experiment_meta": avoid_meta,
+                }
     else:
         policy_meta = primary_meta
 

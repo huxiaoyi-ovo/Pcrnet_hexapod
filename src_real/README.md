@@ -181,6 +181,12 @@ PCR 专用脚本会检测 `/joy_ctrl`，如果它已经运行，会拒绝启动�
 PCR 模式：使用 interface/scripts/pcr_real/run_pcr_real_compat.sh
 ```
 
+如果已经在 ROS 工作空间内完成 `catkin_make` 和 `source devel/setup.bash`，也可以使用 PCR 专用 launch。它不会启动 `joy_ctrl`，默认同样不发布运动命令：
+
+```bash
+roslaunch interface pcr_real_compat.launch
+```
+
 ## 干跑检查
 
 先不要让机器人动，只检查相机输入和 PCR 输出。
@@ -209,6 +215,12 @@ target_lost / depth_invalid 时 cmd_safe 为 0
 bash interface/scripts/pcr_real/run_pcr_real_compat.sh \
   --show \
   --publish_cmd
+```
+
+对应的 launch 写法是：
+
+```bash
+roslaunch interface pcr_real_compat.launch show:=true publish_cmd:=true
 ```
 
 默认限幅很低：

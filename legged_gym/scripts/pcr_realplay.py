@@ -60,6 +60,9 @@ class RealInputSnapshot:
     depth_invalid: bool = False
     target_stamp: float = 0.0
     local_map_stamp: float = 0.0
+    risk_blocked_stamp: float = 0.0
+    policy_visible_stamp: float = 0.0
+    front_distance_risk_stamp: float = 0.0
     state_stamp: float = 0.0
     row_stamp: float = 0.0
 
@@ -445,6 +448,9 @@ class PcrRealplay:
         if not self.args.obs_file:
             rospy.Subscriber(self.args.target_topic, Float32MultiArray, self._target_cb, queue_size=1)
             rospy.Subscriber(self.args.local_map_topic, Float32MultiArray, self._local_map_cb, queue_size=1)
+            rospy.Subscriber(self.args.risk_blocked_topic, Float32MultiArray, self._risk_blocked_cb, queue_size=1)
+            rospy.Subscriber(self.args.policy_visible_topic, Float32MultiArray, self._policy_visible_cb, queue_size=1)
+            rospy.Subscriber(self.args.front_distance_risk_topic, Float32, self._front_distance_risk_cb, queue_size=1)
         if self.args.state_topic and not self.args.obs_file:
             rospy.Subscriber(self.args.state_topic, Float32MultiArray, self._state_cb, queue_size=1)
         if self.args.row_not_released_topic and not self.args.obs_file:
@@ -458,6 +464,7 @@ class PcrRealplay:
         print(
             "[PCRRealplay] ROS ready: "
             f"input={'obs_file' if self.args.obs_file else self.args.target_topic + ' + ' + self.args.local_map_topic}, "
+            f"risk={self.args.risk_blocked_topic}, front_risk={self.args.front_distance_risk_topic}, "
             f"state={self.args.state_topic or '<zeros>'}, publish_cmd={self.args.publish_cmd}, "
             f"cmd_backend={self.args.cmd_backend}",
             flush=True,
@@ -474,6 +481,8 @@ class PcrRealplay:
             self.snapshot.target_too_close = False
             self.snapshot.depth_invalid = True
             self.snapshot.actor_difficulty = None
+            self.snapshot.front_distance_risk = None
+            self.snapshot.front_distance_risk_stamp = 0.0
             self.snapshot.target_stamp = time.time()
             return
         if not np.isfinite(data[:5]).all():
@@ -485,8 +494,11 @@ class PcrRealplay:
             self.snapshot.target_too_close = False
             self.snapshot.depth_invalid = True
             self.snapshot.actor_difficulty = None
+            self.snapshot.front_distance_risk = None
+            self.snapshot.front_distance_risk_stamp = 0.0
             self.snapshot.target_stamp = time.time()
             return
+        now = time.time()
         self.snapshot.target = data[:5].copy()
         self.snapshot.target_too_close = bool(data[5] > 0.5) if data.size >= 6 else False
         self.snapshot.depth_invalid = bool(data[6] > 0.5) if data.size >= 7 else False
@@ -495,7 +507,10 @@ class PcrRealplay:
             if data.size >= 8 and np.isfinite(data[7])
             else None
         )
-        self.snapshot.target_stamp = time.time()
+        if data.size >= 9 and np.isfinite(data[8]):
+            self.snapshot.front_distance_risk = float(np.clip(data[8], 0.0, 1.0))
+            self.snapshot.front_distance_risk_stamp = now
+        self.snapshot.target_stamp = now
 
     def _local_map_cb(self, msg) -> None:
         data = np.asarray(msg.data, dtype=np.float32).reshape(-1)
@@ -510,6 +525,65 @@ class PcrRealplay:
             return
         self.snapshot.local_map_2ch = data.reshape(self.args.map_channels, self.args.map_size, self.args.map_size).copy()
         self.snapshot.local_map_stamp = time.time()
+
+    def _risk_blocked_cb(self, msg) -> None:
+        data = np.asarray(msg.data, dtype=np.float32).reshape(-1)
+        expected = int(self.args.map_size * self.args.map_size)
+        if data.size != expected:
+            print(
+                f"[PCRRealplay][Warn] risk_blocked_map message size mismatch: got {data.size}, expected {expected}; "
+                "risk will fall back to local_map occupancy.",
+                flush=True,
+            )
+            self.snapshot.risk_blocked_map = None
+            self.snapshot.risk_blocked_stamp = 0.0
+            return
+        if not np.isfinite(data).all():
+            print(
+                "[PCRRealplay][Warn] risk_blocked_map has non-finite values; risk will fall back to local_map occupancy.",
+                flush=True,
+            )
+            self.snapshot.risk_blocked_map = None
+            self.snapshot.risk_blocked_stamp = 0.0
+            return
+        self.snapshot.risk_blocked_map = data.reshape(1, self.args.map_size, self.args.map_size).copy()
+        self.snapshot.risk_blocked_stamp = time.time()
+
+    def _policy_visible_cb(self, msg) -> None:
+        data = np.asarray(msg.data, dtype=np.float32).reshape(-1)
+        expected = int(self.args.map_size * self.args.map_size)
+        if data.size != expected:
+            print(
+                f"[PCRRealplay][Warn] policy_visible_map message size mismatch: got {data.size}, expected {expected}; "
+                "visibility diagnostics will be ignored.",
+                flush=True,
+            )
+            self.snapshot.policy_visible_map = None
+            self.snapshot.policy_visible_stamp = 0.0
+            return
+        if not np.isfinite(data).all():
+            print(
+                "[PCRRealplay][Warn] policy_visible_map has non-finite values; visibility diagnostics will be ignored.",
+                flush=True,
+            )
+            self.snapshot.policy_visible_map = None
+            self.snapshot.policy_visible_stamp = 0.0
+            return
+        self.snapshot.policy_visible_map = data.reshape(1, self.args.map_size, self.args.map_size).copy()
+        self.snapshot.policy_visible_stamp = time.time()
+
+    def _front_distance_risk_cb(self, msg) -> None:
+        value = float(msg.data)
+        if not np.isfinite(value):
+            print(
+                "[PCRRealplay][Warn] front_distance_risk has non-finite value; front risk fallback will be disabled.",
+                flush=True,
+            )
+            self.snapshot.front_distance_risk = None
+            self.snapshot.front_distance_risk_stamp = 0.0
+            return
+        self.snapshot.front_distance_risk = float(np.clip(value, 0.0, 1.0))
+        self.snapshot.front_distance_risk_stamp = time.time()
 
     def _state_cb(self, msg) -> None:
         data = np.asarray(msg.data, dtype=np.float32).reshape(-1)
@@ -560,6 +634,9 @@ class PcrRealplay:
             depth_invalid=False,
             target_stamp=now,
             local_map_stamp=now,
+            risk_blocked_stamp=now,
+            policy_visible_stamp=now,
+            front_distance_risk_stamp=now,
             state_stamp=now,
             row_stamp=now,
         )
@@ -620,6 +697,9 @@ class PcrRealplay:
             depth_invalid=bool(target[6] > 0.5) if target.size >= 7 else False,
             target_stamp=stamp,
             local_map_stamp=stamp,
+            risk_blocked_stamp=stamp,
+            policy_visible_stamp=stamp,
+            front_distance_risk_stamp=stamp,
             state_stamp=time.time(),
             row_stamp=stamp,
         )
@@ -649,20 +729,28 @@ class PcrRealplay:
             shape=(self.args.map_channels, self.args.map_size, self.args.map_size),
             name="local_map_2ch",
         )
+        self._last_has_real_risk_map = False
         if snap.risk_blocked_map is not None:
-            risk_np = _sanitize_array(
-                snap.risk_blocked_map,
-                shape=(1, self.args.map_size, self.args.map_size),
-                name="risk_blocked_map",
-            )
+            risk_age = now - float(snap.risk_blocked_stamp)
+            if risk_age <= float(self.args.input_timeout_s):
+                risk_np = _sanitize_array(
+                    snap.risk_blocked_map,
+                    shape=(1, self.args.map_size, self.args.map_size),
+                    name="risk_blocked_map",
+                )
+                self._last_has_real_risk_map = True
+            else:
+                risk_np = local_np[:1].copy()
         else:
             risk_np = local_np[:1].copy()
         if snap.policy_visible_map is not None:
-            _sanitize_array(
-                snap.policy_visible_map,
-                shape=(1, self.args.map_size, self.args.map_size),
-                name="policy_visible_map",
-            )
+            visible_age = now - float(snap.policy_visible_stamp)
+            if visible_age <= float(self.args.input_timeout_s):
+                _sanitize_array(
+                    snap.policy_visible_map,
+                    shape=(1, self.args.map_size, self.args.map_size),
+                    name="policy_visible_map",
+                )
         if snap.state is None or (now - snap.state_stamp) > float(self.args.state_timeout_s):
             if not self.args.allow_missing_state:
                 raise RealPcrRuntimeError("state input missing or stale")
@@ -694,7 +782,11 @@ class PcrRealplay:
         difficulty = torch_mod.as_tensor([actor_difficulty], device=self.device, dtype=torch_mod.float32)
         front_distance_risk = (
             float(np.clip(float(snap.front_distance_risk), 0.0, 1.0))
-            if snap.front_distance_risk is not None and np.isfinite(float(snap.front_distance_risk))
+            if (
+                snap.front_distance_risk is not None
+                and np.isfinite(float(snap.front_distance_risk))
+                and (now - float(snap.front_distance_risk_stamp)) <= float(self.args.input_timeout_s)
+            )
             else 0.0
         )
         return (
@@ -950,7 +1042,7 @@ class PcrRealplay:
             "map_cell_m": float(cell_m),
             "robot_clearance_m": float(robot_clearance_m),
             "robot_clearance_cells": int(_clearance_radius_cells(robot_clearance_m, cell_m)),
-            "has_real_risk_map": bool(snap.risk_blocked_map is not None),
+            "has_real_risk_map": bool(getattr(self, "_last_has_real_risk_map", False)),
             "safety": safety,
         }
         for key in (
@@ -1192,8 +1284,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs_file", type=str, default="", help="read latest PCR observation JSON without ROS")
 
     parser.add_argument("--ros_node_name", default="pcr_realplay")
-    parser.add_argument("--target_topic", default="/pcr/target_state", help="Float32MultiArray: [x_right,y_forward,v_right,v_forward,valid,target_too_close,depth_invalid,actor_difficulty]; last three fields optional")
+    parser.add_argument("--target_topic", default="/pcr/target_state", help="Float32MultiArray: [x_right,y_forward,v_right,v_forward,valid,target_too_close,depth_invalid,actor_difficulty,front_distance_risk]; fields after valid are optional")
     parser.add_argument("--local_map_topic", default="/pcr/local_map_2ch", help="Float32MultiArray: flattened (2,32,32) by default")
+    parser.add_argument("--risk_blocked_topic", default="/pcr/risk_blocked_map", help="Float32MultiArray: flattened (1,32,32) command-risk map from real_pcr_input_check.py")
+    parser.add_argument("--policy_visible_topic", default="/pcr/policy_visible_map", help="Float32MultiArray: flattened (1,32,32) visibility diagnostic map")
+    parser.add_argument("--front_distance_risk_topic", default="/pcr/front_distance_risk", help="Float32 scalar front blocked-distance risk")
     parser.add_argument("--state_topic", default="", help="optional Float32MultiArray robot state; zeros if omitted")
     parser.add_argument("--row_not_released_topic", default="", help="optional Float32 diagnostic only; learned-w actor always receives zero row-release feature")
     parser.add_argument("--cmd_backend", default="twist", choices=["twist", "usr_command"], help="publish Twist or src_real interface/joy_command")

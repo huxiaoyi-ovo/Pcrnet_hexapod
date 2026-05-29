@@ -50,6 +50,30 @@ METHODS: Dict[str, Dict] = {
             "0.5",
         ],
     },
+    "rule_override": {
+        "ckpt_arg": "yonly_ckpt",
+        "flags": [
+            "--yonly",
+            "--rule_override",
+            "--rule_k",
+            "8",
+            "--rule_margin",
+            "0.10",
+            "--rule_hard_thr",
+            "0.60",
+            "--rule_s_min",
+            "0.70",
+            "--rule_slow_ratio",
+            "0.20",
+            "--rule_yaw_keep_loss",
+            "0.50",
+        ],
+    },
+    "mono_ppo": {
+        "ckpt_arg": "mono_ppo_ckpt",
+        "flags": ["--mono_ppo"],
+        "avoid_ckpt_role": "eval_conflict_metrics_only",
+    },
 }
 
 
@@ -181,6 +205,7 @@ def parse_args():
     parser.add_argument("--yonly_ckpt", type=str, default="agents/moe_teacher_best_yonly.pt")
     parser.add_argument("--geomw_ckpt", type=str, default="agents/moe_teacher_best_w0.15.pt")
     parser.add_argument("--learnedw_ckpt", type=str, default="agents/moe_teacher_best_learnedw.pt")
+    parser.add_argument("--mono_ppo_ckpt", type=str, default="agents/mono_ppo_best.pt")
     parser.add_argument("--avoid_ckpt", type=str, default="agents/avoid_best.pt")
     parser.add_argument("--lowlevel_ckpt", type=str, default="agents/low_level_best.pt")
     parser.add_argument("--dry_run", action="store_true")

@@ -1,0 +1,67 @@
+<launch>
+    <!-- PCR real mode: do not start joy_ctrl here, because PCR can publish /usr/command. -->
+    <arg name="start_run_agent" default="true"/>
+    <arg name="start_camera" default="true"/>
+    <arg name="start_pcr" default="true"/>
+    <arg name="publish_cmd" default="false"/>
+    <arg name="show" default="false"/>
+
+    <arg name="lowlevel_agent" default="base_line200.pt"/>
+    <arg name="lowlevel_device" default="cpu"/>
+    <arg name="pcr_device" default="cpu"/>
+    <arg name="rate_hz" default="10"/>
+
+    <arg name="pcr_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/moe_teacher_best_learnedw.pt"/>
+    <arg name="avoid_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/avoid_best.pt"/>
+    <arg name="lowlevel_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/low_level_best.pt"/>
+    <arg name="yolo_model" default="$(find interface)/scripts/pcr_real/yolov8n.pt"/>
+
+    <arg name="camera_height_m" default="0.37"/>
+    <arg name="camera_pitch_down_deg" default="15"/>
+    <arg name="map_size" default="32"/>
+    <arg name="map_extent_m" default="3.0"/>
+
+    <node if="$(arg start_run_agent)"
+          pkg="interface"
+          type="run_agent2.py"
+          name="run_agent2"
+          output="screen"
+          args="--agent=$(arg lowlevel_agent) --device=$(arg lowlevel_device)"/>
+
+    <node if="$(arg start_camera)"
+          pkg="interface"
+          type="scripts/pcr_real/real_pcr_input_check.py"
+          name="real_pcr_input"
+          output="screen"
+          args="--publish_ros
+                --yolo_model $(arg yolo_model)
+                --width 640
+                --height 480
+                --fps 30
+                --map_size $(arg map_size)
+                --map_extent_m $(arg map_extent_m)
+                --camera_height_m $(arg camera_height_m)
+                --camera_pitch_down_deg $(arg camera_pitch_down_deg)
+                --yolo_conf 0.35
+                --target_depth_mode roi
+                --ground_remove_height_m 0.04
+                --debug_map_px 260
+                $(eval '--show' if arg('show') else '')"/>
+
+    <node if="$(arg start_pcr)"
+          pkg="interface"
+          type="scripts/pcr_real/pcr_realplay.py"
+          name="pcr_realplay"
+          output="screen"
+          args="--pcr_ckpt $(arg pcr_ckpt)
+                --avoid_ckpt $(arg avoid_ckpt)
+                --lowlevel_ckpt $(arg lowlevel_ckpt)
+                --cmd_backend usr_command
+                --device $(arg pcr_device)
+                --rate_hz $(arg rate_hz)
+                --risk_memory
+                --max_cmd_x 0.06
+                --max_cmd_y 0.10
+                --max_cmd_yaw 0.20
+                $(eval '--publish_cmd' if arg('publish_cmd') else '')"/>
+</launch>

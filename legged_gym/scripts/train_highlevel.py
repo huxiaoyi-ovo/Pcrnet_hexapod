@@ -1254,6 +1254,8 @@ def _sanitize_or_fail_action_tensor(
 
 
 def format_pcr_variant_tag(args: argparse.Namespace) -> str:
+    if bool(getattr(args, "mono_ppo", False)):
+        return "mono_ppo"
     skill = str(getattr(args, "skill", "")).lower()
     w_mode = str(getattr(args, "w_mode", "none")).lower()
     if skill != "moe":
@@ -1296,6 +1298,16 @@ def _set_arg_if_not_explicit(args: argparse.Namespace, key: str, value: Any) -> 
 def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if bool(getattr(args, "pcr_w_aux_enable", False)) and bool(getattr(args, "no_pcr_w_aux", False)):
         parser.error("--pcr_w_aux_enable 与 --no_pcr_w_aux 不能同时使用")
+    if bool(getattr(args, "mono_ppo", False)):
+        explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
+        if any(bool(getattr(args, key, False)) for key in ("yonly", "wgeom", "wlearned", "wlearned2")):
+            parser.error("--mono_ppo 是外部 baseline，不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if ("w_mode" in explicit) and str(getattr(args, "w_mode", "none")).lower() != "none":
+            parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须保持 none")
+        if bool(getattr(args, "pcr_w_aux_enable", False)):
+            parser.error("--mono_ppo 不允许启用 pcr_w_aux")
+        args.w_mode = "none"
+        args.no_pcr_w_aux = True
     selected = None
     if bool(getattr(args, "yonly", False)):
         selected = "none"
@@ -1454,6 +1466,7 @@ RESOLVED_PROTOCOL_ARG_KEYS = (
     "task",
     "mode",
     "skill",
+    "mono_ppo",
     "seed",
     "num_envs",
     "num_steps",
@@ -4749,11 +4762,14 @@ class HierarchicalHexapodEnv:
                             pcr_conflict,
                         )
                     pcr_gate_target = 1.0 - pcr_conflict
-                    pcr_gate_aux = (
-                        -float(self.pcr_gate_aux_scale)
-                        * torch.square(gate_y_raw_curr - pcr_gate_target)
-                        * current_row_valid.float()
-                    )
+                    if bool(getattr(self, "disable_pcr_gate_aux", False)):
+                        pcr_gate_aux = torch.zeros_like(pcr_progress_y)
+                    else:
+                        pcr_gate_aux = (
+                            -float(self.pcr_gate_aux_scale)
+                            * torch.square(gate_y_raw_curr - pcr_gate_target)
+                            * current_row_valid.float()
+                        )
                     reward_dict['pcr_progress_y'] = pcr_progress_y
                     reward_dict['pcr_follow_quality'] = pcr_follow_quality
                     reward_dict['pcr_follow_err'] = pcr_follow_err
@@ -5495,6 +5511,11 @@ def train(args):
     skill = getattr(args, "skill", "follow")
     if args.mode == "student" and not getattr(args, "teacher_ckpt", None):
         raise ValueError("Student 模式必须提供 --pcr_ckpt，避免把纯视觉从头训练误记为蒸馏实验。")
+    is_mono_ppo = bool(getattr(args, "mono_ppo", False))
+    if is_mono_ppo and skill != "moe":
+        raise ValueError("--mono_ppo 只用于 --skill moe 下的 PCR 外部 baseline。")
+    if is_mono_ppo and args.mode != "teacher":
+        raise ValueError("--mono_ppo 当前只支持 --mode teacher，避免混入 student 蒸馏目标。")
     if args.mode == "student" and skill == "moe":
         raise ValueError("当前未实现 Gate 的 student 蒸馏训练链路，禁止使用 --mode student --skill moe。")
     use_avoid_local_map = skill in ("avoid", "moe")
@@ -5510,6 +5531,7 @@ def train(args):
 
     # 创建环境
     env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
+    env.disable_pcr_gate_aux = bool(is_mono_ppo)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
     is_pcr_output_task = bool(getattr(env, "is_pcr_line_task", False))
     is_avoid_output_task = bool(use_avoid_local_map and not is_pcr_output_task)
@@ -5683,7 +5705,7 @@ def train(args):
     aff_channels = aff_shape[0] * aff_stack
 
     # 创建 Policy (V5)
-    is_gate = skill == "moe"
+    is_gate = (skill == "moe") and (not is_mono_ppo)
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     gate_learned_w_enabled = bool(is_gate and is_learned_w_mode(getattr(args, "w_mode", "none")))
     action_dim = (2 if gate_learned_w_enabled else 1) if is_gate else 3
@@ -5720,7 +5742,10 @@ def train(args):
         if use_gate_analytic_follow:
             print("[Gate] follow_source=analytic_s0_follow")
 
-    run_mode_tag = args.mode + ("_studentaff" if (is_gate and moe_use_student_aff) else "")
+    if is_mono_ppo:
+        run_mode_tag = f"{args.mode}_mono_ppo"
+    else:
+        run_mode_tag = args.mode + ("_studentaff" if (is_gate and moe_use_student_aff) else "")
 
     def _compute_moe_follow_cmd_from_goal(
         state_tensor: torch.Tensor,
@@ -5770,6 +5795,7 @@ def train(args):
             "egpo_lr_guided",
             "egpo_lr_post",
             "use_follow_expert",
+            "mono_ppo",
             "moe_use_student_aff",
             "gate_use_difficulty",
             "pcr_ckpt",
@@ -5819,13 +5845,21 @@ def train(args):
                 meta[key] = os.path.abspath(str(meta[key]))
         meta["sim2real_sensor_target"] = "Intel RealSense D435i"
         meta["observation_contract"] = collect_runtime_observation_contract(args, env)
-        meta["trained_w_mode"] = str(getattr(args, "w_mode", "none")).lower()
+        meta["policy_variant"] = "mono_ppo" if is_mono_ppo else format_pcr_variant_tag(args)
+        meta["mono_ppo"] = bool(is_mono_ppo)
+        meta["uses_follow_expert"] = bool(is_gate)
+        meta["uses_avoid_expert"] = bool(is_gate)
+        meta["uses_pcr_gate"] = bool(is_gate)
+        meta["network_class"] = "CmdVelExpert" if is_mono_ppo else ("GatePolicy" if is_gate else "CmdVelExpert")
+        meta["cmd_output_convention"] = "[x_right, y_forward, yaw]"
+        meta["trained_w_mode"] = "none" if is_mono_ppo else str(getattr(args, "w_mode", "none")).lower()
         meta["actor_output_dim"] = int(action_dim)
         meta["policy_goal_dim"] = int(policy_goal_dim)
         meta["obs_contract_version"] = (
+            "mono_ppo_cmd_v1" if is_mono_ppo else
             LEARNED_W_OBS_CONTRACT_VERSION if gate_learned_w_enabled else "base_gate_v1"
         )
-        meta["fusion_formula_version"] = get_pcr_fusion_formula_version(getattr(args, "w_mode", "none"))
+        meta["fusion_formula_version"] = "none" if is_mono_ppo else get_pcr_fusion_formula_version(getattr(args, "w_mode", "none"))
         meta["uses_cmd_features"] = bool(gate_learned_w_enabled)
         meta["uses_riskF"] = bool(gate_learned_w_enabled)
         meta["uses_riskA"] = bool(gate_learned_w_enabled)
@@ -5851,8 +5885,8 @@ def train(args):
         meta["w_aux_uses_row_not_released"] = bool(
             gate_learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
         )
-        meta["pcr_w_aux_enable"] = bool(getattr(args, "pcr_w_aux_enable", False))
-        meta["pcr_w_aux_coef"] = float(getattr(args, "pcr_w_aux_coef", 0.0))
+        meta["pcr_w_aux_enable"] = False if is_mono_ppo else bool(getattr(args, "pcr_w_aux_enable", False))
+        meta["pcr_w_aux_coef"] = 0.0 if is_mono_ppo else float(getattr(args, "pcr_w_aux_coef", 0.0))
         meta["pcr_w_aux_risk_f_threshold"] = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
         meta["pcr_w_aux_risk_margin"] = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
         meta["pcr_w_aux_cmd_cos_threshold"] = float(getattr(args, "pcr_w_aux_cmd_cos_threshold", 0.5))
@@ -6367,6 +6401,12 @@ def train(args):
             )
     if use_egpo:
         dprint(f"  - Expert interface window: {expert_interface_iters} iters ({EXPERT_INTERFACE_RATIO:.0%} of run)")
+    if is_mono_ppo:
+        print(
+            "[Mono-PPO] policy=CmdVelExpert output_dim=3 "
+            f"goal_dim={policy_goal_dim} aff_channels={aff_channels} "
+            "cmd=[x_right,y_forward,yaw]"
+        )
     dprint(
         f"  - Non-finite handling: "
         f"{'recovery(skip+sanitize)' if bool(getattr(args, 'allow_nonfinite_recovery', False)) else 'fail-fast'}"
@@ -7033,6 +7073,8 @@ def train(args):
                 cmd_used = cmd
             else:
                 with torch.no_grad():
+                    # Mono-PPO and single-expert policies use the same command convention:
+                    # action[:, 0] = x_right / lateral, action[:, 1] = y_forward / forward, action[:, 2] = yaw.
                     cmd, _ = policy.get_action(
                         aff_stack_buf,
                         state,
@@ -9198,6 +9240,8 @@ if __name__ == "__main__":
     parser.add_argument('--skill', type=str, default=None,
                         choices=['follow', 'avoid', 'moe'],
                         help='训练技能: follow / avoid / moe (gate)，默认按 task 自动选择')
+    parser.add_argument('--mono_ppo', action='store_true',
+                        help='PCR 外部 baseline：复用 moe 任务，但直接输出完整 cmd=[x_right,y_forward,yaw]')
     
     # 环境
     parser.add_argument('--task', type=str, required=True,

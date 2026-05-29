@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-05-29 PCR src_real 实机 ROS 部署收口
+
+- [x] ~~[P0] 补齐 `src_real/interface` 的 PCR ROS 运行外层：完善 `joy_command` 消息编译依赖、提供 PCR 专用 launch、保持 `run_agent2.py / joy_command.msg / CAN` 已验证实机控制链路不改，默认 dry-run，只有显式开关才发布 `/usr/command`。~~
+
 ## 2026-05-28 PCR 主表多 seed 评测批量入口
 
 - [x] ~~[P0] 补齐 PCR 主表评测批量入口：固定 `0.35/0.50/0.60m/s × yonly/geomw/learned-w × 多 seed`，保留每组原始 `metrics.json/csv/timeseries`，同时输出论文主表单 seed 行与 mean/std 汇总，避免继续手工拼表污染评测口径。~~
@@ -2096,3 +2100,18 @@
 - [x] Must: 将 D435i 实机风险拆成 `risk_blocked_map / front_distance_risk / risk_F / risk_A`，让 PCR 接收命令条件风险，而不是直接把 `actor_difficulty` 当成 learned-w 的风险输入。
 - [x] Must: `file_bridge` 模式允许继续发布 `/usr/command`，用于笔记本验证 D435i 观测和 PCR 输出；只有真实发布指令或启动 `run_agent2.py` 时才强制 ROS 环境。
 - [x] Must: `src_real/interface/scripts/pcr_real` 与本地 `legged_gym/scripts` 的 PCR 实机脚本保持同步；本地启动脚本自动回到 `src_real` 完整代码目录，避免辅助文件缺失。
+
+## 2026-05-29 PCR 五策略 baseline 主实验收口
+
+- [x] Must: 将主实验方法收口为 `Y-only / Geom-w / Learned-w / Mono-PPO / Rule-Override`，其中前三者回答内部 `w` 消融，后两者回答外部审稿质疑。
+- [x] Must: baseline 优先级固定为先做 `Rule-Override`，再做 `Mono-PPO`；不再优先扩展内部 `E2E gate` 消融，也不优先接 DWA / TEB / MPC。
+- [x] Must: `Rule-Override` 采用强规则版本，风险高时增强横向避障，但保留 slow-forward 和 yaw-preserve，避免变成弱 baseline。
+- [ ] Must: 先实现 `Rule-Override` eval 分支并跑 0.35 / 0.50 / 0.60 × 3 seeds，补进五策略主表和速度曲线。
+- [x] Must: 实现 `Mono-PPO` 最小训练与评测分支；它只允许使用部署观测并直接输出 `[x_right, y_forward, yaw]`，不得调用 Follow/Avoid expert、`resolve_moe_gate_pcr` 或读取 `cmd_F/cmd_A/risk_F/risk_A/y/w`。
+- [x] Must: 修正 `Mono-PPO` 评测主表口径：主性能表保留 `Unsafe Rate / C_avoid Rate`，仅机制项 `CSI@C_avoid` 记为 N/A；冲突诊断只用于 eval 统计，不进入 Mono-PPO 策略输入。
+
+## 2026-05-29 PCR 实机 ROS 风险输入闭环
+
+- [x] ~~Must: 将 `real_pcr_input_check.py --publish_ros` 发布的实时输入扩展到 `risk_blocked_map / policy_visible_map / front_distance_risk`，让 ROS 链路与已验证的 `obs_file` 口径一致。~~
+- [x] ~~Must: 将 `pcr_realplay.py` 订阅并使用上述实时风险输入；没有风险图时才退回 `local_map_2ch` fallback。~~
+- [x] ~~Must: 保持本地 `legged_gym/scripts` 与 `src_real/interface/scripts/pcr_real` 副本同步，并完成语法检查与同步检查。~~
