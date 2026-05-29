@@ -45,3 +45,12 @@ src_real/
 
 # 5. 系统垃圾
 .DS_Store
+# PCR eval raw data: too large for GitHub
+agents/eval_data/**
+agents/eval_data_seed23/**
+
+# Keep paper summary tables
+!agents/eval_data/pcr_main_table/
+!agents/eval_data/pcr_main_table/**
+!agents/eval_data_seed23/pcr_main_table/
+!agents/eval_data_seed23/pcr_main_table/**
