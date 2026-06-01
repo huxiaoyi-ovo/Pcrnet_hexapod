@@ -497,6 +497,43 @@ def _compute_rule_override_cmd(
     }
 
 
+def _apply_risk_only_intervention(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Eval-only ablation: remove learned-w correction from control, keep diagnostics."""
+    gate_y = gate_diag.get("gate_y", gate_diag["gate_y_raw"])
+    delta_y_w_raw = gate_diag.get("w_support_correction", torch.zeros_like(gate_y))
+    delta_y_r = gate_diag.get("risk_diff_correction", torch.zeros_like(gate_y))
+    delta_y_w_used = torch.zeros_like(delta_y_w_raw)
+    delta_y_total = delta_y_w_used + delta_y_r
+    y_eff = torch.clamp(gate_y + delta_y_total, 0.0, 1.0)
+    cmd = y_eff.unsqueeze(-1) * gate_diag["cmd_f"] + (1.0 - y_eff.unsqueeze(-1)) * gate_diag["cmd_a"]
+
+    gate_diag["cmd"] = cmd
+    gate_diag["y_eff"] = y_eff
+    gate_diag["delta_y_w_raw"] = delta_y_w_raw
+    gate_diag["delta_y_w_used"] = delta_y_w_used
+    gate_diag["delta_y_r"] = delta_y_r
+    gate_diag["delta_y_total"] = delta_y_total
+    gate_diag["w_support_correction"] = delta_y_w_used
+    gate_diag["risk_only_delta_y_w_raw"] = delta_y_w_raw
+    gate_diag["risk_only_delta_y_w_used"] = delta_y_w_used
+    gate_diag["risk_only_delta_y_r"] = delta_y_r
+    gate_diag["risk_only_delta_y_total"] = delta_y_total
+    return gate_diag
+
+
+def _ensure_delta_y_diag(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    gate_y = gate_diag.get("gate_y", gate_diag["gate_y_raw"])
+    zero = torch.zeros_like(gate_y)
+    delta_y_w = gate_diag.get("w_support_correction", zero)
+    delta_y_r = gate_diag.get("risk_diff_correction", zero)
+    delta_y_total = gate_diag.get("y_eff", gate_y) - gate_y
+    gate_diag.setdefault("delta_y_w_raw", delta_y_w)
+    gate_diag.setdefault("delta_y_w_used", delta_y_w)
+    gate_diag.setdefault("delta_y_r", delta_y_r)
+    gate_diag.setdefault("delta_y_total", delta_y_total)
+    return gate_diag
+
+
 def _compute_moe_follow_cmd_from_goal(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
@@ -563,6 +600,10 @@ class EpisodeAccumulator:
     risk_rollout_gap_f_min_as_sum: float = 0.0
     w_support_correction_sum: float = 0.0
     risk_diff_correction_sum: float = 0.0
+    delta_y_w_raw_sum: float = 0.0
+    delta_y_w_used_sum: float = 0.0
+    delta_y_r_sum: float = 0.0
+    delta_y_total_sum: float = 0.0
     risk_memory_sum: float = 0.0
     rule_s_sum: float = 0.0
     rule_risk_gap_sum: float = 0.0
@@ -655,6 +696,10 @@ class EpisodeAccumulator:
     avoid_conflict_w_sum: float = 0.0
     avoid_conflict_signed_w_sum: float = 0.0
     avoid_conflict_delta_y_sum: float = 0.0
+    avoid_conflict_delta_y_w_raw_sum: float = 0.0
+    avoid_conflict_delta_y_w_used_sum: float = 0.0
+    avoid_conflict_delta_y_r_sum: float = 0.0
+    avoid_conflict_delta_y_total_sum: float = 0.0
     stop_conflict_steps: int = 0
     stop_conflict_y_raw_sum: float = 0.0
     stop_conflict_y_eff_sum: float = 0.0
@@ -1038,6 +1083,9 @@ class EvalRunner:
                     cmd_a,
                     learned_w=learned_w,
                 )
+                gate_diag = _ensure_delta_y_diag(gate_diag)
+                if bool(getattr(self.args, "risk_only", False)):
+                    gate_diag = _apply_risk_only_intervention(gate_diag)
                 if bool(getattr(self.args, "rule_override", False)):
                     cmd_rule, rule_info = _compute_rule_override_cmd(
                         self.args,
@@ -1059,6 +1107,10 @@ class EvalRunner:
                     gate_diag["signed_w_active"] = zero
                     gate_diag["w_support_correction"] = zero
                     gate_diag["risk_diff_correction"] = zero
+                    gate_diag["delta_y_w_raw"] = zero
+                    gate_diag["delta_y_w_used"] = zero
+                    gate_diag["delta_y_r"] = zero
+                    gate_diag["delta_y_total"] = follow_scale - one
                     gate_diag.update(rule_info)
             return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
 
@@ -1134,6 +1186,10 @@ class EvalRunner:
                     "signed_w_active": nan,
                     "w_support_correction": zero,
                     "risk_diff_correction": zero,
+                    "delta_y_w_raw": zero,
+                    "delta_y_w_used": zero,
+                    "delta_y_r": zero,
+                    "delta_y_total": zero,
                     "fusion_formula_version": "none",
                     "row_current_valid": diag["row_current_valid"],
                     "row_not_released": diag["row_not_released"],
@@ -1328,6 +1384,10 @@ class EvalRunner:
                     post_info["signed_w_active"] = gate_diag["signed_w_active"].detach().clone()
                     post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
                     post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
+                    post_info["delta_y_w_raw"] = gate_diag["delta_y_w_raw"].detach().clone()
+                    post_info["delta_y_w_used"] = gate_diag["delta_y_w_used"].detach().clone()
+                    post_info["delta_y_r"] = gate_diag["delta_y_r"].detach().clone()
+                    post_info["delta_y_total"] = gate_diag["delta_y_total"].detach().clone()
                     post_info["row_current_valid"] = gate_diag["row_current_valid"].detach().clone()
                     post_info["row_not_released"] = gate_diag["row_not_released"].detach().clone()
                     post_info["risk_memory"] = gate_diag["risk_memory"].detach().clone()
@@ -1509,6 +1569,10 @@ class EvalRunner:
                         risk_a_t = post_info.get("risk_A", None)
                         w_support_corr_t = post_info.get("w_support_correction", None)
                         risk_diff_corr_t = post_info.get("risk_diff_correction", None)
+                        delta_y_w_raw_t = post_info.get("delta_y_w_raw", None)
+                        delta_y_w_used_t = post_info.get("delta_y_w_used", None)
+                        delta_y_r_t = post_info.get("delta_y_r", None)
+                        delta_y_total_t = post_info.get("delta_y_total", None)
                         risk_memory_t = post_info.get("risk_memory", None)
                         rule_s_t = post_info.get("rule_s", None)
                         rule_risk_gap_t = post_info.get("rule_risk_gap", None)
@@ -1562,6 +1626,10 @@ class EvalRunner:
                         risk_a_v = _safe_float(risk_a_t[i].item(), default=0.0) if torch.is_tensor(risk_a_t) else 0.0
                         w_support_corr_v = _safe_float(w_support_corr_t[i].item(), default=0.0) if torch.is_tensor(w_support_corr_t) else 0.0
                         risk_diff_corr_v = _safe_float(risk_diff_corr_t[i].item(), default=0.0) if torch.is_tensor(risk_diff_corr_t) else 0.0
+                        delta_y_w_raw_v = _safe_float(delta_y_w_raw_t[i].item(), default=w_support_corr_v) if torch.is_tensor(delta_y_w_raw_t) else w_support_corr_v
+                        delta_y_w_used_v = _safe_float(delta_y_w_used_t[i].item(), default=w_support_corr_v) if torch.is_tensor(delta_y_w_used_t) else w_support_corr_v
+                        delta_y_r_v = _safe_float(delta_y_r_t[i].item(), default=risk_diff_corr_v) if torch.is_tensor(delta_y_r_t) else risk_diff_corr_v
+                        delta_y_total_v = _safe_float(delta_y_total_t[i].item(), default=y_eff_v - gate_raw_v) if torch.is_tensor(delta_y_total_t) else (y_eff_v - gate_raw_v)
                         risk_memory_v = _safe_float(risk_memory_t[i].item(), default=0.0) if torch.is_tensor(risk_memory_t) else 0.0
                         rule_s_v = _safe_float(rule_s_t[i].item(), default=float("nan")) if torch.is_tensor(rule_s_t) else float("nan")
                         rule_risk_gap_v = _safe_float(rule_risk_gap_t[i].item(), default=float("nan")) if torch.is_tensor(rule_risk_gap_t) else float("nan")
@@ -1629,6 +1697,10 @@ class EvalRunner:
                             ai.risk_rollout_gap_f_min_as_sum += risk_roll_f_v - min(risk_roll_a_v, risk_roll_s_v)
                         ai.w_support_correction_sum += w_support_corr_v
                         ai.risk_diff_correction_sum += risk_diff_corr_v
+                        ai.delta_y_w_raw_sum += delta_y_w_raw_v
+                        ai.delta_y_w_used_sum += delta_y_w_used_v
+                        ai.delta_y_r_sum += delta_y_r_v
+                        ai.delta_y_total_sum += delta_y_total_v
                         ai.risk_memory_sum += risk_memory_v
                         if math.isfinite(rule_s_v):
                             ai.rule_s_sum += rule_s_v
@@ -1724,6 +1796,10 @@ class EvalRunner:
                             ai.avoid_conflict_w_sum += w_v
                             ai.avoid_conflict_signed_w_sum += signed_w_v
                             ai.avoid_conflict_delta_y_sum += delta_y_v
+                            ai.avoid_conflict_delta_y_w_raw_sum += delta_y_w_raw_v
+                            ai.avoid_conflict_delta_y_w_used_sum += delta_y_w_used_v
+                            ai.avoid_conflict_delta_y_r_sum += delta_y_r_v
+                            ai.avoid_conflict_delta_y_total_sum += delta_y_total_v
                             if math.isfinite(rule_s_v):
                                 ai.rule_avoid_conflict_s_sum += rule_s_v
                             if math.isfinite(rule_follow_scale_v):
@@ -1894,6 +1970,10 @@ class EvalRunner:
                                     "csi": gate_raw_v - y_eff_v,
                                     "w_support_correction": w_support_corr_v,
                                     "risk_diff_correction": risk_diff_corr_v,
+                                    "delta_y_w_raw": delta_y_w_raw_v,
+                                    "delta_y_w_used": delta_y_w_used_v,
+                                    "delta_y_r": delta_y_r_v,
+                                    "delta_y_total": delta_y_total_v,
                                     "risk_memory": risk_memory_v,
                                     "rule_s": rule_s_v,
                                     "rule_risk_gap": rule_risk_gap_v,
@@ -2114,6 +2194,10 @@ class EvalRunner:
                             "risk_rollout_gap_f_min_as_mean": ai.risk_rollout_gap_f_min_as_sum / denom_steps,
                             "w_support_correction_mean": ai.w_support_correction_sum / denom_steps,
                             "risk_diff_correction_mean": ai.risk_diff_correction_sum / denom_steps,
+                            "delta_y_w_raw_mean": ai.delta_y_w_raw_sum / denom_steps,
+                            "delta_y_w_used_mean": ai.delta_y_w_used_sum / denom_steps,
+                            "delta_y_r_mean": ai.delta_y_r_sum / denom_steps,
+                            "delta_y_total_mean": ai.delta_y_total_sum / denom_steps,
                             "risk_memory_mean": ai.risk_memory_sum / denom_steps,
                             "rule_s_mean": (
                                 ai.rule_s_sum / denom_steps
@@ -2150,6 +2234,22 @@ class EvalRunner:
                             "rule_follow_suppression_at_avoid_conflict": (
                                 ai.rule_avoid_conflict_follow_suppression_sum / avoid_conflict_denom
                                 if bool(getattr(self.args, "rule_override", False)) and ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_delta_y_w_raw_mean": (
+                                ai.avoid_conflict_delta_y_w_raw_sum / avoid_conflict_denom
+                                if ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_delta_y_w_used_mean": (
+                                ai.avoid_conflict_delta_y_w_used_sum / avoid_conflict_denom
+                                if ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_delta_y_r_mean": (
+                                ai.avoid_conflict_delta_y_r_sum / avoid_conflict_denom
+                                if ai.avoid_conflict_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_delta_y_total_mean": (
+                                ai.avoid_conflict_delta_y_total_sum / avoid_conflict_denom
+                                if ai.avoid_conflict_steps > 0 else float("nan")
                             ),
                             "row_not_released_rate": ai.row_not_released_sum / denom_steps,
                             "row_not_released_w_mean": (
@@ -2997,6 +3097,10 @@ class EvalRunner:
         risk_rollout_gap_vals = _clean([r.get("risk_rollout_gap_f_min_as_mean", float("nan")) for r in rows])
         w_support_correction_vals = _clean([r.get("w_support_correction_mean", float("nan")) for r in rows])
         risk_diff_correction_vals = _clean([r.get("risk_diff_correction_mean", float("nan")) for r in rows])
+        delta_y_w_raw_vals = _clean([r.get("delta_y_w_raw_mean", float("nan")) for r in rows])
+        delta_y_w_used_vals = _clean([r.get("delta_y_w_used_mean", float("nan")) for r in rows])
+        delta_y_r_vals = _clean([r.get("delta_y_r_mean", float("nan")) for r in rows])
+        delta_y_total_vals = _clean([r.get("delta_y_total_mean", float("nan")) for r in rows])
         rule_s_vals = _clean([r.get("rule_s_mean", float("nan")) for r in rows])
         rule_risk_gap_vals = _clean([r.get("rule_risk_gap_mean", float("nan")) for r in rows])
         rule_follow_scale_vals = _clean([r.get("rule_follow_scale_mean", float("nan")) for r in rows])
@@ -3006,6 +3110,10 @@ class EvalRunner:
         rule_follow_scale_at_avoid_vals = _clean([r.get("rule_follow_scale_at_avoid_conflict", float("nan")) for r in rows])
         rule_yaw_scale_at_avoid_vals = _clean([r.get("rule_yaw_scale_at_avoid_conflict", float("nan")) for r in rows])
         rule_follow_suppression_at_avoid_vals = _clean([r.get("rule_follow_suppression_at_avoid_conflict", float("nan")) for r in rows])
+        avoid_delta_y_w_raw_vals = _clean([r.get("avoid_conflict_delta_y_w_raw_mean", float("nan")) for r in rows])
+        avoid_delta_y_w_used_vals = _clean([r.get("avoid_conflict_delta_y_w_used_mean", float("nan")) for r in rows])
+        avoid_delta_y_r_vals = _clean([r.get("avoid_conflict_delta_y_r_mean", float("nan")) for r in rows])
+        avoid_delta_y_total_vals = _clean([r.get("avoid_conflict_delta_y_total_mean", float("nan")) for r in rows])
         row_not_released_vals = _clean([r.get("row_not_released_rate", float("nan")) for r in rows])
         row_not_released_w_vals = _clean([r.get("row_not_released_w_mean", float("nan")) for r in rows])
         row_released_w_vals = _clean([r.get("row_released_w_mean", float("nan")) for r in rows])
@@ -3123,6 +3231,10 @@ class EvalRunner:
             "risk_rollout_gap_f_min_as_mean": float(np.mean(risk_rollout_gap_vals)) if risk_rollout_gap_vals else float("nan"),
             "w_support_correction_mean": float(np.mean(w_support_correction_vals)) if w_support_correction_vals else float("nan"),
             "risk_diff_correction_mean": float(np.mean(risk_diff_correction_vals)) if risk_diff_correction_vals else float("nan"),
+            "delta_y_w_raw_mean": float(np.mean(delta_y_w_raw_vals)) if delta_y_w_raw_vals else float("nan"),
+            "delta_y_w_used_mean": float(np.mean(delta_y_w_used_vals)) if delta_y_w_used_vals else float("nan"),
+            "delta_y_r_mean": float(np.mean(delta_y_r_vals)) if delta_y_r_vals else float("nan"),
+            "delta_y_total_mean": float(np.mean(delta_y_total_vals)) if delta_y_total_vals else float("nan"),
             "rule_s_mean": float(np.mean(rule_s_vals)) if rule_s_vals else float("nan"),
             "rule_risk_gap_mean": float(np.mean(rule_risk_gap_vals)) if rule_risk_gap_vals else float("nan"),
             "rule_follow_scale_mean": float(np.mean(rule_follow_scale_vals)) if rule_follow_scale_vals else float("nan"),
@@ -3139,6 +3251,18 @@ class EvalRunner:
             ),
             "rule_follow_suppression_at_avoid_conflict": (
                 float(np.mean(rule_follow_suppression_at_avoid_vals)) if rule_follow_suppression_at_avoid_vals else float("nan")
+            ),
+            "avoid_conflict_delta_y_w_raw_mean": (
+                float(np.mean(avoid_delta_y_w_raw_vals)) if avoid_delta_y_w_raw_vals else float("nan")
+            ),
+            "avoid_conflict_delta_y_w_used_mean": (
+                float(np.mean(avoid_delta_y_w_used_vals)) if avoid_delta_y_w_used_vals else float("nan")
+            ),
+            "avoid_conflict_delta_y_r_mean": (
+                float(np.mean(avoid_delta_y_r_vals)) if avoid_delta_y_r_vals else float("nan")
+            ),
+            "avoid_conflict_delta_y_total_mean": (
+                float(np.mean(avoid_delta_y_total_vals)) if avoid_delta_y_total_vals else float("nan")
             ),
             "row_not_released_rate_mean": float(np.mean(row_not_released_vals)) if row_not_released_vals else float("nan"),
             "row_not_released_w_mean": float(np.mean(row_not_released_w_vals)) if row_not_released_w_vals else float("nan"),
@@ -3354,8 +3478,21 @@ class EvalRunner:
                     if bool(getattr(self.args, "mono_ppo", False))
                     else "rule_override"
                     if bool(getattr(self.args, "rule_override", False))
+                    else "risk_only"
+                    if bool(getattr(self.args, "risk_only", False))
                     else {"none": "yonly", "geom": "geomw", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
                 ),
+                "risk_only": bool(getattr(self.args, "risk_only", False)),
+                "loaded_checkpoint_variant": (
+                    self.policy_meta.get("policy_variant", self.policy_meta.get("trained_w_mode", None))
+                    if isinstance(self.policy_meta, dict) else None
+                ),
+                "uses_learned_w_output": bool(th.is_learned_w_mode(str(self.args.w_mode))),
+                "uses_learned_w_for_control": bool(
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not getattr(self.args, "risk_only", False)
+                ),
+                "uses_risk_diff_correction": bool(th.is_learnedw2_mode(str(self.args.w_mode))),
+                "delta_y_w_forced_zero": bool(getattr(self.args, "risk_only", False)),
                 "mono_ppo": bool(getattr(self.args, "mono_ppo", False)),
                 "uses_follow_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
                 "uses_avoid_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
@@ -3553,6 +3690,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "risk_rollout_gap_f_min_as_mean",
         "w_support_correction_mean",
         "risk_diff_correction_mean",
+        "delta_y_w_raw_mean",
+        "delta_y_w_used_mean",
+        "delta_y_r_mean",
+        "delta_y_total_mean",
         "risk_memory_mean",
         "rule_s_mean",
         "rule_risk_gap_mean",
@@ -3563,6 +3704,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "rule_follow_scale_at_avoid_conflict",
         "rule_yaw_scale_at_avoid_conflict",
         "rule_follow_suppression_at_avoid_conflict",
+        "avoid_conflict_delta_y_w_raw_mean",
+        "avoid_conflict_delta_y_w_used_mean",
+        "avoid_conflict_delta_y_r_mean",
+        "avoid_conflict_delta_y_total_mean",
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
@@ -3758,6 +3903,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "csi",
             "w_support_correction",
             "risk_diff_correction",
+            "delta_y_w_raw",
+            "delta_y_w_used",
+            "delta_y_r",
+            "delta_y_total",
             "risk_memory",
             "rule_s",
             "rule_risk_gap",
@@ -3994,6 +4143,7 @@ def parse_args():
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
+    parser.add_argument("--risk_only", action="store_true", help="eval-only ablation: remove learned-w correction and keep only explicit risk-difference correction")
     parser.add_argument("--rule_k", type=float, default=8.0)
     parser.add_argument("--rule_margin", type=float, default=0.10)
     parser.add_argument("--rule_hard_thr", type=float, default=0.45)
@@ -4086,11 +4236,15 @@ def parse_args():
             parser.error("--mono_ppo 只支持 --skill moe")
         if args.rule_override:
             parser.error("--mono_ppo 不允许同时启用 --rule_override")
+        if args.risk_only:
+            parser.error("--mono_ppo 不允许同时启用 --risk_only")
         if any((args.yonly, args.wgeom, args.wlearned, args.wlearned2)):
             parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
         if args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
         selected_w_mode = "none"
+    elif bool(getattr(args, "risk_only", False)) and bool(getattr(args, "rule_override", False)):
+        parser.error("--risk_only 不允许同时启用 --rule_override")
     elif args.yonly:
         selected_w_mode = "none"
     elif args.wgeom:
@@ -4115,6 +4269,8 @@ def parse_args():
             f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned', 'learnedw2': 'wlearned2'}[selected_w_mode] } 不一致"
         )
     args.w_mode = selected_w_mode
+    if bool(getattr(args, "risk_only", False)) and not th.is_learnedw2_mode(str(args.w_mode)):
+        print("[Warn] --risk_only is intended for learnedw2 checkpoints; current w_mode is not learnedw2.", flush=True)
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
     required_ckpts = ("lowlevel_ckpt",) if bool(getattr(args, "mono_ppo", False)) else ("avoid_ckpt", "lowlevel_ckpt")
@@ -4171,6 +4327,8 @@ def main():
             f"h{float(args.rule_hard_thr):g}_smin{float(args.rule_s_min):g}_"
             f"slow{float(args.rule_slow_ratio):g}_yawloss{float(args.rule_yaw_keep_loss):g}"
         )
+    elif bool(getattr(args, "risk_only", False)):
+        variant_tag = f"risk_only_{th.format_pcr_variant_tag(args)}"
     else:
         variant_tag = th.format_pcr_variant_tag(args)
     out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")

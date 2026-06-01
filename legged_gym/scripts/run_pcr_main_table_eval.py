@@ -50,6 +50,36 @@ METHODS: Dict[str, Dict] = {
             "0.5",
         ],
     },
+    "risk_only": {
+        "ckpt_arg": "learnedw_ckpt",
+        "flags": [
+            "--wlearned2",
+            "--risk_only",
+            "--w_blend_mode",
+            "multiply",
+            "--signed_w_lambda",
+            "0.30",
+            "--signed_w_gamma_risk",
+            "0.15",
+            "--signed_w_margin",
+            "0.05",
+            "--w_disable_gate_safe_clamp",
+            "--risk_memory",
+            "--risk_memory_l_clear",
+            "0.40",
+            "--risk_memory_velocity_source",
+            "body",
+            "--pcr_w_aux_enable",
+            "--pcr_w_aux_coef",
+            "0.05",
+            "--pcr_w_aux_risk_f_threshold",
+            "0.25",
+            "--pcr_w_aux_risk_margin",
+            "0.05",
+            "--pcr_w_aux_cmd_cos_threshold",
+            "0.5",
+        ],
+    },
     "rule_override": {
         "ckpt_arg": "yonly_ckpt",
         "flags": [
@@ -159,6 +189,8 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         "--timeseries_episodes",
         str(args.timeseries_episodes),
     ]
+    if bool(getattr(args, "headless", False)):
+        cmd.append("--headless")
     cmd.extend(method_cfg["flags"])
     return cmd
 
@@ -208,6 +240,7 @@ def parse_args():
     parser.add_argument("--mono_ppo_ckpt", type=str, default="agents/mono_ppo_best.pt")
     parser.add_argument("--avoid_ckpt", type=str, default="agents/avoid_best.pt")
     parser.add_argument("--lowlevel_ckpt", type=str, default="agents/low_level_best.pt")
+    parser.add_argument("--headless", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--summary_only", action="store_true")
     parser.add_argument("--continue_on_error", action="store_true")

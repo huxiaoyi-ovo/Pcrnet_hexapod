@@ -169,14 +169,14 @@ $$\Delta v_{\max}(\beta) = \Delta v^{+} - \beta \cdot (\Delta v^{+} - \Delta v^{
 
 其中 $\beta = 0$ 对应激进跟随（$v_{\max}^{+} = 1.2$ m/s，$d_{\text{safe}}^{-} = 0.35$ m），$\beta = 1$ 对应保守避障（$v_{\max}^{-} = 0.35$ m/s，$d_{\text{safe}}^{+} = 1.0$ m）。
 
-| 参数 | $\beta = 0$（激进） | $\beta = 1$（保守） |
-|---|---|---|
-| 最大线速度 $v_{\max}$ (m/s) | 1.00 | 0.35 |
-| 最大角速度 $\omega_{\max}$ (rad/s) | 1.50 | 0.50 |
-| 安全距离 $d_{\text{safe}}$ (m) | 0.35 | 1.00 |
-| 最大线速度变化率 $\Delta v$ (m/s/step) | 0.15 | 0.05 |
-| 最大角速度变化率 $\Delta \omega$ (rad/s/step) | 0.30 | 0.10 |
-| 风险钳制增益 $k_{\text{risk}}$ | 1.0 | 3.0 |
+| 参数                                    | $\beta = 0$（激进） | $\beta = 1$（保守） |
+| ------------------------------------- | --------------- | --------------- |
+| 最大线速度 $v_{\max}$ (m/s)                | 1.00            | 0.35            |
+| 最大角速度 $\omega_{\max}$ (rad/s)         | 1.50            | 0.50            |
+| 安全距离 $d_{\text{safe}}$ (m)            | 0.35            | 1.00            |
+| 最大线速度变化率 $\Delta v$ (m/s/step)        | 0.15            | 0.05            |
+| 最大角速度变化率 $\Delta \omega$ (rad/s/step) | 0.30            | 0.10            |
+| 风险钳制增益 $k_{\text{risk}}$              | 1.0             | 3.0             |
 
 语义保证是单调的：$\beta \uparrow$ 意味着 $d_{\text{safe}} \uparrow$、$v_{\max} \downarrow$、$\Delta v_{\max} \downarrow$——即严格更保守的行为。
 
@@ -274,23 +274,23 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 
 主性能表回答两个问题：第一，PCR-Net 是否比常规外部方法更适合 Follow/Avoid 运行时冲突；第二，`learned-w` 是否比无冲突先验和手工几何先验更有效。所有方法使用同一主任务、同一评测 episode 数、同一 seeds 和同一指标口径。
 
-| 类别 | 方法 | 描述 |
-|---|---|---|
-| 外部对比 | Monolithic PPO | 单一 RL 策略直接输出 $\mathbf{u}=(v_x,v_y,\omega_z)$，不显式保留 Follow/Avoid 候选指令 |
-| 外部对比 | Reactive Safety Override | 正常跟随，风险超过阈值时用手工规则降速和横移避让 |
-| 外部对比 | DWA-inspired Local Rollout | 基于局部目标点采样短时速度并打分，作为经典局部规划启发式对照 |
-| 内部消融 | PCR-yonly | 只使用门控 $y$，没有显式冲突先验 |
-| 内部消融 | PCR-geomw | 使用手工几何规则得到 $w$，作为强规则基线 |
-| 本文方法 | PCR-learnedw | 使用学习式命令条件化冲突先验；若启用 `risk_memory`，仍归入该方法 |
+| 类别   | 方法                         | 描述                                                                   |
+| ---- | -------------------------- | -------------------------------------------------------------------- |
+| 外部对比 | Monolithic PPO             | 单一 RL 策略直接输出 $\mathbf{u}=(v_x,v_y,\omega_z)$，不显式保留 Follow/Avoid 候选指令 |
+| 外部对比 | Reactive Safety Override   | 正常跟随，风险超过阈值时用手工规则降速和横移避让                                             |
+| 外部对比 | DWA-inspired Local Rollout | 基于局部目标点采样短时速度并打分，作为经典局部规划启发式对照                                       |
+| 内部消融 | PCR-yonly                  | 只使用门控 $y$，没有显式冲突先验                                                   |
+| 内部消融 | PCR-geomw                  | 使用手工几何规则得到 $w$，作为强规则基线                                               |
+| 本文方法 | PCR-learnedw               | 使用学习式命令条件化冲突先验；若启用 `risk_memory`，仍归入该方法                              |
 
-| 方法 | SR↑ | CR↓ | near-miss↓ | follow MAE↓ | FOV rate↑ | CSI↑ | CSS/RCM↑ |
-|---|---|---|---|---|---|---|---|
-| Monolithic PPO | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | — | — |
-| Reactive Safety Override | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | — | — |
-| DWA-inspired Local Rollout | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | — | — |
-| PCR-yonly | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
-| PCR-geomw | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
-| PCR-learnedw | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
+| 方法                         | SR↑    | CR↓    | near-miss↓ | follow MAE↓ | FOV rate↑ | CSI↑   | CSS/RCM↑ |
+| -------------------------- | ------ | ------ | ---------- | ----------- | --------- | ------ | -------- |
+| Monolithic PPO             | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | —      | —        |
+| Reactive Safety Override   | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | —      | —        |
+| DWA-inspired Local Rollout | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | —      | —        |
+| PCR-yonly                  | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | [TODO] | [TODO]   |
+| PCR-geomw                  | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | [TODO] | [TODO]   |
+| PCR-learnedw               | [TODO] | [TODO] | [TODO]     | [TODO]      | [TODO]    | [TODO] | [TODO]   |
 
 **预期趋势**：`PCR-learnedw` 应比 `Monolithic PPO` 更可解释、比 `Reactive Safety Override` 更少保守停滞、比 `DWA-inspired Local Rollout` 更适合动态目标跟随；在内部消融中，它应比 `PCR-yonly` 显著降低碰撞并提高任务成功率，比 `PCR-geomw` 更好地保持目标跟随质量。若机制图显示 `learned-w` 增强 Follow，则论文解释为 progress-preserving arbitration，而不是危险时一律压低 Follow。
 
@@ -298,10 +298,10 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 
 为直接验证 $w$ 的*前瞻性*，测量提前时间 $\Delta t_w$：$w_t > 0.5$ 的首步与实际间隙降至 $d_{\text{safe}}$ 以下的首步之间的差值。正 $\Delta t_w$ 表明 $w$ 在危险实际出现*之前*就已激活。
 
-| | 平均 $\Delta t_w$（步） | 平均 $\Delta t_w$（秒） |
-|---|---|---|
-| PCR-learnedw | [TODO] | [TODO] |
-| PCR-yonly | [TODO] | [TODO] |
+|              | 平均 $\Delta t_w$（步） | 平均 $\Delta t_w$（秒） |
+| ------------ | ------------------ | ------------------ |
+| PCR-learnedw | [TODO]             | [TODO]             |
+| PCR-yonly    | [TODO]             | [TODO]             |
 
 对于 `PCR-yonly`（无 $w$），使用 $y$ 首次降至 0.5 以下的步作为"冲突检测"的代理指标计算类似量。`PCR-learnedw` 显著更大的提前时间确认 $w$ 提供了真正的前瞻性冲突感知，而非仅是对同一反应式信号的不同阈值。
 
@@ -315,12 +315,12 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 
 外部基线用于证明 PCR-Net 不是只优于自家消融。`Monolithic PPO` 回答“为什么不直接训练一个统一策略”；`Reactive Safety Override` 回答“为什么简单规则不够”；`DWA-inspired Local Rollout` 回答“经典局部规划启发式能否解决动态跟随冲突”。若两周内时间不足，主表最低保留前两个外部基线，`DWA-inspired Local Rollout` 放入补充或后续实验。
 
-| 方法 | CR↓ | SR↑ | follow MAE↓ | near-miss↓ |
-|---|---|---|---|---|
-| Monolithic PPO | [TODO] | [TODO] | [TODO] | [TODO] |
-| Reactive Safety Override | [TODO] | [TODO] | [TODO] | [TODO] |
-| DWA-inspired Local Rollout | [TODO] | [TODO] | [TODO] | [TODO] |
-| PCR-learnedw | [TODO] | [TODO] | [TODO] | [TODO] |
+| 方法                         | CR↓    | SR↑    | follow MAE↓ | near-miss↓ |
+| -------------------------- | ------ | ------ | ----------- | ---------- |
+| Monolithic PPO             | [TODO] | [TODO] | [TODO]      | [TODO]     |
+| Reactive Safety Override   | [TODO] | [TODO] | [TODO]      | [TODO]     |
+| DWA-inspired Local Rollout | [TODO] | [TODO] | [TODO]      | [TODO]     |
+| PCR-learnedw               | [TODO] | [TODO] | [TODO]      | [TODO]     |
 
 预期结论不是“PCR-Net 打败所有导航算法”，而是证明：在 Follow/Avoid 高冲突窗口中，显式保留候选行为并用 `learned-w` 预测冲突，比单一黑盒策略、固定规则接管和短时局部速度搜索更稳。
 
@@ -336,12 +336,12 @@ $$y_{\text{eff},t} = (1 - \lambda_w) \cdot y_t + \lambda_w \cdot (1 - w_t)$$
 
 在 0.75 m 到 1.20 m 范围内评估 `PCR-learnedw`，测试对不同几何约束严重程度的稳定性。
 
-| 宽度 (m) | CR↓ | SR↑ | $\bar{d}$ (m)↑ | $\Delta t_w$ (s) |
-|---|---|---|---|---|
-| 0.75 | [TODO] | [TODO] | [TODO] | [TODO] |
-| 0.85 | [TODO] | [TODO] | [TODO] | [TODO] |
-| 1.00 | [TODO] | [TODO] | [TODO] | [TODO] |
-| 1.20 | [TODO] | [TODO] | [TODO] | [TODO] |
+| 宽度 (m) | CR↓    | SR↑    | $\bar{d}$ (m)↑ | $\Delta t_w$ (s) |
+| ------ | ------ | ------ | -------------- | ---------------- |
+| 0.75   | [TODO] | [TODO] | [TODO]         | [TODO]           |
+| 0.85   | [TODO] | [TODO] | [TODO]         | [TODO]           |
+| 1.00   | [TODO] | [TODO] | [TODO]         | [TODO]           |
+| 1.20   | [TODO] | [TODO] | [TODO]         | [TODO]           |
 
 性能随走廊收窄平缓退化：碰撞率上升但应仍低于 `PCR-yonly` 和外部反应式基线。$\Delta t_w$ 在更窄走廊中减小，反映了可用反应裕度的降低——冲突估计器仍提前激活，但可用于机动的时间预算本质上更小。在 0.75 m（单侧间隙 0.025 m）时，任务接近平台物理极限；残留碰撞率归因于步态引起的身体摇摆超出可用裕度。
 

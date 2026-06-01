@@ -60,6 +60,11 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-01 PCR 外部 baseline 收口
+
+- [ ] [P0] 完成 `Risk-only` eval-only 因果切除消融：加载同一个 `learnedw2` checkpoint，保留 policy 输出与 `signed_w` 诊断，但控制时强制 `delta_y_w_used=0`，只保留 `delta_y_r=gamma(risk_A-risk_F)`，验证 learned-w 通道是否提供手写风险差之外的增益。
+- [ ] [P1] 保留 `Mono-PPO` 外部 baseline 的公平训练曲线：当前修复后已学会前进跟随，但完整任务仍易碰撞；优先用 Row-progress / step collision / Follow MAE 解释部分能力，不新增 Mono 专属专家辅助或专属任务奖励。
+
 ## 2026-05-29 PCR src_real 实机 ROS 部署收口
 
 - [x] ~~[P0] 补齐 `src_real/interface` 的 PCR ROS 运行外层：完善 `joy_command` 消息编译依赖、提供 PCR 专用 launch、保持 `run_agent2.py / joy_command.msg / CAN` 已验证实机控制链路不改，默认 dry-run，只有显式开关才发布 `/usr/command`。~~

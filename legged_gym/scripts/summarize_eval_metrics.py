@@ -17,7 +17,7 @@ PAPER_METRICS: List[Tuple[str, str]] = [
     ("C_avoid Rate", "avoid_conflict_step_rate"),
     ("CSI@C_avoid", "avoid_conflict_suppression_index"),
 ]
-METHOD_ORDER = ["yonly", "geomw", "learnedw", "rule_override", "mono_ppo"]
+METHOD_ORDER = ["yonly", "geomw", "risk_only", "rule_override", "mono_ppo", "learnedw"]
 
 
 def _find_metrics_json(paths: List[str]) -> List[str]:
@@ -83,6 +83,14 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "rule_follow_scale_at_avoid_conflict": overall.get("rule_follow_scale_at_avoid_conflict", ""),
         "rule_yaw_scale_at_avoid_conflict": overall.get("rule_yaw_scale_at_avoid_conflict", ""),
         "rule_follow_suppression_at_avoid_conflict": overall.get("rule_follow_suppression_at_avoid_conflict", ""),
+        "delta_y_w_raw_mean": overall.get("delta_y_w_raw_mean", ""),
+        "delta_y_w_used_mean": overall.get("delta_y_w_used_mean", ""),
+        "delta_y_r_mean": overall.get("delta_y_r_mean", ""),
+        "delta_y_total_mean": overall.get("delta_y_total_mean", ""),
+        "avoid_conflict_delta_y_w_raw_mean": overall.get("avoid_conflict_delta_y_w_raw_mean", ""),
+        "avoid_conflict_delta_y_w_used_mean": overall.get("avoid_conflict_delta_y_w_used_mean", ""),
+        "avoid_conflict_delta_y_r_mean": overall.get("avoid_conflict_delta_y_r_mean", ""),
+        "avoid_conflict_delta_y_total_mean": overall.get("avoid_conflict_delta_y_total_mean", ""),
         "switch_rate_mean": overall.get("switch_rate_mean", ""),
         "near_miss_rate_mean": overall.get("near_miss_rate_mean", ""),
         "cmd_jerk_lin_mean": overall.get("cmd_jerk_lin_mean", ""),
@@ -139,6 +147,8 @@ def _method_from_protocol(protocol: Dict, src_path: str = "") -> str:
     variant = str(protocol.get("policy_variant", "") or "").strip().lower()
     w_mode = str(protocol.get("w_mode", "") or "").strip().lower()
     text = f"{variant} {w_mode} {src_path}".lower()
+    if "risk_only" in text or "risk-only" in text or bool(protocol.get("risk_only", False)):
+        return "risk_only"
     if "rule_override" in text or "rule-override" in text:
         return "rule_override"
     if "mono_ppo" in text or "mono-ppo" in text:
