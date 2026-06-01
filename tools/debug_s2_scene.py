@@ -1,5 +1,5 @@
 # Debug helper for S2 scene config using classic builder.
-# Run: python3 tools/debug_s2_scene.py
+#   Run: python3 tools/debug_s2_scene.py
 
 import importlib.util
 import os
