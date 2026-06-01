@@ -2040,6 +2040,7 @@ def parse_args():
     )
     parser.add_argument("--pcr_ckpt", type=str, default=None, help="PCR main policy checkpoint path")
     parser.add_argument("--teacher_ckpt", type=str, default=None, help="历史兼容参数；PCR 主策略请优先使用 --pcr_ckpt")
+    parser.add_argument("--mono_ppo", action="store_true", help="PCR external baseline: direct cmd policy under --skill moe")
     parser.add_argument(
         "--skill",
         type=str,
@@ -2294,6 +2295,15 @@ def parse_args():
         args.skill = "follow"
     th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
     _apply_play_common_defaults(args, raw_argv)
+    if bool(getattr(args, "mono_ppo", False)):
+        if args.skill != "moe":
+            parser.error("--mono_ppo 只支持 --skill moe")
+        if args.mode != "teacher":
+            parser.error("--mono_ppo 当前只支持 --mode teacher")
+        if any((args.yonly, args.wgeom, args.wlearned, args.wlearned2)):
+            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if str(getattr(args, "w_mode", "none")).lower() != "none":
+            parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
 
     return args
 
@@ -2354,7 +2364,7 @@ def main():
     th.import_modules()
     if args.mode == "student" and not args.vision_ckpt:
         raise ValueError("Student 模式必须提供 --vision_ckpt，以确保仅使用相机输入。")
-    if args.mode == "student" and getattr(args, "skill", "follow") == "moe":
+    if args.mode == "student" and getattr(args, "skill", "follow") == "moe" and not bool(getattr(args, "mono_ppo", False)):
         raise ValueError("当前未实现 Gate 的 student 回放契约，禁止使用 --mode student --skill moe。")
 
     if args.camera_show and args.headless:
@@ -2530,7 +2540,13 @@ def main():
     aff_stack = max(int(getattr(args, "aff_stack", 1)), 1)
     aff_channels = aff_shape[0] * aff_stack
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
-    is_gate = skill == "moe"
+    is_mono_ppo = bool(getattr(args, "mono_ppo", False))
+    if is_mono_ppo and skill != "moe":
+        raise ValueError("--mono_ppo 只支持 --skill moe。")
+    if is_mono_ppo and args.mode != "teacher":
+        raise ValueError("--mono_ppo 当前只支持 --mode teacher。")
+    is_gate = skill == "moe" and not is_mono_ppo
+    env.disable_pcr_gate_aux = bool(is_mono_ppo)
     expert_only_mode = use_follow_expert or static_avoid_debug or (force_cmd_tensor is not None)
     policy = None
     avoid_policy = None
@@ -2545,6 +2561,8 @@ def main():
         print("[PlayHigh] static avoid-map debug enabled; robot command is clamped to zero.")
     elif force_cmd_tensor is not None:
         print("[PlayHigh] cmd_source=force_cmd (--force_cmd)")
+    elif is_mono_ppo:
+        print("[PlayHigh] cmd_source=mono_ppo_direct_cmd; cmd=[x_right,y_forward,yaw]")
     if not expert_only_mode:
         if not args.teacher_ckpt:
             raise ValueError("非 expert-only 模式必须提供 --pcr_ckpt")
