@@ -53,3 +53,17 @@ agents/eval_data_seed23/**
 !agents/eval_data/pcr_main_table/**
 !agents/eval_data_seed23/pcr_main_table/
 !agents/eval_data_seed23/pcr_main_table/**
+# PCR eval raw outputs: keep only paper main-table summaries.
+agents/eval_data*/s_*/
+agents/eval_data*/**/metrics.json
+agents/eval_data*/**/metrics.csv
+agents/eval_data*/**/timeseries.csv
+agents/eval_data*/**/*.png
+agents/eval_data*/**/*.mp4
+agents/mono*
+
+# Keep PCR main-table summaries.
+!agents/eval_data*/pcr_main_table/
+!agents/eval_data*/pcr_main_table/*.csv
+s!agents/eval_data*/pcr_main_table/*.md
+
