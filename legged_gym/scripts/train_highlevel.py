@@ -4471,7 +4471,7 @@ class HierarchicalHexapodEnv:
                 reward_dict['passable_occ_ratio'] = passable_occ_ratio
             if crossable_width is not None:
                 reward_dict['crossable_width'] = crossable_width
-            if self.is_pcr_line_task:
+            if self.is_pcr_line_task and not bool(getattr(self, "mono_ppo_direct_cmd", False)):
                 legacy_approach = reward_dict.get('approach', torch.zeros(self.num_envs, device=self.device))
                 legacy_follow_outside = reward_dict.get('follow_outside', torch.zeros(self.num_envs, device=self.device))
                 reward_dict['total'] = reward_dict['total'] - legacy_approach - legacy_follow_outside
@@ -5532,6 +5532,7 @@ def train(args):
     # 创建环境
     env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
     env.disable_pcr_gate_aux = bool(is_mono_ppo)
+    env.mono_ppo_direct_cmd = bool(is_mono_ppo)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
     is_pcr_output_task = bool(getattr(env, "is_pcr_line_task", False))
     is_avoid_output_task = bool(use_avoid_local_map and not is_pcr_output_task)
@@ -6407,6 +6408,13 @@ def train(args):
             f"goal_dim={policy_goal_dim} aff_channels={aff_channels} "
             "cmd=[x_right,y_forward,yaw]"
         )
+        print(
+            "[Mono-PPO Reward] enabled: legacy follow approach/band, PCR progress/follow quality, "
+            "row avoidance, collision, stability"
+        )
+        print(
+            "[Mono-PPO Reward] disabled: PCR gate aux, learned-w aux, gate policy, expert BC"
+        )
     dprint(
         f"  - Non-finite handling: "
         f"{'recovery(skip+sanitize)' if bool(getattr(args, 'allow_nonfinite_recovery', False)) else 'fail-fast'}"
@@ -6544,10 +6552,18 @@ def train(args):
         cmd_speed_sum = torch.zeros((), device=device)
         cmd_pred_x_sum = torch.zeros((), device=device)
         cmd_pred_x_abs_sum = torch.zeros((), device=device)
+        cmd_pred_y_sum = torch.zeros((), device=device)
+        cmd_pred_y_abs_sum = torch.zeros((), device=device)
+        cmd_pred_y_positive_count = torch.zeros((), device=device)
         cmd_slew_x_sum = torch.zeros((), device=device)
         cmd_slew_x_abs_sum = torch.zeros((), device=device)
+        cmd_slew_y_sum = torch.zeros((), device=device)
+        cmd_slew_y_abs_sum = torch.zeros((), device=device)
         cmd_exec_x_sum = torch.zeros((), device=device)
         cmd_exec_x_abs_sum = torch.zeros((), device=device)
+        cmd_exec_y_sum = torch.zeros((), device=device)
+        cmd_exec_y_abs_sum = torch.zeros((), device=device)
+        cmd_exec_y_positive_count = torch.zeros((), device=device)
         cmd_x_delta_abs_sum = torch.zeros((), device=device)
         cmd_x_delta_abs_active_sum = torch.zeros((), device=device)
         cmd_x_sign_switch_count = torch.zeros((), device=device)
@@ -7412,6 +7428,9 @@ def train(args):
             if cmd_used is not None:
                 cmd_pred_x_sum += cmd_used[:, 0].sum()
                 cmd_pred_x_abs_sum += torch.abs(cmd_used[:, 0]).sum()
+                cmd_pred_y_sum += cmd_used[:, 1].sum()
+                cmd_pred_y_abs_sum += torch.abs(cmd_used[:, 1]).sum()
+                cmd_pred_y_positive_count += (cmd_used[:, 1] > 0.0).float().sum()
             cmd_diag_slew = None
             if post_info is not None and isinstance(post_info, dict):
                 cmd_diag_slew = post_info.get('cmd_post', None)
@@ -7426,10 +7445,15 @@ def train(args):
             if cmd_diag_slew is not None:
                 cmd_slew_x_sum += cmd_diag_slew[:, 0].sum()
                 cmd_slew_x_abs_sum += torch.abs(cmd_diag_slew[:, 0]).sum()
+                cmd_slew_y_sum += cmd_diag_slew[:, 1].sum()
+                cmd_slew_y_abs_sum += torch.abs(cmd_diag_slew[:, 1]).sum()
             if cmd_diag_exec is not None:
                 cmd_speed_sum += torch.norm(cmd_diag_exec[:, :2], dim=1).sum()
                 cmd_exec_x_sum += cmd_diag_exec[:, 0].sum()
                 cmd_exec_x_abs_sum += torch.abs(cmd_diag_exec[:, 0]).sum()
+                cmd_exec_y_sum += cmd_diag_exec[:, 1].sum()
+                cmd_exec_y_abs_sum += torch.abs(cmd_diag_exec[:, 1]).sum()
+                cmd_exec_y_positive_count += (cmd_diag_exec[:, 1] > 0.0).float().sum()
             if hasattr(env.env, "base_lin_vel"):
                 body_lin_vel = env.env.base_lin_vel
                 body_forward = body_lin_vel[:, 1]
@@ -8527,10 +8551,18 @@ def train(args):
         goal_dist_mean = (goal_dist_sum / total_samples).item()
         cmd_pred_x_mean = (cmd_pred_x_sum / total_samples).item()
         cmd_pred_x_abs_mean = (cmd_pred_x_abs_sum / total_samples).item()
+        cmd_pred_y_mean = (cmd_pred_y_sum / total_samples).item()
+        cmd_pred_y_abs_mean = (cmd_pred_y_abs_sum / total_samples).item()
+        cmd_pred_y_positive_rate = (cmd_pred_y_positive_count / total_samples).item()
         cmd_slew_x_mean = (cmd_slew_x_sum / total_samples).item()
         cmd_slew_x_abs_mean = (cmd_slew_x_abs_sum / total_samples).item()
+        cmd_slew_y_mean = (cmd_slew_y_sum / total_samples).item()
+        cmd_slew_y_abs_mean = (cmd_slew_y_abs_sum / total_samples).item()
         cmd_exec_x_mean = (cmd_exec_x_sum / total_samples).item()
         cmd_exec_x_abs_mean = (cmd_exec_x_abs_sum / total_samples).item()
+        cmd_exec_y_mean = (cmd_exec_y_sum / total_samples).item()
+        cmd_exec_y_abs_mean = (cmd_exec_y_abs_sum / total_samples).item()
+        cmd_exec_y_positive_rate = (cmd_exec_y_positive_count / total_samples).item()
         cmd_x_delta_abs_mean = (cmd_x_delta_abs_sum / total_samples).item()
         cmd_x_delta_abs_active_mean = (
             (cmd_x_delta_abs_active_sum / cmd_x_gate_active_count.clamp_min(1.0)).item()
@@ -8878,10 +8910,18 @@ def train(args):
         writer.add_scalar('Stats/CmdSpeed', cmd_speed_mean, iteration)
         writer.add_scalar('Stats/CmdPredX', cmd_pred_x_mean, iteration)
         writer.add_scalar('Stats/CmdPredXAbs', cmd_pred_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdPredY', cmd_pred_y_mean, iteration)
+        writer.add_scalar('Stats/CmdPredYAbs', cmd_pred_y_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdPredYPositiveRate', cmd_pred_y_positive_rate, iteration)
         writer.add_scalar('Stats/CmdSlewX', cmd_slew_x_mean, iteration)
         writer.add_scalar('Stats/CmdSlewXAbs', cmd_slew_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdSlewY', cmd_slew_y_mean, iteration)
+        writer.add_scalar('Stats/CmdSlewYAbs', cmd_slew_y_abs_mean, iteration)
         writer.add_scalar('Stats/CmdExecX', cmd_exec_x_mean, iteration)
         writer.add_scalar('Stats/CmdExecXAbs', cmd_exec_x_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdExecY', cmd_exec_y_mean, iteration)
+        writer.add_scalar('Stats/CmdExecYAbs', cmd_exec_y_abs_mean, iteration)
+        writer.add_scalar('Stats/CmdExecYPositiveRate', cmd_exec_y_positive_rate, iteration)
         writer.add_scalar('Stats/CmdXDeltaAbs', cmd_x_delta_abs_mean, iteration)
         writer.add_scalar('Stats/CmdXDeltaAbsActive', cmd_x_delta_abs_active_mean, iteration)
         writer.add_scalar('Stats/CmdXExecSignSwitchRate', cmd_x_sign_switch_rate, iteration)
@@ -9078,6 +9118,9 @@ def train(args):
                           f"""{goal_dist_console_label:>{pad}} {goal_dist_display_mean:.3f} / {cmd_speed_mean:.3f} / {target_speed_mean:.3f}\n"""
                           f"""{'CmdX pred/post/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {cmd_slew_x_mean:.3f} / {cmd_exec_x_mean:.3f}\n"""
                           f"""{'CmdX |pred|/|post|/|exec|:':>{pad}} {cmd_pred_x_abs_mean:.3f} / {cmd_slew_x_abs_mean:.3f} / {cmd_exec_x_abs_mean:.3f}\n"""
+                          f"""{'CmdY pred/post/exec:':>{pad}} {cmd_pred_y_mean:.3f} / {cmd_slew_y_mean:.3f} / {cmd_exec_y_mean:.3f}\n"""
+                          f"""{'CmdY |pred|/|post|/|exec|:':>{pad}} {cmd_pred_y_abs_mean:.3f} / {cmd_slew_y_abs_mean:.3f} / {cmd_exec_y_abs_mean:.3f}\n"""
+                          f"""{'CmdY positive pred/exec:':>{pad}} {cmd_pred_y_positive_rate:.3f} / {cmd_exec_y_positive_rate:.3f}\n"""
                           f"""{'CmdX deltaAbs(all/gated):':>{pad}} {cmd_x_delta_abs_mean:.3f} / {cmd_x_delta_abs_active_mean:.3f}\n"""
                           f"""{'CmdX switchRate(exec/gated/predInGap):':>{pad}} {cmd_x_sign_switch_rate:.3f} / {cmd_x_sign_switch_active_rate:.3f} / {cmd_x_sign_switch_gap_rate:.3f}\n"""
                           f"""{'CmdX pred/towardGap/exec:':>{pad}} {cmd_pred_x_mean:.3f} / {reward_term_means.get('row_cmdx_signed', 0.0):.3f} / {cmd_exec_x_mean:.3f}\n"""
