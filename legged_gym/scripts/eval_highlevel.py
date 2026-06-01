@@ -467,10 +467,10 @@ def _compute_rule_override_cmd(
     risk_gap = risk_f - risk_a
     k = float(getattr(args, "rule_k", 8.0))
     margin = float(getattr(args, "rule_margin", 0.10))
-    hard_thr = float(getattr(args, "rule_hard_thr", 0.60))
-    s_min = float(getattr(args, "rule_s_min", 0.70))
-    slow_ratio = float(getattr(args, "rule_slow_ratio", 0.20))
-    yaw_keep_loss = float(getattr(args, "rule_yaw_keep_loss", 0.50))
+    hard_thr = float(getattr(args, "rule_hard_thr", 0.45))
+    s_min = float(getattr(args, "rule_s_min", 0.85))
+    slow_ratio = float(getattr(args, "rule_slow_ratio", 0.10))
+    yaw_keep_loss = float(getattr(args, "rule_yaw_keep_loss", 0.30))
 
     s = torch.sigmoid(k * (risk_gap - margin))
     s_min_t = torch.full_like(s, s_min)
@@ -482,7 +482,7 @@ def _compute_rule_override_cmd(
 
     cmd = torch.zeros_like(cmd_f)
     if cmd.shape[-1] >= 1 and cmd_a.shape[-1] >= 1:
-        cmd[:, 0] = s * cmd_a[:, 0]
+        cmd[:, 0] = cmd_a[:, 0]
     if cmd.shape[-1] >= 2 and cmd_f.shape[-1] >= 2:
         cmd[:, 1] = follow_scale * cmd_f[:, 1]
     if cmd.shape[-1] >= 3 and cmd_f.shape[-1] >= 3:
@@ -3403,10 +3403,10 @@ class EvalRunner:
                 ),
                 "rule_k": float(getattr(self.args, "rule_k", 8.0)),
                 "rule_margin": float(getattr(self.args, "rule_margin", 0.10)),
-                "rule_hard_thr": float(getattr(self.args, "rule_hard_thr", 0.60)),
-                "rule_s_min": float(getattr(self.args, "rule_s_min", 0.70)),
-                "rule_slow_ratio": float(getattr(self.args, "rule_slow_ratio", 0.20)),
-                "rule_yaw_keep_loss": float(getattr(self.args, "rule_yaw_keep_loss", 0.50)),
+                "rule_hard_thr": float(getattr(self.args, "rule_hard_thr", 0.45)),
+                "rule_s_min": float(getattr(self.args, "rule_s_min", 0.85)),
+                "rule_slow_ratio": float(getattr(self.args, "rule_slow_ratio", 0.10)),
+                "rule_yaw_keep_loss": float(getattr(self.args, "rule_yaw_keep_loss", 0.30)),
                 "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
                 "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
                 "pcr_w_aux_risk_f_threshold": float(getattr(self.args, "pcr_w_aux_risk_f_threshold", 0.4)),
@@ -3996,10 +3996,10 @@ def parse_args():
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
     parser.add_argument("--rule_k", type=float, default=8.0)
     parser.add_argument("--rule_margin", type=float, default=0.10)
-    parser.add_argument("--rule_hard_thr", type=float, default=0.60)
-    parser.add_argument("--rule_s_min", type=float, default=0.70)
-    parser.add_argument("--rule_slow_ratio", type=float, default=0.20)
-    parser.add_argument("--rule_yaw_keep_loss", type=float, default=0.50)
+    parser.add_argument("--rule_hard_thr", type=float, default=0.45)
+    parser.add_argument("--rule_s_min", type=float, default=0.85)
+    parser.add_argument("--rule_slow_ratio", type=float, default=0.10)
+    parser.add_argument("--rule_yaw_keep_loss", type=float, default=0.30)
     parser.add_argument("--risk_memory", action="store_true", help="use deployable temporal risk memory in learned-w row slot")
     parser.add_argument("--risk_memory_l_clear", type=float, default=0.40)
     parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"])
