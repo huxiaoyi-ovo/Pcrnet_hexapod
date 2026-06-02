@@ -4,6 +4,7 @@
     <arg name="start_camera" default="true"/>
     <arg name="start_pcr" default="true"/>
     <arg name="publish_cmd" default="false"/>
+    <arg name="start_mux" default="true"/>
     <arg name="show" default="false"/>
 
     <arg name="lowlevel_agent" default="base_line200.pt"/>
@@ -20,6 +21,12 @@
     <arg name="camera_pitch_down_deg" default="15"/>
     <arg name="map_size" default="32"/>
     <arg name="map_extent_m" default="3.0"/>
+    <arg name="pcr_usr_command_topic" default="/usr/command_pcr"/>
+    <arg name="manual_usr_command_topic" default="/usr/command_manual"/>
+    <arg name="mux_output_topic" default="/usr/command"/>
+    <arg name="mux_rate_hz" default="50"/>
+    <arg name="mux_pcr_timeout_s" default="0.35"/>
+    <arg name="mux_manual_timeout_s" default="0.2"/>
 
     <node if="$(arg start_run_agent)"
           pkg="interface"
@@ -28,40 +35,111 @@
           output="screen"
           args="--agent=$(arg lowlevel_agent) --device=$(arg lowlevel_device)"/>
 
-    <node if="$(arg start_camera)"
-          pkg="interface"
-          type="scripts/pcr_real/real_pcr_input_check.py"
-          name="real_pcr_input"
-          output="screen"
-          args="--publish_ros
-                --yolo_model $(arg yolo_model)
-                --width 640
-                --height 480
-                --fps 30
-                --map_size $(arg map_size)
-                --map_extent_m $(arg map_extent_m)
-                --camera_height_m $(arg camera_height_m)
-                --camera_pitch_down_deg $(arg camera_pitch_down_deg)
-                --yolo_conf 0.35
-                --target_depth_mode roi
-                --ground_remove_height_m 0.04
-                --debug_map_px 260
-                $(eval '--show' if arg('show') else '')"/>
+    <group if="$(arg start_camera)">
+        <node unless="$(arg show)"
+              pkg="interface"
+              type="scripts/pcr_real/real_pcr_input_check.py"
+              name="real_pcr_input"
+              output="screen"
+              args="--publish_ros
+                    --yolo_model $(arg yolo_model)
+                    --width 640
+                    --height 480
+                    --fps 30
+                    --map_size $(arg map_size)
+                    --map_extent_m $(arg map_extent_m)
+                    --camera_height_m $(arg camera_height_m)
+                    --camera_pitch_down_deg $(arg camera_pitch_down_deg)
+                    --yolo_conf 0.35
+                    --target_depth_mode roi
+                    --ground_remove_height_m 0.04
+                    --debug_map_px 260"/>
+        <node if="$(arg show)"
+              pkg="interface"
+              type="scripts/pcr_real/real_pcr_input_check.py"
+              name="real_pcr_input"
+              output="screen"
+              args="--publish_ros
+                    --yolo_model $(arg yolo_model)
+                    --width 640
+                    --height 480
+                    --fps 30
+                    --map_size $(arg map_size)
+                    --map_extent_m $(arg map_extent_m)
+                    --camera_height_m $(arg camera_height_m)
+                    --camera_pitch_down_deg $(arg camera_pitch_down_deg)
+                    --yolo_conf 0.35
+                    --target_depth_mode roi
+                    --ground_remove_height_m 0.04
+                    --debug_map_px 260
+                    --show"/>
+    </group>
 
-    <node if="$(arg start_pcr)"
-          pkg="interface"
-          type="scripts/pcr_real/pcr_realplay.py"
-          name="pcr_realplay"
-          output="screen"
-          args="--pcr_ckpt $(arg pcr_ckpt)
-                --avoid_ckpt $(arg avoid_ckpt)
-                --lowlevel_ckpt $(arg lowlevel_ckpt)
-                --cmd_backend usr_command
-                --device $(arg pcr_device)
-                --rate_hz $(arg rate_hz)
-                --risk_memory
-                --max_cmd_x 0.06
-                --max_cmd_y 0.10
-                --max_cmd_yaw 0.20
-                $(eval '--publish_cmd' if arg('publish_cmd') else '')"/>
+    <group if="$(arg publish_cmd)">
+        <node if="$(arg start_mux)"
+              pkg="interface"
+              type="scripts/pcr_real/usr_command_mux.py"
+              name="usr_command_mux"
+              output="screen"
+              args="--manual_topic $(arg manual_usr_command_topic)
+                    --pcr_topic $(arg pcr_usr_command_topic)
+                    --output_topic $(arg mux_output_topic)
+                    --rate_hz $(arg mux_rate_hz)
+                    --pcr_timeout_s $(arg mux_pcr_timeout_s)
+                    --manual_timeout_s $(arg mux_manual_timeout_s)"/>
+    </group>
+
+    <group if="$(arg start_pcr)">
+        <node unless="$(arg publish_cmd)"
+              pkg="interface"
+              type="scripts/pcr_real/pcr_realplay.py"
+              name="pcr_realplay"
+              output="screen"
+              args="--pcr_ckpt $(arg pcr_ckpt)
+                    --avoid_ckpt $(arg avoid_ckpt)
+                    --lowlevel_ckpt $(arg lowlevel_ckpt)
+                    --cmd_backend usr_command
+                    --device $(arg pcr_device)
+                    --rate_hz $(arg rate_hz)
+                    --risk_memory
+                    --max_cmd_x 0.06
+                    --max_cmd_y 0.10
+                    --max_cmd_yaw 0.20"/>
+        <group if="$(arg publish_cmd)">
+            <node if="$(arg start_mux)"
+                  pkg="interface"
+                  type="scripts/pcr_real/pcr_realplay.py"
+                  name="pcr_realplay"
+                  output="screen"
+                  args="--pcr_ckpt $(arg pcr_ckpt)
+                        --avoid_ckpt $(arg avoid_ckpt)
+                        --lowlevel_ckpt $(arg lowlevel_ckpt)
+                        --cmd_backend usr_command
+                        --usr_command_topic $(arg pcr_usr_command_topic)
+                        --device $(arg pcr_device)
+                        --rate_hz $(arg rate_hz)
+                        --risk_memory
+                        --max_cmd_x 0.06
+                        --max_cmd_y 0.10
+                        --max_cmd_yaw 0.20
+                        --publish_cmd"/>
+            <node unless="$(arg start_mux)"
+                  pkg="interface"
+                  type="scripts/pcr_real/pcr_realplay.py"
+                  name="pcr_realplay"
+                  output="screen"
+                  args="--pcr_ckpt $(arg pcr_ckpt)
+                        --avoid_ckpt $(arg avoid_ckpt)
+                        --lowlevel_ckpt $(arg lowlevel_ckpt)
+                        --cmd_backend usr_command
+                        --usr_command_topic $(arg mux_output_topic)
+                        --device $(arg pcr_device)
+                        --rate_hz $(arg rate_hz)
+                        --risk_memory
+                        --max_cmd_x 0.06
+                        --max_cmd_y 0.10
+                        --max_cmd_yaw 0.20
+                        --publish_cmd"/>
+        </group>
+    </group>
 </launch>

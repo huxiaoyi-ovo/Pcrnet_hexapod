@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Low-speed keyboard publisher for src_real /usr/command."""
+"""Low-speed keyboard publisher for src_real manual command input."""
 
 import argparse
 import select
@@ -93,7 +93,7 @@ def subprocess_check_output(cmd, timeout_s):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Keyboard to interface/joy_command.")
-    parser.add_argument("--topic", default="/usr/command")
+    parser.add_argument("--topic", default="/usr/command_manual")
     parser.add_argument("--rate_hz", type=float, default=20.0)
     parser.add_argument("--x_speed", type=float, default=0.06, help="right speed while key is held, m/s")
     parser.add_argument("--y_speed", type=float, default=0.10, help="forward speed while key is held, m/s")
@@ -254,12 +254,12 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    print("Keyboard /usr/command control")
+    print(f"Keyboard command control -> {args.topic}")
     print("  Hold W/S/A/D/Q/E/R/F to move; release to stop. X or Space: zero")
     print("  1:set_init 2:moving_init 3:stop 4:change_mode")
     print("  5:disable_pump 6:disable_torque 7:action_valve")
     print("  Ctrl+C: zero and exit")
-    print("  Keep this node exclusive with joy_ctrl and PCR publish_cmd.")
+    print("  With usr_command_mux, keep the default /usr/command_manual topic.")
 
     try:
         if args.input_mode in ("auto", "pynput"):

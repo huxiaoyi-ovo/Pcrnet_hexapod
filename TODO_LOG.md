@@ -60,6 +60,14 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-02 PCR 实机命令选择安全层
+
+- [x] ~~[P0] 新增 `/usr_command_mux`：键盘/手柄手动输入优先，PCR 授权且消息新鲜时才转发，PCR 丢目标/超时/零运动时输出 `set_init=True` 站立命令，避免多个节点抢 `/usr/command` 或无目标时继续触发底层 `Traj_follow`。~~
+
+## 2026-06-02 Mono-PPO 诊断指标补强
+
+- [x] ~~[P1] 扩展高层 eval 诊断输出：新增 L1/L2/L3 成功率分解、目标 FOV/bearing 汇总落表、goal-command 相关性与横向命令偏置/熵指标，用于量化 Mono-PPO 是否学到目标条件化跟随，而不是只学到固定横向避障捷径。~~
+
 ## 2026-06-01 PCR 外部 baseline 收口
 
 - [ ] [P0] 完成 `Risk-only` eval-only 因果切除消融：加载同一个 `learnedw2` checkpoint，保留 policy 输出与 `signed_w` 诊断，但控制时强制 `delta_y_w_used=0`，只保留 `delta_y_r=gamma(risk_A-risk_F)`，验证 learned-w 通道是否提供手写风险差之外的增益。
