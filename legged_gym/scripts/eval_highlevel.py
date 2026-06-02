@@ -87,6 +87,19 @@ def _pearson_corr(xs: List[float], ys: List[float]) -> float:
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def _corr_from_sums(sum_x: float, sum_y: float, sum_x2: float, sum_y2: float, sum_xy: float, n: int) -> float:
+    if n < 2:
+        return float("nan")
+    nf = float(n)
+    cov = sum_xy - (sum_x * sum_y / nf)
+    var_x = sum_x2 - (sum_x * sum_x / nf)
+    var_y = sum_y2 - (sum_y * sum_y / nf)
+    denom = math.sqrt(max(var_x, 0.0) * max(var_y, 0.0))
+    if denom <= 1e-12:
+        return float("nan")
+    return float(cov / denom)
+
+
 def _difficulty_list(s: str) -> List[float]:
     if not s:
         return [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -720,6 +733,33 @@ class EpisodeAccumulator:
     target_conflict_in_fov_steps: int = 0
     target_conflict_near_fov_edge_steps: int = 0
     target_conflict_lost_steps: int = 0
+    cmd_x_sum: float = 0.0
+    cmd_x_sq_sum: float = 0.0
+    cmd_x_abs_sum: float = 0.0
+    cmd_x_positive_steps: int = 0
+    cmd_x_negative_steps: int = 0
+    cmd_x_zero_steps: int = 0
+    cmd_x_samples: int = 0
+    goal_cmd_corr_steps: int = 0
+    goal_x_sum: float = 0.0
+    goal_y_sum: float = 0.0
+    corr_cmd_x_sum: float = 0.0
+    corr_cmd_y_sum: float = 0.0
+    corr_cmd_yaw_sum: float = 0.0
+    goal_x_sq_sum: float = 0.0
+    goal_y_sq_sum: float = 0.0
+    corr_cmd_x_sq_sum: float = 0.0
+    corr_cmd_y_sq_sum: float = 0.0
+    corr_cmd_yaw_sq_sum: float = 0.0
+    goalx_cmdx_sum: float = 0.0
+    goalx_cmdyaw_sum: float = 0.0
+    goaly_cmdy_sum: float = 0.0
+    goal_x_left_steps: int = 0
+    goal_x_right_steps: int = 0
+    cmd_yaw_left_sum: float = 0.0
+    cmd_yaw_right_sum: float = 0.0
+    cmd_x_left_sum: float = 0.0
+    cmd_x_right_sum: float = 0.0
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -1508,6 +1548,8 @@ class EvalRunner:
                     target_bearing_abs_v = _safe_float(target_bearing_abs[i].item(), default=float("nan"))
                     target_in_fov_v = bool(target_in_fov[i].item())
                     target_near_fov_edge_v = bool(target_near_fov_edge[i].item())
+                    goal_x_v = _safe_float(follow_goal_obs[i, 0].item(), default=float("nan"))
+                    goal_y_v = _safe_float(follow_goal_obs[i, 1].item(), default=float("nan"))
                     if math.isfinite(target_bearing_abs_v):
                         ai.target_bearing_abs_sum += target_bearing_abs_v
                         ai.target_bearing_abs_max = max(ai.target_bearing_abs_max, target_bearing_abs_v)
@@ -1549,6 +1591,51 @@ class EvalRunner:
                             cmd_final_v = [float(x) for x in cmd_final_t[i].detach().cpu().tolist()[:3]]
                             for j in range(3):
                                 ai.cmd_final_sum[j] += cmd_final_v[j]
+                            cmd_x_v = _safe_float(cmd_final_v[0], default=float("nan"))
+                            cmd_y_v = _safe_float(cmd_final_v[1], default=float("nan"))
+                            cmd_yaw_v = _safe_float(cmd_final_v[2], default=float("nan"))
+                            cmd_x_eps = float(getattr(self.args, "cmd_x_bias_eps", 0.05))
+                            goal_x_bin_thr = float(getattr(self.args, "goal_x_bin_threshold", 0.15))
+                            if math.isfinite(cmd_x_v):
+                                ai.cmd_x_sum += cmd_x_v
+                                ai.cmd_x_sq_sum += cmd_x_v * cmd_x_v
+                                ai.cmd_x_abs_sum += abs(cmd_x_v)
+                                ai.cmd_x_samples += 1
+                                if cmd_x_v > cmd_x_eps:
+                                    ai.cmd_x_positive_steps += 1
+                                elif cmd_x_v < -cmd_x_eps:
+                                    ai.cmd_x_negative_steps += 1
+                                else:
+                                    ai.cmd_x_zero_steps += 1
+                            if (
+                                math.isfinite(goal_x_v)
+                                and math.isfinite(goal_y_v)
+                                and math.isfinite(cmd_x_v)
+                                and math.isfinite(cmd_y_v)
+                                and math.isfinite(cmd_yaw_v)
+                            ):
+                                ai.goal_cmd_corr_steps += 1
+                                ai.goal_x_sum += goal_x_v
+                                ai.goal_y_sum += goal_y_v
+                                ai.corr_cmd_x_sum += cmd_x_v
+                                ai.corr_cmd_y_sum += cmd_y_v
+                                ai.corr_cmd_yaw_sum += cmd_yaw_v
+                                ai.goal_x_sq_sum += goal_x_v * goal_x_v
+                                ai.goal_y_sq_sum += goal_y_v * goal_y_v
+                                ai.corr_cmd_x_sq_sum += cmd_x_v * cmd_x_v
+                                ai.corr_cmd_y_sq_sum += cmd_y_v * cmd_y_v
+                                ai.corr_cmd_yaw_sq_sum += cmd_yaw_v * cmd_yaw_v
+                                ai.goalx_cmdx_sum += goal_x_v * cmd_x_v
+                                ai.goalx_cmdyaw_sum += goal_x_v * cmd_yaw_v
+                                ai.goaly_cmdy_sum += goal_y_v * cmd_y_v
+                                if goal_x_v < -goal_x_bin_thr:
+                                    ai.goal_x_left_steps += 1
+                                    ai.cmd_yaw_left_sum += cmd_yaw_v
+                                    ai.cmd_x_left_sum += cmd_x_v
+                                elif goal_x_v > goal_x_bin_thr:
+                                    ai.goal_x_right_steps += 1
+                                    ai.cmd_yaw_right_sum += cmd_yaw_v
+                                    ai.cmd_x_right_sum += cmd_x_v
                             if ai.prev_cmd_final is not None:
                                 dx = cmd_final_v[0] - ai.prev_cmd_final[0]
                                 dy = cmd_final_v[1] - ai.prev_cmd_final[1]
@@ -2141,12 +2228,92 @@ class EvalRunner:
                         ai.target_conflict_bearing_abs_sum / priv_conflict_denom
                         if ai.priv_conflict_steps > 0 else float("nan")
                     )
+                    target_in_fov_rate = ai.target_in_fov_steps / denom_steps
+                    l1_safety_success = int(not final_collision)
+                    l2_follow_success = int(
+                        math.isfinite(follow_mae)
+                        and follow_mae <= float(getattr(self.args, "l2_follow_mae_threshold", 0.5))
+                        and target_in_fov_rate >= float(getattr(self.args, "l2_target_fov_threshold", 0.90))
+                    )
+                    l3_progress_success = int(row_progress_success >= 1.0 - 1e-6)
+                    cmd_x_denom = float(max(ai.cmd_x_samples, 1))
+                    cmd_x_mean = ai.cmd_x_sum / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_sq_mean = ai.cmd_x_sq_sum / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_std = (
+                        math.sqrt(max(cmd_x_sq_mean - cmd_x_mean * cmd_x_mean, 0.0))
+                        if ai.cmd_x_samples > 0 and math.isfinite(cmd_x_sq_mean) and math.isfinite(cmd_x_mean)
+                        else float("nan")
+                    )
+                    cmd_x_abs_mean = ai.cmd_x_abs_sum / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_positive_rate = ai.cmd_x_positive_steps / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_negative_rate = ai.cmd_x_negative_steps / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_zero_rate = ai.cmd_x_zero_steps / cmd_x_denom if ai.cmd_x_samples > 0 else float("nan")
+                    cmd_x_entropy = 0.0
+                    if ai.cmd_x_samples > 0:
+                        for p_dir in (cmd_x_negative_rate, cmd_x_zero_rate, cmd_x_positive_rate):
+                            if math.isfinite(p_dir) and p_dir > 0.0:
+                                cmd_x_entropy -= p_dir * math.log(p_dir)
+                    else:
+                        cmd_x_entropy = float("nan")
+                    corr_goalx_cmdx = _corr_from_sums(
+                        ai.goal_x_sum,
+                        ai.corr_cmd_x_sum,
+                        ai.goal_x_sq_sum,
+                        ai.corr_cmd_x_sq_sum,
+                        ai.goalx_cmdx_sum,
+                        ai.goal_cmd_corr_steps,
+                    )
+                    corr_goalx_cmdyaw = _corr_from_sums(
+                        ai.goal_x_sum,
+                        ai.corr_cmd_yaw_sum,
+                        ai.goal_x_sq_sum,
+                        ai.corr_cmd_yaw_sq_sum,
+                        ai.goalx_cmdyaw_sum,
+                        ai.goal_cmd_corr_steps,
+                    )
+                    corr_goaly_cmdy = _corr_from_sums(
+                        ai.goal_y_sum,
+                        ai.corr_cmd_y_sum,
+                        ai.goal_y_sq_sum,
+                        ai.corr_cmd_y_sq_sum,
+                        ai.goaly_cmdy_sum,
+                        ai.goal_cmd_corr_steps,
+                    )
+                    cmd_yaw_left_mean = (
+                        ai.cmd_yaw_left_sum / float(ai.goal_x_left_steps)
+                        if ai.goal_x_left_steps > 0 else float("nan")
+                    )
+                    cmd_yaw_right_mean = (
+                        ai.cmd_yaw_right_sum / float(ai.goal_x_right_steps)
+                        if ai.goal_x_right_steps > 0 else float("nan")
+                    )
+                    cmd_x_left_mean = (
+                        ai.cmd_x_left_sum / float(ai.goal_x_left_steps)
+                        if ai.goal_x_left_steps > 0 else float("nan")
+                    )
+                    cmd_x_right_mean = (
+                        ai.cmd_x_right_sum / float(ai.goal_x_right_steps)
+                        if ai.goal_x_right_steps > 0 else float("nan")
+                    )
+                    yaw_directional_response = (
+                        cmd_yaw_right_mean - cmd_yaw_left_mean
+                        if math.isfinite(cmd_yaw_right_mean) and math.isfinite(cmd_yaw_left_mean)
+                        else float("nan")
+                    )
+                    lateral_directional_response = (
+                        cmd_x_right_mean - cmd_x_left_mean
+                        if math.isfinite(cmd_x_right_mean) and math.isfinite(cmd_x_left_mean)
+                        else float("nan")
+                    )
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
                             "difficulty": float(d),
                             "success": int(task_success),
                             "task_success": int(task_success),
+                            "l1_safety_success": l1_safety_success,
+                            "l2_follow_success": l2_follow_success,
+                            "l3_progress_success": l3_progress_success,
                             "row_progress_success": row_progress_success,
                             "full_task_success": int(full_task_success),
                             "strict_success": int(strict_terminal_success),
@@ -2496,7 +2663,7 @@ class EvalRunner:
                             ),
                             "target_bearing_abs_p95": target_bearing_abs_p95,
                             "target_bearing_abs_max": ai.target_bearing_abs_max,
-                            "target_in_rgb_fov_rate": ai.target_in_fov_steps / denom_steps,
+                            "target_in_rgb_fov_rate": target_in_fov_rate,
                             "target_near_rgb_fov_edge_rate": ai.target_near_fov_edge_steps / denom_steps,
                             "target_lost_step_rate": ai.target_lost_steps / denom_steps,
                             "target_lost_episode": int(ai.target_lost_event),
@@ -2518,6 +2685,25 @@ class EvalRunner:
                                 ai.target_conflict_lost_steps / priv_conflict_denom
                                 if ai.priv_conflict_steps > 0 else float("nan")
                             ),
+                            "cmd_x_mean": cmd_x_mean,
+                            "cmd_x_std": cmd_x_std,
+                            "cmd_x_abs_mean": cmd_x_abs_mean,
+                            "cmd_x_positive_rate": cmd_x_positive_rate,
+                            "cmd_x_negative_rate": cmd_x_negative_rate,
+                            "cmd_x_zero_rate": cmd_x_zero_rate,
+                            "cmd_x_direction_entropy": cmd_x_entropy,
+                            "corr_goalx_cmdx": corr_goalx_cmdx,
+                            "corr_goalx_cmdyaw": corr_goalx_cmdyaw,
+                            "corr_goaly_cmdy": corr_goaly_cmdy,
+                            "cmd_yaw_left_mean": cmd_yaw_left_mean,
+                            "cmd_yaw_right_mean": cmd_yaw_right_mean,
+                            "cmd_x_left_mean": cmd_x_left_mean,
+                            "cmd_x_right_mean": cmd_x_right_mean,
+                            "yaw_directional_response": yaw_directional_response,
+                            "lateral_directional_response": lateral_directional_response,
+                            "goal_x_left_steps": ai.goal_x_left_steps,
+                            "goal_x_right_steps": ai.goal_x_right_steps,
+                            "goal_cmd_corr_steps": ai.goal_cmd_corr_steps,
                             "switch_rate": ai.gate_switch_count / denom_steps,
                             "near_miss_rate": ai.near_miss_steps / denom_steps,
                             "rotate_only_rate": ai.rotate_only_steps / denom_steps,
@@ -3061,6 +3247,9 @@ class EvalRunner:
             }
 
         task_success_flags = [int(r.get("task_success", r.get("success", 0))) for r in rows]
+        l1_safety_flags = [int(r.get("l1_safety_success", 0)) for r in rows]
+        l2_follow_flags = [int(r.get("l2_follow_success", 0)) for r in rows]
+        l3_progress_flags = [int(r.get("l3_progress_success", 0)) for r in rows]
         row_progress_scores = [float(r.get("row_progress_success", 0.0)) for r in rows]
         full_task_success_flags = [int(r.get("full_task_success", 0)) for r in rows]
         success_event_flags = [int(r.get("success_event", r["success"])) for r in rows]
@@ -3130,6 +3319,22 @@ class EvalRunner:
         gate_region_near_miss = _clean([r.get("gate_region_near_miss_rate", float("nan")) for r in rows])
         cmd_jerk_lin_vals = _clean([r.get("cmd_jerk_lin_mean", float("nan")) for r in rows])
         cmd_jerk_ang_vals = _clean([r.get("cmd_jerk_ang_mean", float("nan")) for r in rows])
+        cmd_x_mean_vals = _clean([r.get("cmd_x_mean", float("nan")) for r in rows])
+        cmd_x_std_vals = _clean([r.get("cmd_x_std", float("nan")) for r in rows])
+        cmd_x_abs_vals = _clean([r.get("cmd_x_abs_mean", float("nan")) for r in rows])
+        cmd_x_pos_vals = _clean([r.get("cmd_x_positive_rate", float("nan")) for r in rows])
+        cmd_x_neg_vals = _clean([r.get("cmd_x_negative_rate", float("nan")) for r in rows])
+        cmd_x_zero_vals = _clean([r.get("cmd_x_zero_rate", float("nan")) for r in rows])
+        cmd_x_entropy_vals = _clean([r.get("cmd_x_direction_entropy", float("nan")) for r in rows])
+        corr_goalx_cmdx_vals = _clean([r.get("corr_goalx_cmdx", float("nan")) for r in rows])
+        corr_goalx_cmdyaw_vals = _clean([r.get("corr_goalx_cmdyaw", float("nan")) for r in rows])
+        corr_goaly_cmdy_vals = _clean([r.get("corr_goaly_cmdy", float("nan")) for r in rows])
+        cmd_yaw_left_vals = _clean([r.get("cmd_yaw_left_mean", float("nan")) for r in rows])
+        cmd_yaw_right_vals = _clean([r.get("cmd_yaw_right_mean", float("nan")) for r in rows])
+        cmd_x_left_vals = _clean([r.get("cmd_x_left_mean", float("nan")) for r in rows])
+        cmd_x_right_vals = _clean([r.get("cmd_x_right_mean", float("nan")) for r in rows])
+        yaw_response_vals = _clean([r.get("yaw_directional_response", float("nan")) for r in rows])
+        lateral_response_vals = _clean([r.get("lateral_directional_response", float("nan")) for r in rows])
         w_clearance_f_corr = _pearson_corr(
             [float(r.get("w_mean", float("nan"))) for r in rows],
             [float(r.get("clearance_f_mean", float("nan"))) for r in rows],
@@ -3176,6 +3381,9 @@ class EvalRunner:
             "episodes": total_eps,
             "success_episodes": task_success_eps,
             "task_success_episodes": task_success_eps,
+            "l1_safety_success_rate": float(sum(l1_safety_flags) / max(1, total_eps)),
+            "l2_follow_success_rate": float(sum(l2_follow_flags) / max(1, total_eps)),
+            "l3_progress_success_rate": float(sum(l3_progress_flags) / max(1, total_eps)),
             "row_progress_success_sum": row_progress_success_sum,
             "full_task_success_episodes": full_task_success_eps,
             "strict_success_episodes": strict_success_eps,
@@ -3294,6 +3502,24 @@ class EvalRunner:
             "rotate_only_rate_mean": float(np.mean(rotate_only_vals)) if rotate_only_vals else float("nan"),
             "cmd_jerk_lin_mean": float(np.mean(cmd_jerk_lin_vals)) if cmd_jerk_lin_vals else float("nan"),
             "cmd_jerk_ang_mean": float(np.mean(cmd_jerk_ang_vals)) if cmd_jerk_ang_vals else float("nan"),
+            "cmd_x_mean": float(np.mean(cmd_x_mean_vals)) if cmd_x_mean_vals else float("nan"),
+            "cmd_x_std": float(np.mean(cmd_x_std_vals)) if cmd_x_std_vals else float("nan"),
+            "cmd_x_abs_mean": float(np.mean(cmd_x_abs_vals)) if cmd_x_abs_vals else float("nan"),
+            "cmd_x_positive_rate": float(np.mean(cmd_x_pos_vals)) if cmd_x_pos_vals else float("nan"),
+            "cmd_x_negative_rate": float(np.mean(cmd_x_neg_vals)) if cmd_x_neg_vals else float("nan"),
+            "cmd_x_zero_rate": float(np.mean(cmd_x_zero_vals)) if cmd_x_zero_vals else float("nan"),
+            "cmd_x_direction_entropy": float(np.mean(cmd_x_entropy_vals)) if cmd_x_entropy_vals else float("nan"),
+            "corr_goalx_cmdx": float(np.mean(corr_goalx_cmdx_vals)) if corr_goalx_cmdx_vals else float("nan"),
+            "corr_goalx_cmdyaw": float(np.mean(corr_goalx_cmdyaw_vals)) if corr_goalx_cmdyaw_vals else float("nan"),
+            "corr_goaly_cmdy": float(np.mean(corr_goaly_cmdy_vals)) if corr_goaly_cmdy_vals else float("nan"),
+            "cmd_yaw_left_mean": float(np.mean(cmd_yaw_left_vals)) if cmd_yaw_left_vals else float("nan"),
+            "cmd_yaw_right_mean": float(np.mean(cmd_yaw_right_vals)) if cmd_yaw_right_vals else float("nan"),
+            "cmd_x_left_mean": float(np.mean(cmd_x_left_vals)) if cmd_x_left_vals else float("nan"),
+            "cmd_x_right_mean": float(np.mean(cmd_x_right_vals)) if cmd_x_right_vals else float("nan"),
+            "yaw_directional_response": float(np.mean(yaw_response_vals)) if yaw_response_vals else float("nan"),
+            "lateral_directional_response": (
+                float(np.mean(lateral_response_vals)) if lateral_response_vals else float("nan")
+            ),
             "inference_latency_ms_p50": _quantile(latency_ms_samples, 0.50),
             "inference_latency_ms_p95": _quantile(latency_ms_samples, 0.95),
         }
@@ -3601,6 +3827,10 @@ class EvalRunner:
                 "target_fov_margin_deg": float(getattr(self.args, "target_fov_margin_deg", 3.0)),
                 "target_near_fov_edge_margin_deg": float(getattr(self.args, "target_near_fov_edge_margin_deg", 5.0)),
                 "target_lost_k_eval": int(getattr(self.args, "target_lost_k_eval", 5)),
+                "l2_follow_mae_threshold": float(getattr(self.args, "l2_follow_mae_threshold", 0.5)),
+                "l2_target_fov_threshold": float(getattr(self.args, "l2_target_fov_threshold", 0.90)),
+                "cmd_x_bias_eps": float(getattr(self.args, "cmd_x_bias_eps", 0.05)),
+                "goal_x_bin_threshold": float(getattr(self.args, "goal_x_bin_threshold", 0.15)),
                 "pcr_ckpt": os.path.abspath(self.args.pcr_ckpt) if getattr(self.args, "pcr_ckpt", None) else None,
                 "ckpt": os.path.abspath(self.args.ckpt) if getattr(self.args, "ckpt", None) else None,
                 "follow_ckpt": os.path.abspath(self.args.follow_ckpt) if getattr(self.args, "follow_ckpt", None) else None,
@@ -3647,6 +3877,9 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "difficulty",
         "success",
         "task_success",
+        "l1_safety_success",
+        "l2_follow_success",
+        "l3_progress_success",
         "row_progress_success",
         "full_task_success",
         "strict_success",
@@ -3818,6 +4051,25 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "target_in_fov_rate_in_priv_conflict",
         "target_near_fov_edge_rate_in_priv_conflict",
         "target_lost_rate_in_priv_conflict",
+        "cmd_x_mean",
+        "cmd_x_std",
+        "cmd_x_abs_mean",
+        "cmd_x_positive_rate",
+        "cmd_x_negative_rate",
+        "cmd_x_zero_rate",
+        "cmd_x_direction_entropy",
+        "corr_goalx_cmdx",
+        "corr_goalx_cmdyaw",
+        "corr_goaly_cmdy",
+        "cmd_yaw_left_mean",
+        "cmd_yaw_right_mean",
+        "cmd_x_left_mean",
+        "cmd_x_right_mean",
+        "yaw_directional_response",
+        "lateral_directional_response",
+        "goal_x_left_steps",
+        "goal_x_right_steps",
+        "goal_cmd_corr_steps",
         "switch_rate",
         "near_miss_rate",
         "rotate_only_rate",
@@ -4178,6 +4430,10 @@ def parse_args():
     parser.add_argument("--target_fov_margin_deg", type=float, default=3.0)
     parser.add_argument("--target_near_fov_edge_margin_deg", type=float, default=5.0)
     parser.add_argument("--target_lost_k_eval", type=int, default=5)
+    parser.add_argument("--l2_follow_mae_threshold", type=float, default=0.5)
+    parser.add_argument("--l2_target_fov_threshold", type=float, default=0.90)
+    parser.add_argument("--cmd_x_bias_eps", type=float, default=0.05)
+    parser.add_argument("--goal_x_bin_threshold", type=float, default=0.15)
     parser.add_argument("--priv_conflict_follow_thr", type=float, default=0.20)
     parser.add_argument("--priv_conflict_avoid_thr", type=float, default=0.10)
     parser.add_argument(
@@ -4408,6 +4664,27 @@ def main():
         f"{overall['target_lost_step_rate']:.4f} / "
         f"{overall['target_lost_max_consecutive_steps_max']:.0f} / "
         f"{overall['target_bearing_abs_deg_p95']:.2f}"
+    )
+    print(
+        "L1/L2/L3/task safety/follow/progress/task: "
+        f"{overall['l1_safety_success_rate']:.4f} / "
+        f"{overall['l2_follow_success_rate']:.4f} / "
+        f"{overall['l3_progress_success_rate']:.4f} / "
+        f"{overall['task_success_rate']:.4f}"
+    )
+    print(
+        "Goal-command corr gx-cx/gx-yaw/gy-cy: "
+        f"{overall['corr_goalx_cmdx']:.4f} / "
+        f"{overall['corr_goalx_cmdyaw']:.4f} / "
+        f"{overall['corr_goaly_cmdy']:.4f}"
+    )
+    print(
+        "CmdX bias/std/entropy pos/neg: "
+        f"{overall['cmd_x_mean']:.4f} / "
+        f"{overall['cmd_x_std']:.4f} / "
+        f"{overall['cmd_x_direction_entropy']:.4f} / "
+        f"{overall['cmd_x_positive_rate']:.4f} / "
+        f"{overall['cmd_x_negative_rate']:.4f}"
     )
     if overall["priv_obstacle_window_rate"] >= 0.95:
         print(

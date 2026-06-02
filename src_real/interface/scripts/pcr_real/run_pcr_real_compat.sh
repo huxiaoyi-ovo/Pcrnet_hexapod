@@ -33,6 +33,13 @@ START_RUN_AGENT=1
 START_CAMERA=1
 START_PCR=1
 START_ROSCORE=1
+START_MUX=1
+PCR_USR_COMMAND_TOPIC="/usr/command_pcr"
+MANUAL_USR_COMMAND_TOPIC="/usr/command_manual"
+MUX_OUTPUT_TOPIC="/usr/command"
+MUX_RATE_HZ="50"
+MUX_PCR_TIMEOUT_S="0.35"
+MUX_MANUAL_TIMEOUT_S="0.2"
 CAMERA_HEIGHT_M="0.37"
 CAMERA_PITCH_DOWN_DEG="15"
 
@@ -69,6 +76,13 @@ Options:
   --no_camera                  Do not start D435i observation publisher.
   --no_pcr                     Do not start PCR node.
   --no_roscore                 Do not auto-start roscore if missing.
+  --no_mux                     Publish PCR directly to /usr/command when --publish_cmd is set.
+  --pcr_usr_command_topic TOP  Default with mux: /usr/command_pcr
+  --manual_usr_command_topic T Default: /usr/command_manual
+  --mux_output_topic TOP       Default: /usr/command
+  --mux_rate_hz HZ             Default: 50
+  --mux_pcr_timeout_s SEC      Default: 0.35
+  --mux_manual_timeout_s SEC   Default: 0.2
   --camera_height_m VALUE      Default: 0.37
   --camera_pitch_down_deg VAL  Default: 15
   --camera_arg ARG             Append one raw argument to the camera command.
@@ -94,6 +108,13 @@ while [[ $# -gt 0 ]]; do
         --no_camera) START_CAMERA=0; shift ;;
         --no_pcr) START_PCR=0; shift ;;
         --no_roscore) START_ROSCORE=0; shift ;;
+        --no_mux) START_MUX=0; shift ;;
+        --pcr_usr_command_topic) PCR_USR_COMMAND_TOPIC="$2"; shift 2 ;;
+        --manual_usr_command_topic) MANUAL_USR_COMMAND_TOPIC="$2"; shift 2 ;;
+        --mux_output_topic) MUX_OUTPUT_TOPIC="$2"; shift 2 ;;
+        --mux_rate_hz) MUX_RATE_HZ="$2"; shift 2 ;;
+        --mux_pcr_timeout_s) MUX_PCR_TIMEOUT_S="$2"; shift 2 ;;
+        --mux_manual_timeout_s) MUX_MANUAL_TIMEOUT_S="$2"; shift 2 ;;
         --camera_height_m) CAMERA_HEIGHT_M="$2"; shift 2 ;;
         --camera_pitch_down_deg) CAMERA_PITCH_DOWN_DEG="$2"; shift 2 ;;
         --camera_arg) CAMERA_EXTRA_ARGS+=("$2"); shift 2 ;;
@@ -156,10 +177,24 @@ if [[ "${NEEDS_ROS}" -eq 1 ]]; then
     fi
 fi
 
+if [[ "${PUBLISH_CMD}" -eq 0 ]]; then
+    START_MUX=0
+fi
+
 if command -v rosnode >/dev/null && rosnode list 2>/dev/null | grep -qE '(^|/)joy_ctrl$'; then
     echo "Refuse to start: joy_ctrl is already running and may publish /usr/command." >&2
     echo "Stop joy_ctrl first, or use manual mode instead of PCR mode." >&2
     exit 2
+fi
+
+if command -v rostopic >/dev/null && rostopic info "${MUX_OUTPUT_TOPIC}" >/tmp/pcr_usr_command_info.$$ 2>/dev/null; then
+    if grep -qE '^[[:space:]]*\* /' /tmp/pcr_usr_command_info.$$; then
+        echo "Refuse to start: ${MUX_OUTPUT_TOPIC} already has a publisher." >&2
+        cat /tmp/pcr_usr_command_info.$$ >&2
+        rm -f /tmp/pcr_usr_command_info.$$
+        exit 2
+    fi
+    rm -f /tmp/pcr_usr_command_info.$$
 fi
 
 PIDS=()
@@ -188,6 +223,17 @@ if [[ "${START_RUN_AGENT}" -eq 1 ]]; then
         rosrun interface run_agent2.py \
         --agent="${LOWLEVEL_AGENT}" \
         --device="${LOWLEVEL_DEVICE}"
+fi
+
+if [[ "${START_MUX}" -eq 1 ]]; then
+    start_bg "usr_command_mux" \
+        python3 "${CODE_DIR}/usr_command_mux.py" \
+        --manual_topic "${MANUAL_USR_COMMAND_TOPIC}" \
+        --pcr_topic "${PCR_USR_COMMAND_TOPIC}" \
+        --output_topic "${MUX_OUTPUT_TOPIC}" \
+        --rate_hz "${MUX_RATE_HZ}" \
+        --pcr_timeout_s "${MUX_PCR_TIMEOUT_S}" \
+        --manual_timeout_s "${MUX_MANUAL_TIMEOUT_S}"
 fi
 
 if [[ "${START_CAMERA}" -eq 1 ]]; then
@@ -225,6 +271,7 @@ if [[ "${START_PCR}" -eq 1 ]]; then
         --avoid_ckpt "${AVOID_CKPT}"
         --lowlevel_ckpt "${LOWLEVEL_CKPT}"
         --cmd_backend usr_command
+        --usr_command_topic "$([[ "${START_MUX}" -eq 1 ]] && echo "${PCR_USR_COMMAND_TOPIC}" || echo "${MUX_OUTPUT_TOPIC}")"
         --device "${PCR_DEVICE}"
         --rate_hz "${RATE_HZ}"
         --risk_memory
