@@ -2,16 +2,32 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "${SCRIPT_DIR}/../../../interface" && -d "${SCRIPT_DIR}/../../../agent" ]]; then
-    WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-    CODE_DIR="${SCRIPT_DIR}"
-    ASSET_DIR="${SCRIPT_DIR}"
-elif [[ -d "${SCRIPT_DIR}/../../src_real/interface/scripts/pcr_real" ]]; then
+
+find_workspace_dir() {
+    local dir="${SCRIPT_DIR}"
+    while [[ "${dir}" != "/" ]]; do
+        if [[ -d "${dir}/src" && ( -d "${dir}/devel" || -f "${dir}/.catkin_workspace" ) ]]; then
+            echo "${dir}"
+            return 0
+        fi
+        dir="$(dirname "${dir}")"
+    done
+    return 1
+}
+
+if WORKSPACE_DIR="$(find_workspace_dir)"; then
+    :
+else
     WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+
+if [[ -d "${WORKSPACE_DIR}/src/interface/scripts/pcr_real" ]]; then
+    CODE_DIR="${WORKSPACE_DIR}/src/interface/scripts/pcr_real"
+    ASSET_DIR="${CODE_DIR}"
+elif [[ -d "${WORKSPACE_DIR}/src_real/interface/scripts/pcr_real" ]]; then
     CODE_DIR="${WORKSPACE_DIR}/src_real/interface/scripts/pcr_real"
     ASSET_DIR="${CODE_DIR}"
 else
-    WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
     CODE_DIR="${SCRIPT_DIR}"
     ASSET_DIR="${SCRIPT_DIR}"
 fi
