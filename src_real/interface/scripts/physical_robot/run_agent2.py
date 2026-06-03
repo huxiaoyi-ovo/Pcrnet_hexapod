@@ -1,4 +1,5 @@
 #所有的关节指令从同一个话题发出[flat, q1, q2, q3, v1, v2, v3, servo, ...] 1+42=43
+import threading
 import rospy, os, time, argparse, torch
 import numpy  as np
 from BC_learning.Agent_utils import EGPO_Agent
@@ -14,59 +15,110 @@ class motor_mode:
     Traj_follow = 2
 
 
+def PublishDefaultStand():
+    q_des=torch.cat([q_default,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
+    q_des[:,6]=-999
+    q_des_msgs.data[0]=motor_mode.Pos_vel
+    q_des_msgs.data[1:]=q_des.view(-1)
+    q_des_pub.publish(q_des_msgs)
+
+
 def PubCommand(_):
     global q_des_msgs, left_cur_sub,right_cur_sub
-    q_des_pub.publish(q_des_msgs)
-    
-
-def ProcessCommand(msg:joy_command):
-    global agent, last_actions, q_des_msgs,tic
-    if l_cur_time<0.01 or r_cur_time<0.01:
-        print("waiting for latest cur")
-        # return
-    if msg.disable_torque:
-        q_des_msgs.data[0]=motor_mode.Disable
+    with command_lock:
         q_des_pub.publish(q_des_msgs)
-        return
     
-    command=torch.tensor([[msg.set_init,msg.x_vec,msg.y_vec,msg.w_twist]],dtype=torch.float32,device=device)
-    v_range=[0.8,1.2,1.5]
-    # v_range=[1.0,1.2,2.0]
-    command[:,1]=command[:,1]* v_range[0]* 2.0
-    command[:,2]=command[:,2]* v_range[1]* 2.0 
-    command[:,3]=command[:,3]* v_range[2]* 0.25
-    obs = torch.cat([
-        last_actions*0.5,
-        (q_cur-q_default).reshape(1,-1),
-        q_dot_cur.reshape(1,-1) * 0.05,
-        q_torq.reshape(1,-1) * 0.1,
-        command[:,1:]],dim=1)
-    with torch.inference_mode():
-        action=agent(obs)
-        last_actions = action
-        #还原到关节期望角度
-        action = action.reshape(6,3)*0.5+q_default
 
-    if msg.set_init==0:
-        q_des=torch.cat([action,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
-        q_des[:,6]=-999        
-        q_des_msgs.data[0]=motor_mode.Traj_follow
-        q_des_msgs.data[1:]=q_des.view(-1)
-    else:
-        q_des=torch.cat([q_default,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
-        q_des[:,6]=-999
-        q_des_msgs.data[0]=motor_mode.Pos_vel
-        q_des_msgs.data[1:]=q_des.view(-1)
-    # print(time.time()-tic)
-    tic = time.time()
-    q_des_pub.publish(q_des_msgs)
-    test_pub.publish(q_des_msgs)
-    #这里注销掉,然后在定时器中再打开可以确保收到的是0.2s左右的
-    print(f"process r time={r_cur_time}, l time={l_cur_time}")
-    #由于电机是发一次收到一次状态,因此采用一个定时器来获取执行指令0.018s后的状态
-    # rospy.Timer(rospy.Duration(0.013),PubCommand,oneshot=True)
-    rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
-    rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+def ProcessCommand(msg:joy_command, source="legacy"):
+    global agent, last_actions, q_des_msgs,tic
+    with command_lock:
+        if l_cur_time<0.01 or r_cur_time<0.01:
+            print("waiting for latest cur")
+            # return
+        if msg.disable_torque:
+            q_des_msgs.data[0]=motor_mode.Disable
+            q_des_pub.publish(q_des_msgs)
+            return
+        if msg.stop or msg.disable_pump or msg.action_valve:
+            PublishDefaultStand()
+            print(f"process source={source}, safety stand, stop={int(msg.stop)}, disable_pump={int(msg.disable_pump)}, action_valve={int(msg.action_valve)}")
+            return
+
+        command=torch.tensor([[msg.set_init,msg.x_vec,msg.y_vec,msg.w_twist]],dtype=torch.float32,device=device)
+        v_range=[0.8,1.2,1.5]
+        # v_range=[1.0,1.2,2.0]
+        command[:,1]=command[:,1]* v_range[0]* 2.0
+        command[:,2]=command[:,2]* v_range[1]* 2.0
+        command[:,3]=command[:,3]* v_range[2]* 0.25
+        obs = torch.cat([
+            last_actions*0.5,
+            (q_cur-q_default).reshape(1,-1),
+            q_dot_cur.reshape(1,-1) * 0.05,
+            q_torq.reshape(1,-1) * 0.1,
+            command[:,1:]],dim=1)
+        with torch.inference_mode():
+            action=agent(obs)
+            last_actions = action
+            #还原到关节期望角度
+            action = action.reshape(6,3)*0.5+q_default
+
+        if msg.set_init==0:
+            q_des=torch.cat([action,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
+            q_des[:,6]=-999
+            q_des_msgs.data[0]=motor_mode.Traj_follow
+            q_des_msgs.data[1:]=q_des.view(-1)
+        else:
+            PublishDefaultStand()
+        # print(time.time()-tic)
+        tic = time.time()
+        if msg.set_init==0:
+            q_des_pub.publish(q_des_msgs)
+        test_pub.publish(q_des_msgs)
+        #这里注销掉,然后在定时器中再打开可以确保收到的是0.2s左右的
+        print(f"process source={source}, set_init={int(msg.set_init)}, x={msg.x_vec:.3f}, y={msg.y_vec:.3f}, yaw={msg.w_twist:.3f}, r time={r_cur_time}, l time={l_cur_time}")
+        #由于电机是发一次收到一次状态,因此采用一个定时器来获取执行指令0.018s后的状态
+        # rospy.Timer(rospy.Duration(0.013),PubCommand,oneshot=True)
+        rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+        rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+
+
+def ManualCommandCb(msg:joy_command):
+    global pcr_enabled
+    with command_lock:
+        if msg.change_mode:
+            pcr_enabled = True
+            print("[run_agent2] PCR speed input enabled by manual change_mode")
+            return
+
+        if pcr_enabled:
+            print("[run_agent2] manual command overrides PCR speed input")
+        pcr_enabled = False
+        ProcessCommand(msg, source="manual")
+
+
+def BuildPcrSpeedCommand(msg:joy_command):
+    cmd = joy_command()
+    cmd.set_init = False
+    cmd.x_vec = float(msg.x_vec)
+    cmd.y_vec = float(msg.y_vec)
+    cmd.z_vec = float(msg.z_vec)
+    cmd.w_twist = float(msg.w_twist)
+    return cmd
+
+
+def PcrCommandCb(msg:joy_command):
+    global pcr_enabled
+    with command_lock:
+        if pcr_enabled:
+            ProcessCommand(BuildPcrSpeedCommand(msg), source="pcr")
+
+
+def LegacyCommandCb(msg:joy_command):
+    global pcr_enabled
+    with command_lock:
+        if pcr_enabled:
+            pcr_enabled = False
+        ProcessCommand(msg, source="legacy")
 
 
 def UpdateQState(msg:Float64MultiArray,lr_index):
@@ -107,11 +159,16 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument("--device",type=str,default='cpu',help='Device that actor and encoder running, default cpu')
     parser.add_argument("--agent",type=str,default=None,help="Choose an agent in file ~/agents")
+    parser.add_argument("--legacy_command_topic",type=str,default="",help="Optional single command topic for old one-topic mode")
+    parser.add_argument("--manual_command_topic",type=str,default="/usr/command_manual")
+    parser.add_argument("--pcr_command_topic",type=str,default="/usr/command_pcr")
     args,_unknow=parser.parse_known_args()
     if args.agent == None:
         print("Please specify a agent using --agent=EGPO.pt for example")
         exit(0)
     device=args.device
+    pcr_enabled = False
+    command_lock = threading.RLock()
 
     q_default = torch.zeros(6,3,dtype=torch.float32,device=device)
     q_des=torch.zeros(1,6,3,dtype=torch.float32,device=device)
@@ -146,7 +203,15 @@ if __name__=='__main__':
     agent.eval()
     agent.to(device)
 
-    command_sub=rospy.Subscriber('/usr/command',joy_command,ProcessCommand,queue_size=1)
+    if args.legacy_command_topic:
+        command_sub=rospy.Subscriber(args.legacy_command_topic,joy_command,LegacyCommandCb,queue_size=1)
+        print(f"[run_agent2] legacy command topic: {args.legacy_command_topic}")
+    else:
+        manual_sub=rospy.Subscriber(args.manual_command_topic,joy_command,ManualCommandCb,queue_size=1)
+        pcr_sub=rospy.Subscriber(args.pcr_command_topic,joy_command,PcrCommandCb,queue_size=1)
+        print(f"[run_agent2] manual topic: {args.manual_command_topic}")
+        print(f"[run_agent2] PCR topic: {args.pcr_command_topic}")
+        print(f"[run_agent2] manual change_mode enables PCR speed input; any other manual command disables it")
     imu_sub = rospy.Subscriber('/imu/model_states',Float64MultiArray,UpdateRootState,queue_size=1)
     # q_cur_sub = rospy.Subscriber('/sita_cur',Float64MultiArray,UpdateQState,queue_size=10)
     left_cur_sub=rospy.Subscriber('/left_sita_cur',Float64MultiArray,UpdateQState,callback_args='l',queue_size=1)
@@ -159,16 +224,6 @@ if __name__=='__main__':
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
-
-
-
-
-
-
-
-
-
 
 
 

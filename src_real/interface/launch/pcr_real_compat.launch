@@ -1,10 +1,11 @@
 <launch>
-    <!-- PCR real mode: do not start joy_ctrl here, because PCR can publish /usr/command. -->
+    <!-- PCR real mode: joy_ctrl publishes manual commands, PCR publishes PCR commands. -->
     <arg name="start_run_agent" default="true"/>
+    <arg name="start_joy" default="true"/>
     <arg name="start_camera" default="true"/>
     <arg name="start_pcr" default="true"/>
     <arg name="publish_cmd" default="false"/>
-    <arg name="start_mux" default="true"/>
+    <arg name="start_mux" default="false"/>
     <arg name="show" default="false"/>
 
     <arg name="lowlevel_agent" default="base_line200.pt"/>
@@ -33,7 +34,17 @@
           type="run_agent2.py"
           name="run_agent2"
           output="screen"
-          args="--agent=$(arg lowlevel_agent) --device=$(arg lowlevel_device)"/>
+          args="--agent=$(arg lowlevel_agent)
+                --device=$(arg lowlevel_device)
+                --manual_command_topic $(arg manual_usr_command_topic)
+                --pcr_command_topic $(arg pcr_usr_command_topic)"/>
+
+    <group if="$(arg start_joy)">
+        <node pkg="joy" type="joy_node" name="joy_node" output="screen"/>
+        <node pkg="interface" type="joy_ctrl" name="joy_ctrl" output="screen">
+            <param name="command_topic" value="$(arg manual_usr_command_topic)"/>
+        </node>
+    </group>
 
     <group if="$(arg start_camera)">
         <node unless="$(arg show)"
@@ -75,20 +86,6 @@
                     --show"/>
     </group>
 
-    <group if="$(arg publish_cmd)">
-        <node if="$(arg start_mux)"
-              pkg="interface"
-              type="scripts/pcr_real/usr_command_mux.py"
-              name="usr_command_mux"
-              output="screen"
-              args="--manual_topic $(arg manual_usr_command_topic)
-                    --pcr_topic $(arg pcr_usr_command_topic)
-                    --output_topic $(arg mux_output_topic)
-                    --rate_hz $(arg mux_rate_hz)
-                    --pcr_timeout_s $(arg mux_pcr_timeout_s)
-                    --manual_timeout_s $(arg mux_manual_timeout_s)"/>
-    </group>
-
     <group if="$(arg start_pcr)">
         <node unless="$(arg publish_cmd)"
               pkg="interface"
@@ -106,8 +103,7 @@
                     --max_cmd_y 0.10
                     --max_cmd_yaw 0.20"/>
         <group if="$(arg publish_cmd)">
-            <node if="$(arg start_mux)"
-                  pkg="interface"
+            <node pkg="interface"
                   type="scripts/pcr_real/pcr_realplay.py"
                   name="pcr_realplay"
                   output="screen"
@@ -116,23 +112,6 @@
                         --lowlevel_ckpt $(arg lowlevel_ckpt)
                         --cmd_backend usr_command
                         --usr_command_topic $(arg pcr_usr_command_topic)
-                        --device $(arg pcr_device)
-                        --rate_hz $(arg rate_hz)
-                        --risk_memory
-                        --max_cmd_x 0.06
-                        --max_cmd_y 0.10
-                        --max_cmd_yaw 0.20
-                        --publish_cmd"/>
-            <node unless="$(arg start_mux)"
-                  pkg="interface"
-                  type="scripts/pcr_real/pcr_realplay.py"
-                  name="pcr_realplay"
-                  output="screen"
-                  args="--pcr_ckpt $(arg pcr_ckpt)
-                        --avoid_ckpt $(arg avoid_ckpt)
-                        --lowlevel_ckpt $(arg lowlevel_ckpt)
-                        --cmd_backend usr_command
-                        --usr_command_topic $(arg mux_output_topic)
                         --device $(arg pcr_device)
                         --rate_hz $(arg rate_hz)
                         --risk_memory
