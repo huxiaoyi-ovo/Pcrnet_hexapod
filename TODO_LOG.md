@@ -63,6 +63,7 @@
 ## 2026-06-02 PCR 实机命令选择安全层
 
 - [x] ~~[P0] 新增 `/usr_command_mux`：键盘/手柄手动输入优先，PCR 授权且消息新鲜时才转发，PCR 丢目标/超时/零运动时输出 `set_init=True` 站立命令，避免多个节点抢 `/usr/command` 或无目标时继续触发底层 `Traj_follow`。~~
+- [x] ~~[P0] 将 PCR 实机控制权选择下沉到 `run_agent2.py`：手柄/键盘发布 `/usr/command_manual`，PCR 发布 `/usr/command_pcr`，由底层根据 `set_init / disable_torque / change_mode / timeout` 选择当前命令，避免外部 mux 反复制造 `Pos_vel / Traj_follow` 模式切换。~~
 
 ## 2026-06-02 Mono-PPO 诊断指标补强
 

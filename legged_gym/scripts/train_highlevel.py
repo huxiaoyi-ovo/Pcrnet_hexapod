@@ -2301,6 +2301,10 @@ class HierarchicalHexapodEnv:
         self.target_lost_k = int(getattr(nav_cfg, "target_lost_k", 0)) if nav_cfg is not None else 0
         self.target_center_scale = float(getattr(nav_cfg, "target_center_scale", 0.0)) if nav_cfg is not None else 0.0
         self.target_visible_scale = float(getattr(nav_cfg, "target_visible_scale", 0.0)) if nav_cfg is not None else 0.0
+        if bool(getattr(args, "mono_ppo", False)):
+            self.target_lost_k = 5
+            self.target_center_scale = 0.5
+            self.target_visible_scale = 0.2
         (self.affordance_x_map,
          self.affordance_y_map,
          self.affordance_bearing_map,
@@ -5195,6 +5199,38 @@ class HierarchicalHexapodEnv:
                     neginf=0.0,
                 )
                 self.prev_forward_clearance_valid.fill_(True)
+        reward_audit_pre_terminal = None
+        reward_audit_keys = [
+            "approach",
+            "follow_outside",
+            "pcr_progress_y",
+            "pcr_follow_quality",
+            "pcr_follow_err",
+            "pcr_core",
+            "row_lat",
+            "row_gap",
+            "row_push_penalty",
+            "row_cmdx_reward",
+            "heading",
+            "heading_keep",
+            "target_center",
+            "target_visible",
+            "target_lost",
+            "collision",
+            "stability",
+            "time",
+            "total",
+        ]
+        if (
+            bool(getattr(self.args, "mono_ppo_reward_audit", False))
+            and bool(getattr(self, "mono_ppo_direct_cmd", False))
+            and reward_terms is not None
+        ):
+            reward_audit_pre_terminal = {}
+            for key in reward_audit_keys:
+                value = reward_terms.get(key, None)
+                if torch.is_tensor(value):
+                    reward_audit_pre_terminal[key] = float(torch.nan_to_num(value.detach(), nan=0.0).mean().item())
         # done 的环境避免跨 episode 的 shaped reward 污染
         terminal_fail_mask = done_during | band_fail_mask | collision_reset_mask | follow_lost_reset_mask | target_finish_fail_mask
         if terminal_fail_mask.any():
@@ -5223,6 +5259,43 @@ class HierarchicalHexapodEnv:
                     if value.shape[:1] == terminal_fail_mask.shape:
                         reward_terms[key] = torch.where(terminal_fail_mask, torch.zeros_like(value), value)
                 reward_terms["total"] = total_reward
+        if (
+            bool(getattr(self.args, "mono_ppo_reward_audit", False))
+            and bool(getattr(self, "mono_ppo_direct_cmd", False))
+        ):
+            audit_count = int(getattr(self, "_mono_ppo_reward_audit_count", 0))
+            audit_limit = int(getattr(self.args, "mono_ppo_reward_audit_steps", 8))
+            if audit_count < audit_limit:
+                post = {}
+                if reward_terms is not None:
+                    for key in reward_audit_keys:
+                        value = reward_terms.get(key, None)
+                        if torch.is_tensor(value):
+                            post[key] = float(torch.nan_to_num(value.detach(), nan=0.0).mean().item())
+                pre = reward_audit_pre_terminal or {}
+                def _fmt(prefix: str, vals: Dict[str, float]) -> str:
+                    parts = []
+                    for key in reward_audit_keys:
+                        if key in vals:
+                            parts.append(f"{key}={vals[key]:.4f}")
+                    return f"{prefix}: " + ", ".join(parts)
+
+                print(
+                    "[Mono-PPO Reward Audit] "
+                    f"step={audit_count} "
+                    f"mono_ppo_direct_cmd={bool(getattr(self, 'mono_ppo_direct_cmd', False))} "
+                    f"is_pcr_line_task={bool(getattr(self, 'is_pcr_line_task', False))} "
+                    f"legacy_follow_removed={bool(self.is_pcr_line_task and not bool(getattr(self, 'mono_ppo_direct_cmd', False)))} "
+                    f"disable_pcr_gate_aux={bool(getattr(self, 'disable_pcr_gate_aux', False))} "
+                    f"done_during={float(done_during.float().mean().item()):.4f} "
+                    f"collision_reset={float(collision_reset_mask.float().mean().item()):.4f} "
+                    f"follow_lost={float(follow_lost_reset_mask.float().mean().item()):.4f} "
+                    f"terminal_fail={float(terminal_fail_mask.float().mean().item()):.4f}",
+                    flush=True,
+                )
+                print("[Mono-PPO Reward Audit] " + _fmt("pre_terminal", pre), flush=True)
+                print("[Mono-PPO Reward Audit] " + _fmt("post_terminal", post), flush=True)
+                self._mono_ppo_reward_audit_count = audit_count + 1
         if self.debug and (collision_mask.any() or done_during.any()):
             debug_count = int(getattr(self, "_collision_debug_count", 0))
             if debug_count < 20:
@@ -5891,6 +5964,10 @@ def train(args):
         meta["pcr_w_aux_risk_f_threshold"] = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
         meta["pcr_w_aux_risk_margin"] = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
         meta["pcr_w_aux_cmd_cos_threshold"] = float(getattr(args, "pcr_w_aux_cmd_cos_threshold", 0.5))
+        meta["target_lost_k"] = int(getattr(env, "target_lost_k", 0))
+        meta["target_center_scale"] = float(getattr(env, "target_center_scale", 0.0))
+        meta["target_visible_scale"] = float(getattr(env, "target_visible_scale", 0.0))
+        meta["mono_ppo_target_view_reward_auto"] = bool(is_mono_ppo)
         meta["run_mode_tag"] = run_mode_tag
         meta["online_best_metric"] = "online_mean_reward_monitor_only"
         meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
@@ -6414,6 +6491,12 @@ def train(args):
         )
         print(
             "[Mono-PPO Reward] disabled: PCR gate aux, learned-w aux, gate policy, expert BC"
+        )
+        print(
+            "[Mono-PPO TargetView] "
+            f"target_center_scale={float(getattr(env, 'target_center_scale', 0.0)):.3f} "
+            f"target_visible_scale={float(getattr(env, 'target_visible_scale', 0.0)):.3f} "
+            f"target_lost_k={int(getattr(env, 'target_lost_k', 0))}"
         )
     dprint(
         f"  - Non-finite handling: "
@@ -9285,6 +9368,10 @@ if __name__ == "__main__":
                         help='训练技能: follow / avoid / moe (gate)，默认按 task 自动选择')
     parser.add_argument('--mono_ppo', action='store_true',
                         help='PCR 外部 baseline：复用 moe 任务，但直接输出完整 cmd=[x_right,y_forward,yaw]')
+    parser.add_argument('--mono_ppo_reward_audit', action='store_true',
+                        help='打印 Mono-PPO 运行时 reward 分项，包含 terminal 前后对比')
+    parser.add_argument('--mono_ppo_reward_audit_steps', type=int, default=8,
+                        help='Mono-PPO reward 审计打印的高层步数')
     
     # 环境
     parser.add_argument('--task', type=str, required=True,
