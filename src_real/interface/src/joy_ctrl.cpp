@@ -177,6 +177,11 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
     //disable torque or stop pump
     if(command_mod == VEL_MODE){
         interface::joy_command joy_setpoint;
+        double cmd_x = abs(axes[0]) <= 0.15 ? 0.0 : -axes[0];
+        double cmd_y = abs(axes[1]) <= 0.15 ? 0.0 : axes[1];
+        double cmd_z = abs(axes[3]) <= 0.15 ? 0.0 : -axes[3];
+        double cmd_yaw = abs(axes[2]) <= 0.15 ? 0.0 : axes[2];
+        bool vel_axes_active = cmd_x != 0.0 || cmd_y != 0.0 || cmd_z != 0.0 || cmd_yaw != 0.0;
         if(buttons[6]){
             init_flag=0;
             // s_init_flag = 0;
@@ -228,7 +233,7 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         // else if(buttons[14]&&init_flag&&!m_init_flag){
             //只有初始化按下B键才可以进行切换模式
 
-        else if(buttons[14]){
+        else if(buttons[14]&&m_init_flag&&!vel_axes_active){
             //按下右侧轮盘按钮即可切换
             joy_setpoint.change_mode=1;
             com_pub.publish(joy_setpoint);
@@ -237,15 +242,11 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         }        
         else if(m_init_flag){
             //calculate x y desvelocity
-            if(axes[0]!= 0 || axes[1] != 0 || axes[2] != 0 || axes[3] != 0){
-                if(abs(axes[0]) <= 0.15 ) axes[0] = 0;
-                if(abs(axes[1]) <= 0.15 ) axes[1] = 0;
-                joy_setpoint.x_vec = -axes[0];
-                joy_setpoint.y_vec = axes[1];
-                if(abs(axes[3]) <= 0.15 ) axes[3] = 0;
-                if(abs(axes[2]) <= 0.15 ) axes[2] = 0;
-                joy_setpoint.z_vec = -axes[3];
-                joy_setpoint.w_twist = axes[2];
+            if(vel_axes_active){
+                joy_setpoint.x_vec = cmd_x;
+                joy_setpoint.y_vec = cmd_y;
+                joy_setpoint.z_vec = cmd_z;
+                joy_setpoint.w_twist = cmd_yaw;
                 // joy_setpoint.set_init=1;
                 // joy_setpoint.moving = 1;
                 com_pub.publish(joy_setpoint);
@@ -258,6 +259,9 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
 int main(int argc, char** argv){
     ros::init(argc,argv,"joy_ctrl");
     ros::NodeHandle nh;
+    ros::NodeHandle private_nh("~");
+    std::string command_topic;
+    private_nh.param<std::string>("command_topic", command_topic, "/usr/command_manual");
     // GetParam(nh);
     set_model_srv.request.model_state.model_name=robot_name;
     set_model_srv.request.model_state.reference_frame="world";    
@@ -265,7 +269,8 @@ int main(int argc, char** argv){
     tic2 = ros::Time::now();
     cl1 = clock(); cl2 = clock(); cl3=clock();
     // ros::Publisher com_pub = nh.advertise<geometry_msgs::PoseStamped>("usr/command",1);
-    ros::Publisher com_pub = nh.advertise<interface::joy_command>("/usr/command",10);
+    ros::Publisher com_pub = nh.advertise<interface::joy_command>(command_topic,10);
+    ROS_WARN("joy_ctrl publishes joy_command to %s", command_topic.c_str());
     ros::Publisher neg_pre_pub = nh.advertise<std_msgs::Int32MultiArray>("/negative_pressure",1);
     ros::ServiceClient set_model_client = nh.serviceClient<gazebo_msgs::SetModelState>("gazebo/set_model_state");
     ros::ServiceClient set_physic_client = nh.serviceClient<gazebo_msgs::SetPhysicsProperties>("gazebo/set_physics_properties");
