@@ -15,6 +15,14 @@ class motor_mode:
     Traj_follow = 2
 
 
+LOWLEVEL_HZ = 50.0
+PCR_TIMEOUT = 0.3
+MANUAL_DEADBAND = 1e-6
+pcr_enabled = False
+latest_pcr_cmd = None
+latest_pcr_stamp = 0.0
+
+
 def PublishDefaultStand():
     q_des=torch.cat([q_default,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
     q_des[:,6]=-999
@@ -29,7 +37,7 @@ def PubCommand(_):
         q_des_pub.publish(q_des_msgs)
     
 
-def ProcessCommand(msg:joy_command, source="legacy"):
+def ProcessCommand(msg:joy_command, source="legacy", use_triple_pub=True):
     global agent, last_actions, q_des_msgs,tic
     with command_lock:
         if l_cur_time<0.01 or r_cur_time<0.01:
@@ -75,11 +83,36 @@ def ProcessCommand(msg:joy_command, source="legacy"):
             q_des_pub.publish(q_des_msgs)
         test_pub.publish(q_des_msgs)
         #这里注销掉,然后在定时器中再打开可以确保收到的是0.2s左右的
-        print(f"process source={source}, set_init={int(msg.set_init)}, x={msg.x_vec:.3f}, y={msg.y_vec:.3f}, yaw={msg.w_twist:.3f}, r time={r_cur_time}, l time={l_cur_time}")
-        #由于电机是发一次收到一次状态,因此采用一个定时器来获取执行指令0.018s后的状态
-        # rospy.Timer(rospy.Duration(0.013),PubCommand,oneshot=True)
-        rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
-        rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+        status = f"process source={source}, set_init={int(msg.set_init)}, x={msg.x_vec:.3f}, y={msg.y_vec:.3f}, yaw={msg.w_twist:.3f}, r time={r_cur_time}, l time={l_cur_time}"
+        if source.startswith("pcr"):
+            rospy.loginfo_throttle(1.0, status)
+        else:
+            print(status)
+        if use_triple_pub:
+            # 由于电机是发一次收到一次状态,因此采用定时器来补采样反馈；PCR 50Hz 路径不使用该补发。
+            # rospy.Timer(rospy.Duration(0.013),PubCommand,oneshot=True)
+            rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+            rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
+
+
+def ClearPcrCache():
+    global latest_pcr_cmd, latest_pcr_stamp
+    latest_pcr_cmd = None
+    latest_pcr_stamp = 0.0
+
+
+def ManualCommandIsIdle(msg:joy_command):
+    has_flag = (
+        msg.set_init or msg.moving or msg.disable_pump or msg.disable_torque or
+        msg.action_valve or msg.stop or msg.change_mode
+    )
+    has_motion = (
+        abs(msg.x_vec) > MANUAL_DEADBAND or
+        abs(msg.y_vec) > MANUAL_DEADBAND or
+        abs(msg.z_vec) > MANUAL_DEADBAND or
+        abs(msg.w_twist) > MANUAL_DEADBAND
+    )
+    return (not has_flag) and (not has_motion)
 
 
 def ManualCommandCb(msg:joy_command):
@@ -87,30 +120,60 @@ def ManualCommandCb(msg:joy_command):
     with command_lock:
         if msg.change_mode:
             pcr_enabled = True
+            ClearPcrCache()
             print("[run_agent2] PCR speed input enabled by manual change_mode")
+            return
+
+        if ManualCommandIsIdle(msg):
             return
 
         if pcr_enabled:
             print("[run_agent2] manual command overrides PCR speed input")
         pcr_enabled = False
-        ProcessCommand(msg, source="manual")
+        ClearPcrCache()
+        ProcessCommand(msg, source="manual", use_triple_pub=True)
 
 
-def BuildPcrSpeedCommand(msg:joy_command):
+def BuildPcrSpeedCommand(cmd_data):
     cmd = joy_command()
     cmd.set_init = False
-    cmd.x_vec = float(msg.x_vec)
-    cmd.y_vec = float(msg.y_vec)
-    cmd.z_vec = float(msg.z_vec)
-    cmd.w_twist = float(msg.w_twist)
+    cmd.x_vec = float(cmd_data["x_vec"])
+    cmd.y_vec = float(cmd_data["y_vec"])
+    cmd.z_vec = float(cmd_data["z_vec"])
+    cmd.w_twist = float(cmd_data["w_twist"])
     return cmd
 
 
 def PcrCommandCb(msg:joy_command):
+    global latest_pcr_cmd, latest_pcr_stamp
+    with command_lock:
+        latest_pcr_cmd = {
+            "x_vec": float(np.clip(msg.x_vec, -1.0, 1.0)),
+            "y_vec": float(np.clip(msg.y_vec, -1.0, 1.0)),
+            "z_vec": 0.0,
+            "w_twist": float(np.clip(msg.w_twist, -1.0, 1.0)),
+        }
+        latest_pcr_stamp = time.time()
+
+
+def PcrControlTick(_):
     global pcr_enabled
     with command_lock:
-        if pcr_enabled:
-            ProcessCommand(BuildPcrSpeedCommand(msg), source="pcr")
+        if not pcr_enabled:
+            return
+
+        if latest_pcr_cmd is None:
+            rospy.loginfo_throttle(1.0, "[PCR] enabled, waiting for first command")
+            return
+
+        now = time.time()
+        if now - latest_pcr_stamp > PCR_TIMEOUT:
+            pcr_enabled = False
+            ClearPcrCache()
+            rospy.logwarn("[PCR] command timeout, disable PCR output")
+            return
+
+        ProcessCommand(BuildPcrSpeedCommand(latest_pcr_cmd), source="pcr_50hz", use_triple_pub=False)
 
 
 def LegacyCommandCb(msg:joy_command):
@@ -118,7 +181,8 @@ def LegacyCommandCb(msg:joy_command):
     with command_lock:
         if pcr_enabled:
             pcr_enabled = False
-        ProcessCommand(msg, source="legacy")
+            ClearPcrCache()
+        ProcessCommand(msg, source="legacy", use_triple_pub=True)
 
 
 def UpdateQState(msg:Float64MultiArray,lr_index):
@@ -168,6 +232,8 @@ if __name__=='__main__':
         exit(0)
     device=args.device
     pcr_enabled = False
+    latest_pcr_cmd = None
+    latest_pcr_stamp = 0.0
     command_lock = threading.RLock()
 
     q_default = torch.zeros(6,3,dtype=torch.float32,device=device)
@@ -220,11 +286,11 @@ if __name__=='__main__':
     test_pub = rospy.Publisher('test',Float64MultiArray,queue_size=10)
     
     q_des_pub = rospy.Publisher('/sita_des',Float64MultiArray,queue_size=1)
+    pcr_control_timer = rospy.Timer(rospy.Duration(1.0 / LOWLEVEL_HZ), PcrControlTick)
 
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
 
 
 

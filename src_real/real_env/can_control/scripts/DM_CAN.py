@@ -3,6 +3,7 @@ import numpy as np
 from enum import IntEnum
 from struct import unpack
 from struct import pack
+import os
 
 class Mode_List(IntEnum):
     Disable = 0
@@ -86,6 +87,9 @@ class MotorControl:
         self.serial_ = serial_device
         self.motors_map = dict()
         self.data_save = bytes()  # save data
+        self.debug_recv = os.environ.get("DM_CAN_DEBUG", "0") == "1"
+        self.debug_recv_limit = int(os.environ.get("DM_CAN_DEBUG_LIMIT", "80"))
+        self.debug_recv_count = 0
         if self.serial_.is_open:  # open the serial port
             print("Serial port is open")
             serial_device.close()
@@ -249,6 +253,10 @@ class MotorControl:
         # 把上次没有解析完的剩下的也放进来
         data_recv = b''.join([self.data_save, self.serial_.read_all()])
         packets = self.__extract_packets(data_recv)
+        if self.debug_recv and self.debug_recv_count < self.debug_recv_limit:
+            raw_hex = data_recv.hex()
+            print(f"[DM_CAN_DEBUG] recv bytes={len(data_recv)} packets={len(packets)} raw={raw_hex[:240]}")
+            self.debug_recv_count += 1
         for packet in packets:
             data = packet[7:15]
             CANID = (packet[6] << 24) | (packet[5] << 16) | (packet[4] << 8) | packet[3]

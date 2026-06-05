@@ -25,6 +25,7 @@ bool call_gravity_flag = false;
 vector<double> model_state(7);  //x y z  x y z w
 vector<double> axes(8);
 vector<int> buttons(15);
+vector<int> last_buttons(15);
 ros::Time tic1,tic2;
 clock_t cl1,cl2,cl3;
 string robot_name;
@@ -182,28 +183,35 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         double cmd_z = abs(axes[3]) <= 0.15 ? 0.0 : -axes[3];
         double cmd_yaw = abs(axes[2]) <= 0.15 ? 0.0 : axes[2];
         bool vel_axes_active = cmd_x != 0.0 || cmd_y != 0.0 || cmd_z != 0.0 || cmd_yaw != 0.0;
-        if(buttons[6]){
+        bool b6_pressed = buttons[6] && !last_buttons[6];
+        bool b7_pressed = buttons[7] && !last_buttons[7];
+        bool b13_pressed = buttons[13] && !last_buttons[13];
+        bool b1_pressed = buttons[1] && !last_buttons[1];
+        bool b4_pressed = buttons[4] && !last_buttons[4];
+        bool b0_pressed = buttons[0] && !last_buttons[0];
+        bool b14_pressed = buttons[14] && !last_buttons[14];
+        if(b6_pressed){
             init_flag=0;
             // s_init_flag = 0;
             m_init_flag = 0;
             joy_setpoint.disable_pump = 1;
             com_pub.publish(joy_setpoint);
         }
-        else if(buttons[7]){
+        else if(b7_pressed){
             init_flag=0;
             // s_init_flag = 0;
             m_init_flag = 0;
             joy_setpoint.disable_torque = 1;
             com_pub.publish(joy_setpoint);
         }
-        else if(buttons[13]){
+        else if(b13_pressed){
             init_flag=0;
             // s_init_flag = 0;
             m_init_flag = 0;
             joy_setpoint.action_valve = 1;
             com_pub.publish(joy_setpoint);
         }
-        else if(buttons[1]){
+        else if(b1_pressed){
             //button B enter initial set
             init_flag = 1;
             // s_init_flag = 0;
@@ -218,14 +226,14 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         //     s_init_flag = 1;
         //     com_pub.publish(joy_setpoint);
         // }
-        else if(buttons[4]&&init_flag){
+        else if(b4_pressed&&init_flag){
             //moving init "button Y"
             joy_setpoint.set_init=1;
             joy_setpoint.moving = 1;
             m_init_flag = 1;
             com_pub.publish(joy_setpoint);
         }        
-        else if(buttons[0]&&m_init_flag){
+        else if(b0_pressed&&m_init_flag){
             //button A publish stop command
             joy_setpoint.stop=1;
             com_pub.publish(joy_setpoint);
@@ -233,7 +241,7 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         // else if(buttons[14]&&init_flag&&!m_init_flag){
             //只有初始化按下B键才可以进行切换模式
 
-        else if(buttons[14]&&m_init_flag&&!vel_axes_active){
+        else if(b14_pressed&&m_init_flag&&!vel_axes_active){
             //按下右侧轮盘按钮即可切换
             joy_setpoint.change_mode=1;
             com_pub.publish(joy_setpoint);
@@ -253,6 +261,7 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
             }
         }        
     }
+    last_buttons = buttons;
 
 }
 

@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-04 PCR 论文最终图表产出
+
+- [x] ~~[P0] 新增最终论文图表生成入口：读取已完成的 internal / Risk-only / Rule-Override / Mono-PPO stage probe 评测结果，统一输出 Table I/II/III 与 Fig.4 所需 CSV、Markdown 和曲线图，避免继续手工拼表污染论文结果。~~
+
 ## 2026-06-02 PCR 实机命令选择安全层
 
 - [x] ~~[P0] 新增 `/usr_command_mux`：键盘/手柄手动输入优先，PCR 授权且消息新鲜时才转发，PCR 丢目标/超时/零运动时输出 `set_init=True` 站立命令，避免多个节点抢 `/usr/command` 或无目标时继续触发底层 `Traj_follow`。~~
@@ -2129,3 +2133,7 @@
 - [x] ~~Must: 将 `real_pcr_input_check.py --publish_ros` 发布的实时输入扩展到 `risk_blocked_map / policy_visible_map / front_distance_risk`，让 ROS 链路与已验证的 `obs_file` 口径一致。~~
 - [x] ~~Must: 将 `pcr_realplay.py` 订阅并使用上述实时风险输入；没有风险图时才退回 `local_map_2ch` fallback。~~
 - [x] ~~Must: 保持本地 `legged_gym/scripts` 与 `src_real/interface/scripts/pcr_real` 副本同步，并完成语法检查与同步检查。~~
+
+## 2026-06-03 PCR 实机低层频率对齐
+
+- [x] Must: 将 PCR 接入改为 `pcr_realplay` 10Hz 缓存速度、`run_agent2.py` 50Hz 均匀执行低层策略；PCR 路径禁用 `/sita_des` 三连发，手柄路径保留原始三连发与抢占语义。
