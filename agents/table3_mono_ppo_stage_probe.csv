@@ -1,0 +1,4 @@
+Stage,Task Success,Row-progress,Collision,L1 Safety,L2 Follow,L3 Progress,FOV-in,Bearing p95,Cmd-x Mean,Source
+2,0.023,0.424,0.445,0.555,0.180,0.031,0.244,92.14,0.091,agents/eval_data_mono_targetview_stage_probe/stage2_s035/moe_teacher_s_pcr_line_avoid_basic_mono_ppo_seed1_20260604_172722/metrics.json
+3,0.000,0.322,0.688,0.312,0.375,0.000,0.313,74.96,0.068,agents/eval_data_mono_targetview_stage_probe/stage3_s035/moe_teacher_s_pcr_line_avoid_basic_mono_ppo_seed1_20260604_172817/metrics.json
+4,0.000,0.016,1.000,0.000,0.898,0.000,0.922,28.77,-0.098,agents/eval_data_mono_targetview/s_0.35/moe_teacher_s_pcr_line_avoid_basic_mono_ppo_seed1_20260604_155915/metrics.json
