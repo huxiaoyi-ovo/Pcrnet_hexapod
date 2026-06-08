@@ -17,6 +17,7 @@ class motor_mode:
 
 LOWLEVEL_HZ = 50.0
 PCR_TIMEOUT = 0.3
+PCR_CMD_DEADBAND = 1e-4
 MANUAL_DEADBAND = 1e-6
 pcr_enabled = False
 latest_pcr_cmd = None
@@ -147,13 +148,19 @@ def BuildPcrSpeedCommand(cmd_data):
 def PcrCommandCb(msg:joy_command):
     global latest_pcr_cmd, latest_pcr_stamp
     with command_lock:
-        latest_pcr_cmd = {
-            "x_vec": float(np.clip(msg.x_vec, -1.0, 1.0)),
-            "y_vec": float(np.clip(msg.y_vec, -1.0, 1.0)),
-            "z_vec": 0.0,
-            "w_twist": float(np.clip(msg.w_twist, -1.0, 1.0)),
-        }
+        x_vec = float(np.clip(msg.x_vec, -1.0, 1.0))
+        y_vec = float(np.clip(msg.y_vec, -1.0, 1.0))
+        w_twist = float(np.clip(msg.w_twist, -1.0, 1.0))
         latest_pcr_stamp = time.time()
+        if abs(x_vec) <= PCR_CMD_DEADBAND and abs(y_vec) <= PCR_CMD_DEADBAND and abs(w_twist) <= PCR_CMD_DEADBAND:
+            latest_pcr_cmd = None
+            return
+        latest_pcr_cmd = {
+            "x_vec": x_vec,
+            "y_vec": y_vec,
+            "z_vec": 0.0,
+            "w_twist": w_twist,
+        }
 
 
 def PcrControlTick(_):
@@ -291,7 +298,6 @@ if __name__=='__main__':
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
 
 
 

@@ -180,9 +180,9 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
         interface::joy_command joy_setpoint;
         double cmd_x = abs(axes[0]) <= 0.15 ? 0.0 : -axes[0];
         double cmd_y = abs(axes[1]) <= 0.15 ? 0.0 : axes[1];
-        double cmd_z = abs(axes[3]) <= 0.15 ? 0.0 : -axes[3];
+        double cmd_z = 0.0;
         double cmd_yaw = abs(axes[2]) <= 0.15 ? 0.0 : axes[2];
-        bool vel_axes_active = cmd_x != 0.0 || cmd_y != 0.0 || cmd_z != 0.0 || cmd_yaw != 0.0;
+        bool vel_axes_active = cmd_x != 0.0 || cmd_y != 0.0 || cmd_yaw != 0.0;
         bool b6_pressed = buttons[6] && !last_buttons[6];
         bool b7_pressed = buttons[7] && !last_buttons[7];
         bool b13_pressed = buttons[13] && !last_buttons[13];

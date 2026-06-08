@@ -60,6 +60,10 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-05 PCR 实机接管安全修正
+
+- [x] ~~[P0] 修正 PCR 授权后的零速度接管问题：`run_agent2.py` 只缓存有效 PCR 速度命令，PCR 全零命令不再触发 50Hz `Traj_follow`；同时 `joy_ctrl.cpp` 不再让未被底层使用的 `z_vec` 轴触发手柄运动发布，避免按 14 后或 z 轴噪声导致低层进入零速步态。~~
+
 ## 2026-06-04 PCR 论文最终图表产出
 
 - [x] ~~[P0] 新增最终论文图表生成入口：读取已完成的 internal / Risk-only / Rule-Override / Mono-PPO stage probe 评测结果，统一输出 Table I/II/III 与 Fig.4 所需 CSV、Markdown 和曲线图，避免继续手工拼表污染论文结果。~~
