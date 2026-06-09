@@ -51,33 +51,12 @@ METHODS: Dict[str, Dict] = {
         ],
     },
     "risk_only": {
-        "ckpt_arg": "learnedw_ckpt",
+        "ckpt_arg": "risk_only_ckpt",
         "flags": [
-            "--wlearned2",
-            "--risk_only",
-            "--w_blend_mode",
-            "multiply",
-            "--signed_w_lambda",
-            "0.30",
+            "--wriskonly",
             "--signed_w_gamma_risk",
             "0.15",
-            "--signed_w_margin",
-            "0.05",
             "--w_disable_gate_safe_clamp",
-            "--risk_memory",
-            "--risk_memory_l_clear",
-            "0.40",
-            "--risk_memory_velocity_source",
-            "body",
-            "--pcr_w_aux_enable",
-            "--pcr_w_aux_coef",
-            "0.05",
-            "--pcr_w_aux_risk_f_threshold",
-            "0.25",
-            "--pcr_w_aux_risk_margin",
-            "0.05",
-            "--pcr_w_aux_cmd_cos_threshold",
-            "0.5",
         ],
     },
     "rule_override": {
@@ -237,6 +216,7 @@ def parse_args():
     parser.add_argument("--yonly_ckpt", type=str, default="agents/moe_teacher_best_yonly.pt")
     parser.add_argument("--geomw_ckpt", type=str, default="agents/moe_teacher_best_w0.15.pt")
     parser.add_argument("--learnedw_ckpt", type=str, default="agents/moe_teacher_best_learnedw.pt")
+    parser.add_argument("--risk_only_ckpt", type=str, default="agents/moe_teacher_best_risk_only.pt")
     parser.add_argument("--mono_ppo_ckpt", type=str, default="agents/mono_ppo_best.pt")
     parser.add_argument("--avoid_ckpt", type=str, default="agents/avoid_best.pt")
     parser.add_argument("--lowlevel_ckpt", type=str, default="agents/low_level_best.pt")

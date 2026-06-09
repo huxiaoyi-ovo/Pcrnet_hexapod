@@ -60,6 +60,11 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-09 PCR Risk-only 机制统计口径补齐
+
+- [ ] [P0] 补齐 eval/summarize/final-table 中 `C_unsafe` 窗口下的 `delta_y_w / delta_y_r / delta_y_total` 拆分统计，用旧 Risk-only checkpoint 重新 eval 判断显式风险差项是否在冲突窗口真实生效，避免 Table II 只看 `C_avoid` 窄窗口导致误读。
+- [ ] [P0] 将 `Risk-only` 覆盖为从头训练 baseline：训练时 actor 只输出 `y`，控制只使用 `Delta y_r=gamma(risk_A-risk_F)`，删除旧 learnedw2 eval-only 切除身份，Table II 的 `Risk-only` 统一解释为 trained-from-scratch 对照。
+
 ## 2026-06-05 PCR 实机接管安全修正
 
 - [x] ~~[P0] 修正 PCR 授权后的零速度接管问题：`run_agent2.py` 只缓存有效 PCR 速度命令，PCR 全零命令不再触发 50Hz `Traj_follow`；同时 `joy_ctrl.cpp` 不再让未被底层使用的 `z_vec` 轴触发手柄运动发布，避免按 14 后或 z 轴噪声导致低层进入零速步态。~~

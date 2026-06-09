@@ -399,27 +399,42 @@ def build_local_map_from_depth(
         if np.any(front_obstacle):
             front_y = y_forward[front_obstacle]
             front_y_raw = y_forward_raw[front_obstacle]
-            front_nearest_m = float(np.min(front_y))
-            front_nearest_raw_m = float(np.min(front_y_raw))
+            front_min_m = float(np.min(front_y))
+            front_min_raw_m = float(np.min(front_y_raw))
             front_median_m = float(np.median(front_y))
             front_median_raw_m = float(np.median(front_y_raw))
             front_count = int(np.count_nonzero(front_obstacle))
+            front_percentile = float(np.clip(float(args.difficulty_front_percentile), 0.0, 100.0))
+            if front_count >= int(args.difficulty_front_min_points):
+                front_nearest_m = float(np.percentile(front_y, front_percentile))
+                front_nearest_raw_m = float(np.percentile(front_y_raw, front_percentile))
+                front_risk_valid = True
+            else:
+                front_nearest_m = float("inf")
+                front_nearest_raw_m = float("inf")
+                front_risk_valid = False
         else:
+            front_min_m = float("inf")
+            front_min_raw_m = float("inf")
             front_nearest_m = float("inf")
             front_nearest_raw_m = float("inf")
             front_median_m = float("nan")
             front_median_raw_m = float("nan")
             front_count = 0
+            front_risk_valid = False
         num_in_map = int(np.count_nonzero(in_map))
         num_after_self_mask = int(np.count_nonzero(usable_map))
         num_self_masked_points = int(np.count_nonzero(in_map & self_mask))
         num_obstacle_points = int(np.count_nonzero(is_obstacle))
     else:
+        front_min_m = float("inf")
+        front_min_raw_m = float("inf")
         front_nearest_m = float("inf")
         front_nearest_raw_m = float("inf")
         front_median_m = float("nan")
         front_median_raw_m = float("nan")
         front_count = 0
+        front_risk_valid = False
         num_in_map = 0
         num_after_self_mask = 0
         num_self_masked_points = 0
@@ -446,29 +461,52 @@ def build_local_map_from_depth(
     passable = passable_raw * policy_visible
     local_map_2ch = np.stack([occ, passable], axis=0).astype(np.float32)
     risk_blocked_map = np.maximum(occ, inflated_occ_f * policy_visible).astype(np.float32)
-    actor_difficulty = compute_actor_difficulty(
+    difficulty_stats = compute_actor_difficulty_stats(
         local_map_2ch,
         map_extent,
         float(args.difficulty_radius_m),
         visible_mask=policy_visible,
         unknown_cost=float(args.unknown_cost),
     )
+    actor_difficulty_map_raw = float(difficulty_stats["actor_difficulty"])
     front_distance_risk = compute_front_distance_risk(
         front_nearest_m,
         min_m=float(args.difficulty_front_min_m),
         max_m=float(args.difficulty_front_max_m),
     )
-    actor_difficulty = float(max(actor_difficulty, front_distance_risk))
+    actor_difficulty = float(max(actor_difficulty_map_raw, front_distance_risk))
     visible_count = max(float(np.count_nonzero(policy_visible > 0.5)), 1.0)
     blocked_visible = ((policy_visible > 0.5) & (passable < 0.5)).astype(np.float32)
+    front_spread_m = (
+        float(front_median_m - front_nearest_m)
+        if math.isfinite(float(front_median_m)) and math.isfinite(float(front_nearest_m))
+        else float("nan")
+    )
     debug_stats = {
         "map_forward_offset_m": map_forward_offset_m,
         "front_nearest_obstacle_m": front_nearest_m,
         "front_nearest_obstacle_raw_m": front_nearest_raw_m,
+        "front_min_obstacle_m": front_min_m,
+        "front_min_obstacle_raw_m": front_min_raw_m,
         "front_median_obstacle_m": front_median_m,
         "front_median_obstacle_raw_m": front_median_raw_m,
+        "front_spread_obstacle_m": front_spread_m,
         "front_obstacle_count": float(front_count),
+        "front_risk_valid": float(front_risk_valid),
+        "front_risk_percentile": float(args.difficulty_front_percentile),
+        "front_risk_min_points": float(args.difficulty_front_min_points),
+        "actor_difficulty_map_raw": actor_difficulty_map_raw,
+        "actor_difficulty_final": actor_difficulty,
         "front_distance_risk": front_distance_risk,
+        "nearest_blocked_m": float(difficulty_stats["nearest_blocked_m"]),
+        "near_risk": float(difficulty_stats["near_risk"]),
+        "weighted_blocked": float(difficulty_stats["weighted_blocked"]),
+        "visible_blocked_ratio": float(difficulty_stats["visible_blocked_ratio"]),
+        "visible_safety_blocked_ratio": float(difficulty_stats["visible_safety_blocked_ratio"]),
+        "visible_free_ratio": float(difficulty_stats["visible_free_ratio"]),
+        "visible_weighted_blocked": float(difficulty_stats["visible_weighted_blocked"]),
+        "visible_safety_weighted_blocked": float(difficulty_stats["visible_safety_weighted_blocked"]),
+        "unknown_weighted": float(difficulty_stats["unknown_weighted"]),
         "valid_depth_ratio": float(1.0 - depth_invalid_ratio),
         "num_sampled_points": float(depth_m.size),
         "num_valid_depth_points": float(z.size),
@@ -1105,6 +1143,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--difficulty_front_min_m", type=float, default=0.05)
     parser.add_argument("--difficulty_front_max_m", type=float, default=2.0)
     parser.add_argument("--difficulty_front_half_width_m", type=float, default=0.55)
+    parser.add_argument("--difficulty_front_min_points", type=int, default=30)
+    parser.add_argument("--difficulty_front_percentile", type=float, default=10.0)
     parser.add_argument("--near_field_stop_m", type=float, default=0.35)
     parser.add_argument("--near_field_warn_m", type=float, default=0.50)
     parser.add_argument("--near_field_min_forward_m", type=float, default=0.05)
@@ -1216,8 +1256,8 @@ def main() -> None:
                 target.bbox_xyxy,
                 target.depth_m,
             )
-            actor_difficulty_raw = float(actor_difficulty)
-            actor_difficulty = float(max(actor_difficulty_raw, float(near_field_stats["near_field_risk"])))
+            actor_difficulty_map_front = float(actor_difficulty)
+            actor_difficulty = float(max(actor_difficulty_map_front, float(near_field_stats["near_field_risk"])))
             obs = make_policy_ready_obs(
                 target,
                 local_map_2ch,
@@ -1236,13 +1276,6 @@ def main() -> None:
                 target_distance = target_distance_m(target)
                 target_too_close = bool(target.valid and target_distance < float(args.target_min_distance_m))
                 depth_invalid = bool(depth_invalid_ratio > float(args.depth_invalid_ratio_stop))
-                difficulty_stats = compute_actor_difficulty_stats(
-                    local_map_2ch,
-                    float(args.map_extent_m),
-                    float(args.difficulty_radius_m),
-                    visible_mask=policy_visible_map,
-                    unknown_cost=float(args.unknown_cost),
-                )
                 bbox_list = None if bbox is None else [int(v) for v in bbox.tolist()]
                 msg = {
                     "target_valid": bool(target.valid),
@@ -1281,13 +1314,21 @@ def main() -> None:
                     "target_depth_m": float(target.depth_m),
                     "target_vel": [float(target.v_right), float(target.v_forward)],
                     "actor_difficulty": float(actor_difficulty),
-                    "actor_difficulty_raw": float(actor_difficulty_raw),
+                    "actor_difficulty_final": float(actor_difficulty),
+                    "actor_difficulty_map_front": float(actor_difficulty_map_front),
+                    "actor_difficulty_map_raw": float(map_debug["actor_difficulty_map_raw"]),
                     "front_distance_risk": float(map_debug["front_distance_risk"]),
                     "front_nearest_obstacle_m": float(map_debug["front_nearest_obstacle_m"]),
                     "front_nearest_obstacle_raw_m": float(map_debug["front_nearest_obstacle_raw_m"]),
+                    "front_min_obstacle_m": float(map_debug["front_min_obstacle_m"]),
+                    "front_min_obstacle_raw_m": float(map_debug["front_min_obstacle_raw_m"]),
                     "front_median_obstacle_m": float(map_debug["front_median_obstacle_m"]),
                     "front_median_obstacle_raw_m": float(map_debug["front_median_obstacle_raw_m"]),
+                    "front_spread_obstacle_m": float(map_debug["front_spread_obstacle_m"]),
                     "front_obstacle_count": int(map_debug["front_obstacle_count"]),
+                    "front_risk_valid": bool(map_debug["front_risk_valid"]),
+                    "front_risk_percentile": float(map_debug["front_risk_percentile"]),
+                    "front_risk_min_points": int(map_debug["front_risk_min_points"]),
                     "near_field_risk": float(near_field_stats["near_field_risk"]),
                     "near_field_valid_ratio": float(near_field_stats["near_field_valid_ratio"]),
                     "near_field_obstacle_ratio": float(near_field_stats["near_field_obstacle_ratio"]),
@@ -1295,15 +1336,15 @@ def main() -> None:
                     "near_field_warning_ratio": float(near_field_stats["near_field_warning_ratio"]),
                     "near_field_min_depth_m": float(near_field_stats["near_field_min_depth_m"]),
                     "near_field_median_depth_m": float(near_field_stats["near_field_median_depth_m"]),
-                    "nearest_blocked_m": float(difficulty_stats["nearest_blocked_m"]),
-                    "near_risk": float(difficulty_stats["near_risk"]),
-                    "weighted_blocked": float(difficulty_stats["weighted_blocked"]),
-                    "visible_blocked_ratio": float(difficulty_stats["visible_blocked_ratio"]),
-                    "visible_safety_blocked_ratio": float(difficulty_stats["visible_safety_blocked_ratio"]),
-                    "visible_free_ratio": float(difficulty_stats["visible_free_ratio"]),
-                    "visible_weighted_blocked": float(difficulty_stats["visible_weighted_blocked"]),
-                    "visible_safety_weighted_blocked": float(difficulty_stats["visible_safety_weighted_blocked"]),
-                    "unknown_weighted": float(difficulty_stats["unknown_weighted"]),
+                    "nearest_blocked_m": float(map_debug["nearest_blocked_m"]),
+                    "near_risk": float(map_debug["near_risk"]),
+                    "weighted_blocked": float(map_debug["weighted_blocked"]),
+                    "visible_blocked_ratio": float(map_debug["visible_blocked_ratio"]),
+                    "visible_safety_blocked_ratio": float(map_debug["visible_safety_blocked_ratio"]),
+                    "visible_free_ratio": float(map_debug["visible_free_ratio"]),
+                    "visible_weighted_blocked": float(map_debug["visible_weighted_blocked"]),
+                    "visible_safety_weighted_blocked": float(map_debug["visible_safety_weighted_blocked"]),
+                    "unknown_weighted": float(map_debug["unknown_weighted"]),
                     "local_map_shape": list(obs["local_map_2ch"].shape),
                     "occ_mean": float(local_map_2ch[0].mean()),
                     "safety_mean": float(local_map_2ch[1].mean()),
@@ -1346,7 +1387,9 @@ def main() -> None:
                         "target_distance_m",
                         "local_map_2ch",
                         "actor_difficulty",
-                        "actor_difficulty_raw",
+                        "actor_difficulty_final",
+                        "actor_difficulty_map_front",
+                        "actor_difficulty_map_raw",
                         "front_distance_risk",
                         "front_nearest_obstacle_m",
                         "front_median_obstacle_m",

@@ -34,7 +34,7 @@ def _read_csv(path: str) -> List[Dict[str, str]]:
 def _write_csv(path: str, rows: Sequence[Dict], fieldnames: Sequence[str]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames), lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in fieldnames})
@@ -255,6 +255,10 @@ def _delta_lookup(rows: Sequence[Dict[str, str]], methods: Sequence[str]) -> Dic
         if method in methods and speed:
             grouped[(speed, method)].append(row)
     keys = [
+        "delta_y_r_mean",
+        "unsafe_conflict_delta_y_w_used_mean",
+        "unsafe_conflict_delta_y_r_mean",
+        "unsafe_conflict_delta_y_total_mean",
         "avoid_conflict_delta_y_w_used_mean",
         "avoid_conflict_delta_y_r_mean",
         "avoid_conflict_delta_y_total_mean",
@@ -267,6 +271,22 @@ def _delta_lookup(rows: Sequence[Dict[str, str]], methods: Sequence[str]) -> Dic
     return out
 
 
+def _risk_only_source_mode(args, rows: Sequence[Dict[str, str]]) -> str:
+    requested = str(getattr(args, "risk_only_source_mode", "auto")).strip().lower()
+    if requested == "trained":
+        return requested
+    for row in rows:
+        if (row.get("_method") or _infer_method(row)) != "risk_only":
+            continue
+        text = " ".join(
+            str(row.get(k, ""))
+            for k in ("source", "Source", "policy_variant", "method", "Method", "Notes")
+        ).lower()
+        if "risk_only_learnedw2" in text or "eval-time" in text or "forced" in text:
+            return "legacy_eval_only"
+    return "trained"
+
+
 def _build_table2(args) -> List[Dict]:
     aggregate_lookup = _aggregate_csv_lookup(
         [args.internal_aggregate_csv, args.risk_aggregate_csv, args.rule_aggregate_csv, args.learnedw_diag_aggregate_csv]
@@ -275,6 +295,7 @@ def _build_table2(args) -> List[Dict]:
     delta_rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
     delta_rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
     deltas = _delta_lookup(delta_rows, methods=["risk_only", "learnedw"])
+    risk_only_mode = _risk_only_source_mode(args, delta_rows)
 
     out: List[Dict] = []
     for speed in ("0.35", "0.50", "0.60"):
@@ -288,15 +309,21 @@ def _build_table2(args) -> List[Dict]:
                 "C_avoid Rate": _fmt(_safe_float(agg.get("C_avoid Rate Mean", ""))),
                 "CSI@C_avoid": _fmt(_safe_float(agg.get("CSI@C_avoid Mean", ""))),
                 "Delta y_w@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_w_used_mean", float("nan"))) if method in ("risk_only", "learnedw") else "N/A"
+                    _fmt(d.get("avoid_conflict_delta_y_w_used_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
+                ),
+                "Delta y_r (all)": (
+                    _fmt(d.get("delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
+                ),
+                "Delta y_r@C_unsafe": (
+                    _fmt(d.get("unsafe_conflict_delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
                 ),
                 "Delta y_r@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_r_mean", float("nan"))) if method in ("risk_only", "learnedw") else "N/A"
+                    _fmt(d.get("avoid_conflict_delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
                 ),
                 "Delta y_total@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_total_mean", float("nan"))) if method in ("risk_only", "learnedw") else "N/A"
+                    _fmt(d.get("avoid_conflict_delta_y_total_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
                 ),
-                "Notes": _table2_note(method),
+                "Notes": _table2_note(method, risk_only_mode=risk_only_mode),
             }
             out.append(row)
     fields = [
@@ -306,6 +333,8 @@ def _build_table2(args) -> List[Dict]:
         "C_avoid Rate",
         "CSI@C_avoid",
         "Delta y_w@C_avoid",
+        "Delta y_r (all)",
+        "Delta y_r@C_unsafe",
         "Delta y_r@C_avoid",
         "Delta y_total@C_avoid",
         "Notes",
@@ -315,9 +344,11 @@ def _build_table2(args) -> List[Dict]:
     return out
 
 
-def _table2_note(method: str) -> str:
+def _table2_note(method: str, risk_only_mode: str = "auto") -> str:
     if method == "risk_only":
-        return "Eval-time ablation; learned correction forced to zero."
+        if risk_only_mode == "trained":
+            return "trained from scratch with risk-difference term Δy_r only; no learned-w channel"
+        return "LEGACY eval-only source; rerun trained Risk-only before using this row."
     if method == "learnedw":
         return "Delta terms from learned-w diagnostic eval."
     if method in ("yonly", "geomw"):
@@ -422,6 +453,8 @@ def _build_table3(args) -> List[Dict]:
 
 def _plot_fig4(args, table1: Sequence[Dict]) -> None:
     try:
+        import matplotlib
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"[Warn] matplotlib unavailable; skipping Fig.4 ({exc})")
@@ -498,6 +531,8 @@ def _copy_fig5(args) -> None:
 
 def _write_manifest(args, table1: Sequence[Dict], table2: Sequence[Dict], table3: Sequence[Dict]) -> None:
     path = os.path.join(args.output_dir, "MANIFEST.md")
+    risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
+    risk_only_mode = _risk_only_source_mode(args, risk_rows)
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Final Paper Outputs\n\n")
         f.write("Generated files:\n\n")
@@ -532,10 +567,18 @@ def _write_manifest(args, table1: Sequence[Dict], table2: Sequence[Dict], table3
             ("learnedw_mechanism_dir", args.learnedw_mechanism_dir),
         ]:
             f.write(f"- {label}: `{src}` (mtime={_file_stamp(src)})\n")
+        f.write("\nRisk-only source mode:\n\n")
+        f.write(f"- requested: `{args.risk_only_source_mode}`\n")
+        f.write(f"- resolved: `{risk_only_mode}`\n")
         f.write("\nValidation checklist:\n\n")
         f.write("- Fig.4: legend must contain Y-only / Geom-w / Risk-only / Rule-Override / Learned-w.\n")
         f.write("- Table I: expected 15 rows = 3 speeds x 5 methods; Mono-PPO is intentionally excluded.\n")
-        f.write("- Table II: Risk-only Delta y_w@C_avoid should be 0.000; Learned-w should be non-zero.\n")
+        if risk_only_mode == "trained":
+            f.write("- Table II: Risk-only note should say trained from scratch; Delta y_r@C_avoid should be non-zero.\n")
+            f.write("- Table II: if trained Risk-only Delta y_r@C_avoid is 0.000, inspect the trained source and C_avoid window before using the table.\n")
+        else:
+            f.write("- Table II: current Risk-only source is legacy eval-only; rerun trained Risk-only and do not use this table in the paper.\n")
+        f.write("- Table II: Risk-only Delta y_w@C_avoid should be 0.000; Learned-w Delta y_w@C_avoid should be non-zero.\n")
         f.write("- Table III: expected stages 2, 3, and 4; one-row stage4 output is not a valid paper table.\n")
         f.write("- Source timestamps: verify all source paths are the intended final eval outputs.\n")
 
@@ -558,6 +601,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--risk_aggregate_csv",
         default="agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260601_223036.csv",
+    )
+    parser.add_argument(
+        "--risk_only_source_mode",
+        choices=("auto", "trained"),
+        default="auto",
+        help=(
+            "How to label Risk-only in Table II. Risk-only is expected to be a "
+            "from-scratch risk-difference-only policy."
+        ),
     )
     parser.add_argument(
         "--rule_all_csv",

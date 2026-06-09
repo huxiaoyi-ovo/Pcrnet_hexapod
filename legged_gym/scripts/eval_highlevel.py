@@ -510,30 +510,6 @@ def _compute_rule_override_cmd(
     }
 
 
-def _apply_risk_only_intervention(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Eval-only ablation: remove learned-w correction from control, keep diagnostics."""
-    gate_y = gate_diag.get("gate_y", gate_diag["gate_y_raw"])
-    delta_y_w_raw = gate_diag.get("w_support_correction", torch.zeros_like(gate_y))
-    delta_y_r = gate_diag.get("risk_diff_correction", torch.zeros_like(gate_y))
-    delta_y_w_used = torch.zeros_like(delta_y_w_raw)
-    delta_y_total = delta_y_w_used + delta_y_r
-    y_eff = torch.clamp(gate_y + delta_y_total, 0.0, 1.0)
-    cmd = y_eff.unsqueeze(-1) * gate_diag["cmd_f"] + (1.0 - y_eff.unsqueeze(-1)) * gate_diag["cmd_a"]
-
-    gate_diag["cmd"] = cmd
-    gate_diag["y_eff"] = y_eff
-    gate_diag["delta_y_w_raw"] = delta_y_w_raw
-    gate_diag["delta_y_w_used"] = delta_y_w_used
-    gate_diag["delta_y_r"] = delta_y_r
-    gate_diag["delta_y_total"] = delta_y_total
-    gate_diag["w_support_correction"] = delta_y_w_used
-    gate_diag["risk_only_delta_y_w_raw"] = delta_y_w_raw
-    gate_diag["risk_only_delta_y_w_used"] = delta_y_w_used
-    gate_diag["risk_only_delta_y_r"] = delta_y_r
-    gate_diag["risk_only_delta_y_total"] = delta_y_total
-    return gate_diag
-
-
 def _ensure_delta_y_diag(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     gate_y = gate_diag.get("gate_y", gate_diag["gate_y_raw"])
     zero = torch.zeros_like(gate_y)
@@ -689,6 +665,10 @@ class EpisodeAccumulator:
     unsafe_conflict_w_sum: float = 0.0
     unsafe_conflict_signed_w_sum: float = 0.0
     unsafe_conflict_delta_y_sum: float = 0.0
+    unsafe_conflict_delta_y_w_raw_sum: float = 0.0
+    unsafe_conflict_delta_y_w_used_sum: float = 0.0
+    unsafe_conflict_delta_y_r_sum: float = 0.0
+    unsafe_conflict_delta_y_total_sum: float = 0.0
     unsafe_non_conflict_steps: int = 0
     unsafe_non_conflict_delta_y_sum: float = 0.0
     unsafe_conflict_phase_approach_steps: int = 0
@@ -1124,8 +1104,6 @@ class EvalRunner:
                     learned_w=learned_w,
                 )
                 gate_diag = _ensure_delta_y_diag(gate_diag)
-                if bool(getattr(self.args, "risk_only", False)):
-                    gate_diag = _apply_risk_only_intervention(gate_diag)
                 if bool(getattr(self.args, "rule_override", False)):
                     cmd_rule, rule_info = _compute_rule_override_cmd(
                         self.args,
@@ -1858,6 +1836,10 @@ class EvalRunner:
                             ai.unsafe_conflict_w_sum += w_v
                             ai.unsafe_conflict_signed_w_sum += signed_w_v
                             ai.unsafe_conflict_delta_y_sum += delta_y_v
+                            ai.unsafe_conflict_delta_y_w_raw_sum += delta_y_w_raw_v
+                            ai.unsafe_conflict_delta_y_w_used_sum += delta_y_w_used_v
+                            ai.unsafe_conflict_delta_y_r_sum += delta_y_r_v
+                            ai.unsafe_conflict_delta_y_total_sum += delta_y_total_v
                             if priv_conflict_phase_v == 1:
                                 ai.unsafe_conflict_phase_approach_steps += 1
                                 ai.unsafe_conflict_phase_approach_w_sum += w_v
@@ -2546,6 +2528,22 @@ class EvalRunner:
                                 if ai.unsafe_conflict_steps > 0 else float("nan")
                             ),
                             "unsafe_conflict_delta_y_mean": unsafe_conflict_delta_y_mean,
+                            "unsafe_conflict_delta_y_w_raw_mean": (
+                                ai.unsafe_conflict_delta_y_w_raw_sum / unsafe_conflict_denom
+                                if ai.unsafe_conflict_steps > 0 else float("nan")
+                            ),
+                            "unsafe_conflict_delta_y_w_used_mean": (
+                                ai.unsafe_conflict_delta_y_w_used_sum / unsafe_conflict_denom
+                                if ai.unsafe_conflict_steps > 0 else float("nan")
+                            ),
+                            "unsafe_conflict_delta_y_r_mean": (
+                                ai.unsafe_conflict_delta_y_r_sum / unsafe_conflict_denom
+                                if ai.unsafe_conflict_steps > 0 else float("nan")
+                            ),
+                            "unsafe_conflict_delta_y_total_mean": (
+                                ai.unsafe_conflict_delta_y_total_sum / unsafe_conflict_denom
+                                if ai.unsafe_conflict_steps > 0 else float("nan")
+                            ),
                             "unsafe_non_conflict_delta_y_mean": unsafe_non_conflict_delta_y_mean,
                             "unsafe_conflict_suppression_index": (
                                 -unsafe_conflict_delta_y_mean
@@ -3109,6 +3107,18 @@ class EvalRunner:
                 "unsafe_conflict_w_mean": _weighted_step_mean(sub_rows, "unsafe_conflict_w_mean", "unsafe_conflict_steps"),
                 "unsafe_conflict_signed_w_mean": _weighted_step_mean(sub_rows, "unsafe_conflict_signed_w_mean", "unsafe_conflict_steps"),
                 "unsafe_conflict_delta_y_mean": delta_unsafe,
+                "unsafe_conflict_delta_y_w_raw_mean": _weighted_step_mean(
+                    sub_rows, "unsafe_conflict_delta_y_w_raw_mean", "unsafe_conflict_steps"
+                ),
+                "unsafe_conflict_delta_y_w_used_mean": _weighted_step_mean(
+                    sub_rows, "unsafe_conflict_delta_y_w_used_mean", "unsafe_conflict_steps"
+                ),
+                "unsafe_conflict_delta_y_r_mean": _weighted_step_mean(
+                    sub_rows, "unsafe_conflict_delta_y_r_mean", "unsafe_conflict_steps"
+                ),
+                "unsafe_conflict_delta_y_total_mean": _weighted_step_mean(
+                    sub_rows, "unsafe_conflict_delta_y_total_mean", "unsafe_conflict_steps"
+                ),
                 "unsafe_non_conflict_delta_y_mean": delta_non_unsafe,
                 "unsafe_conflict_suppression_index": -delta_unsafe if math.isfinite(delta_unsafe) else float("nan"),
                 "unsafe_conflict_selective_suppression": (
@@ -3299,6 +3309,10 @@ class EvalRunner:
         rule_follow_scale_at_avoid_vals = _clean([r.get("rule_follow_scale_at_avoid_conflict", float("nan")) for r in rows])
         rule_yaw_scale_at_avoid_vals = _clean([r.get("rule_yaw_scale_at_avoid_conflict", float("nan")) for r in rows])
         rule_follow_suppression_at_avoid_vals = _clean([r.get("rule_follow_suppression_at_avoid_conflict", float("nan")) for r in rows])
+        unsafe_delta_y_w_raw_vals = _clean([r.get("unsafe_conflict_delta_y_w_raw_mean", float("nan")) for r in rows])
+        unsafe_delta_y_w_used_vals = _clean([r.get("unsafe_conflict_delta_y_w_used_mean", float("nan")) for r in rows])
+        unsafe_delta_y_r_vals = _clean([r.get("unsafe_conflict_delta_y_r_mean", float("nan")) for r in rows])
+        unsafe_delta_y_total_vals = _clean([r.get("unsafe_conflict_delta_y_total_mean", float("nan")) for r in rows])
         avoid_delta_y_w_raw_vals = _clean([r.get("avoid_conflict_delta_y_w_raw_mean", float("nan")) for r in rows])
         avoid_delta_y_w_used_vals = _clean([r.get("avoid_conflict_delta_y_w_used_mean", float("nan")) for r in rows])
         avoid_delta_y_r_vals = _clean([r.get("avoid_conflict_delta_y_r_mean", float("nan")) for r in rows])
@@ -3459,6 +3473,18 @@ class EvalRunner:
             ),
             "rule_follow_suppression_at_avoid_conflict": (
                 float(np.mean(rule_follow_suppression_at_avoid_vals)) if rule_follow_suppression_at_avoid_vals else float("nan")
+            ),
+            "unsafe_conflict_delta_y_w_raw_mean": (
+                float(np.mean(unsafe_delta_y_w_raw_vals)) if unsafe_delta_y_w_raw_vals else float("nan")
+            ),
+            "unsafe_conflict_delta_y_w_used_mean": (
+                float(np.mean(unsafe_delta_y_w_used_vals)) if unsafe_delta_y_w_used_vals else float("nan")
+            ),
+            "unsafe_conflict_delta_y_r_mean": (
+                float(np.mean(unsafe_delta_y_r_vals)) if unsafe_delta_y_r_vals else float("nan")
+            ),
+            "unsafe_conflict_delta_y_total_mean": (
+                float(np.mean(unsafe_delta_y_total_vals)) if unsafe_delta_y_total_vals else float("nan")
             ),
             "avoid_conflict_delta_y_w_raw_mean": (
                 float(np.mean(avoid_delta_y_w_raw_vals)) if avoid_delta_y_w_raw_vals else float("nan")
@@ -3704,21 +3730,19 @@ class EvalRunner:
                     if bool(getattr(self.args, "mono_ppo", False))
                     else "rule_override"
                     if bool(getattr(self.args, "rule_override", False))
-                    else "risk_only"
-                    if bool(getattr(self.args, "risk_only", False))
-                    else {"none": "yonly", "geom": "geomw", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
+                    else {"none": "yonly", "geom": "geomw", "risk_only": "risk_only", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
                 ),
-                "risk_only": bool(getattr(self.args, "risk_only", False)),
+                "risk_only": bool(th.is_risk_only_mode(str(self.args.w_mode))),
                 "loaded_checkpoint_variant": (
                     self.policy_meta.get("policy_variant", self.policy_meta.get("trained_w_mode", None))
                     if isinstance(self.policy_meta, dict) else None
                 ),
                 "uses_learned_w_output": bool(th.is_learned_w_mode(str(self.args.w_mode))),
                 "uses_learned_w_for_control": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode)) and not getattr(self.args, "risk_only", False)
+                    th.is_learned_w_mode(str(self.args.w_mode))
                 ),
-                "uses_risk_diff_correction": bool(th.is_learnedw2_mode(str(self.args.w_mode))),
-                "delta_y_w_forced_zero": bool(getattr(self.args, "risk_only", False)),
+                "uses_risk_diff_correction": bool(th.is_learnedw2_mode(str(self.args.w_mode)) or th.is_risk_only_mode(str(self.args.w_mode))),
+                "delta_y_w_forced_zero": False,
                 "mono_ppo": bool(getattr(self.args, "mono_ppo", False)),
                 "uses_follow_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
                 "uses_avoid_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
@@ -3937,6 +3961,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "rule_follow_scale_at_avoid_conflict",
         "rule_yaw_scale_at_avoid_conflict",
         "rule_follow_suppression_at_avoid_conflict",
+        "unsafe_conflict_delta_y_w_raw_mean",
+        "unsafe_conflict_delta_y_w_used_mean",
+        "unsafe_conflict_delta_y_r_mean",
+        "unsafe_conflict_delta_y_total_mean",
         "avoid_conflict_delta_y_w_raw_mean",
         "avoid_conflict_delta_y_w_used_mean",
         "avoid_conflict_delta_y_r_mean",
@@ -4383,9 +4411,10 @@ def parse_args():
     w_group = parser.add_mutually_exclusive_group()
     w_group.add_argument("--yonly", action="store_true", help="evaluate MoE-y without w")
     w_group.add_argument("--wgeom", action="store_true", help="evaluate MoE-y with geometric w")
+    w_group.add_argument("--wriskonly", action="store_true", help="evaluate trained Risk-only baseline")
     w_group.add_argument("--wlearned", action="store_true", help="evaluate MoE-y with learned w")
     w_group.add_argument("--wlearned2", action="store_true", help="evaluate learnedw2 signed conflict prior")
-    parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "learned", "learnedw2"])
+    parser.add_argument("--w_mode", type=str, default=None, choices=["none", "geom", "risk_only", "learned", "learnedw2"])
     parser.add_argument("--w_tau", type=float, default=0.25)
     parser.add_argument("--w_blend_mode", type=str, default="multiply", choices=["multiply", "mix"])
     parser.add_argument("--signed_w_lambda", type=float, default=0.30)
@@ -4395,7 +4424,6 @@ def parse_args():
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
-    parser.add_argument("--risk_only", action="store_true", help="eval-only ablation: remove learned-w correction and keep only explicit risk-difference correction")
     parser.add_argument("--rule_k", type=float, default=8.0)
     parser.add_argument("--rule_margin", type=float, default=0.10)
     parser.add_argument("--rule_hard_thr", type=float, default=0.45)
@@ -4492,19 +4520,17 @@ def parse_args():
             parser.error("--mono_ppo 只支持 --skill moe")
         if args.rule_override:
             parser.error("--mono_ppo 不允许同时启用 --rule_override")
-        if args.risk_only:
-            parser.error("--mono_ppo 不允许同时启用 --risk_only")
-        if any((args.yonly, args.wgeom, args.wlearned, args.wlearned2)):
-            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if any((args.yonly, args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wriskonly/--wlearned/--wlearned2")
         if args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
         selected_w_mode = "none"
-    elif bool(getattr(args, "risk_only", False)) and bool(getattr(args, "rule_override", False)):
-        parser.error("--risk_only 不允许同时启用 --rule_override")
     elif args.yonly:
         selected_w_mode = "none"
     elif args.wgeom:
         selected_w_mode = "geom"
+    elif args.wriskonly:
+        selected_w_mode = "risk_only"
     elif args.wlearned:
         selected_w_mode = "learned"
     elif args.wlearned2:
@@ -4515,18 +4541,16 @@ def parse_args():
         selected_w_mode, reason = ph._infer_play_w_mode_from_ckpt(args.pcr_ckpt)
         if selected_w_mode is None:
             parser.error(
-                f"无法从 --pcr_ckpt 自动识别策略模式：{reason}；请显式加 --yonly / --wgeom / --wlearned / --wlearned2"
+                f"无法从 --pcr_ckpt 自动识别策略模式：{reason}；请显式加 --yonly / --wgeom / --wriskonly / --wlearned / --wlearned2"
             )
         print(f"[Eval] auto w_mode={selected_w_mode} ({reason})")
         if selected_w_mode == "none" and "actor_output_dim=1 without geom metadata" in reason:
             print("[Eval] 如果这是 geom-w checkpoint，请显式加 --wgeom；一维 ckpt 不能仅靠网络结构区分 yonly/geom-w。")
     if args.w_mode is not None and args.w_mode != selected_w_mode:
         parser.error(
-            f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'learned': 'wlearned', 'learnedw2': 'wlearned2'}[selected_w_mode] } 不一致"
+            f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'risk_only': 'wriskonly', 'learned': 'wlearned', 'learnedw2': 'wlearned2'}[selected_w_mode] } 不一致"
         )
     args.w_mode = selected_w_mode
-    if bool(getattr(args, "risk_only", False)) and not th.is_learnedw2_mode(str(args.w_mode)):
-        print("[Warn] --risk_only is intended for learnedw2 checkpoints; current w_mode is not learnedw2.", flush=True)
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
     required_ckpts = ("lowlevel_ckpt",) if bool(getattr(args, "mono_ppo", False)) else ("avoid_ckpt", "lowlevel_ckpt")
@@ -4583,8 +4607,6 @@ def main():
             f"h{float(args.rule_hard_thr):g}_smin{float(args.rule_s_min):g}_"
             f"slow{float(args.rule_slow_ratio):g}_yawloss{float(args.rule_yaw_keep_loss):g}"
         )
-    elif bool(getattr(args, "risk_only", False)):
-        variant_tag = f"risk_only_{th.format_pcr_variant_tag(args)}"
     else:
         variant_tag = th.format_pcr_variant_tag(args)
     out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")

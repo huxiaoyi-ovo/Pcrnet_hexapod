@@ -1106,6 +1106,10 @@ def resolve_moe_gate_pcr(
     risk_diff_correction = torch.zeros_like(gate_y)
     if w_mode == "none":
         y_eff = gate_y
+    elif w_mode == "risk_only":
+        signed_gamma = float(getattr(args, "signed_w_gamma_risk", 0.15))
+        risk_diff_correction = signed_gamma * (risk_a - risk_f)
+        y_eff = torch.clamp(gate_y + risk_diff_correction, 0.0, 1.0)
     elif is_learnedw2_mode(w_mode):
         signed_lambda = float(getattr(args, "signed_w_lambda", 0.30))
         signed_gamma = float(getattr(args, "signed_w_gamma_risk", 0.15))
@@ -1262,6 +1266,8 @@ def format_pcr_variant_tag(args: argparse.Namespace) -> str:
         return skill or "policy"
     if w_mode in ("none", ""):
         return "yonly"
+    if w_mode == "risk_only":
+        return f"risk_only_gam{float(getattr(args, 'signed_w_gamma_risk', 0.15)):g}"
     if w_mode == "geom":
         return f"geomw_w{float(getattr(args, 'w_tau', 0.25)):g}"
     if w_mode == "learned":
@@ -1300,8 +1306,8 @@ def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.Argu
         parser.error("--pcr_w_aux_enable 与 --no_pcr_w_aux 不能同时使用")
     if bool(getattr(args, "mono_ppo", False)):
         explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
-        if any(bool(getattr(args, key, False)) for key in ("yonly", "wgeom", "wlearned", "wlearned2")):
-            parser.error("--mono_ppo 是外部 baseline，不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if any(bool(getattr(args, key, False)) for key in ("yonly", "wgeom", "wriskonly", "wlearned", "wlearned2")):
+            parser.error("--mono_ppo 是外部 baseline，不允许同时指定 --yonly/--wgeom/--wriskonly/--wlearned/--wlearned2")
         if ("w_mode" in explicit) and str(getattr(args, "w_mode", "none")).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须保持 none")
         if bool(getattr(args, "pcr_w_aux_enable", False)):
@@ -1313,6 +1319,8 @@ def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.Argu
         selected = "none"
     elif bool(getattr(args, "wgeom", False)):
         selected = "geom"
+    elif bool(getattr(args, "wriskonly", False)):
+        selected = "risk_only"
     elif bool(getattr(args, "wlearned", False)):
         selected = "learned"
     elif bool(getattr(args, "wlearned2", False)):
@@ -1321,11 +1329,13 @@ def apply_train_w_alias_defaults(args: argparse.Namespace, parser: argparse.Argu
     explicit = getattr(args, "_cli_explicit_arg_values", {}) or {}
     if selected is not None and ("w_mode" in explicit) and str(getattr(args, "w_mode", "")) != selected:
         parser.error(
-            f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一"
+            f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wriskonly / --wlearned / --wlearned2 之一"
         )
     if selected is not None:
         args.w_mode = selected
     effective_mode = str(getattr(args, "w_mode", "none")).lower()
+    if effective_mode == "risk_only" and bool(getattr(args, "pcr_w_aux_enable", False)):
+        parser.error("--wriskonly / --w_mode risk_only 不允许启用 pcr_w_aux；该 baseline 必须无 learned-w 通道")
     if effective_mode in ("learned", "learnedw2") and (not bool(getattr(args, "no_pcr_w_aux", False))) and ("pcr_w_aux_enable" not in explicit):
         args.pcr_w_aux_enable = True
     if effective_mode == "learnedw2":
@@ -1429,6 +1439,7 @@ LEARNED_W_FEATURE_DIM = 16
 LEARNED_W_OBS_CONTRACT_VERSION = "learned_w_cmd_conflict_no_priv_row_v3"
 FUSION_FORMULA_VERSION = "pcr_shared_w_multiply_v1"
 LEARNED_W2_FUSION_FORMULA_VERSION = "pcr_learnedw2_signed_conflict_prior_v2"
+RISK_ONLY_FUSION_FORMULA_VERSION = "pcr_risk_only_delta_y_r_v1"
 
 
 def is_learned_w_mode(w_mode: Any) -> bool:
@@ -1439,8 +1450,16 @@ def is_learnedw2_mode(w_mode: Any) -> bool:
     return str(w_mode).strip().lower() == "learnedw2"
 
 
+def is_risk_only_mode(w_mode: Any) -> bool:
+    return str(w_mode).strip().lower() == "risk_only"
+
+
 def get_pcr_fusion_formula_version(w_mode: Any) -> str:
-    return LEARNED_W2_FUSION_FORMULA_VERSION if is_learnedw2_mode(w_mode) else FUSION_FORMULA_VERSION
+    if is_learnedw2_mode(w_mode):
+        return LEARNED_W2_FUSION_FORMULA_VERSION
+    if is_risk_only_mode(w_mode):
+        return RISK_ONLY_FUSION_FORMULA_VERSION
+    return FUSION_FORMULA_VERSION
 
 
 CHECKPOINT_CONTRACT_KEY_PATHS = (
@@ -1688,13 +1707,14 @@ def collect_runtime_observation_contract(
     high_level_dt = float(getattr(env, "high_level_dt", 0.0))
     w_mode = str(getattr(args, "w_mode", "none")).lower()
     learned_w_enabled = bool(is_learned_w_mode(w_mode) and getattr(args, "skill", "follow") == "moe")
+    risk_only_enabled = bool(is_risk_only_mode(w_mode) and getattr(args, "skill", "follow") == "moe")
     return {
         "use_avoid_local_map": bool(getattr(args, "skill", "follow") in ("avoid", "moe")),
         "gate_learned_w_feature_dim": LEARNED_W_FEATURE_DIM if learned_w_enabled else 0,
         "gate_learned_w_contract_version": LEARNED_W_OBS_CONTRACT_VERSION if learned_w_enabled else "none",
         "gate_uses_cmd_features": learned_w_enabled,
-        "gate_uses_riskF": learned_w_enabled,
-        "gate_uses_riskA": learned_w_enabled,
+        "gate_uses_riskF": learned_w_enabled or risk_only_enabled,
+        "gate_uses_riskA": learned_w_enabled or risk_only_enabled,
         "gate_uses_cmd_cos": learned_w_enabled,
         "gate_uses_conflict_score": learned_w_enabled,
         "gate_uses_row_not_released": False,
@@ -5782,6 +5802,7 @@ def train(args):
     is_gate = (skill == "moe") and (not is_mono_ppo)
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
     gate_learned_w_enabled = bool(is_gate and is_learned_w_mode(getattr(args, "w_mode", "none")))
+    gate_risk_only_enabled = bool(is_gate and is_risk_only_mode(getattr(args, "w_mode", "none")))
     action_dim = (2 if gate_learned_w_enabled else 1) if is_gate else 3
     policy_goal_dim = goal_dim + (LEARNED_W_FEATURE_DIM if gate_learned_w_enabled else 0)
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
@@ -5935,8 +5956,9 @@ def train(args):
         )
         meta["fusion_formula_version"] = "none" if is_mono_ppo else get_pcr_fusion_formula_version(getattr(args, "w_mode", "none"))
         meta["uses_cmd_features"] = bool(gate_learned_w_enabled)
-        meta["uses_riskF"] = bool(gate_learned_w_enabled)
-        meta["uses_riskA"] = bool(gate_learned_w_enabled)
+        meta["uses_riskF"] = bool(gate_learned_w_enabled or gate_risk_only_enabled)
+        meta["uses_riskA"] = bool(gate_learned_w_enabled or gate_risk_only_enabled)
+        meta["uses_risk_diff_correction"] = bool(gate_risk_only_enabled or is_learnedw2_mode(getattr(args, "w_mode", "none")))
         meta["uses_cmd_cos"] = bool(gate_learned_w_enabled)
         meta["uses_conflict_score"] = bool(gate_learned_w_enabled)
         meta["uses_row_not_released"] = False
@@ -5959,7 +5981,7 @@ def train(args):
         meta["w_aux_uses_row_not_released"] = bool(
             gate_learned_w_enabled and getattr(args, "pcr_w_aux_enable", False)
         )
-        meta["pcr_w_aux_enable"] = False if is_mono_ppo else bool(getattr(args, "pcr_w_aux_enable", False))
+        meta["pcr_w_aux_enable"] = False if (is_mono_ppo or gate_risk_only_enabled) else bool(getattr(args, "pcr_w_aux_enable", False))
         meta["pcr_w_aux_coef"] = 0.0 if is_mono_ppo else float(getattr(args, "pcr_w_aux_coef", 0.0))
         meta["pcr_w_aux_risk_f_threshold"] = float(getattr(args, "pcr_w_aux_risk_f_threshold", 0.4))
         meta["pcr_w_aux_risk_margin"] = float(getattr(args, "pcr_w_aux_risk_margin", 0.10))
@@ -9452,13 +9474,15 @@ if __name__ == "__main__":
                         help='Gate 训练早期启用安全 clamp')
     parser.add_argument('--gate_safe_max', type=float, default=0.3,
                         help='安全 clamp 的最大 y 值')
-    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'learned', 'learnedw2'],
-                        help='PCR w 模式：learned 保留旧 suppression 公式；learnedw2 使用 signed conflict prior 公式')
+    parser.add_argument('--w_mode', type=str, default='none', choices=['none', 'geom', 'risk_only', 'learned', 'learnedw2'],
+                        help='PCR w 模式：risk_only 只使用风险差项；learnedw2 使用 signed conflict prior 公式')
     w_alias_group = parser.add_mutually_exclusive_group()
     w_alias_group.add_argument('--yonly', action='store_true',
                                help='PCR MoE-y 训练别名，等价于 --w_mode none')
     w_alias_group.add_argument('--wgeom', action='store_true',
                                help='PCR geom-w 训练别名，等价于 --w_mode geom')
+    w_alias_group.add_argument('--wriskonly', action='store_true',
+                               help='PCR Risk-only 训练别名，等价于 --w_mode risk_only')
     w_alias_group.add_argument('--wlearned', action='store_true',
                                help='PCR learned-w 训练别名，默认同时启用 row-aware w_aux')
     w_alias_group.add_argument('--wlearned2', action='store_true',

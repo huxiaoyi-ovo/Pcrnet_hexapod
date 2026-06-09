@@ -71,12 +71,14 @@ def _selected_play_w_alias(args) -> Optional[str]:
         selected.append("none")
     if bool(getattr(args, "wgeom", False)):
         selected.append("geom")
+    if bool(getattr(args, "wriskonly", False)):
+        selected.append("risk_only")
     if bool(getattr(args, "wlearned", False)):
         selected.append("learned")
     if bool(getattr(args, "wlearned2", False)):
         selected.append("learnedw2")
     if len(selected) > 1:
-        raise ValueError("请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一")
+        raise ValueError("请只保留 --yonly / --wgeom / --wriskonly / --wlearned / --wlearned2 之一")
     return selected[0] if selected else None
 
 
@@ -95,7 +97,7 @@ def _infer_play_w_mode_from_ckpt(path: Optional[str]) -> Tuple[Optional[str], st
             if value is None:
                 continue
             value = str(value).strip().lower()
-            if value in ("none", "geom", "learned", "learnedw2"):
+            if value in ("none", "geom", "risk_only", "learned", "learnedw2"):
                 meta_mode = value
                 break
             if value in ("yonly", "moe-y"):
@@ -110,6 +112,8 @@ def _infer_play_w_mode_from_ckpt(path: Optional[str]) -> Tuple[Optional[str], st
     if actor_dim == 1:
         if meta_mode == "geom":
             return "geom", "metadata trained_w_mode=geom"
+        if meta_mode == "risk_only":
+            return "risk_only", "metadata trained_w_mode=risk_only"
         if meta_mode in ("none", "learned", "learnedw2"):
             return meta_mode, f"metadata trained_w_mode={meta_mode}"
         return "none", "actor_output_dim=1 without geom metadata; default yonly"
@@ -141,7 +145,7 @@ def _apply_play_common_defaults(args, raw_argv) -> None:
     if selected is not None:
         if w_mode_explicit and str(getattr(args, "w_mode", "none")).lower() != selected:
             raise ValueError(
-                f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wlearned / --wlearned2 之一"
+                f"--w_mode={args.w_mode} 与策略别名不一致；请只保留 --yonly / --wgeom / --wriskonly / --wlearned / --wlearned2 之一"
             )
         args.w_mode = selected
         _record_play_runtime_override(args, "w_mode", selected)
@@ -2074,10 +2078,11 @@ def parse_args():
         default=None,
         help="(V7) 固定风险预算旋钮 beta：0=快/激进，1=安全/保守；None=禁用（保持旧行为）",
     )
-    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom", "learned", "learnedw2"], help="PCR w 模式")
+    parser.add_argument("--w_mode", type=str, default="none", choices=["none", "geom", "risk_only", "learned", "learnedw2"], help="PCR w 模式")
     w_alias_group = parser.add_mutually_exclusive_group()
     w_alias_group.add_argument("--yonly", action="store_true", help="PCR MoE-y 回放别名，等价于 --w_mode none")
     w_alias_group.add_argument("--wgeom", action="store_true", help="PCR geom-w 回放别名，等价于 --w_mode geom")
+    w_alias_group.add_argument("--wriskonly", action="store_true", help="PCR Risk-only 回放别名，等价于 --w_mode risk_only")
     w_alias_group.add_argument("--wlearned", action="store_true", help="PCR learned-w 回放别名，等价于 --w_mode learned")
     w_alias_group.add_argument("--wlearned2", action="store_true", help="PCR learnedw2 回放别名，等价于 --w_mode learnedw2")
     parser.add_argument("--w_tau", type=float, default=0.25, help="w_geom 衰减尺度（米）")
@@ -2300,8 +2305,8 @@ def parse_args():
             parser.error("--mono_ppo 只支持 --skill moe")
         if args.mode != "teacher":
             parser.error("--mono_ppo 当前只支持 --mode teacher")
-        if any((args.yonly, args.wgeom, args.wlearned, args.wlearned2)):
-            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wlearned/--wlearned2")
+        if any((args.yonly, args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wriskonly/--wlearned/--wlearned2")
         if str(getattr(args, "w_mode", "none")).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
 
