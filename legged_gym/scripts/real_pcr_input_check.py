@@ -30,6 +30,20 @@ SIM_ROBOT_SWING_ABDUCTION_M = 0.15
 SIM_FIXED_LAYOUT_ROBOT_CLEARANCE_M = 0.27
 
 
+def resolve_target_forward_offset_m(args: argparse.Namespace) -> float:
+    value = getattr(args, "target_forward_offset_m", None)
+    if value is None:
+        value = args.camera_forward_offset_m
+    return float(value)
+
+
+def resolve_map_forward_offset_m(args: argparse.Namespace) -> float:
+    value = getattr(args, "map_forward_offset_m", None)
+    if value is None:
+        value = args.camera_forward_offset_m
+    return float(value)
+
+
 @dataclass
 class TargetEstimate:
     valid: bool
@@ -43,6 +57,7 @@ class TargetEstimate:
     bbox_depth_median_m: float = float("nan")
     target_u: int = -1
     target_v: int = -1
+    target_y_forward_raw_m: float = float("nan")
     target_x_cam: float = float("nan")
     target_y_cam: float = float("nan")
     target_z_cam: float = float("nan")
@@ -93,7 +108,7 @@ class TargetTracker:
         self.conf = float(args.yolo_conf)
         self.pitch_down_rad = math.radians(float(args.camera_pitch_down_deg))
         self.camera_height_m = float(args.camera_height_m)
-        self.forward_offset_m = float(args.camera_forward_offset_m)
+        self.forward_offset_m = resolve_target_forward_offset_m(args)
         self.depth_patch = int(args.target_depth_patch)
         self.target_depth_mode = str(args.target_depth_mode)
         self.target_depth_roi_width_frac = float(args.target_depth_roi_width_frac)
@@ -224,6 +239,7 @@ class TargetTracker:
             camera_height_m=self.camera_height_m,
             forward_offset_m=self.forward_offset_m,
         )
+        y_forward_raw = y_forward - self.forward_offset_m
         x_right_f = self.f_x.filter(x_right)
         y_forward_f = self.f_y.filter(y_forward)
 
@@ -249,6 +265,7 @@ class TargetTracker:
             bbox_depth_median_m=dist,
             target_u=u,
             target_v=v,
+            target_y_forward_raw_m=float(y_forward_raw),
             target_x_cam=float(pt_c[0]),
             target_y_cam=float(pt_c[1]),
             target_z_cam=float(pt_c[2]),
@@ -304,6 +321,7 @@ def build_local_map_from_depth(
     map_extent = float(args.map_extent_m)
     cell = map_extent / float(map_size)
     robot_clearance_m = resolve_robot_clearance_m(args)
+    map_forward_offset_m = resolve_map_forward_offset_m(args)
     radius_cells = clearance_radius_cells(robot_clearance_m, cell)
     policy_visible = build_policy_visible_mask(args, intrin, depth_raw.shape[1], depth_raw.shape[0]).astype(np.float32)
     occ = np.zeros((map_size, map_size), dtype=np.float32)
@@ -331,7 +349,8 @@ def build_local_map_from_depth(
         cos_p = math.cos(math.radians(float(args.camera_pitch_down_deg)))
         sin_p = math.sin(math.radians(float(args.camera_pitch_down_deg)))
         x_right = x_cam
-        y_forward = z * cos_p - y_cam * sin_p + float(args.camera_forward_offset_m)
+        y_forward_raw = z * cos_p - y_cam * sin_p
+        y_forward = y_forward_raw + map_forward_offset_m
         down_body = y_cam * cos_p + z * sin_p
         height = float(args.camera_height_m) - down_body
 
@@ -379,12 +398,17 @@ def build_local_map_from_depth(
         )
         if np.any(front_obstacle):
             front_y = y_forward[front_obstacle]
+            front_y_raw = y_forward_raw[front_obstacle]
             front_nearest_m = float(np.min(front_y))
+            front_nearest_raw_m = float(np.min(front_y_raw))
             front_median_m = float(np.median(front_y))
+            front_median_raw_m = float(np.median(front_y_raw))
             front_count = int(np.count_nonzero(front_obstacle))
         else:
             front_nearest_m = float("inf")
+            front_nearest_raw_m = float("inf")
             front_median_m = float("nan")
+            front_median_raw_m = float("nan")
             front_count = 0
         num_in_map = int(np.count_nonzero(in_map))
         num_after_self_mask = int(np.count_nonzero(usable_map))
@@ -392,7 +416,9 @@ def build_local_map_from_depth(
         num_obstacle_points = int(np.count_nonzero(is_obstacle))
     else:
         front_nearest_m = float("inf")
+        front_nearest_raw_m = float("inf")
         front_median_m = float("nan")
+        front_median_raw_m = float("nan")
         front_count = 0
         num_in_map = 0
         num_after_self_mask = 0
@@ -436,8 +462,11 @@ def build_local_map_from_depth(
     visible_count = max(float(np.count_nonzero(policy_visible > 0.5)), 1.0)
     blocked_visible = ((policy_visible > 0.5) & (passable < 0.5)).astype(np.float32)
     debug_stats = {
+        "map_forward_offset_m": map_forward_offset_m,
         "front_nearest_obstacle_m": front_nearest_m,
+        "front_nearest_obstacle_raw_m": front_nearest_raw_m,
         "front_median_obstacle_m": front_median_m,
+        "front_median_obstacle_raw_m": front_median_raw_m,
         "front_obstacle_count": float(front_count),
         "front_distance_risk": front_distance_risk,
         "valid_depth_ratio": float(1.0 - depth_invalid_ratio),
@@ -490,6 +519,7 @@ def compute_near_field_risk(
     valid = (roi >= float(args.min_depth_m)) & (roi <= float(args.near_field_warn_m))
     valid_ratio = float(np.mean(valid.astype(np.float32))) if roi.size > 0 else 0.0
     if np.any(valid):
+        map_forward_offset_m = resolve_map_forward_offset_m(args)
         yy, xx = np.mgrid[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
         xx_v = xx[valid].astype(np.float32)
         yy_v = yy[valid].astype(np.float32)
@@ -499,7 +529,7 @@ def compute_near_field_risk(
         cos_p = math.cos(math.radians(float(args.camera_pitch_down_deg)))
         sin_p = math.sin(math.radians(float(args.camera_pitch_down_deg)))
         x_right = x_cam
-        y_forward = z * cos_p - y_cam * sin_p + float(args.camera_forward_offset_m)
+        y_forward = z * cos_p - y_cam * sin_p + map_forward_offset_m
         down_body = y_cam * cos_p + z * sin_p
         height = float(args.camera_height_m) - down_body
         near_obstacle = (
@@ -581,7 +611,7 @@ def build_policy_visible_mask(args: argparse.Namespace, intrin, image_width: int
     pitch = math.radians(float(args.camera_pitch_down_deg))
     cos_p = math.cos(pitch)
     sin_p = math.sin(pitch)
-    y_forward_from_camera = grid_y - float(args.camera_forward_offset_m)
+    y_forward_from_camera = grid_y - resolve_map_forward_offset_m(args)
     down_body = float(args.camera_height_m)
     z_cam = cos_p * y_forward_from_camera + sin_p * down_body
     y_cam = -sin_p * y_forward_from_camera + cos_p * down_body
@@ -1044,6 +1074,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--camera_pitch_down_deg", type=float, default=10.0)
     parser.add_argument("--camera_forward_offset_m", type=float, default=0.30)
+    parser.add_argument("--target_forward_offset_m", type=float, default=None)
+    parser.add_argument("--map_forward_offset_m", type=float, default=None)
     parser.add_argument("--camera_height_m", type=float, default=0.45)
     parser.add_argument("--target_depth_mode", type=str, default="roi", choices=["roi", "point"])
     parser.add_argument("--target_depth_roi_width_frac", type=float, default=0.35)
@@ -1226,6 +1258,9 @@ def main() -> None:
                     "target_bbox_depth_valid_ratio": float(target.bbox_depth_valid_ratio),
                     "target_bbox_depth_median_m": float(target.bbox_depth_median_m),
                     "target_pixel_uv": [int(target.target_u), int(target.target_v)],
+                    "target_y_forward_raw_m": float(target.target_y_forward_raw_m),
+                    "target_forward_offset_m": float(resolve_target_forward_offset_m(args)),
+                    "map_forward_offset_m": float(resolve_map_forward_offset_m(args)),
                     "target_camera_xyz_m": [
                         float(target.target_x_cam),
                         float(target.target_y_cam),
@@ -1249,7 +1284,9 @@ def main() -> None:
                     "actor_difficulty_raw": float(actor_difficulty_raw),
                     "front_distance_risk": float(map_debug["front_distance_risk"]),
                     "front_nearest_obstacle_m": float(map_debug["front_nearest_obstacle_m"]),
+                    "front_nearest_obstacle_raw_m": float(map_debug["front_nearest_obstacle_raw_m"]),
                     "front_median_obstacle_m": float(map_debug["front_median_obstacle_m"]),
+                    "front_median_obstacle_raw_m": float(map_debug["front_median_obstacle_raw_m"]),
                     "front_obstacle_count": int(map_debug["front_obstacle_count"]),
                     "near_field_risk": float(near_field_stats["near_field_risk"]),
                     "near_field_valid_ratio": float(near_field_stats["near_field_valid_ratio"]),
@@ -1358,8 +1395,19 @@ def main() -> None:
                     args,
                 )
                 cv2.imshow(window_name, prepare_display_image(debug, args))
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
                     break
+                try:
+                    window_visible = cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE)
+                except cv2.error:
+                    window_visible = 0.0
+                if window_visible < 1.0:
+                    args.show = False
+                    try:
+                        cv2.destroyWindow(window_name)
+                    except cv2.error:
+                        pass
             frame_idx += 1
     finally:
         pipe.stop()

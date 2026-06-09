@@ -2141,3 +2141,7 @@
 ## 2026-06-03 PCR 实机低层频率对齐
 
 - [x] Must: 将 PCR 接入改为 `pcr_realplay` 10Hz 缓存速度、`run_agent2.py` 50Hz 均匀执行低层策略；PCR 路径禁用 `/sita_des` 三连发，手柄路径保留原始三连发与抢占语义。
+
+## 2026-06-09 PCR 实机目标/障碍坐标语义对齐
+
+- [x] Must: 将实机目标前向 offset 与障碍地图前向 offset 拆开，目标状态对齐 robot base，局部障碍图对齐 camera mount，避免障碍距离被错误前移导致避障触发偏晚。

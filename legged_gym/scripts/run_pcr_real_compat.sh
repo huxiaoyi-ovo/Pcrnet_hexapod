@@ -43,7 +43,7 @@ PCR_DEVICE="cpu"
 RATE_HZ="10"
 FILE_BRIDGE=0
 OBS_FILE="${WORKSPACE_DIR}/outputs/real_d435i_check/latest_obs.json"
-SHOW_CAMERA=0
+SHOW_CAMERA=1
 PUBLISH_CMD=0
 START_RUN_AGENT=1
 START_JOY=1
@@ -51,7 +51,7 @@ START_CAMERA=1
 START_PCR=1
 START_ROSCORE=1
 START_MUX=0
-USE_TMUX=1
+USE_TMUX=0
 FULL_MONITOR=0
 PCR_USR_COMMAND_TOPIC="/usr/command_pcr"
 MANUAL_USR_COMMAND_TOPIC="/usr/command_manual"
@@ -90,15 +90,16 @@ Options:
   --rate_hz HZ                 Default: 10
   --file_bridge                Use JSON observation file instead of ROS topics.
   --obs_file PATH              Default: outputs/real_d435i_check/latest_obs.json
-  --show                       Show D435i debug window.
+  --show                       Show D435i debug window. This is the default.
   --publish_cmd                Actually publish /usr/command_pcr from PCR.
   --no_run_agent               Do not start run_agent2.py.
   --no_joy                     Do not start joy_node and joy_ctrl.
   --no_camera                  Do not start D435i observation publisher.
   --no_pcr                     Do not start PCR node.
   --no_roscore                 Do not auto-start roscore if missing.
-  --no_tmux                    Run in the old single-shell background mode.
-  --full_monitor               In tmux mode, show each node/topic in its own pane.
+  --tmux                       Run in tmux panes.
+  --no_tmux                    Run in normal single-shell mode. This is the default.
+  --full_monitor               Run in tmux mode and show each node/topic in its own pane.
   --no_mux                     Kept for old command lines; PCR now always publishes to /usr/command_pcr.
   --pcr_usr_command_topic TOP  Default: /usr/command_pcr
   --manual_usr_command_topic T Default: /usr/command_manual
@@ -132,8 +133,9 @@ while [[ $# -gt 0 ]]; do
         --no_camera) START_CAMERA=0; shift ;;
         --no_pcr) START_PCR=0; shift ;;
         --no_roscore) START_ROSCORE=0; shift ;;
+        --tmux) USE_TMUX=1; shift ;;
         --no_tmux) USE_TMUX=0; shift ;;
-        --full_monitor) FULL_MONITOR=1; shift ;;
+        --full_monitor) FULL_MONITOR=1; USE_TMUX=1; shift ;;
         --no_mux) START_MUX=0; shift ;;
         --pcr_usr_command_topic) PCR_USR_COMMAND_TOPIC="$2"; shift 2 ;;
         --manual_usr_command_topic) MANUAL_USR_COMMAND_TOPIC="$2"; shift 2 ;;
