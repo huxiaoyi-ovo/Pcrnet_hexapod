@@ -1,0 +1,13 @@
+Component,Value,Source
+Affordance encoder,"AffordanceCNNEncoder(channels, 128)",GatePolicy
+State encoder,"StateEncoder(state_dim=9, 64)",GatePolicy
+Goal encoder,"GoalEncoder(goal_dim=2, 32)",GatePolicy
+Difficulty input,1 scalar,fusion_dim = 128 + 64 + 32 + 1
+Shared trunk,"225 -> 256 -> 256, ELU",GatePolicy.fusion
+Gate y head,"256 -> 64 -> 1, Softplus; Beta mean/action",GatePolicy.y_alpha_head/y_beta_head
+Learned-w head,"256 -> 64 -> 1, Softplus; only when learned_w=True",GatePolicy.w_alpha_head/w_beta_head
+Critic,Separate encoders + trunk + value head 256 -> 64 -> 1,GatePolicy.critic_*
+Risk-only params,2058762,eval metrics params_total
+Learned-w params,2092812,eval metrics params_total
+Follow expert,Analytic,train_highlevel.py _compute_moe_follow_cmd_from_goal
+Low-level locomotion,Fixed checkpoint,eval/train command low_level_ckpt

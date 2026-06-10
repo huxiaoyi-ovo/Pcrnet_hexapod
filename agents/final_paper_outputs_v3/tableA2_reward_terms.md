@@ -1,0 +1,24 @@
+| Term | Weight/Value | Source |
+| --- | --- | --- |
+| pcr_progress_reward_scale | 60.0 | HexPCRLineAvoidBasicCfg.navigation |
+| pcr_progress_cap | 0.8 | HexPCRLineAvoidBasicCfg.navigation |
+| pcr_follow_quality_floor | 0.12 | HexPCRLineAvoidBasicCfg.navigation |
+| pcr_follow_quality_sigma | 0.40 | HexPCRLineAvoidBasicCfg.navigation |
+| pcr_gate_aux_scale | 10.0 | HexPCRLineAvoidBasicCfg.navigation |
+| pcr_gap_success_bonus | 25.0 | HexPCRLineAvoidBasicCfg.navigation |
+| follow_distance_desired | 1.5 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| follow_distance_sigma | 0.30 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| follow_distance_scale | 10.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| follow_band_scale | 3.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| collision_penalty | -50.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| terminal_fail_penalty | -10.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| avoid_band_penalty_scale | 0.8 | HexPCRLineAvoidBasicCfg.navigation |
+| avoid_row_gap_scale | 10.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| avoid_row_cmdx_scale | 3.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| pcr_w_aux_coef | 0.05 | train_highlevel.py --pcr_w_aux_coef default |
+| pcr_w_aux_risk_f_threshold | 0.4 | train_highlevel.py default |
+| pcr_w_aux_risk_margin | 0.10 | train_highlevel.py default |
+| pcr_w_aux_cmd_cos_threshold | 0.5 | train_highlevel.py default |
+| gate_smooth_penalty | 0.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| risk_barrier_scale | 0.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
+| time_penalty | -0.01 | HexPCRLineAvoidBasicCfg.reward_cfg |

@@ -1,0 +1,14 @@
+Item,Value,Source
+Task,s_pcr_line_avoid_basic,eval/train command
+Eval target speeds,"0.35,0.50,0.60",run_pcr_main_table_eval command
+Training target speed,0.35,HexPCRLineAvoidBasicCfg.navigation
+Episode length [s],50,HexAvoidBasicCfg.env
+Stage-4 passage width min [m],0.75,HexAvoidBasicCfg.terrain
+Capsule obstacle radius [m],0.15,HexAvoidBasicCfg.terrain
+Capsule slots,13,HexAvoidBasicCfg.terrain
+Box slots,0,HexAvoidBasicCfg.terrain
+Wall slots,0,HexAvoidBasicCfg.terrain
+Terrain seed,7001,HexAvoidBasicCfg.terrain
+Friction range,"[0.8,1.2]",hex_terrain_config.domain_rand
+Observation noise enabled,True,hex_terrain_config.noise
+Depth clip range,"[0.2,3.0]",hex_terrain_config

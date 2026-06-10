@@ -1,0 +1,18 @@
+\begin{tabular}{lll}
+\toprule
+Component & Value & Source \\
+\midrule
+Affordance encoder & AffordanceCNNEncoder(channels, 128) & GatePolicy \\
+State encoder & StateEncoder(state\_dim=9, 64) & GatePolicy \\
+Goal encoder & GoalEncoder(goal\_dim=2, 32) & GatePolicy \\
+Difficulty input & 1 scalar & fusion\_dim = 128 + 64 + 32 + 1 \\
+Shared trunk & 225 -> 256 -> 256, ELU & GatePolicy.fusion \\
+Gate y head & 256 -> 64 -> 1, Softplus; Beta mean/action & GatePolicy.y\_alpha\_head/y\_beta\_head \\
+Learned-w head & 256 -> 64 -> 1, Softplus; only when learned\_w=True & GatePolicy.w\_alpha\_head/w\_beta\_head \\
+Critic & Separate encoders + trunk + value head 256 -> 64 -> 1 & GatePolicy.critic\_* \\
+Risk-only params & 2058762 & eval metrics params\_total \\
+Learned-w params & 2092812 & eval metrics params\_total \\
+Follow expert & Analytic & train\_highlevel.py \_compute\_moe\_follow\_cmd\_from\_goal \\
+Low-level locomotion & Fixed checkpoint & eval/train command low\_level\_ckpt \\
+\bottomrule
+\end{tabular}

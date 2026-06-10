@@ -1,0 +1,28 @@
+\begin{tabular}{lll}
+\toprule
+Term & Weight/Value & Source \\
+\midrule
+pcr\_progress\_reward\_scale & 60.0 & HexPCRLineAvoidBasicCfg.navigation \\
+pcr\_progress\_cap & 0.8 & HexPCRLineAvoidBasicCfg.navigation \\
+pcr\_follow\_quality\_floor & 0.12 & HexPCRLineAvoidBasicCfg.navigation \\
+pcr\_follow\_quality\_sigma & 0.40 & HexPCRLineAvoidBasicCfg.navigation \\
+pcr\_gate\_aux\_scale & 10.0 & HexPCRLineAvoidBasicCfg.navigation \\
+pcr\_gap\_success\_bonus & 25.0 & HexPCRLineAvoidBasicCfg.navigation \\
+follow\_distance\_desired & 1.5 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+follow\_distance\_sigma & 0.30 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+follow\_distance\_scale & 10.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+follow\_band\_scale & 3.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+collision\_penalty & -50.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+terminal\_fail\_penalty & -10.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+avoid\_band\_penalty\_scale & 0.8 & HexPCRLineAvoidBasicCfg.navigation \\
+avoid\_row\_gap\_scale & 10.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+avoid\_row\_cmdx\_scale & 3.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+pcr\_w\_aux\_coef & 0.05 & train\_highlevel.py --pcr\_w\_aux\_coef default \\
+pcr\_w\_aux\_risk\_f\_threshold & 0.4 & train\_highlevel.py default \\
+pcr\_w\_aux\_risk\_margin & 0.10 & train\_highlevel.py default \\
+pcr\_w\_aux\_cmd\_cos\_threshold & 0.5 & train\_highlevel.py default \\
+gate\_smooth\_penalty & 0.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+risk\_barrier\_scale & 0.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+time\_penalty & -0.01 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
+\bottomrule
+\end{tabular}

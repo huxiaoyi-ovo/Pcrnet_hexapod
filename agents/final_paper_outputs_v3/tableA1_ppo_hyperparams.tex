@@ -1,0 +1,20 @@
+\begin{tabular}{lll}
+\toprule
+Item & Value & Source \\
+\midrule
+Algorithm & PPO custom loop & train\_highlevel.py \\
+Steps per iter & 24 & train\_highlevel.py --num\_steps default \\
+Num envs & 256 & paper command argument \\
+Learning rate & 1.5e-5 & train\_highlevel.py --lr default \\
+Gamma & 0.99 & train\_highlevel.py --gamma default \\
+GAE lambda & 0.95 & train\_highlevel.py --gae\_lambda default \\
+Entropy coef & 0.01 & train\_highlevel.py --entropy\_coef default \\
+Clip epsilon & 0.05 & train\_highlevel.py --clip\_range default \\
+Value loss coef & 0.5 & train\_highlevel.py --value\_loss\_coef default \\
+Max grad norm & 0.5 & train\_highlevel.py --max\_grad\_norm default \\
+Mini-batch & 4096 & train\_highlevel.py --mini\_batch\_size default \\
+Epochs & 2 & train\_highlevel.py --num\_epochs default \\
+Total iters & 1000 & train\_highlevel.py --num\_iterations default \\
+Optimizer & Adam & train\_highlevel.py optimizer construction \\
+\bottomrule
+\end{tabular}
