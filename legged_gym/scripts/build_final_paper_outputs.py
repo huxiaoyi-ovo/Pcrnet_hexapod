@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build final paper tables and simple figures from completed eval outputs."""
+"""Build PCR-Net paper figures and tables from completed eval outputs."""
 
 import argparse
 import csv
@@ -14,7 +14,16 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 METHOD_ORDER = ["yonly", "geomw", "risk_only", "rule_override", "learnedw"]
+MECHANISM_METHOD_ORDER = ["yonly", "geomw", "risk_only", "learnedw"]
 METHOD_LABELS = {
+    "yonly": "Y-only",
+    "geomw": "Geom-w",
+    "risk_only": "Risk-only",
+    "rule_override": "Rule-Override",
+    "learnedw": "Learned-w (PCR-Net)",
+    "mono_ppo": "Mono-PPO",
+}
+SHORT_METHOD_LABELS = {
     "yonly": "Y-only",
     "geomw": "Geom-w",
     "risk_only": "Risk-only",
@@ -22,6 +31,14 @@ METHOD_LABELS = {
     "learnedw": "Learned-w",
     "mono_ppo": "Mono-PPO",
 }
+METHOD_STYLE = {
+    "yonly": {"marker": "o", "color": "#7f7f7f", "linewidth": 1.5},
+    "geomw": {"marker": "s", "color": "#1f77b4", "linewidth": 1.5},
+    "risk_only": {"marker": "^", "color": "#ff7f0e", "linewidth": 1.5},
+    "rule_override": {"marker": "D", "color": "#2ca02c", "linewidth": 1.5},
+    "learnedw": {"marker": "*", "color": "#1b1b1b", "linewidth": 2.5},
+}
+SPEEDS = ("0.35", "0.50", "0.60")
 
 
 def _read_csv(path: str) -> List[Dict[str, str]]:
@@ -49,12 +66,53 @@ def _write_markdown(path: str, rows: Sequence[Dict], headers: Sequence[str]) -> 
             f.write("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n")
 
 
-def _safe_float(value) -> float:
+def _latex_escape(value) -> str:
+    text = str(value)
+    repl = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+        "↑": r"$\uparrow$",
+        "↓": r"$\downarrow$",
+        "Δ": r"$\Delta$",
+    }
+    return "".join(repl.get(ch, ch) for ch in text)
+
+
+def _write_latex_booktabs(path: str, rows: Sequence[Dict], headers: Sequence[str]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cols = "l" * len(headers)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\\begin{tabular}{" + cols + "}\n")
+        f.write("\\toprule\n")
+        f.write(" & ".join(_latex_escape(h) for h in headers) + r" \\" + "\n")
+        f.write("\\midrule\n")
+        for row in rows:
+            vals = []
+            for h in headers:
+                value = str(row.get(h, ""))
+                if value.startswith("__LATEX__"):
+                    vals.append(value[len("__LATEX__"):])
+                else:
+                    vals.append(_latex_escape(value))
+            f.write(" & ".join(vals) + r" \\" + "\n")
+        f.write("\\bottomrule\n")
+        f.write("\\end{tabular}\n")
+
+
+def _safe_float(value, default: float = float("nan")) -> float:
     try:
         out = float(value)
     except Exception:
-        return float("nan")
-    return out if math.isfinite(out) else float("nan")
+        return default
+    return out if math.isfinite(out) else default
 
 
 def _mean_std(values: Iterable[float]) -> Tuple[float, float]:
@@ -78,6 +136,18 @@ def _fmt_pm(mean: float, std: float, digits: int = 3) -> str:
     if not math.isfinite(float(mean)):
         return "N/A"
     return f"{float(mean):.{digits}f} +/- {float(std):.{digits}f}"
+
+
+def _fmt_pm_latex(mean: float, std: float, digits: int = 3, bold: bool = False) -> str:
+    if not math.isfinite(float(mean)):
+        return "N/A"
+    text = f"{float(mean):.{digits}f} $\\pm$ {float(std):.{digits}f}"
+    return r"\textbf{" + text + "}" if bold else text
+
+
+def _fmt_pm_md(mean: float, std: float, digits: int = 3, bold: bool = False) -> str:
+    text = _fmt_pm(mean, std, digits=digits)
+    return f"**{text}**" if bold and text != "N/A" else text
 
 
 def _file_stamp(path: str) -> str:
@@ -112,7 +182,7 @@ def _infer_method(row: Dict[str, str]) -> str:
         return "rule_override"
     if "mono_ppo" in text or "mono-ppo" in text:
         return "mono_ppo"
-    if "learnedw2" in text or "learnedw" in text or "learned" in text:
+    if "learnedw2" in text or "learnedw" in text or "learned-w" in text:
         return "learnedw"
     if "geomw" in text or "geom" in text:
         return "geomw"
@@ -129,6 +199,42 @@ def _method_sort(method: str) -> Tuple[int, str]:
 
 def _seed(row: Dict[str, str]) -> str:
     return str(row.get("seed", "") or row.get("Seed", "")).strip()
+
+
+def _load_metrics_json(path: str) -> Dict:
+    if not path or not path.endswith(".json") or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _enrich_metrics_from_source(row: Dict[str, str]) -> Dict[str, str]:
+    src = str(row.get("source", "") or row.get("Source", ""))
+    data = _load_metrics_json(src)
+    if not data:
+        return row
+    out = dict(row)
+    for block_name in ("overall", "protocol", "params"):
+        block = data.get(block_name, {})
+        if not isinstance(block, dict):
+            continue
+        for key, value in block.items():
+            if isinstance(value, (str, int, float, bool)) and str(out.get(key, "")) in ("", "nan", "None"):
+                out[key] = str(value)
+    overall = data.get("overall", {})
+    if isinstance(overall, dict):
+        fallback_pairs = {
+            "unsafe_conflict_delta_y_total_mean": "unsafe_conflict_delta_y_mean",
+            "avoid_conflict_delta_y_total_mean": "avoid_conflict_delta_y_mean",
+            "stop_conflict_delta_y_total_mean": "stop_conflict_delta_y_mean",
+        }
+        for dst, src_key in fallback_pairs.items():
+            if str(out.get(dst, "")) in ("", "nan", "None") and src_key in overall:
+                out[dst] = str(overall.get(src_key))
+    return out
 
 
 def _latest_by_key(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -155,6 +261,7 @@ def _raw_rows_from_all_csv(paths: Sequence[str], methods: Sequence[str]) -> List
     rows: List[Dict[str, str]] = []
     for path in paths:
         for row in _read_csv(path):
+            row = _enrich_metrics_from_source(row)
             method = _infer_method(row)
             if method not in methods:
                 continue
@@ -188,10 +295,11 @@ def _aggregate_raw(
     ):
         agg = {
             "Speed": speed,
-            "Method": METHOD_LABELS.get(method, method),
+            "Method": SHORT_METHOD_LABELS.get(method, method),
             "method_key": method,
             "Seeds": ",".join(sorted({_seed(r) for r in group if _seed(r)})),
             "Num Runs": len(group),
+            "Sources": ";".join(str(r.get("source", "") or r.get("Source", "")) for r in group),
         }
         for title, key in metrics:
             mean, std = _mean_std(_safe_float(r.get(key, "")) for r in group)
@@ -202,35 +310,77 @@ def _aggregate_raw(
     return out
 
 
-def _build_table1(args) -> List[Dict]:
+def _load_all_method_rows(args) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
-    rows.extend(
-        _raw_rows_from_all_csv(
-            [args.internal_all_csv],
-            methods=["yonly", "geomw", "learnedw"],
-        )
-    )
+    rows.extend(_raw_rows_from_all_csv([args.internal_all_csv], methods=["yonly", "geomw", "learnedw"]))
     rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
     rows.extend(_raw_rows_from_all_csv([args.rule_all_csv], methods=["rule_override"]))
+    return rows
+
+
+def _build_table1(args) -> List[Dict]:
+    rows = _load_all_method_rows(args)
     metrics = [
         ("Task Success", "success_rate"),
         ("Row-progress", "progress_ratio_mean"),
         ("Collision", "episode_collision_rate"),
-        ("Follow MAE", "follow_mae_m_mean"),
+        ("Follow MAE [m]", "follow_mae_m_mean"),
     ]
     table = _aggregate_raw(rows, metrics, METHOD_ORDER)
-    fields = [
-        "Speed",
-        "Method",
-        "Seeds",
-        "Num Runs",
-        "Task Success",
-        "Row-progress",
-        "Collision",
-        "Follow MAE",
-    ]
-    _write_csv(os.path.join(args.output_dir, "table1_main_performance_stage4.csv"), table, fields)
-    _write_markdown(os.path.join(args.output_dir, "table1_main_performance_stage4.md"), table, fields)
+
+    best_by_speed: Dict[str, Dict[str, float]] = {}
+    for speed in SPEEDS:
+        group = [r for r in table if r.get("Speed") == speed]
+        if not group:
+            continue
+        best_by_speed[speed] = {
+            "Task Success": max(_safe_float(r.get("Task Success Mean", "")) for r in group),
+            "Row-progress": max(_safe_float(r.get("Row-progress Mean", "")) for r in group),
+            "Collision": min(_safe_float(r.get("Collision Mean", "")) for r in group),
+            "Follow MAE [m]": min(_safe_float(r.get("Follow MAE [m] Mean", "")) for r in group),
+        }
+
+    plain_rows: List[Dict] = []
+    md_rows: List[Dict] = []
+    tex_rows: List[Dict] = []
+    for row in table:
+        speed = row["Speed"]
+        plain = {"Speed": speed, "Method": row["Method"]}
+        md = dict(plain)
+        tex = dict(plain)
+        for title, out_title in [
+            ("Task Success", "Task Success ↑"),
+            ("Row-progress", "Row-progress ↑"),
+            ("Collision", "Collision ↓"),
+            ("Follow MAE [m]", "Follow MAE [m] ↓"),
+        ]:
+            mean = _safe_float(row.get(f"{title} Mean", ""))
+            std = _safe_float(row.get(f"{title} Std", ""), default=0.0)
+            best = best_by_speed.get(speed, {}).get(title, float("nan"))
+            is_best = math.isfinite(mean) and math.isfinite(best) and abs(mean - best) < 5e-7
+            plain[out_title] = _fmt_pm(mean, std)
+            md[out_title] = _fmt_pm_md(mean, std, bold=is_best)
+            tex[out_title] = "__LATEX__" + _fmt_pm_latex(mean, std, bold=is_best)
+        plain_rows.append(plain)
+        md_rows.append(md)
+        tex_rows.append(tex)
+
+    fields = ["Speed", "Method", "Task Success ↑", "Row-progress ↑", "Collision ↓", "Follow MAE [m] ↓"]
+    _write_csv(os.path.join(args.output_dir, "table1_main_performance_stage4.csv"), plain_rows, fields)
+    _write_markdown(os.path.join(args.output_dir, "table1_main_performance_stage4.md"), md_rows, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "table1_main_performance_stage4.tex"), tex_rows, fields)
+    _write_csv(
+        os.path.join(args.output_dir, "table1_main_performance_stage4_audit.csv"),
+        table,
+        [
+            "Speed", "Method", "Seeds", "Num Runs",
+            "Task Success Mean", "Task Success Std",
+            "Row-progress Mean", "Row-progress Std",
+            "Collision Mean", "Collision Std",
+            "Follow MAE [m] Mean", "Follow MAE [m] Std",
+            "Sources",
+        ],
+    )
     return table
 
 
@@ -238,6 +388,7 @@ def _aggregate_csv_lookup(paths: Sequence[str]) -> Dict[Tuple[str, str], Dict[st
     lookup: Dict[Tuple[str, str], Dict[str, str]] = {}
     for path in paths:
         for row in _read_csv(path):
+            row = _enrich_metrics_from_source(row)
             speed = str(row.get("Speed", "")).strip()
             method = _infer_method(row)
             if not speed or method == "unknown":
@@ -255,10 +406,15 @@ def _delta_lookup(rows: Sequence[Dict[str, str]], methods: Sequence[str]) -> Dic
         if method in methods and speed:
             grouped[(speed, method)].append(row)
     keys = [
+        "delta_y_w_raw_mean",
+        "delta_y_w_used_mean",
         "delta_y_r_mean",
+        "delta_y_total_mean",
+        "unsafe_conflict_delta_y_w_raw_mean",
         "unsafe_conflict_delta_y_w_used_mean",
         "unsafe_conflict_delta_y_r_mean",
         "unsafe_conflict_delta_y_total_mean",
+        "avoid_conflict_delta_y_w_raw_mean",
         "avoid_conflict_delta_y_w_used_mean",
         "avoid_conflict_delta_y_r_mean",
         "avoid_conflict_delta_y_total_mean",
@@ -266,8 +422,25 @@ def _delta_lookup(rows: Sequence[Dict[str, str]], methods: Sequence[str]) -> Dic
     for key, group in grouped.items():
         out[key] = {}
         for metric_key in keys:
-            mean, _ = _mean_std(_safe_float(r.get(metric_key, "")) for r in group)
+            values = [_safe_float(r.get(metric_key, "")) for r in group]
+            mean, std = _mean_std(values)
             out[key][metric_key] = mean
+            out[key][metric_key + "_std"] = std
+    return out
+
+
+def _params_lookup(rows: Sequence[Dict[str, str]]) -> Dict[Tuple[str, str], str]:
+    grouped: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    for row in rows:
+        speed = row.get("_speed") or _infer_speed(row)
+        method = row.get("_method") or _infer_method(row)
+        value = _safe_float(row.get("params_total", ""))
+        if speed and method and math.isfinite(value):
+            grouped[(speed, method)].append(value)
+    out = {}
+    for key, values in grouped.items():
+        mean, _ = _mean_std(values)
+        out[key] = str(int(round(mean))) if math.isfinite(mean) else "N/A"
     return out
 
 
@@ -287,73 +460,89 @@ def _risk_only_source_mode(args, rows: Sequence[Dict[str, str]]) -> str:
     return "trained"
 
 
-def _build_table2(args) -> List[Dict]:
-    aggregate_lookup = _aggregate_csv_lookup(
-        [args.internal_aggregate_csv, args.risk_aggregate_csv, args.rule_aggregate_csv, args.learnedw_diag_aggregate_csv]
-    )
-    delta_rows: List[Dict[str, str]] = []
-    delta_rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
-    delta_rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
-    deltas = _delta_lookup(delta_rows, methods=["risk_only", "learnedw"])
-    risk_only_mode = _risk_only_source_mode(args, delta_rows)
-
-    out: List[Dict] = []
-    for speed in ("0.35", "0.50", "0.60"):
-        for method in ("yonly", "geomw", "risk_only", "learnedw"):
-            agg = aggregate_lookup.get((speed, method), {})
-            d = deltas.get((speed, method), {})
-            row = {
-                "Speed": speed,
-                "Method": METHOD_LABELS.get(method, method),
-                "Unsafe Rate": _fmt(_safe_float(agg.get("Unsafe Rate Mean", ""))),
-                "C_avoid Rate": _fmt(_safe_float(agg.get("C_avoid Rate Mean", ""))),
-                "CSI@C_avoid": _fmt(_safe_float(agg.get("CSI@C_avoid Mean", ""))),
-                "Delta y_w@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_w_used_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
-                ),
-                "Delta y_r (all)": (
-                    _fmt(d.get("delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
-                ),
-                "Delta y_r@C_unsafe": (
-                    _fmt(d.get("unsafe_conflict_delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
-                ),
-                "Delta y_r@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_r_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
-                ),
-                "Delta y_total@C_avoid": (
-                    _fmt(d.get("avoid_conflict_delta_y_total_mean", float("nan")), digits=4) if method in ("risk_only", "learnedw") else "N/A"
-                ),
-                "Notes": _table2_note(method, risk_only_mode=risk_only_mode),
-            }
-            out.append(row)
-    fields = [
-        "Speed",
-        "Method",
-        "Unsafe Rate",
-        "C_avoid Rate",
-        "CSI@C_avoid",
-        "Delta y_w@C_avoid",
-        "Delta y_r (all)",
-        "Delta y_r@C_unsafe",
-        "Delta y_r@C_avoid",
-        "Delta y_total@C_avoid",
-        "Notes",
-    ]
-    _write_csv(os.path.join(args.output_dir, "table2_mechanism_ablation.csv"), out, fields)
-    _write_markdown(os.path.join(args.output_dir, "table2_mechanism_ablation.md"), out, fields)
-    return out
-
-
 def _table2_note(method: str, risk_only_mode: str = "auto") -> str:
     if method == "risk_only":
         if risk_only_mode == "trained":
-            return "trained from scratch with risk-difference term Δy_r only; no learned-w channel"
+            return "Trained from scratch with risk-difference term Δy_r only; no learned-w channel"
         return "LEGACY eval-only source; rerun trained Risk-only before using this row."
     if method == "learnedw":
-        return "Delta terms from learned-w diagnostic eval."
-    if method in ("yonly", "geomw"):
-        return "No learned-w correction term."
+        return "Learned signed-w channel with analytic risk-difference term"
+    if method == "geomw":
+        return "Geometric w; no learned-w channel"
+    if method == "yonly":
+        return "No w channel"
     return ""
+
+
+def _build_table2(args) -> List[Dict]:
+    speed = f"{float(args.mechanism_speed):.2f}"
+    aggregate_lookup = _aggregate_csv_lookup(
+        [
+            args.internal_aggregate_csv,
+            args.risk_aggregate_csv,
+            args.rule_aggregate_csv,
+            args.learnedw_diag_aggregate_csv,
+        ]
+    )
+    all_rows: List[Dict[str, str]] = []
+    all_rows.extend(_raw_rows_from_all_csv([args.internal_all_csv], methods=["yonly", "geomw", "learnedw"]))
+    all_rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
+    all_rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
+    deltas = _delta_lookup(all_rows, methods=["risk_only", "learnedw"])
+    params = _params_lookup(all_rows)
+    risk_only_mode = _risk_only_source_mode(args, all_rows)
+
+    out: List[Dict] = []
+    for method in MECHANISM_METHOD_ORDER:
+        agg = aggregate_lookup.get((speed, method), {})
+        d = deltas.get((speed, method), {})
+        delta_total = d.get("unsafe_conflict_delta_y_total_mean", float("nan"))
+        row = {
+            "Method": SHORT_METHOD_LABELS.get(method, method),
+            "C_avoid Rate": _fmt(_safe_float(agg.get("C_avoid Rate Mean", ""))),
+            "CSI@C_avoid": _fmt(_safe_float(agg.get("CSI@C_avoid Mean", ""))),
+            "Δy_total@C_unsafe": _fmt(delta_total, digits=4) if method in ("risk_only", "learnedw") else "N/A",
+            "Params": params.get((speed, method), "N/A"),
+            "Notes": _table2_note(method, risk_only_mode=risk_only_mode),
+        }
+        out.append(row)
+    fields = ["Method", "C_avoid Rate", "CSI@C_avoid", "Δy_total@C_unsafe", "Params", "Notes"]
+    _write_csv(os.path.join(args.output_dir, "table2_mechanism_ablation.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "table2_mechanism_ablation.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "table2_mechanism_ablation.tex"), out, fields)
+    return out
+
+
+def _build_table_a5(args) -> List[Dict]:
+    rows: List[Dict[str, str]] = []
+    rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
+    rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
+    deltas = _delta_lookup(rows, methods=["risk_only", "learnedw"])
+    out: List[Dict] = []
+    specs = [
+        ("All", "delta_y_w_used_mean", "delta_y_r_mean", "delta_y_total_mean"),
+        ("C_unsafe", "unsafe_conflict_delta_y_w_used_mean", "unsafe_conflict_delta_y_r_mean", "unsafe_conflict_delta_y_total_mean"),
+        ("C_avoid", "avoid_conflict_delta_y_w_used_mean", "avoid_conflict_delta_y_r_mean", "avoid_conflict_delta_y_total_mean"),
+    ]
+    for speed in SPEEDS:
+        for method in ("risk_only", "learnedw"):
+            d = deltas.get((speed, method), {})
+            for window, w_key, r_key, total_key in specs:
+                out.append(
+                    {
+                        "Speed": speed,
+                        "Method": SHORT_METHOD_LABELS.get(method, method),
+                        "Window": window,
+                        "Δy_w": _fmt(d.get(w_key, float("nan")), digits=6),
+                        "Δy_r": _fmt(d.get(r_key, float("nan")), digits=6),
+                        "Δy_total": _fmt(d.get(total_key, float("nan")), digits=6),
+                    }
+                )
+    fields = ["Speed", "Method", "Window", "Δy_w", "Δy_r", "Δy_total"]
+    _write_csv(os.path.join(args.output_dir, "tableA5_delta_y_full.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA5_delta_y_full.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA5_delta_y_full.tex"), out, fields)
+    return out
 
 
 def _find_metrics_json(path: str) -> List[str]:
@@ -363,39 +552,72 @@ def _find_metrics_json(path: str) -> List[str]:
         return [path]
     out = []
     for root, _, files in os.walk(path):
-        if "metrics.json" in files:
-            out.append(os.path.join(root, "metrics.json"))
+        for name in files:
+            if name == "metrics.json":
+                out.append(os.path.join(root, name))
     return sorted(out)
 
 
-def _metrics_row(path: str) -> Optional[Dict]:
-    files = _find_metrics_json(path)
-    if not files:
+def _metrics_row(path: str) -> Optional[Dict[str, str]]:
+    paths = _find_metrics_json(path)
+    if not paths:
         return None
-    latest = max(files, key=lambda p: os.path.getmtime(p))
-    with open(latest, "r", encoding="utf-8") as f:
-        metrics = json.load(f)
-    overall = metrics.get("overall", {})
-    return {
-        "success_rate": overall.get("success_rate", ""),
-        "progress_ratio_mean": overall.get("progress_ratio_mean", ""),
-        "episode_collision_rate": overall.get("episode_collision_rate", ""),
-        "l1_safety_success_rate": overall.get("l1_safety_success_rate", ""),
-        "l2_follow_success_rate": overall.get("l2_follow_success_rate", ""),
-        "l3_progress_success_rate": overall.get("l3_progress_success_rate", ""),
-        "target_in_rgb_fov_rate": overall.get("target_in_rgb_fov_rate", ""),
-        "target_bearing_abs_deg_p95": overall.get("target_bearing_abs_deg_p95", ""),
-        "cmd_x_mean": overall.get("cmd_x_mean", ""),
-        "Source": latest,
-    }
+    rows = []
+    for p in paths:
+        data = _load_metrics_json(p)
+        if not data:
+            continue
+        overall = data.get("overall", {})
+        if not isinstance(overall, dict):
+            continue
+        row = {k: str(v) for k, v in overall.items() if isinstance(v, (str, int, float, bool))}
+        row["Source"] = p
+        row["source"] = p
+        row.update({k: str(v) for k, v in data.get("params", {}).items() if isinstance(v, (str, int, float, bool))})
+        row["_ttc_mean_s"] = _ttc_mean_from_metrics(data)
+        rows.append(row)
+    if not rows:
+        return None
+    out: Dict[str, str] = {"Source": ";".join(r.get("Source", "") for r in rows)}
+    keys = set().union(*(r.keys() for r in rows))
+    for key in keys:
+        vals = [_safe_float(r.get(key, "")) for r in rows]
+        mean, _ = _mean_std(vals)
+        if math.isfinite(mean):
+            out[key] = str(mean)
+    return out
 
 
-def _stage4_mono_row(path: str) -> Optional[Dict]:
-    rows = _read_csv(path)
-    candidates = [r for r in rows if _infer_method(r) == "mono_ppo" and _infer_speed(r) == "0.35"]
+def _ttc_mean_from_metrics(data: Dict) -> str:
+    rows = data.get("per_episode", [])
+    if not isinstance(rows, list):
+        return ""
+    vals = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        v = _safe_float(row.get("collision_time_s", ""))
+        if math.isfinite(v):
+            vals.append(v)
+    if not vals:
+        return ""
+    return str(sum(vals) / len(vals))
+
+
+def _stage4_mono_row(path: str) -> Optional[Dict[str, str]]:
+    candidates = [
+        _enrich_metrics_from_source(r)
+        for r in _read_csv(path)
+        if _infer_method(r) == "mono_ppo" and _infer_speed(r) == "0.35"
+    ]
     if not candidates:
         return None
-    return candidates[0]
+    row = candidates[0]
+    src = row.get("source", "")
+    data = _load_metrics_json(src)
+    if data:
+        row["_ttc_mean_s"] = _ttc_mean_from_metrics(data)
+    return row
 
 
 def _build_table3(args) -> List[Dict]:
@@ -413,15 +635,16 @@ def _build_table3(args) -> List[Dict]:
         out.append(
             {
                 "Stage": stage,
-                "Task Success": _fmt(_safe_float(row.get("success_rate", ""))),
-                "Row-progress": _fmt(_safe_float(row.get("progress_ratio_mean", ""))),
+                "Success": _fmt(_safe_float(row.get("success_rate", ""))),
+                "Row-prog": _fmt(_safe_float(row.get("progress_ratio_mean", ""))),
                 "Collision": _fmt(_safe_float(row.get("episode_collision_rate", ""))),
-                "L1 Safety": _fmt(_safe_float(row.get("l1_safety_success_rate", ""))),
-                "L2 Follow": _fmt(_safe_float(row.get("l2_follow_success_rate", ""))),
-                "L3 Progress": _fmt(_safe_float(row.get("l3_progress_success_rate", ""))),
+                "L1": _fmt(_safe_float(row.get("l1_safety_success_rate", ""))),
+                "L2": _fmt(_safe_float(row.get("l2_follow_success_rate", ""))),
+                "L3": _fmt(_safe_float(row.get("l3_progress_success_rate", ""))),
                 "FOV-in": _fmt(_safe_float(row.get("target_in_rgb_fov_rate", ""))),
                 "Bearing p95": _fmt(_safe_float(row.get("target_bearing_abs_deg_p95", "")), digits=2),
-                "Cmd-x Mean": _fmt(_safe_float(row.get("cmd_x_mean", ""))),
+                "Cmd-x": _fmt(_safe_float(row.get("cmd_x_mean", ""))),
+                "TTC [s]": _fmt(_safe_float(row.get("_ttc_mean_s", "")), digits=2),
                 "Source": row.get("Source", row.get("source", "")),
             }
         )
@@ -433,25 +656,102 @@ def _build_table3(args) -> List[Dict]:
         )
     for stage in missing_stages:
         print(f"[Warn] Mono-PPO stage {stage} metrics not found; skipping.")
-    fields = [
-        "Stage",
-        "Task Success",
-        "Row-progress",
-        "Collision",
-        "L1 Safety",
-        "L2 Follow",
-        "L3 Progress",
-        "FOV-in",
-        "Bearing p95",
-        "Cmd-x Mean",
-        "Source",
-    ]
-    _write_csv(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.csv"), out, fields)
-    _write_markdown(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.md"), out, fields[:-1])
+    fields = ["Stage", "Success", "Row-prog", "Collision", "L1", "L2", "L3", "FOV-in", "Bearing p95", "Cmd-x", "TTC [s]"]
+    _write_csv(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.csv"), out, fields + ["Source"])
+    _write_markdown(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.tex"), out, fields)
     return out
 
 
-def _plot_fig4(args, table1: Sequence[Dict]) -> None:
+def _plot_fig3(args, table1: Sequence[Dict]) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[Warn] matplotlib unavailable; skipping Fig.3 ({exc})")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.6), constrained_layout=True)
+    ax = axes[0]
+    for method in METHOD_ORDER:
+        pts = [r for r in table1 if r.get("method_key") == method]
+        pts = sorted(pts, key=lambda r: _safe_float(r.get("Speed", "")))
+        if not pts:
+            continue
+        style = METHOD_STYLE[method]
+        x = [_safe_float(r["Speed"]) for r in pts]
+        y = [_safe_float(r["Task Success Mean"]) for r in pts]
+        yerr = [_safe_float(r["Task Success Std"], default=0.0) for r in pts]
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            marker=style["marker"],
+            color=style["color"],
+            linewidth=style["linewidth"],
+            markersize=7.5 if method == "learnedw" else 5.2,
+            capsize=2.5,
+            label=SHORT_METHOD_LABELS.get(method, method),
+        )
+    ax.set_xlabel("Target speed [m/s]")
+    ax.set_ylabel("Task Success")
+    ax.set_xticks([0.35, 0.50, 0.60])
+    ax.set_ylim(-0.04, 1.04)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
+    ax.text(0.02, 0.08, "(a)", transform=ax.transAxes, fontsize=11, va="bottom")
+
+    ax = axes[1]
+    scatter_rows = [r for r in table1 if r.get("Speed") == f"{float(args.mechanism_speed):.2f}"]
+    for row in scatter_rows:
+        method = row.get("method_key")
+        if method not in METHOD_STYLE:
+            continue
+        style = METHOD_STYLE[method]
+        x = _safe_float(row.get("Collision Mean", ""))
+        y = _safe_float(row.get("Task Success Mean", ""))
+        xerr = _safe_float(row.get("Collision Std", ""), default=0.0)
+        yerr = _safe_float(row.get("Task Success Std", ""), default=0.0)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            continue
+        ax.errorbar(
+            [x],
+            [y],
+            xerr=[xerr],
+            yerr=[yerr],
+            marker=style["marker"],
+            color=style["color"],
+            linewidth=0.0,
+            elinewidth=1.0,
+            markersize=9.5 if method == "learnedw" else 6.0,
+            capsize=2.5,
+        )
+        dx = -0.075 if method == "yonly" else 0.015
+        dy = 0.035 if method in ("risk_only", "geomw") else 0.018
+        ax.annotate(SHORT_METHOD_LABELS.get(method, method), (x, y), xytext=(x + dx, y + dy), fontsize=8)
+    ax.set_xlabel("Collision rate")
+    ax.set_ylabel("Task Success")
+    ax.set_xlim(-0.03, 0.80)
+    ax.set_ylim(-0.05, 1.05)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
+    ax.text(0.93, 0.96, "(b)", transform=ax.transAxes, fontsize=11, va="top")
+    ax.annotate(
+        "Better",
+        xy=(0.50, 0.98),
+        xytext=(0.67, 0.88),
+        arrowprops=dict(arrowstyle="->", color="#333333", linewidth=0.8),
+        fontsize=8,
+        color="#333333",
+    )
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=5, frameon=False, fontsize=8, bbox_to_anchor=(0.5, 1.16))
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(args.output_dir, f"fig3_main_performance.{ext}"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_fig4(args) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -460,97 +760,286 @@ def _plot_fig4(args, table1: Sequence[Dict]) -> None:
         print(f"[Warn] matplotlib unavailable; skipping Fig.4 ({exc})")
         return
 
-    metrics = [
-        ("Task Success Mean", "Task Success"),
-        ("Collision Mean", "Collision"),
-        ("Follow MAE Mean", "Follow MAE [m]"),
-    ]
-    colors = {
-        "yonly": "#7f7f7f",
-        "geomw": "#1f77b4",
-        "risk_only": "#ff7f0e",
-        "rule_override": "#2ca02c",
-        "learnedw": "#d62728",
-    }
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0), constrained_layout=True)
-    for ax, (metric_key, ylabel) in zip(axes, metrics):
-        for method in METHOD_ORDER:
-            pts = [
-                r for r in table1
-                if r.get("method_key") == method and math.isfinite(_safe_float(r.get(metric_key, "")))
-            ]
-            pts = sorted(pts, key=lambda r: _safe_float(r.get("Speed", "")))
-            if not pts:
-                continue
-            x = [_safe_float(r["Speed"]) for r in pts]
-            y = [_safe_float(r[metric_key]) for r in pts]
-            ax.plot(
-                x,
-                y,
-                marker="o",
-                linewidth=2.0,
-                markersize=4.5,
-                label=METHOD_LABELS.get(method, method),
-                color=colors.get(method),
-            )
-        ax.set_xlabel("Target speed [m/s]")
-        ax.set_ylabel(ylabel)
+    metrics_path = os.path.join(args.learnedw_mechanism_dir, "metrics.json")
+    data = _load_metrics_json(metrics_path)
+    bins = data.get("priv_conflict_bins", []) if isinstance(data, dict) else []
+    if not bins:
+        print("[Warn] priv_conflict_bins not found; Fig.4 skipped.")
+        return
+
+    labels = []
+    x = []
+    y_raw = []
+    y_eff = []
+    signed_w = []
+    delta_y = []
+    for idx, row in enumerate(bins):
+        steps = _safe_float(row.get("steps", 0.0), default=0.0)
+        if steps <= 0:
+            continue
+        labels.append(str(row.get("bin", "")))
+        x.append(idx)
+        yr = _safe_float(row.get("gate_y_raw_mean", ""))
+        ye = _safe_float(row.get("y_eff_mean", ""))
+        sw = _safe_float(row.get("signed_w_mean", ""))
+        y_raw.append(yr)
+        y_eff.append(ye)
+        signed_w.append(sw)
+        delta_y.append(ye - yr if math.isfinite(yr) and math.isfinite(ye) else float("nan"))
+    if not x:
+        print("[Warn] priv_conflict_bins has no non-empty bin; Fig.4 skipped.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.1), constrained_layout=True)
+    axes[0].plot(x, y_raw, marker="o", linewidth=1.8, color="#5b7083", label="y_raw (raw)")
+    axes[0].plot(x, y_eff, marker="s", linewidth=1.8, color="#1f77b4", label="y_eff (effective)")
+    axes[0].set_ylabel("Follow weight")
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].legend(frameon=False, fontsize=8)
+    axes[0].text(0.02, 0.96, "(a)", transform=axes[0].transAxes, fontsize=11, va="top")
+
+    axes[1].plot(x, signed_w, marker="s", linewidth=1.8, color="#6f4aa8", label="signed_w")
+    axes[1].plot(x, delta_y, marker="o", linewidth=1.8, color="#d55e00", label="Δy = y_eff - y_raw")
+    axes[1].axhline(0.0, color="#777777", linewidth=0.8, linestyle="--", alpha=0.8)
+    axes[1].set_ylabel("Modulation")
+    axes[1].legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.55, 1.18), ncol=2)
+    axes[1].text(0.02, 0.96, "(b)", transform=axes[1].transAxes, fontsize=11, va="top")
+    axes[1].annotate(
+        "conflict-triggered\navoidance",
+        xy=(x[-1], delta_y[-1]),
+        xytext=(max(x[-1] - 1.65, 0), max(delta_y[-1] - 0.03, 0.015)),
+        arrowprops=dict(arrowstyle="->", linewidth=0.8, color="#333333"),
+        fontsize=8,
+    )
+
+    for ax in axes:
+        ax.set_xlabel("Conflict intensity")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=15, ha="right")
         ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
-        ax.set_xticks([0.35, 0.50, 0.60])
-    axes[0].set_ylim(-0.05, 1.05)
-    axes[1].set_ylim(-0.05, 1.05)
-    axes[0].legend(frameon=False, fontsize=8, loc="lower left")
-    for ext in ("png", "pdf"):
-        fig.savefig(os.path.join(args.output_dir, f"fig4_speed_curves_stage4.{ext}"), dpi=300)
+
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(args.output_dir, f"fig4_mechanism.{ext}"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def _copy_fig5(args) -> None:
+def _copy_legacy_mechanism_png(args) -> None:
     if not args.learnedw_mechanism_dir or not os.path.isdir(args.learnedw_mechanism_dir):
-        print("[Warn] learned-w mechanism directory not found; Fig.5 copy skipped.")
+        print("[Warn] learned-w mechanism directory not found; legacy mechanism copy skipped.")
         return
     copied = []
     for name in ("mechanism_risk_bins.png", "mechanism_priv_conflict_bins.png"):
         src = os.path.join(args.learnedw_mechanism_dir, name)
         if os.path.exists(src):
-            dst = os.path.join(args.output_dir, "fig5_" + name)
+            dst = os.path.join(args.output_dir, "legacy_" + name)
             shutil.copy2(src, dst)
             copied.append(dst)
     if copied:
-        with open(os.path.join(args.output_dir, "fig5_note.md"), "w", encoding="utf-8") as f:
-            f.write("# Fig.5 mechanism source\n\n")
-            f.write("Copied mechanism plots. Rename labels in the manuscript figure as:\n")
-            f.write("- risk_F: Forward risk\n")
-            f.write("- risk_A: Lateral-avoid risk\n")
-            f.write("- y: Follow weight\n")
-            f.write("- y_eff: Effective follow weight\n")
-            f.write("- conflict mask: Conflict window\n")
-    else:
-        print("[Warn] no mechanism_*.png files found in learned-w mechanism directory.")
+        with open(os.path.join(args.output_dir, "legacy_mechanism_note.md"), "w", encoding="utf-8") as f:
+            f.write("# Legacy mechanism plots\n\n")
+            f.write("These PNGs are copied only for audit. Use fig4_mechanism.pdf/png for the v3 manuscript figure.\n")
 
 
-def _write_manifest(args, table1: Sequence[Dict], table2: Sequence[Dict], table3: Sequence[Dict]) -> None:
+def _read_text(path: str) -> str:
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _class_block(source: str, class_name: str, next_class_name: Optional[str] = None) -> str:
+    start_pat = f"class {class_name}"
+    start = source.find(start_pat)
+    if start < 0:
+        return source
+    if next_class_name:
+        end = source.find(f"class {next_class_name}", start + len(start_pat))
+        if end > start:
+            return source[start:end]
+    matches = list(re.finditer(r"^class\s+\w+", source[start + len(start_pat):], flags=re.M))
+    if matches:
+        end = start + len(start_pat) + matches[0].start()
+        return source[start:end]
+    return source[start:]
+
+
+def _arg_default(source: str, name: str) -> str:
+    pat = r"add_argument\(\s*['\"]--" + re.escape(name) + r"['\"].*?default\s*=\s*([^,\)\n]+)"
+    m = re.search(pat, source, flags=re.S)
+    if not m:
+        return "N/A"
+    return m.group(1).strip().strip("'\"")
+
+
+def _assign_value(source: str, name: str) -> str:
+    m = re.search(r"^\s*" + re.escape(name) + r"\s*=\s*([^\n#]+)", source, flags=re.M)
+    return m.group(1).strip() if m else "N/A"
+
+
+def _reward_cfg_value(source: str, name: str) -> str:
+    m = re.search(r"reward_cfg\[['\"]" + re.escape(name) + r"['\"]\]\s*=\s*([^\n#]+)", source)
+    return m.group(1).strip() if m else "N/A"
+
+
+def _build_appendix_a1(args) -> List[Dict]:
+    src = _read_text("legged_gym/scripts/train_highlevel.py")
+    rows = [
+        ("Algorithm", "PPO custom loop", "train_highlevel.py"),
+        ("Steps per iter", _arg_default(src, "num_steps"), "train_highlevel.py --num_steps default"),
+        ("Num envs", str(args.paper_train_num_envs) if args.paper_train_num_envs else "N/A", "paper command argument"),
+        ("Learning rate", _arg_default(src, "lr"), "train_highlevel.py --lr default"),
+        ("Gamma", _arg_default(src, "gamma"), "train_highlevel.py --gamma default"),
+        ("GAE lambda", _arg_default(src, "gae_lambda"), "train_highlevel.py --gae_lambda default"),
+        ("Entropy coef", _arg_default(src, "entropy_coef"), "train_highlevel.py --entropy_coef default"),
+        ("Clip epsilon", _arg_default(src, "clip_range"), "train_highlevel.py --clip_range default"),
+        ("Value loss coef", _arg_default(src, "value_loss_coef"), "train_highlevel.py --value_loss_coef default"),
+        ("Max grad norm", _arg_default(src, "max_grad_norm"), "train_highlevel.py --max_grad_norm default"),
+        ("Mini-batch", _arg_default(src, "mini_batch_size"), "train_highlevel.py --mini_batch_size default"),
+        ("Epochs", _arg_default(src, "num_epochs"), "train_highlevel.py --num_epochs default"),
+        ("Total iters", _arg_default(src, "num_iterations"), "train_highlevel.py --num_iterations default"),
+        ("Optimizer", "Adam", "train_highlevel.py optimizer construction"),
+    ]
+    out = [{"Item": k, "Value": v, "Source": s} for k, v, s in rows]
+    fields = ["Item", "Value", "Source"]
+    _write_csv(os.path.join(args.output_dir, "tableA1_ppo_hyperparams.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA1_ppo_hyperparams.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA1_ppo_hyperparams.tex"), out, fields)
+    return out
+
+
+def _build_appendix_a2(args) -> List[Dict]:
+    scene_src = _read_text("legged_gym/envs/hex_v4/hex_scenes_config.py")
+    pcr_block = _class_block(scene_src, "HexPCRLineAvoidBasicCfg", "HexPCRLineAvoidBasicCfgPPO")
+    train_src = _read_text("legged_gym/scripts/train_highlevel.py")
+    rows = [
+        ("pcr_progress_reward_scale", _assign_value(pcr_block, "pcr_progress_reward_scale"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("pcr_progress_cap", _assign_value(pcr_block, "pcr_progress_cap"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("pcr_follow_quality_floor", _assign_value(pcr_block, "pcr_follow_quality_floor"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("pcr_follow_quality_sigma", _assign_value(pcr_block, "pcr_follow_quality_sigma"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("pcr_gate_aux_scale", _assign_value(pcr_block, "pcr_gate_aux_scale"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("pcr_gap_success_bonus", _assign_value(pcr_block, "pcr_gap_success_bonus"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("follow_distance_desired", _reward_cfg_value(pcr_block, "follow_distance_desired"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("follow_distance_sigma", _reward_cfg_value(pcr_block, "follow_distance_sigma"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("follow_distance_scale", _reward_cfg_value(pcr_block, "follow_distance_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("follow_band_scale", _reward_cfg_value(pcr_block, "follow_band_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("collision_penalty", _reward_cfg_value(pcr_block, "collision_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("terminal_fail_penalty", _reward_cfg_value(pcr_block, "terminal_fail_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("avoid_band_penalty_scale", _assign_value(pcr_block, "avoid_band_penalty_scale"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("avoid_row_gap_scale", _reward_cfg_value(pcr_block, "avoid_row_gap_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("avoid_row_cmdx_scale", _reward_cfg_value(pcr_block, "avoid_row_cmdx_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("pcr_w_aux_coef", _arg_default(train_src, "pcr_w_aux_coef"), "train_highlevel.py --pcr_w_aux_coef default"),
+        ("pcr_w_aux_risk_f_threshold", _arg_default(train_src, "pcr_w_aux_risk_f_threshold"), "train_highlevel.py default"),
+        ("pcr_w_aux_risk_margin", _arg_default(train_src, "pcr_w_aux_risk_margin"), "train_highlevel.py default"),
+        ("pcr_w_aux_cmd_cos_threshold", _arg_default(train_src, "pcr_w_aux_cmd_cos_threshold"), "train_highlevel.py default"),
+        ("gate_smooth_penalty", _reward_cfg_value(pcr_block, "gate_smooth_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("risk_barrier_scale", _reward_cfg_value(pcr_block, "risk_barrier_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+        ("time_penalty", _reward_cfg_value(pcr_block, "time_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
+    ]
+    out = [{"Term": k, "Weight/Value": v, "Source": s} for k, v, s in rows]
+    fields = ["Term", "Weight/Value", "Source"]
+    _write_csv(os.path.join(args.output_dir, "tableA2_reward_terms.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA2_reward_terms.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA2_reward_terms.tex"), out, fields)
+    return out
+
+
+def _build_appendix_a3(args) -> List[Dict]:
+    scene_src = _read_text("legged_gym/envs/hex_v4/hex_scenes_config.py")
+    avoid_block = _class_block(scene_src, "HexAvoidBasicCfg", "HexAvoidBasicCfgPPO")
+    pcr_block = _class_block(scene_src, "HexPCRLineAvoidBasicCfg", "HexPCRLineAvoidBasicCfgPPO")
+    terrain_src = _read_text("legged_gym/envs/hex_v4/hex_terrain_config.py")
+    rows = [
+        ("Task", "s_pcr_line_avoid_basic", "eval/train command"),
+        ("Eval target speeds", ",".join(SPEEDS), "run_pcr_main_table_eval command"),
+        ("Training target speed", _assign_value(pcr_block, "moving_target_pcr_line_speed"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("Episode length [s]", _assign_value(avoid_block, "episode_length_s"), "HexAvoidBasicCfg.env"),
+        ("Stage-4 passage width min [m]", _assign_value(avoid_block, "avoid_stage4_width_min"), "HexAvoidBasicCfg.terrain"),
+        ("Capsule obstacle radius [m]", _assign_value(avoid_block, "avoid_capsule_radius"), "HexAvoidBasicCfg.terrain"),
+        ("Capsule slots", _assign_value(avoid_block, "avoid_capsule_slots"), "HexAvoidBasicCfg.terrain"),
+        ("Box slots", _assign_value(avoid_block, "avoid_box_slots"), "HexAvoidBasicCfg.terrain"),
+        ("Wall slots", _assign_value(avoid_block, "avoid_wall_slots"), "HexAvoidBasicCfg.terrain"),
+        ("Terrain seed", _assign_value(avoid_block, "avoid_seed"), "HexAvoidBasicCfg.terrain"),
+        ("Friction range", _assign_value(terrain_src, "friction_range"), "hex_terrain_config.domain_rand"),
+        ("Observation noise enabled", _assign_value(terrain_src, "add_noise"), "hex_terrain_config.noise"),
+        ("Depth clip range", _assign_value(terrain_src, "clip_range"), "hex_terrain_config"),
+    ]
+    out = [{"Item": k, "Value": v, "Source": s} for k, v, s in rows]
+    fields = ["Item", "Value", "Source"]
+    _write_csv(os.path.join(args.output_dir, "tableA3_domain_randomization.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA3_domain_randomization.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA3_domain_randomization.tex"), out, fields)
+    return out
+
+
+def _build_appendix_a4(args) -> List[Dict]:
+    planner_src = _read_text("rsl_rl/algorithms/high_level_planner.py")
+    learned_rows = _raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"])
+    risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
+    learned_params = _params_lookup(learned_rows).get((f"{float(args.mechanism_speed):.2f}", "learnedw"), "N/A")
+    risk_params = _params_lookup(risk_rows).get((f"{float(args.mechanism_speed):.2f}", "risk_only"), "N/A")
+    rows = [
+        ("Affordance encoder", "AffordanceCNNEncoder(channels, 128)", "GatePolicy"),
+        ("State encoder", "StateEncoder(state_dim=9, 64)", "GatePolicy"),
+        ("Goal encoder", "GoalEncoder(goal_dim=2, 32)", "GatePolicy"),
+        ("Difficulty input", "1 scalar", "fusion_dim = 128 + 64 + 32 + 1"),
+        ("Shared trunk", "225 -> 256 -> 256, ELU", "GatePolicy.fusion"),
+        ("Gate y head", "256 -> 64 -> 1, Softplus; Beta mean/action", "GatePolicy.y_alpha_head/y_beta_head"),
+        ("Learned-w head", "256 -> 64 -> 1, Softplus; only when learned_w=True", "GatePolicy.w_alpha_head/w_beta_head"),
+        ("Critic", "Separate encoders + trunk + value head 256 -> 64 -> 1", "GatePolicy.critic_*"),
+        ("Risk-only params", risk_params, "eval metrics params_total"),
+        ("Learned-w params", learned_params, "eval metrics params_total"),
+        ("Follow expert", "Analytic", "train_highlevel.py _compute_moe_follow_cmd_from_goal"),
+        ("Low-level locomotion", "Fixed checkpoint", "eval/train command low_level_ckpt"),
+    ]
+    if "fusion_dim = 128 + 64 + 32 + 1" not in planner_src:
+        rows.append(("Audit warning", "GatePolicy dimensions not found by text check", "rsl_rl/algorithms/high_level_planner.py"))
+    out = [{"Component": k, "Value": v, "Source": s} for k, v, s in rows]
+    fields = ["Component", "Value", "Source"]
+    _write_csv(os.path.join(args.output_dir, "tableA4_network_structure.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA4_network_structure.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA4_network_structure.tex"), out, fields)
+    return out
+
+
+def _write_manifest(
+    args,
+    table1: Sequence[Dict],
+    table2: Sequence[Dict],
+    table3: Sequence[Dict],
+    table_a5: Sequence[Dict],
+) -> None:
     path = os.path.join(args.output_dir, "MANIFEST.md")
     risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
     risk_only_mode = _risk_only_source_mode(args, risk_rows)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("# Final Paper Outputs\n\n")
+        f.write("# Final Paper Outputs v3\n\n")
         f.write("Generated files:\n\n")
         for name in [
+            "fig3_main_performance.pdf",
+            "fig3_main_performance.png",
+            "fig4_mechanism.pdf",
+            "fig4_mechanism.png",
             "table1_main_performance_stage4.csv",
             "table1_main_performance_stage4.md",
-            "fig4_speed_curves_stage4.png",
-            "fig4_speed_curves_stage4.pdf",
+            "table1_main_performance_stage4.tex",
             "table2_mechanism_ablation.csv",
             "table2_mechanism_ablation.md",
+            "table2_mechanism_ablation.tex",
             "table3_mono_ppo_stage_probe.csv",
             "table3_mono_ppo_stage_probe.md",
+            "table3_mono_ppo_stage_probe.tex",
+            "tableA1_ppo_hyperparams.tex",
+            "tableA2_reward_terms.tex",
+            "tableA3_domain_randomization.tex",
+            "tableA4_network_structure.tex",
+            "tableA5_delta_y_full.tex",
         ]:
             f.write(f"- {name}\n")
         f.write("\nRow counts:\n\n")
-        f.write(f"- Table I: {len(table1)} rows\n")
-        f.write(f"- Table II: {len(table2)} rows\n")
-        f.write(f"- Table III: {len(table3)} rows\n")
+        f.write(f"- Table I audit rows: {len(table1)}\n")
+        f.write(f"- Table II rows: {len(table2)}\n")
+        f.write(f"- Table III rows: {len(table3)}\n")
+        f.write(f"- Table A5 rows: {len(table_a5)}\n")
         f.write("\nSource files and paths:\n\n")
         for label, src in [
             ("internal_all_csv", args.internal_all_csv),
@@ -571,20 +1060,18 @@ def _write_manifest(args, table1: Sequence[Dict], table2: Sequence[Dict], table3
         f.write(f"- requested: `{args.risk_only_source_mode}`\n")
         f.write(f"- resolved: `{risk_only_mode}`\n")
         f.write("\nValidation checklist:\n\n")
-        f.write("- Fig.4: legend must contain Y-only / Geom-w / Risk-only / Rule-Override / Learned-w.\n")
         f.write("- Table I: expected 15 rows = 3 speeds x 5 methods; Mono-PPO is intentionally excluded.\n")
-        if risk_only_mode == "trained":
-            f.write("- Table II: Risk-only note should say trained from scratch; Delta y_r@C_avoid should be non-zero.\n")
-            f.write("- Table II: if trained Risk-only Delta y_r@C_avoid is 0.000, inspect the trained source and C_avoid window before using the table.\n")
-        else:
-            f.write("- Table II: current Risk-only source is legacy eval-only; rerun trained Risk-only and do not use this table in the paper.\n")
-        f.write("- Table II: Risk-only Delta y_w@C_avoid should be 0.000; Learned-w Delta y_w@C_avoid should be non-zero.\n")
-        f.write("- Table III: expected stages 2, 3, and 4; one-row stage4 output is not a valid paper table.\n")
-        f.write("- Source timestamps: verify all source paths are the intended final eval outputs.\n")
+        f.write("- Table I: Risk-only 0.60 success should be about 0.008 +/- 0.008.\n")
+        f.write("- Table II: speed is fixed by --mechanism_speed, default 0.60.\n")
+        f.write("- Table II: Risk-only note must say trained from scratch and no learned-w channel.\n")
+        f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
+        f.write("- Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
+        f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
+        f.write("- Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.\n")
 
 
 def build_argparser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build final PCR paper tables and figures.")
+    parser = argparse.ArgumentParser(description="Build final PCR-Net paper tables and figures.")
     parser.add_argument("--output_dir", default="agents/final_paper_outputs")
     parser.add_argument(
         "--internal_all_csv",
@@ -606,10 +1093,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--risk_only_source_mode",
         choices=("auto", "trained"),
         default="auto",
-        help=(
-            "How to label Risk-only in Table II. Risk-only is expected to be a "
-            "from-scratch risk-difference-only policy."
-        ),
+        help="How to label Risk-only in Table II.",
     )
     parser.add_argument(
         "--rule_all_csv",
@@ -643,6 +1127,8 @@ def build_argparser() -> argparse.ArgumentParser:
         "--learnedw_mechanism_dir",
         default="agents/eval_data/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260526_204857",
     )
+    parser.add_argument("--mechanism_speed", type=float, default=0.60)
+    parser.add_argument("--paper_train_num_envs", type=int, default=256)
     parser.add_argument(
         "--allow_incomplete_mono_stage_probe",
         action="store_true",
@@ -657,10 +1143,16 @@ def main() -> None:
     table1 = _build_table1(args)
     table2 = _build_table2(args)
     table3 = _build_table3(args)
-    _plot_fig4(args, table1)
-    _copy_fig5(args)
-    _write_manifest(args, table1, table2, table3)
-    print(f"Final paper outputs written to: {args.output_dir}")
+    _plot_fig3(args, table1)
+    _plot_fig4(args)
+    _copy_legacy_mechanism_png(args)
+    _build_appendix_a1(args)
+    _build_appendix_a2(args)
+    _build_appendix_a3(args)
+    _build_appendix_a4(args)
+    table_a5 = _build_table_a5(args)
+    _write_manifest(args, table1, table2, table3, table_a5)
+    print(f"Final paper outputs v3 written to: {args.output_dir}")
 
 
 if __name__ == "__main__":
