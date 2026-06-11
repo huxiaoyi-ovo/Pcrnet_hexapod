@@ -278,7 +278,7 @@ int main(int argc, char** argv){
     tic2 = ros::Time::now();
     cl1 = clock(); cl2 = clock(); cl3=clock();
     // ros::Publisher com_pub = nh.advertise<geometry_msgs::PoseStamped>("usr/command",1);
-    ros::Publisher com_pub = nh.advertise<interface::joy_command>(command_topic,10);
+    ros::Publisher com_pub = nh.advertise<interface::joy_command>(command_topic,1);
     ROS_WARN("joy_ctrl publishes joy_command to %s", command_topic.c_str());
     ros::Publisher neg_pre_pub = nh.advertise<std_msgs::Int32MultiArray>("/negative_pressure",1);
     ros::ServiceClient set_model_client = nh.serviceClient<gazebo_msgs::SetModelState>("gazebo/set_model_state");

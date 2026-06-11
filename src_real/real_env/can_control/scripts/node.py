@@ -58,7 +58,6 @@ class rosnode:
         rospy.init_node(node_name, anonymous=True)
 
         self.sita_cur_pub = rospy.Publisher(target_joints.status_cur, Float64MultiArray, queue_size=1)
-        self.sita_des_sub = rospy.Subscriber("/sita_des", Float64MultiArray, self.sita_des)
 
         print("node init------------")
         self.rate = rospy.Rate(200) # 100hz
@@ -70,6 +69,7 @@ class rosnode:
 
         self.body_part = body_part
         self.rec_flag=False
+        self.serial_fault=False
         self.serial_device = serial.Serial(port, 921600, timeout=0.5)
 
         #创建用于写入的文件流
@@ -98,6 +98,12 @@ class rosnode:
             self.MC.switchControlMode(a,Control_Type.MIT)
             # self.MC.enable(a)
             print("back leg is opened--------")
+        self.sita_des_sub = rospy.Subscriber(
+            "/sita_des",
+            Float64MultiArray,
+            self.sita_des,
+            queue_size=1,
+        )
     def leg_is_enable(self,leg_num:leg_list):
         for i in leg_num.motor:
             # print("motor is enable ",i.isEnable)
@@ -232,22 +238,36 @@ class rosnode:
     
     def sita_des(self,data):
         with Lock:
-            status_data=Float64MultiArray()
-            des_data=[]
-            set_data=[0.0]*19
-            set_data[0]=data.data[0]
-            set_data[1:7]=data.data[1+self.body_part*21:7+self.body_part*21]
-            set_data[7:13]=data.data[8+self.body_part*21:14+self.body_part*21]
-            set_data[13:19]=data.data[15+self.body_part*21:21+self.body_part*21]
-            
-            self.data2leg(set_data)
-            # 扁平化拼接状态并发布
-            status_flat = []
-            status_flat.extend(self.motor_staus_pub(self.bac_leg))
-            status_flat.extend(self.motor_staus_pub(self.fro_leg))
-            status_flat.extend(self.motor_staus_pub(self.mid_leg))
-            status_data.data = status_flat
-            self.sita_cur_pub.publish(status_data)
+            if self.serial_fault:
+                return
+            try:
+                status_data=Float64MultiArray()
+                des_data=[]
+                set_data=[0.0]*19
+                set_data[0]=data.data[0]
+                set_data[1:7]=data.data[1+self.body_part*21:7+self.body_part*21]
+                set_data[7:13]=data.data[8+self.body_part*21:14+self.body_part*21]
+                set_data[13:19]=data.data[15+self.body_part*21:21+self.body_part*21]
+
+                self.data2leg(set_data)
+                # 扁平化拼接状态并发布
+                status_flat = []
+                status_flat.extend(self.motor_staus_pub(self.bac_leg))
+                status_flat.extend(self.motor_staus_pub(self.fro_leg))
+                status_flat.extend(self.motor_staus_pub(self.mid_leg))
+                status_data.data = status_flat
+                self.sita_cur_pub.publish(status_data)
+            except (serial.SerialException, OSError) as exc:
+                self.serial_fault = True
+                rospy.logfatal(
+                    "[%s] serial I/O fault; command writes are latched off until legrun is restarted: %s",
+                    self.body_part.name,
+                    exc,
+                )
+                try:
+                    self.serial_device.close()
+                except Exception:
+                    pass
 
             #将期望值和当前值写入一个文件中
             # if self.record_txt:

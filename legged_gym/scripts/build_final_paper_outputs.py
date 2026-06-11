@@ -929,21 +929,141 @@ def _episode_rows(rows: Sequence[Dict[str, str]], episode_id: str) -> List[Dict[
     return sorted(out, key=lambda r: _safe_float(r.get("time_s", ""), default=0.0))
 
 
-def _choose_fig6_episode_id(datasets: Dict[Tuple[str, str], Dict], requested: Optional[int]) -> str:
+def _fig6_terminal_reason(rows: Sequence[Dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    return str(rows[-1].get("episode_termination_reason", "")).strip().lower()
+
+
+def _fig6_common_episode_ids(datasets: Dict[Tuple[str, str], Dict]) -> set:
     episode_sets = []
     for data in datasets.values():
         episode_sets.append({str(r.get("episode_id", "")) for r in data["rows"] if str(r.get("episode_id", "")) != ""})
-    common = set.intersection(*episode_sets) if episode_sets else set()
+    return set.intersection(*episode_sets) if episode_sets else set()
+
+
+def _score_fig6_episode(datasets: Dict[Tuple[str, str], Dict], episode_id: str) -> Dict[str, str]:
+    score = 0.0
+    collisions = 0
+    failures = 0
+    learned_success = 0
+    layout_refs = set()
+    terms: Dict[Tuple[str, str], str] = {}
+    for speed in SPEEDS:
+        speed_weight = 4.0 if speed == "0.60" else (2.0 if speed == "0.50" else 1.0)
+        for method in METHOD_ORDER:
+            rows = _episode_rows(datasets[(speed, method)]["rows"], episode_id)
+            if not rows:
+                return {
+                    "Episode": episode_id,
+                    "Score": "-inf",
+                    "LayoutOK": "0",
+                    "LearnedSuccess": "0",
+                    "BaselineCollisions": "0",
+                    "BaselineFailures": "0",
+                    "Reason": "missing rows",
+                }
+            layout_refs.add(_canonical_obstacles(rows[0].get("obstacles_json", "")))
+            reason = _fig6_terminal_reason(rows)
+            terms[(speed, method)] = reason
+            if method == "learnedw":
+                if reason == "success":
+                    learned_success += 1
+                    score += 10.0 * speed_weight
+                else:
+                    score -= 30.0 * speed_weight
+            else:
+                if reason == "collision":
+                    collisions += 1
+                    score += 7.0 * speed_weight
+                elif reason in ("follow_lost", "target_lost", "timeout"):
+                    failures += 1
+                    score += 3.0 * speed_weight
+                elif reason == "success":
+                    score -= 1.5 * speed_weight
+
+    layout_ok = len(layout_refs) == 1
+    if not layout_ok:
+        score -= 10000.0
+    high_speed_terms = ",".join(f"{m}:{terms.get(('0.60', m), '')}" for m in METHOD_ORDER)
+    return {
+        "Episode": episode_id,
+        "Score": f"{score:.3f}",
+        "LayoutOK": "1" if layout_ok else "0",
+        "LearnedSuccess": str(learned_success),
+        "BaselineCollisions": str(collisions),
+        "BaselineFailures": str(failures),
+        "Reason": high_speed_terms,
+    }
+
+
+def _choose_fig6_episode_id(
+    datasets: Dict[Tuple[str, str], Dict],
+    requested: Optional[int],
+) -> Tuple[str, str, List[Dict[str, str]]]:
+    common = _fig6_common_episode_ids(datasets)
     if requested is not None and requested >= 0:
         eid = str(int(requested))
         if eid not in common:
             raise RuntimeError(f"Fig.6 requested episode_id={eid}, but it is not present in every method/speed timeseries.")
-        return eid
-    if "0" in common:
-        return "0"
+        return eid, "manual_common_episode_id", [_score_fig6_episode(datasets, eid)]
     if not common:
         raise RuntimeError("Fig.6 has no common episode_id across all method/speed timeseries.")
-    return sorted(common, key=lambda x: int(x) if x.isdigit() else x)[0]
+    candidates = [_score_fig6_episode(datasets, eid) for eid in sorted(common, key=lambda x: int(x) if x.isdigit() else x)]
+    candidates = sorted(
+        candidates,
+        key=lambda r: (
+            int(r.get("LayoutOK", "0")),
+            _safe_float(r.get("Score", ""), default=-float("inf")),
+        ),
+        reverse=True,
+    )
+    best = candidates[0]
+    if best.get("LayoutOK") != "1":
+        raise RuntimeError("Fig.6 has no common episode with the same obstacle layout across all method/speed runs.")
+    return str(best["Episode"]), "auto_high_conflict_episode", candidates
+
+
+def _fig6_window_limits(
+    obstacles: Sequence[Dict],
+    selected: Dict[Tuple[str, str], List[Dict[str, str]]],
+    args,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    y_min_arg = _safe_float(getattr(args, "fig6_y_min", ""), default=float("nan"))
+    y_max_arg = _safe_float(getattr(args, "fig6_y_max", ""), default=float("nan"))
+    x_margin_arg = _safe_float(getattr(args, "fig6_x_margin", ""), default=0.8)
+    if math.isfinite(y_min_arg) and math.isfinite(y_max_arg) and y_max_arg > y_min_arg:
+        y_min, y_max = y_min_arg, y_max_arg
+    else:
+        obs_y = [_safe_float(o.get("y", "")) for o in obstacles if math.isfinite(_safe_float(o.get("y", "")))]
+        if obs_y:
+            y_min = min(obs_y) - 1.8
+            y_max = max(obs_y) + 2.4
+        else:
+            y_min, y_max = -2.5, 10.5
+
+    xs: List[float] = []
+    for rows in selected.values():
+        for row in rows:
+            ry = _safe_float(row.get("robot_y", ""))
+            ty = _safe_float(row.get("target_y", ""))
+            if math.isfinite(ry) and y_min <= ry <= y_max:
+                xs.append(_safe_float(row.get("robot_x", "")))
+            if math.isfinite(ty) and y_min <= ty <= y_max:
+                xs.append(_safe_float(row.get("target_x", "")))
+    for obs in obstacles:
+        x = _safe_float(obs.get("x", ""))
+        r = _safe_float(obs.get("r", ""), default=0.0)
+        y = _safe_float(obs.get("y", ""))
+        if math.isfinite(x) and math.isfinite(y) and y_min <= y <= y_max:
+            xs.extend([x - r, x + r])
+    xs = [x for x in xs if math.isfinite(x)]
+    if xs:
+        x_min = min(xs) - max(0.35, x_margin_arg)
+        x_max = max(xs) + max(0.35, x_margin_arg)
+    else:
+        x_min, x_max = -2.0, 2.0
+    return (x_min, x_max), (y_min, y_max)
 
 
 def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> None:
@@ -969,7 +1089,10 @@ def _plot_fig6(args) -> None:
     except Exception as exc:
         raise RuntimeError(f"matplotlib unavailable; cannot draw Fig.6 ({exc})") from exc
 
-    episode_id = _choose_fig6_episode_id(datasets, getattr(args, "fig6_episode_id", None))
+    episode_id, selection_mode, candidate_rows = _choose_fig6_episode_id(
+        datasets,
+        getattr(args, "fig6_episode_id", None),
+    )
     selected: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
     obstacle_refs = set()
     for key, data in datasets.items():
@@ -985,35 +1108,19 @@ def _plot_fig6(args) -> None:
         )
     obstacles = json.loads(next(iter(obstacle_refs)))
 
-    all_x: List[float] = []
-    all_y: List[float] = []
-    for rows in selected.values():
-        for row in rows:
-            for key in ("robot_x", "target_x"):
-                v = _safe_float(row.get(key, ""))
-                if math.isfinite(v):
-                    all_x.append(v)
-            for key in ("robot_y", "target_y"):
-                v = _safe_float(row.get(key, ""))
-                if math.isfinite(v):
-                    all_y.append(v)
-    for obs in obstacles:
-        all_x.extend([_safe_float(obs.get("x")) - _safe_float(obs.get("r")), _safe_float(obs.get("x")) + _safe_float(obs.get("r"))])
-        all_y.extend([_safe_float(obs.get("y")) - _safe_float(obs.get("r")), _safe_float(obs.get("y")) + _safe_float(obs.get("r"))])
-    if not all_x or not all_y:
-        raise RuntimeError("Fig.6 selected data has no finite trajectory coordinates.")
-    x_pad = max(0.25, 0.08 * (max(all_x) - min(all_x)))
-    y_pad = max(0.35, 0.08 * (max(all_y) - min(all_y)))
-    xlim = (min(all_x) - x_pad, max(all_x) + x_pad)
-    ylim = (min(all_y) - y_pad, max(all_y) + y_pad)
+    xlim, ylim = _fig6_window_limits(obstacles, selected, args)
 
     fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.2), sharex=True, sharey=True, constrained_layout=True)
     for ax, speed in zip(axes, SPEEDS):
         for obs in obstacles:
+            oy = _safe_float(obs.get("y"))
+            radius = _safe_float(obs.get("r"))
+            if not math.isfinite(oy) or oy + radius < ylim[0] or oy - radius > ylim[1]:
+                continue
             ax.add_patch(
                 Circle(
                     (_safe_float(obs.get("x")), _safe_float(obs.get("y"))),
-                    _safe_float(obs.get("r")),
+                    radius,
                     facecolor="#9e9e9e",
                     edgecolor="#666666",
                     linewidth=0.5,
@@ -1025,7 +1132,7 @@ def _plot_fig6(args) -> None:
         target_rows = selected[(speed, "learnedw")]
         tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
         ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
-        ax.plot(tx, ty, linestyle="--", linewidth=1.5, color="#009e73", alpha=0.9, label="Target", zorder=2)
+        ax.plot(tx, ty, linestyle="--", linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
 
         start_marked = False
         for method in METHOD_ORDER:
@@ -1033,7 +1140,7 @@ def _plot_fig6(args) -> None:
             xs = [_safe_float(r.get("robot_x", "")) for r in rows]
             ys = [_safe_float(r.get("robot_y", "")) for r in rows]
             style = METHOD_STYLE[method]
-            alpha = 0.95 if method == "learnedw" else 0.52
+            alpha = 0.98 if method == "learnedw" else 0.34
             z = 5 if method == "learnedw" else 3
             ax.plot(
                 xs,
@@ -1057,7 +1164,7 @@ def _plot_fig6(args) -> None:
         ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        ax.set_aspect("equal", adjustable="box")
+        ax.set_aspect("auto")
         ax.tick_params(labelsize=9)
     axes[0].set_ylabel("world y / forward [m]", fontsize=11)
 
@@ -1096,7 +1203,7 @@ def _plot_fig6(args) -> None:
                     "Speed": speed,
                     "Method": SHORT_METHOD_LABELS[method],
                     "Episode": episode_id,
-                    "Selection": "fixed_common_episode_id",
+                    "Selection": selection_mode,
                     "TrajectoryFrame": rows[0].get("trajectory_frame", ""),
                     "Termination": rows[-1].get("episode_termination_reason", ""),
                     "Source": datasets[(speed, method)]["path"],
@@ -1106,6 +1213,11 @@ def _plot_fig6(args) -> None:
         os.path.join(args.output_dir, "fig6_trajectories_stage4_sources.csv"),
         source_rows,
         ["Speed", "Method", "Episode", "Selection", "TrajectoryFrame", "Termination", "Source"],
+    )
+    _write_csv(
+        os.path.join(args.output_dir, "fig6_trajectory_episode_candidates.csv"),
+        candidate_rows,
+        ["Episode", "Score", "LayoutOK", "LearnedSuccess", "BaselineCollisions", "BaselineFailures", "Reason"],
     )
 
 
@@ -1325,6 +1437,7 @@ def _write_manifest(
                 "fig6_trajectories_stage4.pdf",
                 "fig6_trajectories_stage4.png",
                 "fig6_trajectories_stage4_sources.csv",
+                "fig6_trajectory_episode_candidates.csv",
             ]
         for name in generated_files:
             f.write(f"- {name}\n")
@@ -1361,7 +1474,7 @@ def _write_manifest(
         f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
         f.write("- Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
         f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
-        f.write("- Fig.6: if requested, timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play.\n")
+        f.write("- Fig.6: if requested, timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; default episode selection prefers learned-w success with baseline collision/failure.\n")
         f.write("- Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.\n")
 
 
@@ -1439,7 +1552,25 @@ def build_argparser() -> argparse.ArgumentParser:
         "--fig6_episode_id",
         type=int,
         default=-1,
-        help="Common episode_id to draw for Fig.6. Default chooses 0 if present.",
+        help="Common episode_id to draw for Fig.6. Default auto-selects a high-conflict episode.",
+    )
+    parser.add_argument(
+        "--fig6_y_min",
+        type=float,
+        default=float("nan"),
+        help="Optional lower y limit for Fig.6 interaction window.",
+    )
+    parser.add_argument(
+        "--fig6_y_max",
+        type=float,
+        default=float("nan"),
+        help="Optional upper y limit for Fig.6 interaction window.",
+    )
+    parser.add_argument(
+        "--fig6_x_margin",
+        type=float,
+        default=0.8,
+        help="Lateral padding for Fig.6 interaction window.",
     )
     parser.add_argument(
         "--allow_incomplete_mono_stage_probe",

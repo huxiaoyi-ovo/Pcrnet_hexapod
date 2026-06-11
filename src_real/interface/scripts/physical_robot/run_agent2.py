@@ -32,13 +32,7 @@ def PublishDefaultStand():
     q_des_pub.publish(q_des_msgs)
 
 
-def PubCommand(_):
-    global q_des_msgs, left_cur_sub,right_cur_sub
-    with command_lock:
-        q_des_pub.publish(q_des_msgs)
-    
-
-def ProcessCommand(msg:joy_command, source="legacy", use_triple_pub=True):
+def ProcessCommand(msg:joy_command, source="legacy"):
     global agent, last_actions, q_des_msgs,tic
     with command_lock:
         if l_cur_time<0.01 or r_cur_time<0.01:
@@ -89,13 +83,6 @@ def ProcessCommand(msg:joy_command, source="legacy", use_triple_pub=True):
             rospy.loginfo_throttle(1.0, status)
         else:
             print(status)
-        if use_triple_pub:
-            # 由于电机是发一次收到一次状态,因此采用定时器来补采样反馈；PCR 50Hz 路径不使用该补发。
-            # rospy.Timer(rospy.Duration(0.013),PubCommand,oneshot=True)
-            rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
-            rospy.Timer(rospy.Duration(0.008),PubCommand,oneshot=True)
-
-
 def ClearPcrCache():
     global latest_pcr_cmd, latest_pcr_stamp
     latest_pcr_cmd = None
@@ -132,7 +119,7 @@ def ManualCommandCb(msg:joy_command):
             print("[run_agent2] manual command overrides PCR speed input")
         pcr_enabled = False
         ClearPcrCache()
-        ProcessCommand(msg, source="manual", use_triple_pub=True)
+        ProcessCommand(msg, source="manual")
 
 
 def BuildPcrSpeedCommand(cmd_data):
@@ -180,7 +167,7 @@ def PcrControlTick(_):
             rospy.logwarn("[PCR] command timeout, disable PCR output")
             return
 
-        ProcessCommand(BuildPcrSpeedCommand(latest_pcr_cmd), source="pcr_50hz", use_triple_pub=False)
+        ProcessCommand(BuildPcrSpeedCommand(latest_pcr_cmd), source="pcr_50hz")
 
 
 def LegacyCommandCb(msg:joy_command):
@@ -189,7 +176,7 @@ def LegacyCommandCb(msg:joy_command):
         if pcr_enabled:
             pcr_enabled = False
             ClearPcrCache()
-        ProcessCommand(msg, source="legacy", use_triple_pub=True)
+        ProcessCommand(msg, source="legacy")
 
 
 def UpdateQState(msg:Float64MultiArray,lr_index):
@@ -285,6 +272,7 @@ if __name__=='__main__':
         print(f"[run_agent2] manual topic: {args.manual_command_topic}")
         print(f"[run_agent2] PCR topic: {args.pcr_command_topic}")
         print(f"[run_agent2] manual change_mode enables PCR speed input; any other manual command disables it")
+        print("[run_agent2] manual and PCR commands use one /sita_des publish per control update")
     imu_sub = rospy.Subscriber('/imu/model_states',Float64MultiArray,UpdateRootState,queue_size=1)
     # q_cur_sub = rospy.Subscriber('/sita_cur',Float64MultiArray,UpdateQState,queue_size=10)
     left_cur_sub=rospy.Subscriber('/left_sita_cur',Float64MultiArray,UpdateQState,callback_args='l',queue_size=1)
@@ -298,7 +286,6 @@ if __name__=='__main__':
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
 
 
 
