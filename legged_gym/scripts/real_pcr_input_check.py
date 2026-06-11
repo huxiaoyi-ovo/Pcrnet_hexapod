@@ -12,12 +12,18 @@ checker; with --publish_ros it also publishes the exact PCR ROS1 inputs.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
+import queue
+import shutil
+import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import cv2
@@ -42,6 +48,57 @@ def resolve_map_forward_offset_m(args: argparse.Namespace) -> float:
     if value is None:
         value = args.camera_forward_offset_m
     return float(value)
+
+
+def update_obstacle_memory(
+    raw_occ: np.ndarray,
+    memory_state: Optional[Dict[str, object]],
+    args: argparse.Namespace,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    raw_occ = (np.asarray(raw_occ, dtype=np.float32) > 0.5).astype(np.float32)
+    if not bool(args.obstacle_memory) or memory_state is None:
+        raw_count = int(np.count_nonzero(raw_occ))
+        return raw_occ, raw_occ.copy(), {
+            "obstacle_memory_enabled": 0.0,
+            "obstacle_memory_dt_s": 0.0,
+            "obstacle_memory_decay": 0.0,
+            "raw_occ_cell_count": float(raw_count),
+            "memory_occ_cell_count": float(raw_count),
+            "memory_retained_cell_count": 0.0,
+            "memory_retained_ratio": 0.0,
+            "memory_peak": float(raw_occ.max()) if raw_occ.size else 0.0,
+        }
+
+    now = time.monotonic()
+    memory = memory_state.get("occ")
+    if not isinstance(memory, np.ndarray) or memory.shape != raw_occ.shape:
+        memory = np.zeros_like(raw_occ, dtype=np.float32)
+        last_stamp = now
+    else:
+        last_stamp = float(memory_state.get("stamp", now))
+
+    dt = max(0.0, now - last_stamp)
+    tau = max(float(args.obstacle_memory_tau_s), 1e-3)
+    decay = math.exp(-dt / tau)
+    memory = np.maximum(memory * decay, raw_occ).astype(np.float32, copy=False)
+    memory_state["occ"] = memory
+    memory_state["stamp"] = now
+
+    threshold = float(np.clip(float(args.obstacle_memory_threshold), 0.0, 1.0))
+    fused_occ = (memory >= threshold).astype(np.float32)
+    retained = (fused_occ > 0.5) & (raw_occ < 0.5)
+    memory_count = int(np.count_nonzero(fused_occ))
+    retained_count = int(np.count_nonzero(retained))
+    return fused_occ, memory.copy(), {
+        "obstacle_memory_enabled": 1.0,
+        "obstacle_memory_dt_s": float(dt),
+        "obstacle_memory_decay": float(decay),
+        "raw_occ_cell_count": float(np.count_nonzero(raw_occ)),
+        "memory_occ_cell_count": float(memory_count),
+        "memory_retained_cell_count": float(retained_count),
+        "memory_retained_ratio": float(retained_count / max(memory_count, 1)),
+        "memory_peak": float(memory.max()) if memory.size else 0.0,
+    }
 
 
 @dataclass
@@ -316,7 +373,21 @@ def build_local_map_from_depth(
     args: argparse.Namespace,
     person_bbox: Optional[np.ndarray],
     person_depth_m: float,
-) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    memory_state: Optional[Dict[str, object]] = None,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    float,
+    np.ndarray,
+    float,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    Dict[str, float],
+]:
     map_size = int(args.map_size)
     map_extent = float(args.map_extent_m)
     cell = map_extent / float(map_size)
@@ -389,12 +460,10 @@ def build_local_map_from_depth(
         iy = np.clip(iy, 0, map_size - 1)
         occ[ix, iy] = 1.0
         front_obstacle = (
-            (np.abs(x_right) <= float(args.difficulty_front_half_width_m))
+            is_obstacle
+            & (np.abs(x_right) <= float(args.difficulty_front_half_width_m))
             & (y_forward >= float(args.difficulty_front_min_m))
             & (y_forward <= float(args.difficulty_front_max_m))
-            & (height >= float(args.ground_remove_height_m))
-            & (height <= float(args.obstacle_max_height_m))
-            & in_map
         )
         if np.any(front_obstacle):
             front_y = y_forward[front_obstacle]
@@ -440,8 +509,27 @@ def build_local_map_from_depth(
         num_self_masked_points = 0
         num_obstacle_points = 0
 
+    raw_occ = occ.copy()
     if radius_cells > 0:
         kernel = np.ones((2 * radius_cells + 1, 2 * radius_cells + 1), dtype=np.uint8)
+        raw_inflated_occ = cv2.dilate((raw_occ > 0.5).astype(np.uint8), kernel, iterations=1)
+    else:
+        raw_inflated_occ = (raw_occ > 0.5).astype(np.uint8)
+    raw_passable = (
+        ((raw_inflated_occ <= 0) & (raw_occ < 0.5)).astype(np.float32) * policy_visible
+    )
+    raw_local_map_2ch = np.stack([raw_occ, raw_passable], axis=0).astype(np.float32)
+    current_difficulty_stats = compute_actor_difficulty_stats(
+        raw_local_map_2ch,
+        map_extent,
+        float(args.difficulty_radius_m),
+        visible_mask=policy_visible,
+        unknown_cost=float(args.unknown_cost),
+    )
+    actor_difficulty_current_raw = float(current_difficulty_stats["actor_difficulty"])
+
+    occ, memory_occ, memory_stats = update_obstacle_memory(raw_occ, memory_state, args)
+    if radius_cells > 0:
         inflated_occ = cv2.dilate((occ > 0.5).astype(np.uint8), kernel, iterations=1)
     else:
         inflated_occ = (occ > 0.5).astype(np.uint8)
@@ -468,13 +556,13 @@ def build_local_map_from_depth(
         visible_mask=policy_visible,
         unknown_cost=float(args.unknown_cost),
     )
-    actor_difficulty_map_raw = float(difficulty_stats["actor_difficulty"])
+    actor_difficulty_map_fused = float(difficulty_stats["actor_difficulty"])
     front_distance_risk = compute_front_distance_risk(
         front_nearest_m,
         min_m=float(args.difficulty_front_min_m),
         max_m=float(args.difficulty_front_max_m),
     )
-    actor_difficulty = float(max(actor_difficulty_map_raw, front_distance_risk))
+    actor_difficulty = float(max(actor_difficulty_map_fused, front_distance_risk))
     visible_count = max(float(np.count_nonzero(policy_visible > 0.5)), 1.0)
     blocked_visible = ((policy_visible > 0.5) & (passable < 0.5)).astype(np.float32)
     front_spread_m = (
@@ -495,8 +583,10 @@ def build_local_map_from_depth(
         "front_risk_valid": float(front_risk_valid),
         "front_risk_percentile": float(args.difficulty_front_percentile),
         "front_risk_min_points": float(args.difficulty_front_min_points),
-        "actor_difficulty_map_raw": actor_difficulty_map_raw,
-        "actor_difficulty_final": actor_difficulty,
+        "actor_difficulty_current_raw": actor_difficulty_current_raw,
+        "actor_difficulty_map_raw": actor_difficulty_current_raw,
+        "actor_difficulty_map_fused": actor_difficulty_map_fused,
+        "actor_difficulty_map_front": actor_difficulty,
         "front_distance_risk": front_distance_risk,
         "nearest_blocked_m": float(difficulty_stats["nearest_blocked_m"]),
         "near_risk": float(difficulty_stats["near_risk"]),
@@ -514,6 +604,13 @@ def build_local_map_from_depth(
         "num_points_after_self_mask": float(num_after_self_mask),
         "num_self_masked_points": float(num_self_masked_points),
         "num_obstacle_points": float(num_obstacle_points),
+        "num_raw_obstacle_cells_before_inflation": float(
+            np.count_nonzero(raw_occ > 0.5)
+        ),
+        "num_fused_obstacle_cells_before_inflation": float(
+            np.count_nonzero(occ > 0.5)
+        ),
+        # Legacy field retained for existing bag analysis scripts.
         "num_obstacle_cells_before_inflation": float(np.count_nonzero(occ > 0.5)),
         "num_obstacle_cells_after_inflation": float(np.count_nonzero(inflated_occ > 0)),
         "policy_visible_mean": float(policy_visible.mean()),
@@ -525,6 +622,7 @@ def build_local_map_from_depth(
         "raw_observed_mean": float(observed.mean()),
         "raw_observed_gate_mean": float(observed_gate.mean()),
     }
+    debug_stats.update(memory_stats)
     return (
         local_map_2ch,
         passable.astype(np.float32),
@@ -535,6 +633,8 @@ def build_local_map_from_depth(
         observed_gate,
         policy_visible,
         risk_blocked_map,
+        raw_occ,
+        memory_occ,
         debug_stats,
     )
 
@@ -981,13 +1081,419 @@ def save_snapshot(
     cv2.imwrite(os.path.join(save_dir, f"real_pcr_color_{frame_idx:06d}.png"), color_bgr)
 
 
+class ViewerRecorder:
+    """Write draw_debug() frames without blocking the camera/control loop."""
+
+    def __init__(self, rospy, Bool, String, args: argparse.Namespace):
+        self.rospy = rospy
+        self.args = args
+        self.lock = threading.RLock()
+        self.frame_queue_limit = max(1, int(args.viewer_record_queue_size))
+        # Reserve two slots for stop and shutdown so frame backpressure can
+        # never prevent the writer from finalizing the current MP4.
+        self.frame_queue = queue.Queue(maxsize=self.frame_queue_limit + 2)
+        self.session_dir = ""
+        self.active_session = ""
+        self.recording_requested = False
+        self.accept_frames = False
+        self.last_enqueue = 0.0
+        self.dropped_frames = 0
+        self.session_drop_start = 0
+        self.shutdown_started = False
+        self.worker = threading.Thread(
+            target=self._writer_loop,
+            name="pcr_viewer_writer",
+            daemon=True,
+        )
+        self.worker.start()
+        self.session_sub = rospy.Subscriber(
+            "/pcr/recording_session", String, self._session_callback, queue_size=1
+        )
+        self.recording_sub = rospy.Subscriber(
+            "/pcr/recording", Bool, self._recording_callback, queue_size=1
+        )
+        rospy.on_shutdown(self.shutdown)
+
+    def _session_callback(self, msg) -> None:
+        with self.lock:
+            self.session_dir = str(msg.data).strip()
+            if self.recording_requested and self.session_dir:
+                self._activate_locked(self.session_dir)
+
+    def _recording_callback(self, msg) -> None:
+        requested = bool(msg.data)
+        with self.lock:
+            self.recording_requested = requested
+            if requested:
+                if self.session_dir:
+                    self._activate_locked(self.session_dir)
+                else:
+                    self.rospy.logwarn(
+                        "[ViewerRecorder] recording requested before session path; waiting"
+                    )
+                return
+            old_session = self.active_session
+            self.accept_frames = False
+            self.active_session = ""
+        if old_session:
+            self._enqueue_control(("stop", old_session))
+
+    def _activate_locked(self, session_dir: str) -> None:
+        if self.accept_frames and self.active_session == session_dir:
+            return
+        self.active_session = session_dir
+        self.accept_frames = True
+        self.last_enqueue = 0.0
+        self.session_drop_start = self.dropped_frames
+        self.rospy.logwarn("[ViewerRecorder] viewer recording armed: %s", session_dir)
+
+    def _enqueue_control(self, item) -> None:
+        self.frame_queue.put(item)
+
+    def is_recording(self) -> bool:
+        with self.lock:
+            return bool(self.accept_frames and self.active_session)
+
+    def enqueue(
+        self,
+        source_frame_idx: int,
+        ros_time: float,
+        wall_time: float,
+        frame_bgr: np.ndarray,
+        metrics: Dict[str, float],
+    ) -> None:
+        with self.lock:
+            if not self.accept_frames or not self.active_session:
+                return
+            now_mono = time.monotonic()
+            period = 1.0 / max(float(self.args.viewer_video_fps), 1.0)
+            if now_mono - self.last_enqueue < period:
+                return
+            self.last_enqueue = now_mono
+            session_dir = self.active_session
+            session_drop_start = self.session_drop_start
+        packet = (
+            "frame",
+            session_dir,
+            session_drop_start,
+            int(source_frame_idx),
+            float(ros_time),
+            float(wall_time),
+            dict(metrics),
+            frame_bgr.copy(),
+        )
+        if self.frame_queue.qsize() >= self.frame_queue_limit:
+            with self.lock:
+                self.dropped_frames += 1
+            self.rospy.logwarn_throttle(
+                2.0,
+                "[ViewerRecorder] viewer queue full; dropping frames to protect control timing",
+            )
+            return
+        try:
+            self.frame_queue.put_nowait(packet)
+        except queue.Full:
+            with self.lock:
+                self.dropped_frames += 1
+            self.rospy.logwarn_throttle(
+                2.0,
+                "[ViewerRecorder] viewer queue full; dropping frames to protect control timing",
+            )
+
+    def _open_writer(self, video_path: Path, width: int, height: int):
+        fps = max(float(self.args.viewer_video_fps), 1.0)
+        bitrate = max(int(self.args.viewer_video_bitrate), 100000)
+        writer = None
+        codec = ""
+        gst_inspect = shutil.which("gst-inspect-1.0")
+        if gst_inspect is not None:
+            try:
+                probe = subprocess.run(
+                    [gst_inspect, "nvv4l2h264enc"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2.0,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                probe = None
+            if probe is not None and probe.returncode == 0:
+                pipeline = (
+                    "appsrc ! videoconvert ! video/x-raw,format=BGRx ! "
+                    "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+                    f"nvv4l2h264enc bitrate={bitrate} ! h264parse ! qtmux ! "
+                    f'filesink location="{video_path}" sync=false'
+                )
+                candidate = cv2.VideoWriter(
+                    pipeline,
+                    cv2.CAP_GSTREAMER,
+                    0,
+                    fps,
+                    (width, height),
+                    True,
+                )
+                if candidate.isOpened():
+                    writer = candidate
+                    codec = "nvv4l2h264enc"
+                else:
+                    candidate.release()
+        if writer is None:
+            candidate = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height),
+            )
+            if candidate.isOpened():
+                writer = candidate
+                codec = "mp4v"
+            else:
+                candidate.release()
+        return writer, codec
+
+    def _viewer_metadata(
+        self,
+        session_dir: Path,
+        *,
+        codec: str,
+        width: int,
+        height: int,
+        frame_count: int,
+        dropped_frames: int,
+        started_ros: Optional[float],
+        started_wall: Optional[float],
+        stopped_ros: Optional[float],
+        stopped_wall: Optional[float],
+    ) -> None:
+        video_path = session_dir / "viewer.mp4"
+        frame_csv_path = session_dir / "frame_timestamps.csv"
+        video_available = bool(frame_count > 0 and video_path.is_file())
+        timestamps_available = bool(frame_count > 0 and frame_csv_path.is_file())
+        payload = {
+            "viewer_video": str(video_path) if video_available else None,
+            "frame_timestamps": (
+                str(frame_csv_path) if timestamps_available else None
+            ),
+            "viewer_recording_ok": bool(video_available and timestamps_available),
+            "viewer_video_fps": float(self.args.viewer_video_fps),
+            "viewer_video_bitrate": int(self.args.viewer_video_bitrate),
+            "viewer_codec": codec,
+            "viewer_width": int(width),
+            "viewer_height": int(height),
+            "viewer_frames_written": int(frame_count),
+            "viewer_frames_dropped": int(dropped_frames),
+            "viewer_started_ros_time": started_ros,
+            "viewer_started_wall_time": started_wall,
+            "viewer_stopped_ros_time": stopped_ros,
+            "viewer_stopped_wall_time": stopped_wall,
+            "camera_width": int(self.args.width),
+            "camera_height": int(self.args.height),
+            "camera_fps_target": int(self.args.fps),
+            "camera_height_m": float(self.args.camera_height_m),
+            "camera_pitch_down_deg": float(self.args.camera_pitch_down_deg),
+            "target_forward_offset_m": float(resolve_target_forward_offset_m(self.args)),
+            "map_forward_offset_m": float(resolve_map_forward_offset_m(self.args)),
+            "map_size": int(self.args.map_size),
+            "map_extent_m": float(self.args.map_extent_m),
+            "obstacle_memory_enable": bool(self.args.obstacle_memory),
+            "obstacle_memory_tau_s": float(self.args.obstacle_memory_tau_s),
+            "obstacle_memory_threshold": float(self.args.obstacle_memory_threshold),
+            "yolo_model": str(self.args.yolo_model),
+            "yolo_conf": float(self.args.yolo_conf),
+            "pcr_policy": str(self.args.viewer_pcr_policy),
+            "lowlevel_policy": str(self.args.viewer_lowlevel_policy),
+        }
+        tmp_path = session_dir / "viewer_session.json.tmp"
+        final_path = session_dir / "viewer_session.json"
+        try:
+            with open(tmp_path, "w") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+            os.replace(str(tmp_path), str(final_path))
+        except OSError as exc:
+            self.rospy.logerr("[ViewerRecorder] failed to write metadata: %s", exc)
+
+    def _writer_loop(self) -> None:
+        writer = None
+        csv_file = None
+        csv_writer = None
+        writer_session = ""
+        codec = ""
+        width = 0
+        height = 0
+        frame_count = 0
+        started_ros = None
+        started_wall = None
+        writer_drop_start = 0
+
+        def close_session() -> None:
+            nonlocal writer, csv_file, csv_writer, writer_session
+            nonlocal codec, width, height, frame_count, started_ros, started_wall
+            nonlocal writer_drop_start
+            if writer is not None:
+                writer.release()
+            if csv_file is not None:
+                csv_file.flush()
+                csv_file.close()
+            if writer_session:
+                with self.lock:
+                    dropped = self.dropped_frames - writer_drop_start
+                self._viewer_metadata(
+                    Path(writer_session),
+                    codec=codec,
+                    width=width,
+                    height=height,
+                    frame_count=frame_count,
+                    dropped_frames=max(0, dropped),
+                    started_ros=started_ros,
+                    started_wall=started_wall,
+                    stopped_ros=float(self.rospy.Time.now().to_sec()),
+                    stopped_wall=time.time(),
+                )
+                self.rospy.logwarn(
+                    "[ViewerRecorder] viewer closed: %s frames=%d dropped=%d codec=%s",
+                    writer_session,
+                    frame_count,
+                    max(0, dropped),
+                    codec or "none",
+                )
+            writer = None
+            csv_file = None
+            csv_writer = None
+            writer_session = ""
+            codec = ""
+            width = 0
+            height = 0
+            frame_count = 0
+            started_ros = None
+            started_wall = None
+            writer_drop_start = 0
+
+        while True:
+            item = self.frame_queue.get()
+            try:
+                kind = item[0]
+                if kind == "shutdown":
+                    close_session()
+                    return
+                if kind == "stop":
+                    if writer_session == item[1]:
+                        close_session()
+                    elif not writer_session:
+                        self._viewer_metadata(
+                            Path(item[1]),
+                            codec="",
+                            width=0,
+                            height=0,
+                            frame_count=0,
+                            dropped_frames=0,
+                            started_ros=None,
+                            started_wall=None,
+                            stopped_ros=float(self.rospy.Time.now().to_sec()),
+                            stopped_wall=time.time(),
+                        )
+                    continue
+
+                (
+                    _,
+                    session_dir,
+                    session_drop_start,
+                    source_idx,
+                    ros_time,
+                    wall_time,
+                    metrics,
+                    frame,
+                ) = item
+                if writer_session != session_dir:
+                    close_session()
+                    session_path = Path(session_dir)
+                    session_path.mkdir(parents=True, exist_ok=True)
+                    height, width = frame.shape[:2]
+                    writer, codec = self._open_writer(
+                        session_path / "viewer.mp4", width, height
+                    )
+                    if writer is None:
+                        self.rospy.logerr(
+                            "[ViewerRecorder] no video encoder available; viewer recording disabled"
+                        )
+                        writer_session = session_dir
+                        continue
+                    csv_file = open(
+                        session_path / "frame_timestamps.csv", "w", newline=""
+                    )
+                    csv_writer = csv.writer(csv_file)
+                    csv_writer.writerow(
+                        [
+                            "frame_idx",
+                            "source_frame_idx",
+                            "ros_time",
+                            "wall_time",
+                            "video_time",
+                            "target_valid",
+                            "actor_difficulty",
+                            "front_distance_risk",
+                            "raw_occ_cell_count",
+                            "memory_cell_count",
+                        ]
+                    )
+                    writer_session = session_dir
+                    writer_drop_start = int(session_drop_start)
+                    started_ros = float(ros_time)
+                    started_wall = float(wall_time)
+
+                if writer is None or csv_writer is None:
+                    continue
+                writer.write(frame)
+                video_time = float(frame_count) / max(
+                    float(self.args.viewer_video_fps), 1.0
+                )
+                csv_writer.writerow(
+                    [
+                        frame_count,
+                        source_idx,
+                        f"{ros_time:.9f}",
+                        f"{wall_time:.9f}",
+                        f"{video_time:.9f}",
+                        int(bool(metrics["target_valid"])),
+                        f"{float(metrics['actor_difficulty']):.6f}",
+                        f"{float(metrics['front_distance_risk']):.6f}",
+                        int(metrics["raw_occ_cell_count"]),
+                        int(metrics["memory_cell_count"]),
+                    ]
+                )
+                frame_count += 1
+                if frame_count % 10 == 0:
+                    csv_file.flush()
+            except Exception as exc:
+                self.rospy.logerr("[ViewerRecorder] writer error: %s", exc)
+                close_session()
+            finally:
+                self.frame_queue.task_done()
+
+    def shutdown(self) -> None:
+        with self.lock:
+            if self.shutdown_started:
+                return
+            self.shutdown_started = True
+            self.accept_frames = False
+            old_session = self.active_session
+            self.active_session = ""
+        if old_session:
+            self._enqueue_control(("stop", old_session))
+        self._enqueue_control(("shutdown",))
+        self.worker.join(timeout=10.0)
+        if self.worker.is_alive():
+            self.rospy.logerr("[ViewerRecorder] writer thread did not stop cleanly")
+
+
 def setup_ros_publishers(args: argparse.Namespace):
     if not bool(args.publish_ros):
         return None
     try:
         import rospy
+        from std_msgs.msg import Bool
         from std_msgs.msg import Float32
         from std_msgs.msg import Float32MultiArray
+        from std_msgs.msg import String
     except ImportError as exc:
         raise SystemExit(
             "--publish_ros requires ROS1 Python packages; source the catkin workspace first."
@@ -997,11 +1503,15 @@ def setup_ros_publishers(args: argparse.Namespace):
     local_map_pub = rospy.Publisher(args.local_map_topic, Float32MultiArray, queue_size=1)
     risk_blocked_pub = rospy.Publisher(args.risk_blocked_topic, Float32MultiArray, queue_size=1)
     policy_visible_pub = rospy.Publisher(args.policy_visible_topic, Float32MultiArray, queue_size=1)
+    raw_occ_pub = rospy.Publisher(args.raw_occ_topic, Float32MultiArray, queue_size=1)
+    memory_occ_pub = rospy.Publisher(args.memory_occ_topic, Float32MultiArray, queue_size=1)
     front_distance_risk_pub = rospy.Publisher(args.front_distance_risk_topic, Float32, queue_size=1)
+    viewer_recorder = ViewerRecorder(rospy, Bool, String, args)
     print(
         "[RealPCR] ROS publishers ready: "
         f"target={args.target_topic}, local_map={args.local_map_topic}, "
         f"risk_blocked={args.risk_blocked_topic}, policy_visible={args.policy_visible_topic}, "
+        f"raw_occ={args.raw_occ_topic}, memory_occ={args.memory_occ_topic}, "
         f"front_distance_risk={args.front_distance_risk_topic}",
         flush=True,
     )
@@ -1013,7 +1523,10 @@ def setup_ros_publishers(args: argparse.Namespace):
         local_map_pub,
         risk_blocked_pub,
         policy_visible_pub,
+        raw_occ_pub,
+        memory_occ_pub,
         front_distance_risk_pub,
+        viewer_recorder,
     )
 
 
@@ -1028,7 +1541,10 @@ def publish_policy_obs(ros_ctx, obs: Dict[str, np.ndarray]) -> None:
         local_map_pub,
         risk_blocked_pub,
         policy_visible_pub,
+        raw_occ_pub,
+        memory_occ_pub,
         front_distance_risk_pub,
+        _viewer_recorder,
     ) = ros_ctx
     goal = np.asarray(obs["goal"], dtype=np.float32).reshape(1, 2)[0]
     target_vel = np.asarray(obs["target_vel"], dtype=np.float32).reshape(1, 2)[0]
@@ -1056,14 +1572,19 @@ def publish_policy_obs(ros_ctx, obs: Dict[str, np.ndarray]) -> None:
     risk_msg.data = np.asarray(obs["risk_blocked_map"], dtype=np.float32).reshape(-1).tolist()
     visible_msg = Float32MultiArray()
     visible_msg.data = np.asarray(obs["policy_visible_map"], dtype=np.float32).reshape(-1).tolist()
+    raw_occ_msg = Float32MultiArray()
+    raw_occ_msg.data = np.asarray(obs["raw_occ_map"], dtype=np.float32).reshape(-1).tolist()
+    memory_occ_msg = Float32MultiArray()
+    memory_occ_msg.data = np.asarray(obs["memory_occ_map"], dtype=np.float32).reshape(-1).tolist()
     front_msg = Float32()
     front_msg.data = front_distance_risk
     target_pub.publish(target_msg)
     local_map_pub.publish(local_msg)
     risk_blocked_pub.publish(risk_msg)
     policy_visible_pub.publish(visible_msg)
+    raw_occ_pub.publish(raw_occ_msg)
+    memory_occ_pub.publish(memory_occ_msg)
     front_distance_risk_pub.publish(front_msg)
-
 
 def write_policy_obs_file(path: str, obs: Dict[str, np.ndarray]) -> None:
     if not path:
@@ -1088,6 +1609,10 @@ def write_policy_obs_file(path: str, obs: Dict[str, np.ndarray]) -> None:
         "risk_blocked_map": np.asarray(obs["risk_blocked_map"], dtype=np.float32).reshape(-1).tolist(),
         "policy_visible_shape": list(np.asarray(obs["policy_visible_map"], dtype=np.float32).shape),
         "policy_visible_map": np.asarray(obs["policy_visible_map"], dtype=np.float32).reshape(-1).tolist(),
+        "raw_occ_shape": list(np.asarray(obs["raw_occ_map"], dtype=np.float32).shape),
+        "raw_occ_map": np.asarray(obs["raw_occ_map"], dtype=np.float32).reshape(-1).tolist(),
+        "memory_occ_shape": list(np.asarray(obs["memory_occ_map"], dtype=np.float32).shape),
+        "memory_occ_map": np.asarray(obs["memory_occ_map"], dtype=np.float32).reshape(-1).tolist(),
         "front_distance_risk": float(np.asarray(obs["front_distance_risk"], dtype=np.float32).reshape(-1)[0]),
     }
     directory = os.path.dirname(os.path.abspath(path)) or "."
@@ -1125,9 +1650,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--observed_gate_radius_cells", type=int, default=2)
     parser.add_argument("--min_depth_m", type=float, default=0.25)
     parser.add_argument("--max_depth_m", type=float, default=3.0)
-    parser.add_argument("--obstacle_min_height_m", type=float, default=0.06)
-    parser.add_argument("--obstacle_max_height_m", type=float, default=1.20)
-    parser.add_argument("--obstacle_mode", type=str, default="non_person_non_ground", choices=["non_person_non_ground", "height_band"])
+    parser.add_argument("--obstacle_min_height_m", type=float, default=0.08)
+    parser.add_argument("--obstacle_max_height_m", type=float, default=0.80)
+    parser.add_argument("--obstacle_mode", type=str, default="height_band", choices=["non_person_non_ground", "height_band"])
     parser.add_argument("--ground_remove_height_m", type=float, default=0.04)
     parser.add_argument("--self_mask_forward_m", type=float, default=0.25)
     parser.add_argument("--self_mask_half_width_m", type=float, default=0.45)
@@ -1143,8 +1668,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--difficulty_front_min_m", type=float, default=0.05)
     parser.add_argument("--difficulty_front_max_m", type=float, default=2.0)
     parser.add_argument("--difficulty_front_half_width_m", type=float, default=0.55)
-    parser.add_argument("--difficulty_front_min_points", type=int, default=30)
+    parser.add_argument("--difficulty_front_min_points", type=int, default=15)
     parser.add_argument("--difficulty_front_percentile", type=float, default=10.0)
+    parser.add_argument("--obstacle_memory", dest="obstacle_memory", action="store_true")
+    parser.add_argument("--no_obstacle_memory", dest="obstacle_memory", action="store_false")
+    parser.set_defaults(obstacle_memory=True)
+    parser.add_argument("--obstacle_memory_tau_s", type=float, default=0.80)
+    parser.add_argument("--obstacle_memory_threshold", type=float, default=0.35)
     parser.add_argument("--near_field_stop_m", type=float, default=0.35)
     parser.add_argument("--near_field_warn_m", type=float, default=0.50)
     parser.add_argument("--near_field_min_forward_m", type=float, default=0.05)
@@ -1167,7 +1697,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local_map_topic", type=str, default="/pcr/local_map_2ch")
     parser.add_argument("--risk_blocked_topic", type=str, default="/pcr/risk_blocked_map")
     parser.add_argument("--policy_visible_topic", type=str, default="/pcr/policy_visible_map")
+    parser.add_argument("--raw_occ_topic", type=str, default="/pcr/raw_occ_map")
+    parser.add_argument("--memory_occ_topic", type=str, default="/pcr/memory_occ_map")
     parser.add_argument("--front_distance_risk_topic", type=str, default="/pcr/front_distance_risk")
+    parser.add_argument("--viewer_video_fps", type=float, default=15.0)
+    parser.add_argument("--viewer_video_bitrate", type=int, default=4000000)
+    parser.add_argument("--viewer_record_queue_size", type=int, default=8)
+    parser.add_argument("--viewer_pcr_policy", type=str, default="")
+    parser.add_argument("--viewer_lowlevel_policy", type=str, default="")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--display_scale", type=float, default=1.6)
     parser.add_argument("--debug_map_px", type=int, default=320)
@@ -1197,10 +1734,12 @@ def main() -> None:
 
     frame_idx = 0
     last_print = 0.0
+    obstacle_memory_state: Dict[str, object] = {}
     window_name = "Real PCR input check"
     if args.show:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     ros_ctx = setup_ros_publishers(args)
+    viewer_recorder = None if ros_ctx is None else ros_ctx[-1]
     print(
         "[RealPCR] started. Policy frame: goal_buf=(x_right,y_forward), "
         f"camera forward is robot +Y. publish_ros={bool(args.publish_ros)}"
@@ -1220,7 +1759,10 @@ def main() -> None:
         f"visible=aligned_camera_intrinsics "
         f"self_mask_y<={float(args.self_mask_forward_m):.2f}m "
         f"self_mask_half_width={float(args.self_mask_half_width_m):.2f}m "
-        f"unknown_cost={float(args.unknown_cost):.2f}"
+        f"unknown_cost={float(args.unknown_cost):.2f} "
+        f"obstacle_memory={bool(args.obstacle_memory)} "
+        f"memory_tau={float(args.obstacle_memory_tau_s):.2f}s "
+        f"memory_threshold={float(args.obstacle_memory_threshold):.2f}"
     )
     try:
         while True:
@@ -1247,6 +1789,8 @@ def main() -> None:
                 observed_gate_map,
                 policy_visible_map,
                 risk_blocked_map,
+                raw_occ_map,
+                memory_occ_map,
                 map_debug,
             ) = build_local_map_from_depth(
                 depth_raw,
@@ -1255,6 +1799,7 @@ def main() -> None:
                 args,
                 target.bbox_xyxy,
                 target.depth_m,
+                memory_state=obstacle_memory_state,
             )
             actor_difficulty_map_front = float(actor_difficulty)
             actor_difficulty = float(max(actor_difficulty_map_front, float(near_field_stats["near_field_risk"])))
@@ -1268,6 +1813,8 @@ def main() -> None:
                 depth_invalid_ratio=depth_invalid_ratio,
                 args=args,
             )
+            obs["raw_occ_map"] = raw_occ_map[None, :, :].astype(np.float32)
+            obs["memory_occ_map"] = memory_occ_map[None, :, :].astype(np.float32)
             publish_policy_obs(ros_ctx, obs)
             write_policy_obs_file(args.obs_file, obs)
 
@@ -1316,7 +1863,9 @@ def main() -> None:
                     "actor_difficulty": float(actor_difficulty),
                     "actor_difficulty_final": float(actor_difficulty),
                     "actor_difficulty_map_front": float(actor_difficulty_map_front),
+                    "actor_difficulty_current_raw": float(map_debug["actor_difficulty_current_raw"]),
                     "actor_difficulty_map_raw": float(map_debug["actor_difficulty_map_raw"]),
+                    "actor_difficulty_map_fused": float(map_debug["actor_difficulty_map_fused"]),
                     "front_distance_risk": float(map_debug["front_distance_risk"]),
                     "front_nearest_obstacle_m": float(map_debug["front_nearest_obstacle_m"]),
                     "front_nearest_obstacle_raw_m": float(map_debug["front_nearest_obstacle_raw_m"]),
@@ -1366,8 +1915,22 @@ def main() -> None:
                     "num_points_after_self_mask": int(map_debug["num_points_after_self_mask"]),
                     "num_self_masked_points": int(map_debug["num_self_masked_points"]),
                     "num_obstacle_points": int(map_debug["num_obstacle_points"]),
+                    "num_raw_obstacle_cells_before_inflation": int(
+                        map_debug["num_raw_obstacle_cells_before_inflation"]
+                    ),
+                    "num_fused_obstacle_cells_before_inflation": int(
+                        map_debug["num_fused_obstacle_cells_before_inflation"]
+                    ),
                     "num_obstacle_cells_before_inflation": int(map_debug["num_obstacle_cells_before_inflation"]),
                     "num_obstacle_cells_after_inflation": int(map_debug["num_obstacle_cells_after_inflation"]),
+                    "obstacle_memory_enabled": bool(map_debug["obstacle_memory_enabled"]),
+                    "obstacle_memory_dt_s": float(map_debug["obstacle_memory_dt_s"]),
+                    "obstacle_memory_decay": float(map_debug["obstacle_memory_decay"]),
+                    "raw_occ_cell_count": int(map_debug["raw_occ_cell_count"]),
+                    "memory_occ_cell_count": int(map_debug["memory_occ_cell_count"]),
+                    "memory_retained_cell_count": int(map_debug["memory_retained_cell_count"]),
+                    "memory_retained_ratio": float(map_debug["memory_retained_ratio"]),
+                    "memory_peak": float(map_debug["memory_peak"]),
                     "target_mask_ratio": float(target_mask.mean()),
                     "depth_invalid_ratio": float(depth_invalid_ratio),
                     "depth_invalid": bool(depth_invalid),
@@ -1389,7 +1952,9 @@ def main() -> None:
                         "actor_difficulty",
                         "actor_difficulty_final",
                         "actor_difficulty_map_front",
+                        "actor_difficulty_current_raw",
                         "actor_difficulty_map_raw",
+                        "actor_difficulty_map_fused",
                         "front_distance_risk",
                         "front_nearest_obstacle_m",
                         "front_median_obstacle_m",
@@ -1416,6 +1981,15 @@ def main() -> None:
                         "inflated_occ_mean",
                         "risk_blocked_mean",
                         "risk_blocked_visible_mean",
+                        "obstacle_memory_enabled",
+                        "obstacle_memory_dt_s",
+                        "obstacle_memory_decay",
+                        "num_raw_obstacle_cells_before_inflation",
+                        "num_fused_obstacle_cells_before_inflation",
+                        "raw_occ_cell_count",
+                        "memory_occ_cell_count",
+                        "memory_retained_cell_count",
+                        "memory_retained_ratio",
                         "depth_invalid_ratio",
                         "depth_invalid",
                     ],
@@ -1426,7 +2000,9 @@ def main() -> None:
             if args.save_dir and args.save_every > 0 and frame_idx % int(args.save_every) == 0:
                 save_snapshot(args.save_dir, obs, color, target_mask, frame_idx)
 
-            if args.show:
+            if args.show or (
+                viewer_recorder is not None and viewer_recorder.is_recording()
+            ):
                 debug = draw_debug(
                     color,
                     target,
@@ -1437,6 +2013,28 @@ def main() -> None:
                     depth_invalid_ratio,
                     args,
                 )
+                if viewer_recorder is not None:
+                    viewer_recorder.enqueue(
+                        source_frame_idx=frame_idx,
+                        ros_time=float(ros_ctx[0].Time.now().to_sec()),
+                        wall_time=now,
+                        frame_bgr=debug,
+                        metrics={
+                            "target_valid": float(target.valid),
+                            "actor_difficulty": float(actor_difficulty),
+                            "front_distance_risk": float(
+                                map_debug["front_distance_risk"]
+                            ),
+                            "raw_occ_cell_count": float(
+                                map_debug["raw_occ_cell_count"]
+                            ),
+                            "memory_cell_count": float(
+                                map_debug["memory_occ_cell_count"]
+                            ),
+                        },
+                    )
+
+            if args.show:
                 cv2.imshow(window_name, prepare_display_image(debug, args))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -1453,6 +2051,8 @@ def main() -> None:
                         pass
             frame_idx += 1
     finally:
+        if viewer_recorder is not None:
+            viewer_recorder.shutdown()
         pipe.stop()
         cv2.destroyAllWindows()
 

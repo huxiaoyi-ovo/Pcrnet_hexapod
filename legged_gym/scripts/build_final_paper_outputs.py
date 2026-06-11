@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import glob
 import json
 import math
 import os
@@ -823,6 +824,291 @@ def _plot_fig4(args) -> None:
     plt.close(fig)
 
 
+FIG6_REQUIRED_FIELDS = (
+    "episode_id",
+    "trajectory_frame",
+    "robot_x",
+    "robot_y",
+    "target_x",
+    "target_y",
+    "obstacles_json",
+    "episode_termination_reason",
+)
+
+
+def _read_timeseries(path: str) -> List[Dict[str, str]]:
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _canonical_obstacles(text: str) -> str:
+    try:
+        obs = json.loads(text or "[]")
+    except Exception:
+        return ""
+    if not isinstance(obs, list) or not obs:
+        return ""
+    out = []
+    for item in obs:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "slot": int(_safe_float(item.get("slot", len(out)), default=len(out))),
+                "x": round(_safe_float(item.get("x", "")), 4),
+                "y": round(_safe_float(item.get("y", "")), 4),
+                "r": round(_safe_float(item.get("r", "")), 4),
+            }
+        )
+    out = sorted(out, key=lambda z: (z["slot"], z["x"], z["y"]))
+    return json.dumps(out, separators=(",", ":"), sort_keys=True)
+
+
+def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
+    root = str(getattr(args, "fig6_timeseries_root", "") or "").strip()
+    if not root:
+        return {}
+    if not os.path.isdir(root):
+        msg = f"Fig.6 timeseries root not found: {root}"
+        if bool(getattr(args, "fig6_required", False)):
+            raise FileNotFoundError(msg)
+        print(f"[Warn] {msg}; skipping Fig.6.")
+        return {}
+
+    missing: List[str] = []
+    datasets: Dict[Tuple[str, str], Dict] = {}
+    for path in sorted(glob.glob(os.path.join(root, "**", "timeseries.csv"), recursive=True)):
+        method = _infer_method({"source": path})
+        speed = _infer_speed({"source": path})
+        if method not in METHOD_ORDER or speed not in SPEEDS:
+            continue
+        rows = _read_timeseries(path)
+        if not rows:
+            missing.append(f"{speed}/{method}: empty timeseries ({path})")
+            continue
+        fields = set(rows[0].keys())
+        absent = [f for f in FIG6_REQUIRED_FIELDS if f not in fields]
+        if absent:
+            missing.append(f"{speed}/{method}: missing fields {absent} ({path})")
+            continue
+        frame = str(rows[0].get("trajectory_frame", "")).strip()
+        if frame != "world_xy_train_play":
+            missing.append(
+                f"{speed}/{method}: trajectory_frame must be world_xy_train_play, got {frame!r} ({path})"
+            )
+            continue
+        first_obs = _canonical_obstacles(rows[0].get("obstacles_json", ""))
+        if not first_obs:
+            missing.append(f"{speed}/{method}: missing/empty obstacles_json ({path})")
+            continue
+        datasets[(speed, method)] = {
+            "path": path,
+            "rows": rows,
+            "obstacles": first_obs,
+            "metrics_path": os.path.join(os.path.dirname(path), "metrics.csv"),
+        }
+
+    for speed in SPEEDS:
+        for method in METHOD_ORDER:
+            if (speed, method) not in datasets:
+                missing.append(f"{speed}/{method}: no valid timeseries.csv under {root}")
+    if missing:
+        detail = "\n".join(f"- {m}" for m in missing)
+        msg = "Fig.6 trajectory data incomplete:\n" + detail
+        if bool(getattr(args, "fig6_required", False)):
+            raise RuntimeError(msg)
+        print("[Warn] " + msg.replace("\n", "\n[Warn] "))
+        return {}
+    return datasets
+
+
+def _episode_rows(rows: Sequence[Dict[str, str]], episode_id: str) -> List[Dict[str, str]]:
+    out = [r for r in rows if str(r.get("episode_id", "")) == str(episode_id)]
+    return sorted(out, key=lambda r: _safe_float(r.get("time_s", ""), default=0.0))
+
+
+def _choose_fig6_episode_id(datasets: Dict[Tuple[str, str], Dict], requested: Optional[int]) -> str:
+    episode_sets = []
+    for data in datasets.values():
+        episode_sets.append({str(r.get("episode_id", "")) for r in data["rows"] if str(r.get("episode_id", "")) != ""})
+    common = set.intersection(*episode_sets) if episode_sets else set()
+    if requested is not None and requested >= 0:
+        eid = str(int(requested))
+        if eid not in common:
+            raise RuntimeError(f"Fig.6 requested episode_id={eid}, but it is not present in every method/speed timeseries.")
+        return eid
+    if "0" in common:
+        return "0"
+    if not common:
+        raise RuntimeError("Fig.6 has no common episode_id across all method/speed timeseries.")
+    return sorted(common, key=lambda x: int(x) if x.isdigit() else x)[0]
+
+
+def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> None:
+    reason = str(reason or "").lower()
+    if reason == "success":
+        ax.scatter([x], [y], marker="*", s=88, color="#111111", edgecolor="white", linewidth=0.5, zorder=7)
+    elif reason == "collision":
+        ax.scatter([x], [y], marker="x", s=68, color="#d62728", linewidth=1.8, zorder=7)
+    else:
+        ax.scatter([x], [y], marker="o", s=58, facecolors="white", edgecolors="#333333", linewidth=1.3, zorder=7)
+
+
+def _plot_fig6(args) -> None:
+    datasets = _load_fig6_datasets(args)
+    if not datasets:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Circle
+    except Exception as exc:
+        raise RuntimeError(f"matplotlib unavailable; cannot draw Fig.6 ({exc})") from exc
+
+    episode_id = _choose_fig6_episode_id(datasets, getattr(args, "fig6_episode_id", None))
+    selected: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+    obstacle_refs = set()
+    for key, data in datasets.items():
+        rows = _episode_rows(data["rows"], episode_id)
+        if not rows:
+            raise RuntimeError(f"Fig.6 episode_id={episode_id} has no rows for {key}.")
+        selected[key] = rows
+        obstacle_refs.add(_canonical_obstacles(rows[0].get("obstacles_json", "")))
+    if len(obstacle_refs) != 1:
+        raise RuntimeError(
+            "Fig.6 selected episode does not share the same obstacle layout across all method/speed runs. "
+            "Re-run trajectory eval with the same seed and num_envs=1, or pass a common --fig6_episode_id."
+        )
+    obstacles = json.loads(next(iter(obstacle_refs)))
+
+    all_x: List[float] = []
+    all_y: List[float] = []
+    for rows in selected.values():
+        for row in rows:
+            for key in ("robot_x", "target_x"):
+                v = _safe_float(row.get(key, ""))
+                if math.isfinite(v):
+                    all_x.append(v)
+            for key in ("robot_y", "target_y"):
+                v = _safe_float(row.get(key, ""))
+                if math.isfinite(v):
+                    all_y.append(v)
+    for obs in obstacles:
+        all_x.extend([_safe_float(obs.get("x")) - _safe_float(obs.get("r")), _safe_float(obs.get("x")) + _safe_float(obs.get("r"))])
+        all_y.extend([_safe_float(obs.get("y")) - _safe_float(obs.get("r")), _safe_float(obs.get("y")) + _safe_float(obs.get("r"))])
+    if not all_x or not all_y:
+        raise RuntimeError("Fig.6 selected data has no finite trajectory coordinates.")
+    x_pad = max(0.25, 0.08 * (max(all_x) - min(all_x)))
+    y_pad = max(0.35, 0.08 * (max(all_y) - min(all_y)))
+    xlim = (min(all_x) - x_pad, max(all_x) + x_pad)
+    ylim = (min(all_y) - y_pad, max(all_y) + y_pad)
+
+    fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.2), sharex=True, sharey=True, constrained_layout=True)
+    for ax, speed in zip(axes, SPEEDS):
+        for obs in obstacles:
+            ax.add_patch(
+                Circle(
+                    (_safe_float(obs.get("x")), _safe_float(obs.get("y"))),
+                    _safe_float(obs.get("r")),
+                    facecolor="#9e9e9e",
+                    edgecolor="#666666",
+                    linewidth=0.5,
+                    alpha=0.55,
+                    zorder=1,
+                )
+            )
+
+        target_rows = selected[(speed, "learnedw")]
+        tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
+        ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
+        ax.plot(tx, ty, linestyle="--", linewidth=1.5, color="#009e73", alpha=0.9, label="Target", zorder=2)
+
+        start_marked = False
+        for method in METHOD_ORDER:
+            rows = selected[(speed, method)]
+            xs = [_safe_float(r.get("robot_x", "")) for r in rows]
+            ys = [_safe_float(r.get("robot_y", "")) for r in rows]
+            style = METHOD_STYLE[method]
+            alpha = 0.95 if method == "learnedw" else 0.52
+            z = 5 if method == "learnedw" else 3
+            ax.plot(
+                xs,
+                ys,
+                color=style["color"],
+                linewidth=style["linewidth"],
+                alpha=alpha,
+                marker=style["marker"],
+                markevery=[0],
+                markersize=8.0 if method == "learnedw" else 5.5,
+                zorder=z,
+            )
+            if not start_marked and xs and ys:
+                ax.scatter([xs[0]], [ys[0]], marker="s", s=45, color="#000000", zorder=8)
+                start_marked = True
+            if xs and ys:
+                _plot_terminal_marker(ax, xs[-1], ys[-1], rows[-1].get("episode_termination_reason", ""))
+
+        ax.set_title(f"({chr(ord('a') + SPEEDS.index(speed))}) {float(speed):.2f} m/s", fontsize=11)
+        ax.set_xlabel("world x / lateral [m]", fontsize=11)
+        ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_aspect("equal", adjustable="box")
+        ax.tick_params(labelsize=9)
+    axes[0].set_ylabel("world y / forward [m]", fontsize=11)
+
+    method_handles = [
+        Line2D([0], [0], color=METHOD_STYLE[m]["color"], marker=METHOD_STYLE[m]["marker"],
+               linewidth=METHOD_STYLE[m]["linewidth"], label=SHORT_METHOD_LABELS[m],
+               alpha=0.95 if m == "learnedw" else 0.6)
+        for m in METHOD_ORDER
+    ]
+    event_handles = [
+        Line2D([0], [0], color="#009e73", linestyle="--", linewidth=1.5, label="Target"),
+        Line2D([0], [0], marker="s", color="#000000", linestyle="None", markersize=6, label="Start"),
+        Line2D([0], [0], marker="*", color="#111111", linestyle="None", markersize=9, label="Success"),
+        Line2D([0], [0], marker="x", color="#d62728", linestyle="None", markersize=7, label="Collision"),
+        Line2D([0], [0], marker="o", markerfacecolor="white", markeredgecolor="#333333",
+               color="#333333", linestyle="None", markersize=7, label="Follow lost/timeout"),
+    ]
+    fig.legend(
+        handles=method_handles + event_handles,
+        loc="upper center",
+        ncol=10,
+        frameon=False,
+        fontsize=8,
+        bbox_to_anchor=(0.5, 1.17),
+    )
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(args.output_dir, f"fig6_trajectories_stage4.{ext}"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    source_rows = []
+    for speed in SPEEDS:
+        for method in METHOD_ORDER:
+            rows = selected[(speed, method)]
+            source_rows.append(
+                {
+                    "Speed": speed,
+                    "Method": SHORT_METHOD_LABELS[method],
+                    "Episode": episode_id,
+                    "Selection": "fixed_common_episode_id",
+                    "TrajectoryFrame": rows[0].get("trajectory_frame", ""),
+                    "Termination": rows[-1].get("episode_termination_reason", ""),
+                    "Source": datasets[(speed, method)]["path"],
+                }
+            )
+    _write_csv(
+        os.path.join(args.output_dir, "fig6_trajectories_stage4_sources.csv"),
+        source_rows,
+        ["Speed", "Method", "Episode", "Selection", "TrajectoryFrame", "Termination", "Source"],
+    )
+
+
 def _copy_legacy_mechanism_png(args) -> None:
     if not args.learnedw_mechanism_dir or not os.path.isdir(args.learnedw_mechanism_dir):
         print("[Warn] learned-w mechanism directory not found; legacy mechanism copy skipped.")
@@ -887,7 +1173,7 @@ def _build_appendix_a1(args) -> List[Dict]:
         ("Algorithm", "PPO custom loop", "train_highlevel.py"),
         ("Steps per iter", _arg_default(src, "num_steps"), "train_highlevel.py --num_steps default"),
         ("Num envs", str(args.paper_train_num_envs) if args.paper_train_num_envs else "N/A", "paper command argument"),
-        ("Learning rate", _arg_default(src, "lr"), "train_highlevel.py --lr default"),
+        ("Learning rate", str(args.paper_train_lr), "paper training command"),
         ("Gamma", _arg_default(src, "gamma"), "train_highlevel.py --gamma default"),
         ("GAE lambda", _arg_default(src, "gae_lambda"), "train_highlevel.py --gae_lambda default"),
         ("Entropy coef", _arg_default(src, "entropy_coef"), "train_highlevel.py --entropy_coef default"),
@@ -1014,7 +1300,7 @@ def _write_manifest(
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Final Paper Outputs v3\n\n")
         f.write("Generated files:\n\n")
-        for name in [
+        generated_files = [
             "fig3_main_performance.pdf",
             "fig3_main_performance.png",
             "fig4_mechanism.pdf",
@@ -1033,7 +1319,14 @@ def _write_manifest(
             "tableA3_domain_randomization.tex",
             "tableA4_network_structure.tex",
             "tableA5_delta_y_full.tex",
-        ]:
+        ]
+        if os.path.exists(os.path.join(args.output_dir, "fig6_trajectories_stage4.png")):
+            generated_files[4:4] = [
+                "fig6_trajectories_stage4.pdf",
+                "fig6_trajectories_stage4.png",
+                "fig6_trajectories_stage4_sources.csv",
+            ]
+        for name in generated_files:
             f.write(f"- {name}\n")
         f.write("\nRow counts:\n\n")
         f.write(f"- Table I audit rows: {len(table1)}\n")
@@ -1054,6 +1347,7 @@ def _write_manifest(
             ("mono_stage3_path", args.mono_stage3_path),
             ("mono_stage4_all_csv", args.mono_stage4_all_csv),
             ("learnedw_mechanism_dir", args.learnedw_mechanism_dir),
+            ("fig6_timeseries_root", args.fig6_timeseries_root),
         ]:
             f.write(f"- {label}: `{src}` (mtime={_file_stamp(src)})\n")
         f.write("\nRisk-only source mode:\n\n")
@@ -1067,6 +1361,7 @@ def _write_manifest(
         f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
         f.write("- Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
         f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
+        f.write("- Fig.6: if requested, timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play.\n")
         f.write("- Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.\n")
 
 
@@ -1129,6 +1424,23 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mechanism_speed", type=float, default=0.60)
     parser.add_argument("--paper_train_num_envs", type=int, default=256)
+    parser.add_argument("--paper_train_lr", type=str, default="6e-5")
+    parser.add_argument(
+        "--fig6_timeseries_root",
+        default=None,
+        help="Root directory containing Fig.6 trajectory eval outputs with timeseries.csv files.",
+    )
+    parser.add_argument(
+        "--fig6_required",
+        action="store_true",
+        help="Fail if Fig.6 trajectory data is missing or incomplete.",
+    )
+    parser.add_argument(
+        "--fig6_episode_id",
+        type=int,
+        default=-1,
+        help="Common episode_id to draw for Fig.6. Default chooses 0 if present.",
+    )
     parser.add_argument(
         "--allow_incomplete_mono_stage_probe",
         action="store_true",
@@ -1145,6 +1457,7 @@ def main() -> None:
     table3 = _build_table3(args)
     _plot_fig3(args, table1)
     _plot_fig4(args)
+    _plot_fig6(args)
     _copy_legacy_mechanism_png(args)
     _build_appendix_a1(args)
     _build_appendix_a2(args)

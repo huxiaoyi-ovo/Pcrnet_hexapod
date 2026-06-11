@@ -60,6 +60,20 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-11 PCR Fig.6 轨迹图数据闭环
+
+- [x] ~~[P0] 为最终论文 Fig.6 增加 stage4 三速度五策略轨迹图所需数据链：eval timeseries 必须保存 robot/target 逐帧位置、真实障碍圆柱位置与 episode 终止原因；最终出图脚本必须先检查字段完整性，缺字段时停止并提示补跑 timeseries-only eval。~~
+
+## 2026-06-10 PCR 论文 v3 图表收口
+
+- [x] ~~[P0] 将最终论文图表生成入口升级到 `PCR-Net_figure_table_plan_v3.md` 口径：Table I/II/III 输出 markdown + LaTeX booktabs，接入重训 Risk-only，新增 Fig.3 主性能图、Fig.4 learned-w 机制图和 A1-A5 附录表；字段只能来自现有代码、配置和 eval 输出，不填猜测值。~~
+
+## 2026-06-10 PCR 实机短时障碍空间记忆
+
+- [x] ~~[P0] 在实机 `local_map_2ch` 膨胀前加入按真实时间衰减的短时占据记忆，保留遮挡期间的障碍横向位置；该层只稳定 PCR 观测，不发布控制命令，首轮暂不加入避障方向锁定。~~
+- [ ] [P0] 录制带 `/pcr/raw_occ_map`、`/pcr/memory_occ_map` 和 `/pcr_realplay/debug` 的实机 bag，对比高风险阶段 `cmd_x` 反转次数、障碍保留时间与通过后的释放时间，再决定是否加入 `avoid_latch`。
+- [x] ~~[P0] 增加手柄触发的实机实验录制：同一会话由相机进程异步保存 `draw_debug()` 原始 viewer、帧时间戳和运行元数据，ROS bag 仅保留关键数值与地图，并从 `/pcr_realplay/debug` 导出 `risk_F / risk_A / y_eff / w / cmd` 论文曲线。~~
+
 ## 2026-06-09 PCR Risk-only 机制统计口径补齐
 
 - [ ] [P0] 补齐 eval/summarize/final-table 中 `C_unsafe` 窗口下的 `delta_y_w / delta_y_r / delta_y_total` 拆分统计，用旧 Risk-only checkpoint 重新 eval 判断显式风险差项是否在冲突窗口真实生效，避免 Table II 只看 `C_avoid` 窄窗口导致误读。

@@ -1138,6 +1138,8 @@ class PcrRealplay:
         cmd = np.asarray(result["cmd_safe"], dtype=np.float32).reshape(3)
         usr_command = self._build_usr_command_payload(cmd)
         payload = {
+            "cmd_f": np.asarray(result["cmd_f"], dtype=np.float32).round(4).tolist(),
+            "cmd_a": np.asarray(result["cmd_a"], dtype=np.float32).round(4).tolist(),
             "cmd_policy": np.asarray(result["cmd_policy"], dtype=np.float32).round(4).tolist(),
             "cmd_safe": cmd.round(4).tolist(),
             "ros_twist": {

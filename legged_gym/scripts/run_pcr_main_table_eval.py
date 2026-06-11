@@ -157,6 +157,8 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         str(args.episodes),
         "--seed",
         str(seed),
+        "--difficulty_levels",
+        str(args.difficulty_levels),
         "--output_dir",
         output_dir,
         "--avoid_stage_override",
@@ -167,6 +169,8 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         "--dump_timeseries",
         "--timeseries_episodes",
         str(args.timeseries_episodes),
+        "--timeseries_stride",
+        str(args.timeseries_stride),
     ]
     if bool(getattr(args, "headless", False)):
         cmd.append("--headless")
@@ -209,7 +213,9 @@ def parse_args():
     parser.add_argument("--methods", type=str, default="yonly,geomw,learnedw")
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--episodes", type=int, default=128)
+    parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
     parser.add_argument("--timeseries_episodes", type=int, default=64)
+    parser.add_argument("--timeseries_stride", type=int, default=1)
     parser.add_argument("--output_root", type=str, default="agents/eval_data_seed23")
     parser.add_argument("--summary_dir", type=str, default="agents/eval_data_seed23/pcr_main_table")
     parser.add_argument("--extra_summary_paths", type=str, default="", help="extra metrics dirs/files to include in final table")

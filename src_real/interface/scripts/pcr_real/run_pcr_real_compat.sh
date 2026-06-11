@@ -49,6 +49,7 @@ START_RUN_AGENT=1
 START_JOY=1
 START_CAMERA=1
 START_PCR=1
+START_RECORDER=1
 START_ROSCORE=1
 START_MUX=0
 USE_TMUX=0
@@ -61,6 +62,8 @@ MUX_PCR_TIMEOUT_S="0.35"
 MUX_MANUAL_TIMEOUT_S="0.2"
 CAMERA_HEIGHT_M="0.37"
 CAMERA_PITCH_DOWN_DEG="15"
+RECORD_BUTTON_INDEX="12"
+RECORD_OUTPUT_ROOT="${HOME}/pcr_records"
 
 CAMERA_EXTRA_ARGS=()
 PCR_EXTRA_ARGS=()
@@ -96,6 +99,9 @@ Options:
   --no_joy                     Do not start joy_node and joy_ctrl.
   --no_camera                  Do not start D435i observation publisher.
   --no_pcr                     Do not start PCR node.
+  --no_recorder                Do not start joystick-triggered bag/video recorder.
+  --record_button INDEX        Joystick button index used to toggle recording. Default: 12
+  --record_root PATH           Recording root. Default: ~/pcr_records
   --no_roscore                 Do not auto-start roscore if missing.
   --tmux                       Run in tmux panes.
   --no_tmux                    Run in normal single-shell mode. This is the default.
@@ -132,6 +138,9 @@ while [[ $# -gt 0 ]]; do
         --no_joy) START_JOY=0; shift ;;
         --no_camera) START_CAMERA=0; shift ;;
         --no_pcr) START_PCR=0; shift ;;
+        --no_recorder) START_RECORDER=0; shift ;;
+        --record_button) RECORD_BUTTON_INDEX="$2"; shift 2 ;;
+        --record_root) RECORD_OUTPUT_ROOT="$2"; shift 2 ;;
         --no_roscore) START_ROSCORE=0; shift ;;
         --tmux) USE_TMUX=1; shift ;;
         --no_tmux) USE_TMUX=0; shift ;;
@@ -151,6 +160,10 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
+    START_RECORDER=0
+fi
 
 if [[ "${START_PCR}" -eq 1 && ! -f "${PCR_CKPT}" ]]; then
     echo "PCR checkpoint not found: ${PCR_CKPT}" >&2
@@ -185,6 +198,9 @@ if [[ "${START_JOY}" -eq 1 ]]; then
     rospack find interface >/dev/null || { echo "ROS package 'interface' not found; source the src_real catkin workspace first." >&2; exit 2; }
     rospack find joy >/dev/null || { echo "ROS package 'joy' not found; install ros-noetic-joy or pass --no_joy." >&2; exit 2; }
 fi
+if [[ "${START_RECORDER}" -eq 1 ]]; then
+    command -v rosbag >/dev/null || { echo "rosbag not found; install/source ROS or pass --no_recorder." >&2; exit 2; }
+fi
 
 START_MUX=0
 
@@ -196,6 +212,11 @@ fi
 if [[ "${START_JOY}" -eq 1 ]] && command -v rosnode >/dev/null && timeout 1s rosnode list 2>/dev/null | grep -qE '(^|/)(joy_ctrl|joy_node)$'; then
     echo "Refuse to start: joy_ctrl or joy_node is already running." >&2
     echo "Stop the old hand-control launch first, or rerun this script with --no_joy." >&2
+    exit 2
+fi
+if [[ "${START_RECORDER}" -eq 1 ]] && command -v rosnode >/dev/null && timeout 1s rosnode list 2>/dev/null | grep -qE '(^|/)pcr_session_recorder$'; then
+    echo "Refuse to start: pcr_session_recorder is already running." >&2
+    echo "Stop the old PCR launch first, or rerun this script with --no_recorder." >&2
     exit 2
 fi
 
@@ -249,7 +270,7 @@ write_tmux_wrapper_script() {
             echo "PIDS+=(\$!)"
             echo "sleep 1"
         done
-        echo "trap 'for pid in \${PIDS[@]}; do kill \$pid 2>/dev/null || true; done; exit 0' INT TERM EXIT"
+        echo "trap 'for pid in \${PIDS[@]}; do kill -INT \$pid 2>/dev/null || true; done; for _ in {1..150}; do alive=0; for pid in \${PIDS[@]}; do kill -0 \$pid 2>/dev/null && alive=1; done; (( alive == 0 )) && break; sleep 0.1; done; for pid in \${PIDS[@]}; do kill -TERM \$pid 2>/dev/null || true; wait \$pid 2>/dev/null || true; done; exit 0' INT TERM EXIT"
         echo "wait"
         echo "echo"
         echo "echo '[PCRRealCompat] ${title} exited. Press Ctrl-D to close this pane.'"
@@ -321,7 +342,7 @@ if [[ "${USE_TMUX}" -eq 1 && -z "${PCR_REAL_COMPAT_IN_TMUX:-}" ]]; then
         fi
     fi
     if [[ "${START_CAMERA}" -eq 1 ]]; then
-        CAMERA_CMD=(python3 "${CODE_DIR}/real_pcr_input_check.py" --yolo_model "${YOLO_MODEL}" --width 640 --height 480 --fps 30 --map_size 32 --map_extent_m 3.0 --camera_height_m "${CAMERA_HEIGHT_M}" --camera_pitch_down_deg "${CAMERA_PITCH_DOWN_DEG}" --yolo_conf 0.35 --target_depth_mode roi --ground_remove_height_m 0.04 --debug_map_px 260)
+        CAMERA_CMD=(python3 "${CODE_DIR}/real_pcr_input_check.py" --yolo_model "${YOLO_MODEL}" --width 640 --height 480 --fps 30 --map_size 32 --map_extent_m 3.0 --camera_height_m "${CAMERA_HEIGHT_M}" --camera_pitch_down_deg "${CAMERA_PITCH_DOWN_DEG}" --yolo_conf 0.35 --target_depth_mode roi --ground_remove_height_m 0.04 --debug_map_px 260 --viewer_pcr_policy "${PCR_CKPT##*/}" --viewer_lowlevel_policy "${LOWLEVEL_AGENT}")
         if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
             CAMERA_CMD+=(--obs_file "${OBS_FILE}")
         else
@@ -356,6 +377,20 @@ if [[ "${USE_TMUX}" -eq 1 && -z "${PCR_REAL_COMPAT_IN_TMUX:-}" ]]; then
             NODE_BG_ITEMS+=("pcr_realplay:::${PCR_BODY}")
         fi
     fi
+    if [[ "${START_RECORDER}" -eq 1 ]]; then
+        RECORDER_CMD=(
+            python3 "${CODE_DIR}/pcr_session_recorder.py"
+            --button_index "${RECORD_BUTTON_INDEX}"
+            --output_root "${RECORD_OUTPUT_ROOT}"
+        )
+        RECORDER_BODY="${WAIT_ROS}; $(quote_cmd "${RECORDER_CMD[@]}")"
+        if [[ "${FULL_MONITOR}" -eq 1 ]]; then
+            write_pane_script "${TMUX_DIR}/45_recorder.zsh" "PCR session recorder" "${RECORDER_BODY}"
+            add_tmux_pane "${TMUX_DIR}/45_recorder.zsh"
+        else
+            NODE_BG_ITEMS+=("recorder:::${RECORDER_BODY}")
+        fi
+    fi
 
     Q_MANUAL_TOPIC="$(printf "%q" "${MANUAL_USR_COMMAND_TOPIC}")"
     Q_PCR_TOPIC="$(printf "%q" "${PCR_USR_COMMAND_TOPIC}")"
@@ -386,7 +421,7 @@ if [[ "${USE_TMUX}" -eq 1 && -z "${PCR_REAL_COMPAT_IN_TMUX:-}" ]]; then
 fi
 
 NEEDS_ROS=0
-if [[ "${FILE_BRIDGE}" -eq 0 && ( "${START_CAMERA}" -eq 1 || "${START_PCR}" -eq 1 || "${START_RUN_AGENT}" -eq 1 || "${START_JOY}" -eq 1 ) ]]; then
+if [[ "${FILE_BRIDGE}" -eq 0 && ( "${START_CAMERA}" -eq 1 || "${START_PCR}" -eq 1 || "${START_RUN_AGENT}" -eq 1 || "${START_JOY}" -eq 1 || "${START_RECORDER}" -eq 1 ) ]]; then
     NEEDS_ROS=1
 fi
 if [[ "${PUBLISH_CMD}" -eq 1 || "${START_RUN_AGENT}" -eq 1 ]]; then
@@ -410,16 +445,38 @@ if [[ "${NEEDS_ROS}" -eq 1 ]]; then
 fi
 
 PIDS=()
+CLEANUP_DONE=0
 cleanup() {
+    if [[ "${CLEANUP_DONE}" -eq 1 ]]; then
+        return
+    fi
+    CLEANUP_DONE=1
     set +e
     for pid in "${PIDS[@]:-}"; do
-        kill "${pid}" 2>/dev/null || true
+        kill -INT "${pid}" 2>/dev/null || true
+    done
+    for _ in $(seq 1 150); do
+        alive=0
+        for pid in "${PIDS[@]:-}"; do
+            if kill -0 "${pid}" 2>/dev/null; then
+                alive=1
+            fi
+        done
+        [[ "${alive}" -eq 0 ]] && break
+        sleep 0.1
+    done
+    for pid in "${PIDS[@]:-}"; do
+        kill -TERM "${pid}" 2>/dev/null || true
+        wait "${pid}" 2>/dev/null || true
     done
     if [[ -n "${ROSCORE_PID:-}" ]]; then
-        kill "${ROSCORE_PID}" 2>/dev/null || true
+        kill -INT "${ROSCORE_PID}" 2>/dev/null || true
+        wait "${ROSCORE_PID}" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_bg() {
     local name="$1"
@@ -462,6 +519,8 @@ if [[ "${START_CAMERA}" -eq 1 ]]; then
         --target_depth_mode roi
         --ground_remove_height_m 0.04
         --debug_map_px 260
+        --viewer_pcr_policy "${PCR_CKPT##*/}"
+        --viewer_lowlevel_policy "${LOWLEVEL_AGENT}"
     )
     if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
         CAMERA_CMD+=(--obs_file "${OBS_FILE}")
@@ -498,6 +557,13 @@ if [[ "${START_PCR}" -eq 1 ]]; then
     fi
     PCR_CMD+=("${PCR_EXTRA_ARGS[@]}")
     start_bg "PCR realplay" "${PCR_CMD[@]}"
+fi
+
+if [[ "${START_RECORDER}" -eq 1 ]]; then
+    start_bg "PCR session recorder" \
+        python3 "${CODE_DIR}/pcr_session_recorder.py" \
+        --button_index "${RECORD_BUTTON_INDEX}" \
+        --output_root "${RECORD_OUTPUT_ROOT}"
 fi
 
 echo "[PCRRealCompat] running. Press Ctrl+C to stop all started processes."

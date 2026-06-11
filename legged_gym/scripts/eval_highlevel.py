@@ -65,6 +65,61 @@ def _safe_float(x, default: float = 0.0) -> float:
     return v
 
 
+def _json_dumps_compact(obj) -> str:
+    return json.dumps(obj, separators=(",", ":"), sort_keys=True)
+
+
+def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
+    if (
+        env_impl is None
+        or not hasattr(env_impl, "s_avoid_active")
+        or not hasattr(env_impl, "s_avoid_pos_world")
+    ):
+        return "[]"
+    active = getattr(env_impl, "s_avoid_active", None)
+    pos_world = getattr(env_impl, "s_avoid_pos_world", None)
+    if not torch.is_tensor(active) or not torch.is_tensor(pos_world):
+        return "[]"
+    if env_id < 0 or env_id >= int(active.shape[0]):
+        return "[]"
+    cap_slots = int(getattr(env_impl, "s_avoid_capsule_slot_count", 0))
+    cap_slots = max(0, min(cap_slots, int(active.shape[1])))
+    terrain_cfg = getattr(getattr(env_impl, "cfg", None), "terrain", None)
+    radius = float(getattr(terrain_cfg, "avoid_capsule_radius", 0.15))
+    out = []
+    for slot in range(cap_slots):
+        if not bool(active[env_id, slot].item()):
+            continue
+        out.append(
+            {
+                "slot": int(slot),
+                "x": _safe_float(pos_world[env_id, slot, 0].item()),
+                "y": _safe_float(pos_world[env_id, slot, 1].item()),
+                "r": radius,
+            }
+        )
+    return _json_dumps_compact(out)
+
+
+def _episode_termination_reason(
+    *,
+    task_success: bool,
+    full_task_success: bool,
+    final_collision: bool,
+    target_lost_event: bool,
+    timeout_or_other: bool,
+) -> str:
+    if bool(task_success) or bool(full_task_success):
+        return "success"
+    if bool(final_collision):
+        return "collision"
+    if bool(target_lost_event):
+        return "target_lost"
+    if bool(timeout_or_other):
+        return "timeout"
+    return "follow_lost"
+
+
 def _quantile(values: List[float], q: float) -> float:
     if not values:
         return float("nan")
@@ -1994,11 +2049,30 @@ class EvalRunner:
                             ai.near_miss_steps += 1
 
                         if dump_timeseries and ai.step_hl % timeseries_stride == 0:
+                            env_impl = getattr(self.env, "env", None)
+                            root_states = getattr(env_impl, "root_states", None)
+                            target_world = getattr(env_impl, "target_world", None)
+                            robot_x_v = float("nan")
+                            robot_y_v = float("nan")
+                            target_x_v = float("nan")
+                            target_y_v = float("nan")
+                            if torch.is_tensor(root_states) and root_states.shape[0] > i and root_states.shape[1] >= 2:
+                                robot_x_v = _safe_float(root_states[i, 0].item(), default=float("nan"))
+                                robot_y_v = _safe_float(root_states[i, 1].item(), default=float("nan"))
+                            if torch.is_tensor(target_world) and target_world.shape[0] > i and target_world.shape[1] >= 2:
+                                target_x_v = _safe_float(target_world[i, 0].item(), default=float("nan"))
+                                target_y_v = _safe_float(target_world[i, 1].item(), default=float("nan"))
                             cmd_final_v = ai.prev_cmd_final if ai.prev_cmd_final is not None else [float("nan"), float("nan"), float("nan")]
                             ai.timeseries.append(
                                 {
                                     "step_hl": int(ai.step_hl),
                                     "time_s": float(ai.step_hl) * float(self.env.high_level_dt),
+                                    "trajectory_frame": "world_xy_train_play",
+                                    "robot_x": robot_x_v,
+                                    "robot_y": robot_y_v,
+                                    "target_x": target_x_v,
+                                    "target_y": target_y_v,
+                                    "obstacles_json": _trajectory_obstacles_json(env_impl, i),
                                     "progress": float(progress_val),
                                     "follow_err_m": follow_err_step,
                                     "target_bearing_rad": target_bearing_v,
@@ -2112,6 +2186,13 @@ class EvalRunner:
                     success_event_and_collision = bool(success_event and final_collision)
                     collision_only = bool(final_collision and row_progress_success <= 1e-6)
                     timeout_or_other = bool((row_progress_success <= 1e-6) and (not final_collision))
+                    termination_reason = _episode_termination_reason(
+                        task_success=task_success,
+                        full_task_success=full_task_success,
+                        final_collision=final_collision,
+                        target_lost_event=ai.target_lost_event,
+                        timeout_or_other=timeout_or_other,
+                    )
                     if row_progress_success >= 1.0 - 1e-6:
                         outcome = "full_row_score"
                     elif row_progress_success > 1e-6:
@@ -2740,6 +2821,12 @@ class EvalRunner:
                                 ts_row = dict(ts_row)
                                 ts_row["episode_id"] = global_episode_idx
                                 ts_row["difficulty"] = float(d)
+                                ts_row["episode_termination_reason"] = termination_reason
+                                ts_row["episode_task_success"] = int(task_success)
+                                ts_row["episode_full_task_success"] = int(full_task_success)
+                                ts_row["episode_collision_final"] = int(final_collision)
+                                ts_row["episode_target_lost"] = int(ai.target_lost_event)
+                                ts_row["episode_row_progress"] = row_progress_success
                                 timeseries_rows.append(ts_row)
                     global_episode_idx += 1
                     done_episodes += 1
@@ -4144,8 +4231,20 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         ts_fieldnames = [
             "episode_id",
             "difficulty",
+            "episode_termination_reason",
+            "episode_task_success",
+            "episode_full_task_success",
+            "episode_collision_final",
+            "episode_target_lost",
+            "episode_row_progress",
             "step_hl",
             "time_s",
+            "trajectory_frame",
+            "robot_x",
+            "robot_y",
+            "target_x",
+            "target_y",
+            "obstacles_json",
             "progress",
             "follow_err_m",
             "target_bearing_rad",
