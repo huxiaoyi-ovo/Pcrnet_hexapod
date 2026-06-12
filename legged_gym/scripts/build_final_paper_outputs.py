@@ -869,20 +869,70 @@ def _canonical_obstacles(text: str) -> str:
     return json.dumps(out, separators=(",", ":"), sort_keys=True)
 
 
+def _split_fig6_roots(text: str) -> List[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    parts: List[str] = []
+    for chunk in raw.split(","):
+        parts.extend(p for p in chunk.split(os.pathsep) if p.strip())
+    out: List[str] = []
+    seen = set()
+    for part in parts:
+        norm = os.path.normpath(part.strip())
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def _infer_fig6_roots_from_metric_csvs(args) -> List[str]:
+    roots: List[str] = []
+    seen = set()
+    for csv_path in (
+        getattr(args, "internal_all_csv", ""),
+        getattr(args, "risk_all_csv", ""),
+        getattr(args, "rule_all_csv", ""),
+        getattr(args, "learnedw_diag_all_csv", ""),
+    ):
+        for row in _read_csv(str(csv_path)):
+            src = str(row.get("source", "") or row.get("Source", "")).strip()
+            if not src:
+                continue
+            root = os.path.dirname(src) if os.path.isfile(src) else src
+            if os.path.isdir(root) and root not in seen:
+                seen.add(root)
+                roots.append(root)
+    return roots
+
+
+def _fig6_source_label(path: str) -> str:
+    return hashlib.sha1(os.path.abspath(path).encode("utf-8")).hexdigest()[:10]
+
+
 def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
-    root = str(getattr(args, "fig6_timeseries_root", "") or "").strip()
-    if not root:
+    roots = _split_fig6_roots(getattr(args, "fig6_timeseries_root", "") or "")
+    if not roots:
+        roots = _infer_fig6_roots_from_metric_csvs(args)
+    if not roots:
         return {}
-    if not os.path.isdir(root):
-        msg = f"Fig.6 timeseries root not found: {root}"
+
+    bad_roots = [root for root in roots if not os.path.isdir(root)]
+    if bad_roots:
+        msg = "Fig.6 timeseries roots not found:\n" + "\n".join(f"- {root}" for root in bad_roots)
         if bool(getattr(args, "fig6_required", False)):
             raise FileNotFoundError(msg)
-        print(f"[Warn] {msg}; skipping Fig.6.")
-        return {}
+        print("[Warn] " + msg.replace("\n", "\n[Warn] "))
+        roots = [root for root in roots if os.path.isdir(root)]
+        if not roots:
+            return {}
 
     missing: List[str] = []
     datasets: Dict[Tuple[str, str], Dict] = {}
-    for path in sorted(glob.glob(os.path.join(root, "**", "timeseries.csv"), recursive=True)):
+    all_paths: List[str] = []
+    for root in roots:
+        all_paths.extend(glob.glob(os.path.join(root, "**", "timeseries.csv"), recursive=True))
+    for path in sorted(set(all_paths)):
         method = _infer_method({"source": path})
         speed = _infer_speed({"source": path})
         if method not in METHOD_ORDER or speed not in FIG6_SPEEDS:
@@ -906,17 +956,34 @@ def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
         if not first_obs:
             missing.append(f"{speed}/{method}: missing/empty obstacles_json ({path})")
             continue
-        datasets[(speed, method)] = {
-            "path": path,
-            "rows": rows,
-            "obstacles": first_obs,
-            "metrics_path": os.path.join(os.path.dirname(path), "metrics.csv"),
-        }
+        run_id = _fig6_source_label(path)
+        tagged_rows: List[Dict[str, str]] = []
+        for row in rows:
+            copy = dict(row)
+            raw_episode = str(copy.get("episode_id", ""))
+            copy["fig6_episode_id_raw"] = raw_episode
+            copy["episode_id"] = f"{run_id}:{raw_episode}"
+            copy["fig6_source"] = path
+            copy["fig6_run_id"] = run_id
+            tagged_rows.append(copy)
+        data = datasets.setdefault(
+            (speed, method),
+            {
+                "path": path,
+                "paths": [],
+                "rows": [],
+                "obstacles": first_obs,
+                "metrics_path": os.path.join(os.path.dirname(path), "metrics.csv"),
+            },
+        )
+        data["paths"].append(path)
+        data["rows"].extend(tagged_rows)
 
     for speed in FIG6_SPEEDS:
         for method in METHOD_ORDER:
             if (speed, method) not in datasets:
-                missing.append(f"{speed}/{method}: no valid timeseries.csv under {root}")
+                root_text = ", ".join(roots)
+                missing.append(f"{speed}/{method}: no valid timeseries.csv under {root_text}")
     if missing:
         detail = "\n".join(f"- {m}" for m in missing)
         msg = "Fig.6 trajectory data incomplete:\n" + detail
@@ -1015,9 +1082,11 @@ def _fig6_entries_by_layout(datasets: Dict[Tuple[str, str], Dict]) -> Dict[str, 
                     "speed": speed,
                     "method": method,
                     "episode": str(episode_id),
+                    "episode_raw": str(rows[0].get("fig6_episode_id_raw", "")),
+                    "run_id": str(rows[0].get("fig6_run_id", "")),
                     "reason": _fig6_terminal_reason(rows),
                     "rows": rows,
-                    "source": data["path"],
+                    "source": str(rows[0].get("fig6_source", data["path"])),
                     "layout": layout,
                 }
             )
@@ -1166,8 +1235,10 @@ def _manual_fig6_selection(
             "speed": speed,
             "method": method,
             "episode": str(int(episode_id)),
+            "episode_raw": str(rows[0].get("fig6_episode_id_raw", episode_id)),
+            "run_id": str(rows[0].get("fig6_run_id", "")),
             "reason": _fig6_terminal_reason(rows),
-            "source": datasets[(speed, method)]["path"],
+            "source": str(rows[0].get("fig6_source", datasets[(speed, method)]["path"])),
             "layout": layout,
         }
     if len(layout_refs) != 1:
@@ -1235,6 +1306,8 @@ def _choose_fig6_selection(
             "speed": speed,
             "method": method,
             "episode": entry.get("episode", ""),
+            "episode_raw": entry.get("episode_raw", ""),
+            "run_id": entry.get("run_id", ""),
             "reason": entry.get("reason", ""),
             "source": entry.get("source", ""),
             "layout": best_layout,
@@ -1521,6 +1594,8 @@ def _plot_fig6(args) -> None:
                     "Speed": speed,
                     "Method": SHORT_METHOD_LABELS[method],
                     "Episode": meta.get("episode", ""),
+                    "RawEpisode": meta.get("episode_raw", ""),
+                    "RunID": meta.get("run_id", ""),
                     "Selection": selection_mode,
                     "TrajectoryFrame": rows[0].get("trajectory_frame", ""),
                     "Termination": meta.get("reason", rows[-1].get("episode_termination_reason", "")),
@@ -1531,7 +1606,10 @@ def _plot_fig6(args) -> None:
     _write_csv(
         os.path.join(args.output_dir, "fig6_trajectories_stage4_sources.csv"),
         source_rows,
-        ["Speed", "Method", "Episode", "Selection", "TrajectoryFrame", "Termination", "LayoutID", "Source"],
+        [
+            "Speed", "Method", "Episode", "RawEpisode", "RunID", "Selection",
+            "TrajectoryFrame", "Termination", "LayoutID", "Source",
+        ],
     )
     _write_csv(
         os.path.join(args.output_dir, "fig6_trajectory_episode_candidates.csv"),
@@ -1796,7 +1874,7 @@ def _write_manifest(
         f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
         f.write("- Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
         f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
-        f.write("- Fig.6: if requested, 0.60 m/s timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; default selection uses one shared obstacle layout, requires learned-w success, and prefers 2-3 baseline collisions plus at least one lost/timeout trajectory when available.\n")
+        f.write("- Fig.6: if requested, 0.60 m/s timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; roots may be inferred from main-table CSV sources; default selection uses one shared obstacle layout, requires learned-w success, and prefers 2-3 baseline collisions plus at least one lost/timeout trajectory when available.\n")
         f.write("- Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.\n")
 
 
@@ -1863,7 +1941,10 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fig6_timeseries_root",
         default=None,
-        help="Root directory containing Fig.6 trajectory eval outputs with timeseries.csv files.",
+        help=(
+            "Root directory/directories containing Fig.6 trajectory eval outputs with timeseries.csv files. "
+            "Use comma or ':' separated roots; if omitted, roots are inferred from main-table CSV sources."
+        ),
     )
     parser.add_argument(
         "--fig6_required",
