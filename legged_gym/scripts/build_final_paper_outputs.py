@@ -40,6 +40,7 @@ METHOD_STYLE = {
     "learnedw": {"marker": "*", "color": "#d62728", "linewidth": 2.0},
 }
 SPEEDS = ("0.35", "0.50", "0.60")
+FIG6_SPEEDS = ("0.60",)
 
 
 def _read_csv(path: str) -> List[Dict[str, str]]:
@@ -882,7 +883,7 @@ def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
     for path in sorted(glob.glob(os.path.join(root, "**", "timeseries.csv"), recursive=True)):
         method = _infer_method({"source": path})
         speed = _infer_speed({"source": path})
-        if method not in METHOD_ORDER or speed not in SPEEDS:
+        if method not in METHOD_ORDER or speed not in FIG6_SPEEDS:
             continue
         rows = _read_timeseries(path)
         if not rows:
@@ -910,7 +911,7 @@ def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
             "metrics_path": os.path.join(os.path.dirname(path), "metrics.csv"),
         }
 
-    for speed in SPEEDS:
+    for speed in FIG6_SPEEDS:
         for method in METHOD_ORDER:
             if (speed, method) not in datasets:
                 missing.append(f"{speed}/{method}: no valid timeseries.csv under {root}")
@@ -955,7 +956,7 @@ def _score_fig6_episode(datasets: Dict[Tuple[str, str], Dict], episode_id: str) 
     learned_success = 0
     layout_refs = set()
     terms: Dict[Tuple[str, str], str] = {}
-    for speed in SPEEDS:
+    for speed in FIG6_SPEEDS:
         speed_weight = 4.0 if speed == "0.60" else (2.0 if speed == "0.50" else 1.0)
         for method in METHOD_ORDER:
             rows = _episode_rows(datasets[(speed, method)]["rows"], episode_id)
@@ -991,7 +992,8 @@ def _score_fig6_episode(datasets: Dict[Tuple[str, str], Dict], episode_id: str) 
     layout_ok = len(layout_refs) == 1
     if not layout_ok:
         score -= 10000.0
-    high_speed_terms = ",".join(f"{m}:{terms.get(('0.60', m), '')}" for m in METHOD_ORDER)
+    term_speed = FIG6_SPEEDS[-1]
+    high_speed_terms = ",".join(f"{m}:{terms.get((term_speed, m), '')}" for m in METHOD_ORDER)
     return {
         "Episode": episode_id,
         "Score": f"{score:.3f}",
@@ -1210,72 +1212,72 @@ def _plot_fig6(args) -> None:
 
     xlim, ylim = _fig6_window_limits(obstacles, selected, args)
 
-    fig, axes = plt.subplots(1, 3, figsize=(8.8, 4.6), sharex=True, sharey=True, constrained_layout=True)
-    for ax, speed in zip(axes, SPEEDS):
-        for obs in obstacles:
-            oy = _safe_float(obs.get("y"))
-            radius = _safe_float(obs.get("r"))
-            if not math.isfinite(oy) or oy + radius < ylim[0] or oy - radius > ylim[1]:
-                continue
-            ax.add_patch(
-                Circle(
-                    (_safe_float(obs.get("x")), _safe_float(obs.get("y"))),
-                    radius,
-                    facecolor="#9e9e9e",
-                    edgecolor="#666666",
-                    linewidth=0.5,
-                    alpha=0.55,
-                    zorder=1,
-                )
+    speed = FIG6_SPEEDS[0]
+    fig, ax = plt.subplots(1, 1, figsize=(4.3, 7.4), constrained_layout=True)
+    for obs in obstacles:
+        oy = _safe_float(obs.get("y"))
+        radius = _safe_float(obs.get("r"))
+        if not math.isfinite(oy) or oy + radius < ylim[0] or oy - radius > ylim[1]:
+            continue
+        ax.add_patch(
+            Circle(
+                (_safe_float(obs.get("x")), _safe_float(obs.get("y"))),
+                radius,
+                facecolor="#9e9e9e",
+                edgecolor="#666666",
+                linewidth=0.5,
+                alpha=0.55,
+                zorder=1,
+            )
+        )
+
+    target_rows = selected[(speed, "learnedw")]
+    tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
+    ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
+    tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
+    target_line, = ax.plot(tx, ty, linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
+    target_line.set_dashes([5.0, 3.0])
+
+    start_marked = False
+    for method in METHOD_ORDER:
+        rows = selected[(speed, method)]
+        raw_xs = [_safe_float(r.get("robot_x", "")) for r in rows]
+        raw_ys = [_safe_float(r.get("robot_y", "")) for r in rows]
+        xs, ys = _clip_fig6_xy(raw_xs, raw_ys, xlim, ylim)
+        style = METHOD_STYLE[method]
+        alpha = 0.92 if method == "learnedw" else 0.90
+        linewidth = 2.0 if method == "learnedw" else style["linewidth"]
+        z = 5 if method == "learnedw" else 3
+        ax.plot(
+            xs,
+            ys,
+            color=style["color"],
+            linewidth=linewidth,
+            alpha=alpha,
+            zorder=z,
+        )
+        if not start_marked and xs and ys:
+            first_pt = _first_visible_fig6_point(xs, ys)
+            if first_pt is not None:
+                ax.scatter([first_pt[0]], [first_pt[1]], marker="s", s=42, color="#000000", zorder=8)
+                start_marked = True
+        terminal_pt = _fig6_visible_terminal_point(raw_xs, raw_ys, xs, ys, xlim, ylim)
+        if terminal_pt is not None:
+            _plot_terminal_marker(
+                ax,
+                terminal_pt[0],
+                terminal_pt[1],
+                rows[-1].get("episode_termination_reason", ""),
             )
 
-        target_rows = selected[(speed, "learnedw")]
-        tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
-        ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
-        tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
-        target_line, = ax.plot(tx, ty, linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
-        target_line.set_dashes([5.0, 3.0])
-
-        start_marked = False
-        for method in METHOD_ORDER:
-            rows = selected[(speed, method)]
-            raw_xs = [_safe_float(r.get("robot_x", "")) for r in rows]
-            raw_ys = [_safe_float(r.get("robot_y", "")) for r in rows]
-            xs, ys = _clip_fig6_xy(raw_xs, raw_ys, xlim, ylim)
-            style = METHOD_STYLE[method]
-            alpha = 0.92 if method == "learnedw" else 0.90
-            linewidth = 2.0 if method == "learnedw" else style["linewidth"]
-            z = 5 if method == "learnedw" else 3
-            ax.plot(
-                xs,
-                ys,
-                color=style["color"],
-                linewidth=linewidth,
-                alpha=alpha,
-                zorder=z,
-            )
-            if not start_marked and xs and ys:
-                first_pt = _first_visible_fig6_point(xs, ys)
-                if first_pt is not None:
-                    ax.scatter([first_pt[0]], [first_pt[1]], marker="s", s=42, color="#000000", zorder=8)
-                    start_marked = True
-            terminal_pt = _fig6_visible_terminal_point(raw_xs, raw_ys, xs, ys, xlim, ylim)
-            if terminal_pt is not None:
-                _plot_terminal_marker(
-                    ax,
-                    terminal_pt[0],
-                    terminal_pt[1],
-                    rows[-1].get("episode_termination_reason", ""),
-                )
-
-        ax.set_title(f"({chr(ord('a') + SPEEDS.index(speed))}) {float(speed):.2f} m/s", fontsize=11)
-        ax.set_xlabel("world x / lateral [m]", fontsize=11)
-        ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
-        ax.set_aspect("equal", adjustable="box")
-        ax.tick_params(labelsize=9)
-    axes[0].set_ylabel("world y / forward [m]", fontsize=11)
+    ax.set_title(f"{float(speed):.2f} m/s", fontsize=11)
+    ax.set_xlabel("world x / lateral [m]", fontsize=11)
+    ax.set_ylabel("world y / forward [m]", fontsize=11)
+    ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_aspect("equal", adjustable="box")
+    ax.tick_params(labelsize=9)
 
     method_handles = [
         Line2D([0], [0], color=METHOD_STYLE[m]["color"],
@@ -1295,17 +1297,17 @@ def _plot_fig6(args) -> None:
     fig.legend(
         handles=method_handles + event_handles,
         loc="upper center",
-        ncol=10,
+        ncol=3,
         frameon=False,
         fontsize=8,
-        bbox_to_anchor=(0.5, 1.17),
+        bbox_to_anchor=(0.5, 1.10),
     )
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(args.output_dir, f"fig6_trajectories_stage4.{ext}"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     source_rows = []
-    for speed in SPEEDS:
+    for speed in FIG6_SPEEDS:
         for method in METHOD_ORDER:
             rows = selected[(speed, method)]
             source_rows.append(
