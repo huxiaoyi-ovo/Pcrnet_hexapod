@@ -63,10 +63,13 @@
 ## 2026-06-11 实机手柄持续控制串口负载修复
 
 - [x] ~~[P0] 移除手柄路径 `/sita_des` 的 0/8/8 ms 三连发，改为与 PCR 相同的单次均匀发布；CAN 侧只保留最新命令，并在首次串口 I/O 故障后停止继续写入，避免连续推杆时突发负载击穿 USB 串口后形成错误风暴。~~
+- [x] ~~[P0] 将任一侧串口 I/O 故障同步到左右 CAN 节点与 `run_agent2`：健康侧只执行一次 `Disable`，故障会话内拒绝后续手柄/PCR 运动命令，必须重启控制节点并重新 B→Y 才能恢复。~~
 
 ## 2026-06-11 PCR Fig.6 轨迹图数据闭环
 
 - [x] ~~[P0] 为最终论文 Fig.6 增加 stage4 三速度五策略轨迹图所需数据链：eval timeseries 必须保存 robot/target 逐帧位置、真实障碍圆柱位置与 episode 终止原因；最终出图脚本必须先检查字段完整性，缺字段时停止并提示补跑 timeseries-only eval。~~
+- [x] ~~[P0] 将最终论文 Fig.6 收口为 0.60 m/s 单张代表性轨迹图：从主表原始 eval timeseries 中按同一障碍布局选轨迹，Learned-w 必须选成功轨迹，baseline 尽量选 2-3 条 collision 和至少 1 条 lost/timeout，并在 source CSV 中记录每条轨迹的真实 run、episode 与终止原因。~~
+- [x] ~~[P0] 增加 Fig.6 轨迹池审计脚本：扫描 `agents/` 下所有原始 timeseries，统计 0.60 m/s 下各方法 success/collision/lost/timeout 与布局签名，允许非同一布局但必须避免明显镜像拼图，为最终轨迹图选择提供证据。~~
 
 ## 2026-06-10 PCR 论文 v3 图表收口
 
