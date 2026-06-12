@@ -2069,8 +2069,8 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fig6_candidate_csv",
-        default="",
-        help="Optional candidate CSV from audit_fig6_trajectory_pool.py; overrides automatic Fig.6 episode selection.",
+        default="agents/fig6_trajectory_pool_audit/fig6_candidate_sets.csv",
+        help="Candidate CSV from audit_fig6_trajectory_pool.py; overrides automatic Fig.6 episode selection when present.",
     )
     parser.add_argument(
         "--fig6_candidate_rank",
@@ -2081,25 +2081,25 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fig6_y_min",
         type=float,
-        default=float("nan"),
+        default=-2.0,
         help="Optional lower y limit for Fig.6 interaction window.",
     )
     parser.add_argument(
         "--fig6_y_max",
         type=float,
-        default=float("nan"),
+        default=8.0,
         help="Optional upper y limit for Fig.6 interaction window.",
     )
     parser.add_argument(
         "--fig6_x_min",
         type=float,
-        default=float("nan"),
+        default=-1.5,
         help="Optional lower x limit for Fig.6 interaction window.",
     )
     parser.add_argument(
         "--fig6_x_max",
         type=float,
-        default=float("nan"),
+        default=1.5,
         help="Optional upper x limit for Fig.6 interaction window.",
     )
     parser.add_argument(
