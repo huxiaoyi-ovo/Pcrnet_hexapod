@@ -1502,6 +1502,34 @@ def _clip_fig6_xy(
     return out_x, out_y
 
 
+def _truncate_fig6_at_reset(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    *,
+    jump_threshold: float = 1.2,
+) -> Tuple[List[float], List[float], bool]:
+    out_x: List[float] = []
+    out_y: List[float] = []
+    prev_x = float("nan")
+    prev_y = float("nan")
+    for x, y in zip(xs, ys):
+        x_f = _safe_float(x)
+        y_f = _safe_float(y)
+        if not math.isfinite(x_f) or not math.isfinite(y_f):
+            continue
+        if (
+            math.isfinite(prev_x)
+            and math.isfinite(prev_y)
+            and math.hypot(x_f - prev_x, y_f - prev_y) > jump_threshold
+        ):
+            return out_x, out_y, True
+        out_x.append(x_f)
+        out_y.append(y_f)
+        prev_x = x_f
+        prev_y = y_f
+    return out_x, out_y, False
+
+
 def _first_visible_fig6_point(xs: Sequence[float], ys: Sequence[float]) -> Optional[Tuple[float, float]]:
     for x, y in zip(xs, ys):
         x_f = _safe_float(x)
@@ -1548,14 +1576,65 @@ def _fig6_visible_terminal_point(
     return _last_visible_fig6_point(clipped_xs, clipped_ys)
 
 
-def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> None:
+def _terminal_marker_name(reason: str) -> str:
     reason = str(reason or "").lower()
     if reason == "success":
-        ax.scatter([x], [y], marker="*", s=88, color="#111111", edgecolor="white", linewidth=0.5, zorder=7)
-    elif reason == "collision":
-        ax.scatter([x], [y], marker="x", s=68, color="#d62728", linewidth=1.8, zorder=7)
+        return "success_star"
+    if reason == "collision":
+        return "collision_x"
+    return "lost_timeout_circle"
+
+
+def _plot_terminal_marker(ax, x: float, y: float, reason: str, method_color: str) -> str:
+    marker_name = _terminal_marker_name(reason)
+    ax.scatter(
+        [x],
+        [y],
+        marker="o",
+        s=190,
+        facecolors="white",
+        edgecolors=method_color,
+        linewidth=2.4,
+        zorder=20,
+        clip_on=False,
+    )
+    if marker_name == "success_star":
+        ax.scatter(
+            [x],
+            [y],
+            marker="*",
+            s=145,
+            color="#111111",
+            edgecolor="white",
+            linewidth=0.7,
+            zorder=22,
+            clip_on=False,
+        )
+    elif marker_name == "collision_x":
+        ax.scatter(
+            [x],
+            [y],
+            marker="X",
+            s=105,
+            color="#d62728",
+            edgecolor="white",
+            linewidth=0.7,
+            zorder=22,
+            clip_on=False,
+        )
     else:
-        ax.scatter([x], [y], marker="o", s=58, facecolors="white", edgecolors="#333333", linewidth=1.3, zorder=7)
+        ax.scatter(
+            [x],
+            [y],
+            marker="o",
+            s=92,
+            facecolors="white",
+            edgecolors="#222222",
+            linewidth=2.0,
+            zorder=22,
+            clip_on=False,
+        )
+    return marker_name
 
 
 def _plot_fig6(args) -> None:
@@ -1620,18 +1699,22 @@ def _plot_fig6(args) -> None:
         )
 
     target_rows = selected[(speed, "learnedw")]
-    tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
-    ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
+    raw_tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
+    raw_ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
+    tx, ty, _ = _truncate_fig6_at_reset(raw_tx, raw_ty)
     tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
     target_line, = ax.plot(tx, ty, linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
     target_line.set_dashes([5.0, 3.0])
 
     start_marked = False
+    terminal_draw_info: Dict[str, Dict[str, str]] = {}
     for method in METHOD_ORDER:
         rows = selected[(speed, method)]
+        meta = selected_meta.get((speed, method), {})
         raw_xs = [_safe_float(r.get("robot_x", "")) for r in rows]
         raw_ys = [_safe_float(r.get("robot_y", "")) for r in rows]
-        xs, ys = _clip_fig6_xy(raw_xs, raw_ys, xlim, ylim)
+        trajectory_xs, trajectory_ys, reset_detected = _truncate_fig6_at_reset(raw_xs, raw_ys)
+        xs, ys = _clip_fig6_xy(trajectory_xs, trajectory_ys, xlim, ylim)
         style = METHOD_STYLE[method]
         alpha = 0.92 if method == "learnedw" else 0.90
         linewidth = 2.0 if method == "learnedw" else style["linewidth"]
@@ -1647,15 +1730,61 @@ def _plot_fig6(args) -> None:
         if not start_marked and xs and ys:
             first_pt = _first_visible_fig6_point(xs, ys)
             if first_pt is not None:
-                ax.scatter([first_pt[0]], [first_pt[1]], marker="s", s=42, color="#000000", zorder=8)
+                ax.scatter(
+                    [first_pt[0]],
+                    [first_pt[1]],
+                    marker="s",
+                    s=52,
+                    color="#000000",
+                    edgecolor="white",
+                    linewidth=0.7,
+                    zorder=18,
+                    clip_on=False,
+                )
                 start_marked = True
-        terminal_pt = _fig6_visible_terminal_point(raw_xs, raw_ys, xs, ys, xlim, ylim)
+        terminal_pt = _fig6_visible_terminal_point(
+            trajectory_xs,
+            trajectory_ys,
+            xs,
+            ys,
+            xlim,
+            ylim,
+        )
         if terminal_pt is not None:
-            _plot_terminal_marker(
+            reason = str(meta.get("reason") or rows[-1].get("episode_termination_reason", "")).lower()
+            marker_name = _plot_terminal_marker(
                 ax,
                 terminal_pt[0],
                 terminal_pt[1],
-                rows[-1].get("episode_termination_reason", ""),
+                reason,
+                style["color"],
+            )
+            raw_terminal_x = _safe_float(trajectory_xs[-1]) if trajectory_xs else float("nan")
+            raw_terminal_y = _safe_float(trajectory_ys[-1]) if trajectory_ys else float("nan")
+            recorded_last_x = _safe_float(raw_xs[-1]) if raw_xs else float("nan")
+            recorded_last_y = _safe_float(raw_ys[-1]) if raw_ys else float("nan")
+            terminal_draw_info[method] = {
+                "reason": reason,
+                "marker": marker_name,
+                "plot_x": f"{terminal_pt[0]:.6f}",
+                "plot_y": f"{terminal_pt[1]:.6f}",
+                "raw_x": f"{raw_terminal_x:.6f}" if math.isfinite(raw_terminal_x) else "nan",
+                "raw_y": f"{raw_terminal_y:.6f}" if math.isfinite(raw_terminal_y) else "nan",
+                "clipped": "0" if _point_in_limits(raw_terminal_x, raw_terminal_y, xlim, ylim) else "1",
+                "reset_detected": "1" if reset_detected else "0",
+                "recorded_last_x": (
+                    f"{recorded_last_x:.6f}" if math.isfinite(recorded_last_x) else "nan"
+                ),
+                "recorded_last_y": (
+                    f"{recorded_last_y:.6f}" if math.isfinite(recorded_last_y) else "nan"
+                ),
+            }
+            print(
+                f"[Fig6] terminal method={method} reason={reason} marker={marker_name} "
+                f"plot=({terminal_pt[0]:.3f},{terminal_pt[1]:.3f}) "
+                f"pre_reset=({raw_terminal_x:.3f},{raw_terminal_y:.3f}) "
+                f"recorded_last=({recorded_last_x:.3f},{recorded_last_y:.3f}) "
+                f"reset_detected={int(reset_detected)}"
             )
 
     ax.set_title(f"{float(speed):.2f} m/s", fontsize=11)
@@ -1677,8 +1806,10 @@ def _plot_fig6(args) -> None:
     event_handles = [
         Line2D([0], [0], color="#009e73", linestyle=(0, (5.0, 3.0)), linewidth=1.5, label="Target"),
         Line2D([0], [0], marker="s", color="#000000", linestyle="None", markersize=6, label="Start"),
-        Line2D([0], [0], marker="*", color="#111111", linestyle="None", markersize=9, label="Success"),
-        Line2D([0], [0], marker="x", color="#d62728", linestyle="None", markersize=7, label="Collision"),
+        Line2D([0], [0], marker="*", markerfacecolor="#111111", markeredgecolor="white",
+               color="#111111", linestyle="None", markersize=10, label="Success"),
+        Line2D([0], [0], marker="X", markerfacecolor="#d62728", markeredgecolor="white",
+               color="#d62728", linestyle="None", markersize=8, label="Collision"),
         Line2D([0], [0], marker="o", markerfacecolor="white", markeredgecolor="#333333",
                color="#333333", linestyle="None", markersize=7, label="Follow lost/timeout"),
     ]
@@ -1699,6 +1830,7 @@ def _plot_fig6(args) -> None:
         for method in METHOD_ORDER:
             rows = selected[(speed, method)]
             meta = selected_meta.get((speed, method), {})
+            draw_info = terminal_draw_info.get(method, {})
             source_rows.append(
                 {
                     "Speed": speed,
@@ -1709,6 +1841,15 @@ def _plot_fig6(args) -> None:
                     "Selection": selection_mode,
                     "TrajectoryFrame": rows[0].get("trajectory_frame", ""),
                     "Termination": meta.get("reason", rows[-1].get("episode_termination_reason", "")),
+                    "TerminalMarker": draw_info.get("marker", ""),
+                    "TerminalPlotX": draw_info.get("plot_x", ""),
+                    "TerminalPlotY": draw_info.get("plot_y", ""),
+                    "TerminalRawX": draw_info.get("raw_x", ""),
+                    "TerminalRawY": draw_info.get("raw_y", ""),
+                    "TerminalClipped": draw_info.get("clipped", ""),
+                    "ResetDetected": draw_info.get("reset_detected", ""),
+                    "RecordedLastX": draw_info.get("recorded_last_x", ""),
+                    "RecordedLastY": draw_info.get("recorded_last_y", ""),
                     "LayoutID": hashlib.sha1(meta.get("layout", "").encode("utf-8")).hexdigest()[:10],
                     "Source": meta.get("source") or datasets.get((speed, method), {}).get("path", ""),
                 }
@@ -1718,7 +1859,10 @@ def _plot_fig6(args) -> None:
         source_rows,
         [
             "Speed", "Method", "Episode", "RawEpisode", "RunID", "Selection",
-            "TrajectoryFrame", "Termination", "LayoutID", "Source",
+            "TrajectoryFrame", "Termination", "TerminalMarker",
+            "TerminalPlotX", "TerminalPlotY", "TerminalRawX", "TerminalRawY",
+            "TerminalClipped", "ResetDetected", "RecordedLastX", "RecordedLastY",
+            "LayoutID", "Source",
         ],
     )
     _write_csv(
