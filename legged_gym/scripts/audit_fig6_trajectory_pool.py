@@ -5,12 +5,13 @@ import argparse
 import csv
 import glob
 import hashlib
+import heapq
 import json
 import math
 import os
 import re
 from collections import Counter, defaultdict
-from itertools import product
+from itertools import permutations, product
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 
@@ -33,6 +34,12 @@ REQUIRED_FIELDS = (
     "episode_termination_reason",
 )
 LOST_LIKE = {"follow_lost", "target_lost", "timeout"}
+FIG6_FAILURE_CATEGORIES = (
+    "collision_row3",
+    "collision_row4",
+    "lost_early",
+    "lost_late",
+)
 
 
 def _safe_float(value, default: float = float("nan")) -> float:
@@ -200,6 +207,69 @@ def _layout_summary(obstacles: Sequence[Dict[str, float]]) -> Dict[str, str]:
     }
 
 
+def _obstacle_row_centers(
+    obstacles: Sequence[Dict[str, float]],
+    *,
+    cluster_gap: float = 0.6,
+) -> List[float]:
+    ys = sorted(float(obs["y"]) for obs in obstacles if math.isfinite(float(obs["y"])))
+    if not ys:
+        return []
+    clusters: List[List[float]] = [[ys[0]]]
+    for y in ys[1:]:
+        center = sum(clusters[-1]) / len(clusters[-1])
+        if abs(y - center) <= cluster_gap:
+            clusters[-1].append(y)
+        else:
+            clusters.append([y])
+    return [sum(cluster) / len(cluster) for cluster in clusters]
+
+
+def _truncate_episode_at_reset(
+    rows: Sequence[Dict[str, str]],
+    *,
+    jump_threshold: float = 1.2,
+) -> Tuple[List[Dict[str, str]], bool]:
+    kept: List[Dict[str, str]] = []
+    prev_x = float("nan")
+    prev_y = float("nan")
+    for row in rows:
+        x = _safe_float(row.get("robot_x", ""))
+        y = _safe_float(row.get("robot_y", ""))
+        if not math.isfinite(x) or not math.isfinite(y):
+            continue
+        if (
+            math.isfinite(prev_x)
+            and math.isfinite(prev_y)
+            and math.hypot(x - prev_x, y - prev_y) > jump_threshold
+        ):
+            return kept, True
+        kept.append(row)
+        prev_x = x
+        prev_y = y
+    return kept, False
+
+
+def _nearest_obstacle_row(y: float, row_centers: Sequence[float]) -> Tuple[int, float]:
+    if not math.isfinite(y) or not row_centers:
+        return 0, float("nan")
+    index = min(range(len(row_centers)), key=lambda i: abs(y - row_centers[i]))
+    return index + 1, abs(y - row_centers[index])
+
+
+def _failure_category(entry: Dict) -> str:
+    reason = str(entry.get("termination", "")).lower()
+    row_index = int(_safe_float(entry.get("terminal_row", ""), default=0.0))
+    if reason == "collision" and row_index in (3, 4):
+        return f"collision_row{row_index}"
+    if reason in LOST_LIKE:
+        if row_index and row_index <= 3:
+            return "lost_early"
+        if row_index >= 4:
+            return "lost_late"
+    return _reason_group(reason)
+
+
 def _mirror_ok(entries: Sequence[Dict], strict_same_side: bool = False) -> bool:
     sides = {str(e.get("layout_side", "")) for e in entries if str(e.get("layout_side", "")) != "unknown"}
     if not sides:
@@ -230,9 +300,12 @@ def _score_candidate(entries: Dict[str, Dict], strict_same_side: bool = False) -
     layout_ids = {str(e.get("layout_id", "")) for e in entries.values()}
     layout_sides = {str(e.get("layout_side", "")) for e in entries.values()}
     layout_signatures = {str(e.get("layout_signature", "")) for e in entries.values()}
+    failure_categories = [_failure_category(e) for e in baseline]
+    exact_failure_pattern = sorted(failure_categories) == sorted(FIG6_FAILURE_CATEGORIES)
 
     score = 0.0
     score += 5000.0 if learned_reason == "success" else -5000.0
+    score += 8000.0 if exact_failure_pattern else 0.0
     if 2 <= collisions <= 3:
         score += 1300.0
     else:
@@ -255,6 +328,7 @@ def _score_candidate(entries: Dict[str, Dict], strict_same_side: bool = False) -
         "baseline_collisions": str(collisions),
         "baseline_lost_timeout": str(lost),
         "baseline_success": str(baseline_success),
+        "exact_failure_pattern": "1" if exact_failure_pattern else "0",
         "layout_ids": ",".join(sorted(layout_ids)),
         "layout_sides": ",".join(sorted(layout_sides)),
         "layout_signatures": ",".join(sorted(layout_signatures)),
@@ -262,6 +336,18 @@ def _score_candidate(entries: Dict[str, Dict], strict_same_side: bool = False) -
             f"{m}:{entries[m].get('run_id')}:{entries[m].get('episode_id')}" for m in METHOD_ORDER
         ),
         "selected_terminations": ",".join(f"{m}:{entries[m].get('termination')}" for m in METHOD_ORDER),
+        "selected_failure_categories": ",".join(
+            f"{m}:{_failure_category(entries[m])}" for m in METHOD_ORDER
+        ),
+        "selected_terminal_rows": ",".join(
+            f"{m}:{entries[m].get('terminal_row')}" for m in METHOD_ORDER
+        ),
+        "selected_terminal_y": ",".join(
+            f"{m}:{entries[m].get('terminal_y')}" for m in METHOD_ORDER
+        ),
+        "selected_time_end": ",".join(
+            f"{m}:{entries[m].get('terminal_time')}" for m in METHOD_ORDER
+        ),
         "selected_sources": ";".join(f"{m}:{entries[m].get('source')}" for m in METHOD_ORDER),
     }
     return score, row
@@ -274,6 +360,54 @@ def _compact_entries(entries: Sequence[Dict], per_group: int) -> List[Dict]:
     out: List[Dict] = []
     for group in ("collision", "lost_timeout", "success", "unknown"):
         out.extend(sorted(grouped.get(group, []), key=lambda e: (e.get("run_id", ""), str(e.get("episode_id", ""))))[:per_group])
+    return out
+
+
+def _category_pool(entries: Sequence[Dict], category: str, limit: int) -> List[Dict]:
+    matched = [entry for entry in entries if _failure_category(entry) == category]
+    if category == "lost_early":
+        matched.sort(
+            key=lambda e: (
+                int(_safe_float(e.get("terminal_row", ""), default=99.0)),
+                _safe_float(e.get("terminal_y", ""), default=999.0),
+                _safe_float(e.get("terminal_time", ""), default=999.0),
+            )
+        )
+    elif category == "lost_late":
+        matched.sort(
+            key=lambda e: (
+                -int(_safe_float(e.get("terminal_row", ""), default=0.0)),
+                -_safe_float(e.get("terminal_y", ""), default=-999.0),
+                -_safe_float(e.get("terminal_time", ""), default=-999.0),
+            )
+        )
+    else:
+        matched.sort(
+            key=lambda e: (
+                _safe_float(e.get("terminal_row_error", ""), default=999.0),
+                _safe_float(e.get("terminal_time", ""), default=999.0),
+            )
+        )
+    return matched[:limit]
+
+
+def _learned_success_pool(entries: Sequence[Dict], per_side: int) -> List[Dict]:
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for entry in entries:
+        if str(entry.get("termination", "")).lower() == "success":
+            grouped[str(entry.get("layout_side", "unknown"))].append(entry)
+    out: List[Dict] = []
+    for side in sorted(grouped):
+        out.extend(
+            sorted(
+                grouped[side],
+                key=lambda e: (
+                    _safe_float(e.get("terminal_time", ""), default=999.0),
+                    e.get("run_id", ""),
+                    str(e.get("episode_id", "")),
+                ),
+            )[:per_side]
+        )
     return out
 
 
@@ -299,6 +433,18 @@ def _scan_timeseries(path: str) -> Tuple[Dict, List[Dict]]:
         termination_counter[reason] += 1
         obstacles = _load_obstacles(erows[0].get("obstacles_json", ""))
         layout = _layout_summary(obstacles)
+        obstacle_rows = _obstacle_row_centers(obstacles)
+        trajectory_rows, reset_detected = _truncate_episode_at_reset(erows)
+        terminal_row_data = trajectory_rows[-1] if trajectory_rows else erows[-1]
+        terminal_x = _safe_float(terminal_row_data.get("robot_x", ""))
+        terminal_y = _safe_float(terminal_row_data.get("robot_y", ""))
+        terminal_time = _safe_float(terminal_row_data.get("time_s", ""))
+        start_y = _safe_float(trajectory_rows[0].get("robot_y", "")) if trajectory_rows else float("nan")
+        terminal_row, terminal_row_error = _nearest_obstacle_row(terminal_y, obstacle_rows)
+        if obstacle_rows and math.isfinite(start_y) and obstacle_rows[-1] > start_y:
+            terminal_progress = (terminal_y - start_y) / (obstacle_rows[-1] - start_y)
+        else:
+            terminal_progress = float("nan")
         layout_ids.add(layout["layout_id"])
         layout_sides[layout["layout_side"]] += 1
         entry = {
@@ -313,8 +459,22 @@ def _scan_timeseries(path: str) -> Tuple[Dict, List[Dict]]:
             "rows": str(len(erows)),
             "time_start": erows[0].get("time_s", ""),
             "time_end": erows[-1].get("time_s", ""),
+            "terminal_time": f"{terminal_time:.4f}" if math.isfinite(terminal_time) else "nan",
+            "terminal_x": f"{terminal_x:.4f}" if math.isfinite(terminal_x) else "nan",
+            "terminal_y": f"{terminal_y:.4f}" if math.isfinite(terminal_y) else "nan",
+            "terminal_progress": (
+                f"{terminal_progress:.4f}" if math.isfinite(terminal_progress) else "nan"
+            ),
+            "terminal_row": str(terminal_row),
+            "terminal_row_error": (
+                f"{terminal_row_error:.4f}" if math.isfinite(terminal_row_error) else "nan"
+            ),
+            "failure_category": "",
+            "reset_detected": "1" if reset_detected else "0",
+            "obstacle_row_centers": ",".join(f"{y:.4f}" for y in obstacle_rows),
         }
         entry.update(layout)
+        entry["failure_category"] = _failure_category(entry)
         episode_entries.append(entry)
 
     run_row = {
@@ -378,26 +538,64 @@ def _build_candidate_sets(
     if any(not by_method.get(method) for method in METHOD_ORDER):
         return []
 
-    learned_success = [r for r in by_method["learnedw"] if r.get("termination") == "success"]
-    if not learned_success:
+    learned_pool = _learned_success_pool(by_method["learnedw"], per_side=per_method_limit)
+    if not learned_pool:
         return []
-    pools = {
-        method: _compact_entries(by_method[method], per_group=per_method_limit)
-        for method in METHOD_ORDER
-        if method != "learnedw"
-    }
-    learned_pool = sorted(learned_success, key=lambda e: (e.get("run_id", ""), str(e.get("episode_id", ""))))[:per_method_limit]
-    candidates: List[Tuple[float, Dict]] = []
     baseline_methods = [m for m in METHOD_ORDER if m != "learnedw"]
+    category_pools = {
+        (method, category): _category_pool(
+            by_method[method],
+            category,
+            per_method_limit,
+        )
+        for method in baseline_methods
+        for category in FIG6_FAILURE_CATEGORIES
+    }
+    ranked: List[Tuple[float, int, Dict]] = []
+    serial = 0
+
+    def consider(entries: Dict[str, Dict]) -> None:
+        nonlocal serial
+        if not _mirror_ok(list(entries.values()), strict_same_side=strict_same_side):
+            return
+        score, row = _score_candidate(entries, strict_same_side=strict_same_side)
+        item = (score, serial, row)
+        serial += 1
+        if len(ranked) < top_k:
+            heapq.heappush(ranked, item)
+        elif score > ranked[0][0]:
+            heapq.heapreplace(ranked, item)
+
     for learned in learned_pool:
-        for choices in product(*(pools[m] for m in baseline_methods)):
+        for categories in permutations(FIG6_FAILURE_CATEGORIES):
+            pools = [
+                category_pools[(method, category)]
+                for method, category in zip(baseline_methods, categories)
+            ]
+            if any(not pool for pool in pools):
+                continue
+            for choices in product(*pools):
+                entries = {"learnedw": learned}
+                entries.update(dict(zip(baseline_methods, choices)))
+                consider(entries)
+
+    if ranked:
+        return [item[2] for item in sorted(ranked, key=lambda x: (x[0], x[1]), reverse=True)]
+
+    print(
+        "[Warn] No exact Fig.6 failure pattern found; falling back to broad "
+        "2-3 collision plus lost/timeout ranking."
+    )
+    broad_pools = {
+        method: _compact_entries(by_method[method], per_group=per_method_limit)
+        for method in baseline_methods
+    }
+    for learned in learned_pool:
+        for choices in product(*(broad_pools[m] for m in baseline_methods)):
             entries = {"learnedw": learned}
-            for method, entry in zip(baseline_methods, choices):
-                entries[method] = entry
-            score, row = _score_candidate(entries, strict_same_side=strict_same_side)
-            candidates.append((score, row))
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return [row for _, row in candidates[:top_k]]
+            entries.update(dict(zip(baseline_methods, choices)))
+            consider(entries)
+    return [item[2] for item in sorted(ranked, key=lambda x: (x[0], x[1]), reverse=True)]
 
 
 def _write_report(path: str, run_rows: Sequence[Dict], summary_rows: Sequence[Dict], candidate_rows: Sequence[Dict]) -> None:
@@ -416,8 +614,9 @@ def _write_report(path: str, run_rows: Sequence[Dict], summary_rows: Sequence[Di
             f.write("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n")
         f.write("\n## Top Fig.6 Candidate Sets\n\n")
         c_headers = [
-            "score", "mirror_ok", "baseline_collisions", "baseline_lost_timeout",
-            "layout_sides", "selected_terminations", "selected_episodes",
+            "score", "exact_failure_pattern", "mirror_ok", "baseline_collisions",
+            "baseline_lost_timeout", "layout_sides", "selected_failure_categories",
+            "selected_terminal_rows", "selected_terminal_y", "selected_episodes",
         ]
         f.write("| " + " | ".join(c_headers) + " |\n")
         f.write("| " + " | ".join(["---"] * len(c_headers)) + " |\n")
@@ -470,7 +669,10 @@ def main() -> None:
     ]
     episode_fields = [
         "method", "method_label", "speed", "seed", "run_id", "episode_id", "termination",
-        "source", "rows", "time_start", "time_end", "layout_id", "layout_side",
+        "source", "rows", "time_start", "time_end", "terminal_time",
+        "terminal_x", "terminal_y", "terminal_progress", "terminal_row",
+        "terminal_row_error", "failure_category", "reset_detected",
+        "obstacle_row_centers", "layout_id", "layout_side",
         "layout_x_mean", "layout_x_abs_mean", "layout_y_min", "layout_y_max",
         "layout_signature", "obstacle_count",
     ]
@@ -480,9 +682,11 @@ def main() -> None:
         "layout_count", "layout_sides",
     ]
     candidate_fields = [
-        "score", "mirror_ok", "baseline_collisions", "baseline_lost_timeout",
-        "baseline_success", "layout_ids", "layout_sides", "layout_signatures",
-        "selected_episodes", "selected_terminations", "selected_sources",
+        "score", "exact_failure_pattern", "mirror_ok", "baseline_collisions",
+        "baseline_lost_timeout", "baseline_success", "layout_ids", "layout_sides",
+        "layout_signatures", "selected_episodes", "selected_terminations",
+        "selected_failure_categories", "selected_terminal_rows", "selected_terminal_y",
+        "selected_time_end", "selected_sources",
     ]
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -505,7 +709,8 @@ def main() -> None:
             "[Fig6Audit] top candidate: "
             f"score={top.get('score')} collisions={top.get('baseline_collisions')} "
             f"lost={top.get('baseline_lost_timeout')} mirror_ok={top.get('mirror_ok')} "
-            f"terms={top.get('selected_terminations')}"
+            f"exact={top.get('exact_failure_pattern')} "
+            f"categories={top.get('selected_failure_categories')}"
         )
     else:
         print("[Fig6Audit] no complete Fig.6 candidate set found.")
