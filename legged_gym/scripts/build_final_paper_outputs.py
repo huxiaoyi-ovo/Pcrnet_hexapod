@@ -33,11 +33,11 @@ SHORT_METHOD_LABELS = {
     "mono_ppo": "Mono-PPO",
 }
 METHOD_STYLE = {
-    "yonly": {"marker": "o", "color": "#7f7f7f", "linewidth": 1.5},
-    "geomw": {"marker": "s", "color": "#1f77b4", "linewidth": 1.5},
-    "risk_only": {"marker": "^", "color": "#ff7f0e", "linewidth": 1.5},
-    "rule_override": {"marker": "D", "color": "#2ca02c", "linewidth": 1.5},
-    "learnedw": {"marker": "*", "color": "#1b1b1b", "linewidth": 2.5},
+    "yonly": {"marker": "o", "color": "#6b6b6b", "linewidth": 1.7},
+    "geomw": {"marker": "s", "color": "#1f77b4", "linewidth": 1.7},
+    "risk_only": {"marker": "^", "color": "#ff7f0e", "linewidth": 1.7},
+    "rule_override": {"marker": "D", "color": "#2ca02c", "linewidth": 1.7},
+    "learnedw": {"marker": "*", "color": "#d62728", "linewidth": 2.0},
 }
 SPEEDS = ("0.35", "0.50", "0.60")
 
@@ -926,7 +926,13 @@ def _load_fig6_datasets(args) -> Dict[Tuple[str, str], Dict]:
 
 def _episode_rows(rows: Sequence[Dict[str, str]], episode_id: str) -> List[Dict[str, str]]:
     out = [r for r in rows if str(r.get("episode_id", "")) == str(episode_id)]
-    return sorted(out, key=lambda r: _safe_float(r.get("time_s", ""), default=0.0))
+    return sorted(
+        out,
+        key=lambda r: (
+            _safe_float(r.get("step_hl", ""), default=0.0),
+            _safe_float(r.get("time_s", ""), default=0.0),
+        ),
+    )
 
 
 def _fig6_terminal_reason(rows: Sequence[Dict[str, str]]) -> str:
@@ -1031,7 +1037,12 @@ def _fig6_window_limits(
 ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     y_min_arg = _safe_float(getattr(args, "fig6_y_min", ""), default=float("nan"))
     y_max_arg = _safe_float(getattr(args, "fig6_y_max", ""), default=float("nan"))
+    x_min_arg = _safe_float(getattr(args, "fig6_x_min", ""), default=float("nan"))
+    x_max_arg = _safe_float(getattr(args, "fig6_x_max", ""), default=float("nan"))
     x_margin_arg = _safe_float(getattr(args, "fig6_x_margin", ""), default=0.8)
+    fixed_x = math.isfinite(x_min_arg) and math.isfinite(x_max_arg) and x_max_arg > x_min_arg
+    if fixed_x:
+        x_min, x_max = x_min_arg, x_max_arg
     if math.isfinite(y_min_arg) and math.isfinite(y_max_arg) and y_max_arg > y_min_arg:
         y_min, y_max = y_min_arg, y_max_arg
     else:
@@ -1042,28 +1053,117 @@ def _fig6_window_limits(
         else:
             y_min, y_max = -2.5, 10.5
 
-    xs: List[float] = []
-    for rows in selected.values():
-        for row in rows:
-            ry = _safe_float(row.get("robot_y", ""))
-            ty = _safe_float(row.get("target_y", ""))
-            if math.isfinite(ry) and y_min <= ry <= y_max:
-                xs.append(_safe_float(row.get("robot_x", "")))
-            if math.isfinite(ty) and y_min <= ty <= y_max:
-                xs.append(_safe_float(row.get("target_x", "")))
-    for obs in obstacles:
-        x = _safe_float(obs.get("x", ""))
-        r = _safe_float(obs.get("r", ""), default=0.0)
-        y = _safe_float(obs.get("y", ""))
-        if math.isfinite(x) and math.isfinite(y) and y_min <= y <= y_max:
-            xs.extend([x - r, x + r])
-    xs = [x for x in xs if math.isfinite(x)]
-    if xs:
-        x_min = min(xs) - max(0.35, x_margin_arg)
-        x_max = max(xs) + max(0.35, x_margin_arg)
-    else:
-        x_min, x_max = -2.0, 2.0
+    if not fixed_x:
+        xs: List[float] = []
+        for rows in selected.values():
+            for row in rows:
+                ry = _safe_float(row.get("robot_y", ""))
+                ty = _safe_float(row.get("target_y", ""))
+                if math.isfinite(ry) and y_min <= ry <= y_max:
+                    xs.append(_safe_float(row.get("robot_x", "")))
+                if math.isfinite(ty) and y_min <= ty <= y_max:
+                    xs.append(_safe_float(row.get("target_x", "")))
+        for obs in obstacles:
+            x = _safe_float(obs.get("x", ""))
+            r = _safe_float(obs.get("r", ""), default=0.0)
+            y = _safe_float(obs.get("y", ""))
+            if math.isfinite(x) and math.isfinite(y) and y_min <= y <= y_max:
+                xs.extend([x - r, x + r])
+        xs = [x for x in xs if math.isfinite(x)]
+        if xs:
+            x_min = min(xs) - max(0.35, x_margin_arg)
+            x_max = max(xs) + max(0.35, x_margin_arg)
+        else:
+            x_min, x_max = -2.0, 2.0
     return (x_min, x_max), (y_min, y_max)
+
+
+def _clip_fig6_xy(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    xlim: Tuple[float, float],
+    ylim: Tuple[float, float],
+    *,
+    jump_threshold: float = 1.2,
+) -> Tuple[List[float], List[float]]:
+    out_x: List[float] = []
+    out_y: List[float] = []
+    prev_x = float("nan")
+    prev_y = float("nan")
+    for x, y in zip(xs, ys):
+        x_f = _safe_float(x)
+        y_f = _safe_float(y)
+        inside = (
+            math.isfinite(x_f)
+            and math.isfinite(y_f)
+            and xlim[0] <= x_f <= xlim[1]
+            and ylim[0] <= y_f <= ylim[1]
+        )
+        jump = (
+            inside
+            and math.isfinite(prev_x)
+            and math.isfinite(prev_y)
+            and math.hypot(x_f - prev_x, y_f - prev_y) > jump_threshold
+        )
+        if inside and not jump:
+            out_x.append(x_f)
+            out_y.append(y_f)
+        else:
+            out_x.append(float("nan"))
+            out_y.append(float("nan"))
+        if inside:
+            prev_x = x_f
+            prev_y = y_f
+        else:
+            prev_x = float("nan")
+            prev_y = float("nan")
+    return out_x, out_y
+
+
+def _first_visible_fig6_point(xs: Sequence[float], ys: Sequence[float]) -> Optional[Tuple[float, float]]:
+    for x, y in zip(xs, ys):
+        x_f = _safe_float(x)
+        y_f = _safe_float(y)
+        if math.isfinite(x_f) and math.isfinite(y_f):
+            return x_f, y_f
+    return None
+
+
+def _last_visible_fig6_point(xs: Sequence[float], ys: Sequence[float]) -> Optional[Tuple[float, float]]:
+    for x, y in zip(reversed(xs), reversed(ys)):
+        x_f = _safe_float(x)
+        y_f = _safe_float(y)
+        if math.isfinite(x_f) and math.isfinite(y_f):
+            return x_f, y_f
+    return None
+
+
+def _point_in_limits(x: float, y: float, xlim: Tuple[float, float], ylim: Tuple[float, float]) -> bool:
+    return math.isfinite(x) and math.isfinite(y) and xlim[0] <= x <= xlim[1] and ylim[0] <= y <= ylim[1]
+
+
+def _fig6_visible_terminal_point(
+    raw_xs: Sequence[float],
+    raw_ys: Sequence[float],
+    clipped_xs: Sequence[float],
+    clipped_ys: Sequence[float],
+    xlim: Tuple[float, float],
+    ylim: Tuple[float, float],
+) -> Optional[Tuple[float, float]]:
+    if raw_xs and raw_ys:
+        terminal_x = _safe_float(raw_xs[-1])
+        terminal_y = _safe_float(raw_ys[-1])
+        if _point_in_limits(terminal_x, terminal_y, xlim, ylim):
+            return terminal_x, terminal_y
+        visible_pt = _last_visible_fig6_point(clipped_xs, clipped_ys)
+        if visible_pt is not None:
+            return visible_pt
+        if math.isfinite(terminal_x) and math.isfinite(terminal_y):
+            return (
+                min(max(terminal_x, xlim[0]), xlim[1]),
+                min(max(terminal_y, ylim[0]), ylim[1]),
+            )
+    return _last_visible_fig6_point(clipped_xs, clipped_ys)
 
 
 def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> None:
@@ -1110,7 +1210,7 @@ def _plot_fig6(args) -> None:
 
     xlim, ylim = _fig6_window_limits(obstacles, selected, args)
 
-    fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.2), sharex=True, sharey=True, constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(8.8, 4.6), sharex=True, sharey=True, constrained_layout=True)
     for ax, speed in zip(axes, SPEEDS):
         for obs in obstacles:
             oy = _safe_float(obs.get("y"))
@@ -1132,50 +1232,60 @@ def _plot_fig6(args) -> None:
         target_rows = selected[(speed, "learnedw")]
         tx = [_safe_float(r.get("target_x", "")) for r in target_rows]
         ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
-        ax.plot(tx, ty, linestyle="--", linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
+        tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
+        target_line, = ax.plot(tx, ty, linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
+        target_line.set_dashes([5.0, 3.0])
 
         start_marked = False
         for method in METHOD_ORDER:
             rows = selected[(speed, method)]
-            xs = [_safe_float(r.get("robot_x", "")) for r in rows]
-            ys = [_safe_float(r.get("robot_y", "")) for r in rows]
+            raw_xs = [_safe_float(r.get("robot_x", "")) for r in rows]
+            raw_ys = [_safe_float(r.get("robot_y", "")) for r in rows]
+            xs, ys = _clip_fig6_xy(raw_xs, raw_ys, xlim, ylim)
             style = METHOD_STYLE[method]
-            alpha = 0.98 if method == "learnedw" else 0.34
+            alpha = 0.92 if method == "learnedw" else 0.90
+            linewidth = 2.0 if method == "learnedw" else style["linewidth"]
             z = 5 if method == "learnedw" else 3
             ax.plot(
                 xs,
                 ys,
                 color=style["color"],
-                linewidth=style["linewidth"],
+                linewidth=linewidth,
                 alpha=alpha,
-                marker=style["marker"],
-                markevery=[0],
-                markersize=8.0 if method == "learnedw" else 5.5,
                 zorder=z,
             )
             if not start_marked and xs and ys:
-                ax.scatter([xs[0]], [ys[0]], marker="s", s=45, color="#000000", zorder=8)
-                start_marked = True
-            if xs and ys:
-                _plot_terminal_marker(ax, xs[-1], ys[-1], rows[-1].get("episode_termination_reason", ""))
+                first_pt = _first_visible_fig6_point(xs, ys)
+                if first_pt is not None:
+                    ax.scatter([first_pt[0]], [first_pt[1]], marker="s", s=42, color="#000000", zorder=8)
+                    start_marked = True
+            terminal_pt = _fig6_visible_terminal_point(raw_xs, raw_ys, xs, ys, xlim, ylim)
+            if terminal_pt is not None:
+                _plot_terminal_marker(
+                    ax,
+                    terminal_pt[0],
+                    terminal_pt[1],
+                    rows[-1].get("episode_termination_reason", ""),
+                )
 
         ax.set_title(f"({chr(ord('a') + SPEEDS.index(speed))}) {float(speed):.2f} m/s", fontsize=11)
         ax.set_xlabel("world x / lateral [m]", fontsize=11)
         ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        ax.set_aspect("auto")
+        ax.set_aspect("equal", adjustable="box")
         ax.tick_params(labelsize=9)
     axes[0].set_ylabel("world y / forward [m]", fontsize=11)
 
     method_handles = [
-        Line2D([0], [0], color=METHOD_STYLE[m]["color"], marker=METHOD_STYLE[m]["marker"],
-               linewidth=METHOD_STYLE[m]["linewidth"], label=SHORT_METHOD_LABELS[m],
-               alpha=0.95 if m == "learnedw" else 0.6)
+        Line2D([0], [0], color=METHOD_STYLE[m]["color"],
+               linewidth=2.0 if m == "learnedw" else METHOD_STYLE[m]["linewidth"],
+               label=SHORT_METHOD_LABELS[m],
+               alpha=0.92 if m == "learnedw" else 0.90)
         for m in METHOD_ORDER
     ]
     event_handles = [
-        Line2D([0], [0], color="#009e73", linestyle="--", linewidth=1.5, label="Target"),
+        Line2D([0], [0], color="#009e73", linestyle=(0, (5.0, 3.0)), linewidth=1.5, label="Target"),
         Line2D([0], [0], marker="s", color="#000000", linestyle="None", markersize=6, label="Start"),
         Line2D([0], [0], marker="*", color="#111111", linestyle="None", markersize=9, label="Success"),
         Line2D([0], [0], marker="x", color="#d62728", linestyle="None", markersize=7, label="Collision"),
@@ -1565,6 +1675,18 @@ def build_argparser() -> argparse.ArgumentParser:
         type=float,
         default=float("nan"),
         help="Optional upper y limit for Fig.6 interaction window.",
+    )
+    parser.add_argument(
+        "--fig6_x_min",
+        type=float,
+        default=float("nan"),
+        help="Optional lower x limit for Fig.6 interaction window.",
+    )
+    parser.add_argument(
+        "--fig6_x_max",
+        type=float,
+        default=float("nan"),
+        help="Optional upper x limit for Fig.6 interaction window.",
     )
     parser.add_argument(
         "--fig6_x_margin",
