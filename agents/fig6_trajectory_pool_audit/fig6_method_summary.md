@@ -1,0 +1,7 @@
+| speed | method | method_label | episode_count | success | collision | target_lost | timeout | follow_lost | lost_timeout_total | layout_count | layout_sides |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.60 | yonly | Y-only | 64 | 28 | 24 | 0 | 0 | 12 | 12 | 64 | left_heavy:32,right_heavy:32 |
+| 0.60 | geomw | Geom-w | 64 | 47 | 12 | 0 | 0 | 5 | 5 | 64 | left_heavy:32,right_heavy:32 |
+| 0.60 | risk_only | Risk-only | 64 | 32 | 9 | 0 | 0 | 23 | 23 | 64 | left_heavy:32,right_heavy:32 |
+| 0.60 | rule_override | Rule-Override | 64 | 34 | 21 | 0 | 0 | 9 | 9 | 64 | left_heavy:32,right_heavy:32 |
+| 0.60 | learnedw | Learned-w | 64 | 62 | 2 | 0 | 0 | 0 | 0 | 64 | left_heavy:32,right_heavy:32 |

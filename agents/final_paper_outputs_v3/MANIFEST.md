@@ -62,5 +62,5 @@ Validation checklist:
 - Table II: Params should separate Risk-only and Learned-w.
 - Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.
 - Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.
-- Fig.6: if requested, timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; default episode selection prefers learned-w success with baseline collision/failure.
+- Fig.6: if requested, 0.60 m/s timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; default selection uses one shared obstacle layout, requires learned-w success, and prefers 2-3 baseline collisions plus at least one lost/timeout trajectory when available.
 - Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.
