@@ -3,7 +3,7 @@
 | Algorithm | PPO custom loop | train_highlevel.py |
 | Steps per iter | 24 | train_highlevel.py --num_steps default |
 | Num envs | 256 | paper command argument |
-| Learning rate | 1.5e-5 | train_highlevel.py --lr default |
+| Learning rate | 6e-5 | paper training command |
 | Gamma | 0.99 | train_highlevel.py --gamma default |
 | GAE lambda | 0.95 | train_highlevel.py --gae_lambda default |
 | Entropy coef | 0.01 | train_highlevel.py --entropy_coef default |

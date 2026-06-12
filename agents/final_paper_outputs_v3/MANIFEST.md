@@ -6,6 +6,10 @@ Generated files:
 - fig3_main_performance.png
 - fig4_mechanism.pdf
 - fig4_mechanism.png
+- fig6_trajectories_stage4.pdf
+- fig6_trajectories_stage4.png
+- fig6_trajectories_stage4_sources.csv
+- fig6_trajectory_episode_candidates.csv
 - table1_main_performance_stage4.csv
 - table1_main_performance_stage4.md
 - table1_main_performance_stage4.tex
@@ -42,6 +46,7 @@ Source files and paths:
 - mono_stage3_path: `agents/eval_data_mono_targetview_stage_probe/stage3_s035` (mtime=2026-06-04 17:28:17)
 - mono_stage4_all_csv: `agents/eval_data_mono_targetview/pcr_main_table/pcr_main_table_all_metrics_20260604_160305.csv` (mtime=2026-06-04 16:03:05)
 - learnedw_mechanism_dir: `agents/eval_data/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260526_204857` (mtime=2026-05-27 14:30:15)
+- fig6_timeseries_root: `agents/eval_data_fig6_trajectories_worldxy` (mtime=2026-06-12 04:48:53)
 
 Risk-only source mode:
 
@@ -57,4 +62,5 @@ Validation checklist:
 - Table II: Params should separate Risk-only and Learned-w.
 - Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.
 - Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.
+- Fig.6: if requested, timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; default episode selection prefers learned-w success with baseline collision/failure.
 - Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.
