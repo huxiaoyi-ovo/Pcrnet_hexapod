@@ -1216,6 +1216,99 @@ def _score_fig6_selection(selection: Dict[str, Dict], layout: str) -> Tuple[floa
     return score, row
 
 
+def _parse_fig6_method_map(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for item in str(text or "").split(";"):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        method, value = item.split(":", 1)
+        method = method.strip()
+        if method:
+            out[method] = value.strip()
+    return out
+
+
+def _parse_fig6_episode_map(text: str) -> Dict[str, Tuple[str, str]]:
+    out: Dict[str, Tuple[str, str]] = {}
+    for item in str(text or "").split(","):
+        item = item.strip()
+        parts = item.split(":")
+        if len(parts) < 3:
+            continue
+        method = parts[0].strip()
+        run_id = parts[1].strip()
+        episode_id = ":".join(parts[2:]).strip()
+        if method:
+            out[method] = (run_id, episode_id)
+    return out
+
+
+def _candidate_fig6_selection(
+    candidate_csv: str,
+    rank: int,
+) -> Tuple[Dict[Tuple[str, str], List[Dict[str, str]]], Dict[Tuple[str, str], Dict], str, List[Dict[str, str]]]:
+    rows = _read_csv(candidate_csv)
+    if not rows:
+        raise RuntimeError(f"Fig.6 candidate CSV is empty or missing: {candidate_csv}")
+    idx = max(0, min(int(rank), len(rows) - 1))
+    row = rows[idx]
+    source_map = _parse_fig6_method_map(row.get("selected_sources", ""))
+    episode_map = _parse_fig6_episode_map(row.get("selected_episodes", ""))
+    missing = [m for m in METHOD_ORDER if m not in source_map or m not in episode_map]
+    if missing:
+        raise RuntimeError(f"Fig.6 candidate row rank={idx} missing methods: {missing}")
+
+    speed = FIG6_SPEEDS[0]
+    selected: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+    meta: Dict[Tuple[str, str], Dict] = {}
+    for method in METHOD_ORDER:
+        source = source_map[method]
+        run_id, episode_id = episode_map[method]
+        rows_all = _read_timeseries(source)
+        if not rows_all:
+            raise RuntimeError(f"Fig.6 candidate source is empty or missing: {source}")
+        tagged_rows: List[Dict[str, str]] = []
+        for raw in rows_all:
+            copy = dict(raw)
+            raw_episode = str(copy.get("episode_id", ""))
+            copy["fig6_episode_id_raw"] = raw_episode
+            copy["episode_id"] = f"{run_id}:{raw_episode}"
+            copy["fig6_source"] = source
+            copy["fig6_run_id"] = run_id
+            tagged_rows.append(copy)
+        selected_episode_id = f"{run_id}:{episode_id}"
+        episode_rows = _episode_rows(tagged_rows, selected_episode_id)
+        if not episode_rows:
+            raise RuntimeError(
+                f"Fig.6 candidate source has no episode {episode_id} for method={method}, run_id={run_id}: {source}"
+            )
+        layout = _canonical_obstacles(episode_rows[0].get("obstacles_json", ""))
+        selected[(speed, method)] = episode_rows
+        meta[(speed, method)] = {
+            "speed": speed,
+            "method": method,
+            "episode": selected_episode_id,
+            "episode_raw": episode_id,
+            "run_id": run_id,
+            "reason": _fig6_terminal_reason(episode_rows),
+            "source": source,
+            "layout": layout,
+        }
+    candidate_row = {
+        "LayoutID": row.get("layout_ids", ""),
+        "Score": row.get("score", ""),
+        "LearnedSuccess": "1" if "learnedw:success" in row.get("selected_terminations", "") else "0",
+        "BaselineCollisions": row.get("baseline_collisions", ""),
+        "BaselineLostTimeout": row.get("baseline_lost_timeout", ""),
+        "BaselineSuccess": row.get("baseline_success", ""),
+        "SelectedEpisodes": row.get("selected_episodes", ""),
+        "SelectedTerminations": row.get("selected_terminations", ""),
+        "SelectedSources": row.get("selected_sources", ""),
+    }
+    return selected, meta, f"candidate_csv_rank_{idx}", [candidate_row]
+
+
 def _manual_fig6_selection(
     datasets: Dict[Tuple[str, str], Dict],
     episode_id: int,
@@ -1251,7 +1344,11 @@ def _manual_fig6_selection(
 def _choose_fig6_selection(
     datasets: Dict[Tuple[str, str], Dict],
     requested: Optional[int],
+    candidate_csv: str = "",
+    candidate_rank: int = 0,
 ) -> Tuple[Dict[Tuple[str, str], List[Dict[str, str]]], Dict[Tuple[str, str], Dict], str, List[Dict[str, str]]]:
+    if str(candidate_csv or "").strip():
+        return _candidate_fig6_selection(str(candidate_csv), int(candidate_rank))
     if requested is not None and requested >= 0:
         return _manual_fig6_selection(datasets, int(requested))
 
@@ -1462,9 +1559,11 @@ def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> None:
 
 
 def _plot_fig6(args) -> None:
-    datasets = _load_fig6_datasets(args)
+    candidate_csv = str(getattr(args, "fig6_candidate_csv", "") or "").strip()
+    datasets = {} if candidate_csv else _load_fig6_datasets(args)
     if not datasets:
-        return
+        if not candidate_csv:
+            return
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -1477,16 +1576,27 @@ def _plot_fig6(args) -> None:
     selected, selected_meta, selection_mode, candidate_rows = _choose_fig6_selection(
         datasets,
         getattr(args, "fig6_episode_id", None),
+        candidate_csv,
+        int(getattr(args, "fig6_candidate_rank", 0)),
     )
     obstacle_refs = set()
     for key, rows in selected.items():
         obstacle_refs.add(_canonical_obstacles(rows[0].get("obstacles_json", "")))
     if len(obstacle_refs) != 1:
-        raise RuntimeError(
-            "Fig.6 selected trajectories do not share the same obstacle layout. "
-            "Re-run trajectory eval with more episodes or pass a valid common --fig6_episode_id."
+        if not candidate_csv:
+            raise RuntimeError(
+                "Fig.6 selected trajectories do not share the same obstacle layout. "
+                "Re-run trajectory eval with more episodes or pass a valid common --fig6_episode_id."
+            )
+        learned_rows = selected.get((FIG6_SPEEDS[0], "learnedw"), [])
+        layout_text = _canonical_obstacles(learned_rows[0].get("obstacles_json", "")) if learned_rows else next(iter(obstacle_refs))
+        print(
+            "[Warn] Fig.6 candidate trajectories use multiple obstacle layouts; "
+            "drawing the Learned-w layout as the background."
         )
-    obstacles = json.loads(next(iter(obstacle_refs)))
+    else:
+        layout_text = next(iter(obstacle_refs))
+    obstacles = json.loads(layout_text)
 
     xlim, ylim = _fig6_window_limits(obstacles, selected, args)
 
@@ -1600,7 +1710,7 @@ def _plot_fig6(args) -> None:
                     "TrajectoryFrame": rows[0].get("trajectory_frame", ""),
                     "Termination": meta.get("reason", rows[-1].get("episode_termination_reason", "")),
                     "LayoutID": hashlib.sha1(meta.get("layout", "").encode("utf-8")).hexdigest()[:10],
-                    "Source": meta.get("source", datasets[(speed, method)]["path"]),
+                    "Source": meta.get("source") or datasets.get((speed, method), {}).get("path", ""),
                 }
             )
     _write_csv(
@@ -1616,7 +1726,7 @@ def _plot_fig6(args) -> None:
         candidate_rows,
         [
             "LayoutID", "Score", "LearnedSuccess", "BaselineCollisions", "BaselineLostTimeout",
-            "BaselineSuccess", "SelectedEpisodes", "SelectedTerminations",
+            "BaselineSuccess", "SelectedEpisodes", "SelectedTerminations", "SelectedSources",
         ],
     )
 
@@ -1956,6 +2066,17 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=-1,
         help="Common episode_id to draw for Fig.6. Default auto-selects a high-conflict episode.",
+    )
+    parser.add_argument(
+        "--fig6_candidate_csv",
+        default="",
+        help="Optional candidate CSV from audit_fig6_trajectory_pool.py; overrides automatic Fig.6 episode selection.",
+    )
+    parser.add_argument(
+        "--fig6_candidate_rank",
+        type=int,
+        default=0,
+        help="Candidate row rank to draw from --fig6_candidate_csv.",
     )
     parser.add_argument(
         "--fig6_y_min",
