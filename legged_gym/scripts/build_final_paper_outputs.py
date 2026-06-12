@@ -1585,26 +1585,15 @@ def _terminal_marker_name(reason: str) -> str:
     return "lost_timeout_circle"
 
 
-def _plot_terminal_marker(ax, x: float, y: float, reason: str, method_color: str) -> str:
+def _plot_terminal_marker(ax, x: float, y: float, reason: str) -> str:
     marker_name = _terminal_marker_name(reason)
-    ax.scatter(
-        [x],
-        [y],
-        marker="o",
-        s=190,
-        facecolors="white",
-        edgecolors=method_color,
-        linewidth=2.4,
-        zorder=20,
-        clip_on=False,
-    )
     if marker_name == "success_star":
         ax.scatter(
             [x],
             [y],
             marker="*",
             s=145,
-            color="#111111",
+            color="#d62728",
             edgecolor="white",
             linewidth=0.7,
             zorder=22,
@@ -1616,7 +1605,7 @@ def _plot_terminal_marker(ax, x: float, y: float, reason: str, method_color: str
             [y],
             marker="X",
             s=105,
-            color="#d62728",
+            color="#111111",
             edgecolor="white",
             linewidth=0.7,
             zorder=22,
@@ -1757,7 +1746,6 @@ def _plot_fig6(args) -> None:
                 terminal_pt[0],
                 terminal_pt[1],
                 reason,
-                style["color"],
             )
             raw_terminal_x = _safe_float(trajectory_xs[-1]) if trajectory_xs else float("nan")
             raw_terminal_y = _safe_float(trajectory_ys[-1]) if trajectory_ys else float("nan")
@@ -1806,10 +1794,10 @@ def _plot_fig6(args) -> None:
     event_handles = [
         Line2D([0], [0], color="#009e73", linestyle=(0, (5.0, 3.0)), linewidth=1.5, label="Target"),
         Line2D([0], [0], marker="s", color="#000000", linestyle="None", markersize=6, label="Start"),
-        Line2D([0], [0], marker="*", markerfacecolor="#111111", markeredgecolor="white",
-               color="#111111", linestyle="None", markersize=10, label="Success"),
-        Line2D([0], [0], marker="X", markerfacecolor="#d62728", markeredgecolor="white",
-               color="#d62728", linestyle="None", markersize=8, label="Collision"),
+        Line2D([0], [0], marker="*", markerfacecolor="#d62728", markeredgecolor="white",
+               color="#d62728", linestyle="None", markersize=10, label="Success"),
+        Line2D([0], [0], marker="X", markerfacecolor="#111111", markeredgecolor="white",
+               color="#111111", linestyle="None", markersize=8, label="Collision"),
         Line2D([0], [0], marker="o", markerfacecolor="white", markeredgecolor="#333333",
                color="#333333", linestyle="None", markersize=7, label="Follow lost/timeout"),
     ]
