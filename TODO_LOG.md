@@ -70,6 +70,7 @@
 - [x] ~~[P0] 为最终论文 Fig.6 增加 stage4 三速度五策略轨迹图所需数据链：eval timeseries 必须保存 robot/target 逐帧位置、真实障碍圆柱位置与 episode 终止原因；最终出图脚本必须先检查字段完整性，缺字段时停止并提示补跑 timeseries-only eval。~~
 - [x] ~~[P0] 将最终论文 Fig.6 收口为 0.60 m/s 单张代表性轨迹图：从主表原始 eval timeseries 中按同一障碍布局选轨迹，Learned-w 必须选成功轨迹，baseline 尽量选 2-3 条 collision 和至少 1 条 lost/timeout，并在 source CSV 中记录每条轨迹的真实 run、episode 与终止原因。~~
 - [x] ~~[P0] 增加 Fig.6 轨迹池审计脚本：扫描 `agents/` 下所有原始 timeseries，统计 0.60 m/s 下各方法 success/collision/lost/timeout 与布局签名，允许非同一布局但必须避免明显镜像拼图，为最终轨迹图选择提供证据。~~
+- [x] ~~[P0] 让最终 Fig.6 出图脚本可直接读取轨迹池审计候选 CSV，按指定 rank 精确加载五条真实轨迹，避免重新自动选择导致图与审计结果不一致。~~
 
 ## 2026-06-10 PCR 论文 v3 图表收口
 
@@ -2171,3 +2172,33 @@
 ## 2026-06-09 PCR 实机目标/障碍坐标语义对齐
 
 - [x] Must: 将实机目标前向 offset 与障碍地图前向 offset 拆开，目标状态对齐 robot base，局部障碍图对齐 camera mount，避免障碍距离被错误前移导致避障触发偏晚。
+
+## 2026-06-12 Fig.6 分层失败轨迹选样
+
+- [x] Must: Fig.6 候选按重置前真实终止位置标注障碍行与进度，默认优先选择“第 3 排碰撞 + 第 4 排碰撞 + 早期掉队 + 晚期掉队 + Learned-w 成功”的五策略组合，避免失败轨迹集中在同一位置。
+
+## 2026-06-12 Fig.3(b) 候选图对比
+
+- [x] Must: 基于 Table I 的 0.60 m/s 五方法三 seed 聚合数据，采用 Collision-Follow MAE 点大小编码散点图作为最终 Fig.3(b)；点面积随 Task Success 单调增大，并补偿星形 marker 的视觉面积，不覆盖现有 Fig.3。
+
+## 2026-06-12 论文附录与最终产物口径修正
+
+- [x] Must: A1/A2/A4 改为读取最终 checkpoint 的实际训练配置与网络维度，禁止用脚本默认值冒充论文复现参数。
+- [x] Must: A5 的 Learned-w 必须完整报告 All/C_unsafe/C_avoid 下的 Delta y_w、Delta y_r、Delta y_total；旧数据缺字段时明确要求补跑机制诊断，不允许从总量倒推。
+- [x] Must: 修正 Table II 小量级显示、Table III TTC/Mono 容量说明、A3 传感设置和 Fig.3(b) 点面积措辞。
+- [x] Must: Fig.4/Fig.6 同时生成 PNG 与 PDF，并让 MANIFEST 逐项核验实际文件存在性；本地缺 Fig.6 原始 timeseries 时保留已审定 PNG 并显式标记 raster-wrapped PDF，服务器端有源数据时重绘矢量 PDF。
+
+## 2026-06-14 论文神经网络架构图
+
+- [x] Must: 按正式 checkpoint 与当前代码生成独立 SVG 网络图，覆盖 Learned-w Gate、基础 Gate 变体、Avoid Expert、Mono-PPO、固定底层 locomotion 和可选 Affordance Estimator；解析式模块不画成神经网络。
+- [x] Must: 将初版模块流程框图改为论文常用的神经元层级与 CNN 特征图示意图，仅保留真实网络层、分支和训练 critic。
+- [x] Must: 额外生成用于总流程图的紧凑型透明 SVG 图标，分别概括 Affordance Map、Learned-w Gate、Avoid Expert 和固定 Locomotion 的输入、主要中间层与输出。
+- [x] Must: 总流程图小图标改用 TikZ 标准神经元样式，仅显示带真实参数的输入层与输出层；隐藏内部层，保证缩小时仍可辨认。
+
+## 2026-06-15 PCR-Net 整体训练与部署架构图
+
+- [x] Must: 按当前训练和实机代码绘制左右分栏的论文级整体架构图，准确展示专家预训练、PCR Gate 训练、D435i 实机感知、PCR-Net 仲裁、固定底层策略与电机反馈闭环；不纳入手柄控制或可选 Affordance Estimator。
+
+## 2026-06-15 论文视频仿真可视化
+
+- [x] Must: 为 `play_highlevel.py` 增加独立论文视频模式，同步展示虚拟深度相机、actor 实际 `local_map_2ch`、3D 相机视锥、perception 红点与机身坐标系执行速度箭头；只改变 viewer 显示，不改变训练、评测、观测或控制口径。
