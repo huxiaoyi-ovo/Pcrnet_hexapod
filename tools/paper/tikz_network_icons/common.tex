@@ -1,0 +1,79 @@
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,backgrounds,positioning}
+
+\definecolor{inputfill}{HTML}{BFE3C0}
+\definecolor{inputdraw}{HTML}{24592B}
+\definecolor{outputfill}{HTML}{F1BBB5}
+\definecolor{outputdraw}{HTML}{72231F}
+\definecolor{edgecolor}{HTML}{2B4472}
+\definecolor{textcolor}{HTML}{172033}
+
+\tikzset{
+  >=Latex,
+  input neuron/.style={
+    circle,
+    draw=inputdraw,
+    fill=inputfill,
+    line width=0.85pt,
+    minimum size=10mm,
+    inner sep=0pt,
+    font=\bfseries\boldmath\normalsize
+  },
+  hidden neuron/.style={
+    circle,
+    draw=edgecolor,
+    fill=hiddenfill,
+    line width=0.9pt,
+    minimum size=10mm,
+    inner sep=0pt,
+    font=\bfseries\boldmath\normalsize
+  },
+  output neuron/.style={
+    circle,
+    draw=outputdraw,
+    fill=outputfill,
+    line width=0.85pt,
+    minimum size=10mm,
+    inner sep=0pt,
+    font=\bfseries\boldmath\normalsize
+  },
+  connection/.style={
+    draw=edgecolor!48,
+    line width=0.50pt,
+    -{Latex[length=1.8mm,width=1.25mm]}
+  },
+  layer title/.style={
+    font=\bfseries\boldmath\small,
+    text=textcolor,
+    align=center
+  },
+  parameter/.style={
+    font=\bfseries\small,
+    text=textcolor,
+    align=center
+  }
+}
+
+\definecolor{hiddenfill}{HTML}{CBC9F2}
+
+\newcommand{\connectinputhidden}[2]{%
+  \begin{scope}[on background layer]
+    \foreach \i in {#1}{
+      \foreach \h in {#2}{
+        \draw[connection] (I-\i) -- (H-\h);
+      }
+    }
+  \end{scope}
+}
+
+\newcommand{\connecthiddenoutput}[2]{%
+  \begin{scope}[on background layer]
+    \foreach \h in {#1}{
+      \foreach \j in {#2}{
+        \draw[connection] (H-\h) -- (O-\j);
+      }
+    }
+  \end{scope}
+}

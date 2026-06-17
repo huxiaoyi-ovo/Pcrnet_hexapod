@@ -1,14 +1,21 @@
 | Component | Value | Source |
 | --- | --- | --- |
-| Affordance encoder | AffordanceCNNEncoder(channels, 128) | GatePolicy |
-| State encoder | StateEncoder(state_dim=9, 64) | GatePolicy |
-| Goal encoder | GoalEncoder(goal_dim=2, 32) | GatePolicy |
-| Difficulty input | 1 scalar | fusion_dim = 128 + 64 + 32 + 1 |
-| Shared trunk | 225 -> 256 -> 256, ELU | GatePolicy.fusion |
-| Gate y head | 256 -> 64 -> 1, Softplus; Beta mean/action | GatePolicy.y_alpha_head/y_beta_head |
-| Learned-w head | 256 -> 64 -> 1, Softplus; only when learned_w=True | GatePolicy.w_alpha_head/w_beta_head |
-| Critic | Separate encoders + trunk + value head 256 -> 64 -> 1 | GatePolicy.critic_* |
-| Risk-only params | 2058762 | eval metrics params_total |
-| Learned-w params | 2092812 | eval metrics params_total |
+| Affordance encoder | 4 channels -> 32 -> 64 -> 128 | agents/moe_teacher_best_learnedw.pt |
+| Learned-w state encoder | 13 -> 64 -> 64 -> 64 | agents/moe_teacher_best_learnedw.pt |
+| Learned-w goal encoder | 18 -> 32 -> 32 (2 goal + 16 conflict features) | agents/moe_teacher_best_learnedw.pt |
+| Risk-only state/goal encoders | 13 -> 64; 2 -> 32 | agents/moe_teacher_best_risk_only.pt |
+| Difficulty input | 1 scalar slot; disabled/zero in final checkpoints | gate_use_difficulty=False |
+| Shared trunk | 225 -> 256 -> 256, ELU | agents/moe_teacher_best_learnedw.pt |
+| Gate y head | 256 -> 64 -> Beta(alpha,beta) | agents/moe_teacher_best_learnedw.pt |
+| Learned-w head | 256 -> 64 -> Beta(alpha,beta) | agents/moe_teacher_best_learnedw.pt |
+| Risk-only actor output | 1 | agents/moe_teacher_best_risk_only.pt |
+| Learned-w actor output | 2 | agents/moe_teacher_best_learnedw.pt |
+| Critic | Separate encoders + 225 -> 256 -> 256 -> 64 -> 1 | agents/moe_teacher_best_learnedw.pt |
+| Avoid expert | state 14, goal 2, command output 3 | agents/avoid_best.pt |
+| Fixed Avoid expert params | 1029575 | agents/avoid_best.pt |
+| Risk-only policy params | 1029187 | agents/moe_teacher_best_risk_only.pt |
+| Learned-w policy params | 1063237 | agents/moe_teacher_best_learnedw.pt |
+| Risk-only high-level total | 2058762 | policy + fixed Avoid expert |
+| Learned-w high-level total | 2092812 | policy + fixed Avoid expert |
 | Follow expert | Analytic | train_highlevel.py _compute_moe_follow_cmd_from_goal |
 | Low-level locomotion | Fixed checkpoint | eval/train command low_level_ckpt |

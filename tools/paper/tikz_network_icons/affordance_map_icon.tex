@@ -1,0 +1,24 @@
+\documentclass[tikz,border=3pt]{standalone}
+\input{common.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[input neuron] (I-1) at (0.00,2.25) {$D_t$};
+
+  \node[hidden neuron] (H-1) at (1.38,3.05) {};
+  \node[hidden neuron] (H-2) at (1.38,2.25) {};
+  \node[hidden neuron] (H-3) at (1.38,1.45) {};
+
+  \node[output neuron] (O-1) at (2.76,3.05) {$O$};
+  \node[output neuron] (O-2) at (2.76,2.25) {$P$};
+  \node[output neuron] (O-3) at (2.76,1.45) {$L$};
+
+  \connectinputhidden{1}{1,2,3}
+  \connecthiddenoutput{1,2,3}{1,2,3}
+
+  \node[parameter,anchor=east] at (-0.56,2.25) {depth $1\times128^2$};
+  \node[parameter,anchor=west] at (3.32,3.05) {$O:16^2$};
+  \node[parameter,anchor=west] at (3.32,2.25) {$P:16^2$};
+  \node[parameter,anchor=west] at (3.32,1.45) {$L:16^2$};
+\end{tikzpicture}
+\end{document}

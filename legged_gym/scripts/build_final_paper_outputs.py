@@ -13,7 +13,7 @@ import re
 import shutil
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 METHOD_ORDER = ["yonly", "geomw", "risk_only", "rule_override", "learnedw"]
@@ -23,6 +23,8 @@ METHOD_LABELS = {
     "geomw": "Geom-w",
     "risk_only": "Risk-only",
     "rule_override": "Rule-Override",
+    "additive_fusion": "Additive-Fusion",
+    "velocity_search": "Velocity-Search",
     "learnedw": "Learned-w (PCR-Net)",
     "mono_ppo": "Mono-PPO",
 }
@@ -31,6 +33,8 @@ SHORT_METHOD_LABELS = {
     "geomw": "Geom-w",
     "risk_only": "Risk-only",
     "rule_override": "Rule-Override",
+    "additive_fusion": "Additive-Fusion",
+    "velocity_search": "Velocity-Search",
     "learnedw": "Learned-w",
     "mono_ppo": "Mono-PPO",
 }
@@ -39,6 +43,8 @@ METHOD_STYLE = {
     "geomw": {"marker": "s", "color": "#1f77b4", "linewidth": 1.7},
     "risk_only": {"marker": "^", "color": "#ff7f0e", "linewidth": 1.7},
     "rule_override": {"marker": "D", "color": "#2ca02c", "linewidth": 1.7},
+    "additive_fusion": {"marker": "P", "color": "#9467bd", "linewidth": 1.7},
+    "velocity_search": {"marker": "X", "color": "#8c564b", "linewidth": 1.7},
     "learnedw": {"marker": "*", "color": "#d62728", "linewidth": 2.0},
 }
 SPEEDS = ("0.35", "0.50", "0.60")
@@ -133,7 +139,21 @@ def _mean_std(values: Iterable[float]) -> Tuple[float, float]:
 def _fmt(value: float, digits: int = 3) -> str:
     if not math.isfinite(float(value)):
         return "N/A"
-    return f"{float(value):.{digits}f}"
+    value = float(value)
+    if abs(value) < 0.5 * (10.0 ** (-digits)):
+        value = 0.0
+    return f"{value:.{digits}f}"
+
+
+def _fmt_small_nonzero(value: float, digits: int = 4) -> str:
+    if not math.isfinite(float(value)):
+        return "N/A"
+    value = float(value)
+    if value == 0.0:
+        return f"{0.0:.{digits}f}"
+    if abs(value) < 10.0 ** (-digits):
+        return f"{value:.1e}"
+    return f"{value:.{digits}f}"
 
 
 def _fmt_pm(mean: float, std: float, digits: int = 3) -> str:
@@ -162,6 +182,68 @@ def _file_stamp(path: str) -> str:
     return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _file_sha256(path: str) -> str:
+    if not path or not os.path.isfile(path):
+        return "missing"
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_checkpoint(path: str) -> Dict[str, Any]:
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"Required checkpoint not found: {path}")
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeError("PyTorch is required to read final checkpoint metadata.") from exc
+    data = torch.load(path, map_location="cpu")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Checkpoint is not a dictionary: {path}")
+    return data
+
+
+def _checkpoint_meta(path: str) -> Dict[str, Any]:
+    data = _load_checkpoint(path)
+    meta = data.get("experiment_meta", {})
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"Checkpoint has no experiment_meta dictionary: {path}")
+    return meta
+
+
+def _checkpoint_state_dict(path: str) -> Dict[str, Any]:
+    data = _load_checkpoint(path)
+    state_dict = data.get("model_state_dict", data.get("state_dict", {}))
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise RuntimeError(f"Checkpoint has no model state dictionary: {path}")
+    return state_dict
+
+
+def _checkpoint_iteration(path: str) -> str:
+    data = _load_checkpoint(path)
+    value = data.get("iteration", data.get("iter", "N/A"))
+    return str(value)
+
+
+def _shape(state_dict: Dict[str, Any], key: str) -> Tuple[int, ...]:
+    tensor = state_dict.get(key)
+    if tensor is None or not hasattr(tensor, "shape"):
+        raise RuntimeError(f"Checkpoint tensor missing: {key}")
+    return tuple(int(v) for v in tensor.shape)
+
+
+def _state_dict_param_count(state_dict: Dict[str, Any]) -> int:
+    total = 0
+    for key, value in state_dict.items():
+        if key.endswith("cmd_scale"):
+            continue
+        if hasattr(value, "numel"):
+            total += int(value.numel())
+    return total
+
+
 def _infer_speed(row: Dict[str, str]) -> str:
     for key in ("Speed", "speed", "resolved_moving_target_pcr_line_speed"):
         if key in row and row.get(key, "") not in ("", None):
@@ -180,6 +262,10 @@ def _infer_method(row: Dict[str, str]) -> str:
         str(row.get(k, ""))
         for k in ("Method", "method", "policy_variant", "w_mode", "source", "Source")
     ).lower()
+    if "velocity_search" in text or "velocity-search" in text:
+        return "velocity_search"
+    if "additive_fusion" in text or "additive-fusion" in text:
+        return "additive_fusion"
     if "risk_only" in text or "risk-only" in text:
         return "risk_only"
     if "rule_override" in text or "rule-override" in text:
@@ -196,9 +282,10 @@ def _infer_method(row: Dict[str, str]) -> str:
 
 
 def _method_sort(method: str) -> Tuple[int, str]:
-    if method in METHOD_ORDER:
-        return (METHOD_ORDER.index(method), method)
-    return (len(METHOD_ORDER), method)
+    order = ["yonly", "geomw", "risk_only", "rule_override", "additive_fusion", "velocity_search", "learnedw", "mono_ppo"]
+    if method in order:
+        return (order.index(method), method)
+    return (len(order), method)
 
 
 def _seed(row: Dict[str, str]) -> str:
@@ -319,6 +406,8 @@ def _load_all_method_rows(args) -> List[Dict[str, str]]:
     rows.extend(_raw_rows_from_all_csv([args.internal_all_csv], methods=["yonly", "geomw", "learnedw"]))
     rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
     rows.extend(_raw_rows_from_all_csv([args.rule_all_csv], methods=["rule_override"]))
+    rows.extend(_raw_rows_from_all_csv([getattr(args, "additive_all_csv", "")], methods=["additive_fusion"]))
+    rows.extend(_raw_rows_from_all_csv([getattr(args, "velocity_search_all_csv", "")], methods=["velocity_search"]))
     return rows
 
 
@@ -330,7 +419,16 @@ def _build_table1(args) -> List[Dict]:
         ("Collision", "episode_collision_rate"),
         ("Follow MAE [m]", "follow_mae_m_mean"),
     ]
-    table = _aggregate_raw(rows, metrics, METHOD_ORDER)
+    table_methods = list(METHOD_ORDER)
+    extra_methods = [row.get("_method") or _infer_method(row) for row in rows]
+    if "additive_fusion" in extra_methods or "velocity_search" in extra_methods:
+        table_methods = ["yonly", "geomw", "risk_only", "rule_override"]
+        if "additive_fusion" in extra_methods:
+            table_methods.append("additive_fusion")
+        if "velocity_search" in extra_methods:
+            table_methods.append("velocity_search")
+        table_methods.append("learnedw")
+    table = _aggregate_raw(rows, metrics, table_methods)
 
     best_by_speed: Dict[str, Dict[str, float]] = {}
     for speed in SPEEDS:
@@ -505,7 +603,11 @@ def _build_table2(args) -> List[Dict]:
             "Method": SHORT_METHOD_LABELS.get(method, method),
             "C_avoid Rate": _fmt(_safe_float(agg.get("C_avoid Rate Mean", ""))),
             "CSI@C_avoid": _fmt(_safe_float(agg.get("CSI@C_avoid Mean", ""))),
-            "Δy_total@C_unsafe": _fmt(delta_total, digits=4) if method in ("risk_only", "learnedw") else "N/A",
+            "Δy_total@C_unsafe": (
+                _fmt_small_nonzero(delta_total, digits=4)
+                if method in ("risk_only", "learnedw")
+                else "N/A"
+            ),
             "Params": params.get((speed, method), "N/A"),
             "Notes": _table2_note(method, risk_only_mode=risk_only_mode),
         }
@@ -520,7 +622,8 @@ def _build_table2(args) -> List[Dict]:
 def _build_table_a5(args) -> List[Dict]:
     rows: List[Dict[str, str]] = []
     rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
-    rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
+    learned_split_source = args.learnedw_split_all_csv or args.learnedw_diag_all_csv
+    rows.extend(_raw_rows_from_all_csv([learned_split_source], methods=["learnedw"]))
     deltas = _delta_lookup(rows, methods=["risk_only", "learnedw"])
     out: List[Dict] = []
     specs = [
@@ -532,20 +635,50 @@ def _build_table_a5(args) -> List[Dict]:
         for method in ("risk_only", "learnedw"):
             d = deltas.get((speed, method), {})
             for window, w_key, r_key, total_key in specs:
+                values = {
+                    "Δy_w": d.get(w_key, float("nan")),
+                    "Δy_r": d.get(r_key, float("nan")),
+                    "Δy_total": d.get(total_key, float("nan")),
+                }
+                missing = [name for name, value in values.items() if not math.isfinite(float(value))]
+                if missing:
+                    raise RuntimeError(
+                        "Table A5 is incomplete: "
+                        f"speed={speed}, method={method}, window={window}, "
+                        f"missing={','.join(missing)}. Re-run the mechanism diagnostic with "
+                        "the current eval_highlevel.py and summarize_eval_metrics.py."
+                    )
                 out.append(
                     {
                         "Speed": speed,
                         "Method": SHORT_METHOD_LABELS.get(method, method),
                         "Window": window,
-                        "Δy_w": _fmt(d.get(w_key, float("nan")), digits=6),
-                        "Δy_r": _fmt(d.get(r_key, float("nan")), digits=6),
-                        "Δy_total": _fmt(d.get(total_key, float("nan")), digits=6),
+                        "Δy_w": _fmt(values["Δy_w"], digits=6),
+                        "Δy_r": _fmt(values["Δy_r"], digits=6),
+                        "Δy_total": _fmt(values["Δy_total"], digits=6),
                     }
                 )
     fields = ["Speed", "Method", "Window", "Δy_w", "Δy_r", "Δy_total"]
     _write_csv(os.path.join(args.output_dir, "tableA5_delta_y_full.csv"), out, fields)
     _write_markdown(os.path.join(args.output_dir, "tableA5_delta_y_full.md"), out, fields)
     _write_latex_booktabs(os.path.join(args.output_dir, "tableA5_delta_y_full.tex"), out, fields)
+    with open(
+        os.path.join(args.output_dir, "tableA5_delta_y_full_notes.md"),
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("# Table A5 notes\n\n")
+        f.write(
+            "- Risk-only values are aggregated from the trained three-seed main evaluation.\n"
+        )
+        f.write(
+            "- Learned-w values use the current seed-1 mechanism diagnostic because the "
+            "older diagnostic predates the C_unsafe component split.\n"
+        )
+        f.write(
+            "- Each row reports components from one internally consistent source; "
+            "Delta y_total is not used to back-calculate missing components.\n"
+        )
     return out
 
 
@@ -625,11 +758,28 @@ def _stage4_mono_row(path: str) -> Optional[Dict[str, str]]:
 
 
 def _build_table3(args) -> List[Dict]:
+    snapshot_rows = {
+        str(row.get("Stage", "")): row
+        for row in _read_csv(args.mono_stage_snapshot_csv)
+        if str(row.get("Stage", "")) in ("2", "3", "4")
+    }
     stage_sources = {
         "2": _metrics_row(args.mono_stage2_path),
         "3": _metrics_row(args.mono_stage3_path),
         "4": _stage4_mono_row(args.mono_stage4_all_csv),
     }
+    for stage in ("2", "3", "4"):
+        if stage_sources[stage] is None and stage in snapshot_rows:
+            stage_sources[stage] = snapshot_rows[stage]
+        elif stage_sources[stage] is not None and stage in snapshot_rows:
+            for key, value in snapshot_rows[stage].items():
+                if key in ("Stage", "Source"):
+                    continue
+                current = stage_sources[stage].get(key, "")
+                if current in ("", None) or (
+                    key == "_ttc_mean_s" and not math.isfinite(_safe_float(current))
+                ):
+                    stage_sources[stage][key] = value
     out: List[Dict] = []
     missing_stages: List[str] = []
     for stage, row in stage_sources.items():
@@ -648,7 +798,16 @@ def _build_table3(args) -> List[Dict]:
                 "FOV-in": _fmt(_safe_float(row.get("target_in_rgb_fov_rate", ""))),
                 "Bearing p95": _fmt(_safe_float(row.get("target_bearing_abs_deg_p95", "")), digits=2),
                 "Cmd-x": _fmt(_safe_float(row.get("cmd_x_mean", ""))),
-                "TTC [s]": _fmt(_safe_float(row.get("_ttc_mean_s", "")), digits=2),
+                "Collision TTC [s]": _fmt(
+                    _safe_float(
+                        row.get(
+                            "_ttc_mean_s",
+                            row.get("Collision TTC [s]", row.get("TTC [s]", "")),
+                        )
+                    ),
+                    digits=2,
+                ),
+                "Params": str(row.get("params_total", row.get("Params", "1029447"))),
                 "Source": row.get("Source", row.get("source", "")),
             }
         )
@@ -660,10 +819,29 @@ def _build_table3(args) -> List[Dict]:
         )
     for stage in missing_stages:
         print(f"[Warn] Mono-PPO stage {stage} metrics not found; skipping.")
-    fields = ["Stage", "Success", "Row-prog", "Collision", "L1", "L2", "L3", "FOV-in", "Bearing p95", "Cmd-x", "TTC [s]"]
+    fields = [
+        "Stage", "Success", "Row-prog", "Collision", "L1", "L2", "L3",
+        "FOV-in", "Bearing p95", "Cmd-x", "Collision TTC [s]", "Params",
+    ]
     _write_csv(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.csv"), out, fields + ["Source"])
     _write_markdown(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.md"), out, fields)
     _write_latex_booktabs(os.path.join(args.output_dir, "table3_mono_ppo_stage_probe.tex"), out, fields)
+    with open(
+        os.path.join(args.output_dir, "table3_mono_ppo_stage_probe_notes.md"),
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("# Table III notes\n\n")
+        f.write("- Diagnostic probe: fixed target speed 0.35 m/s, varying stage 2/3/4.\n")
+        f.write("- Single seed (seed 1); report as a diagnostic probe, not a statistical comparison.\n")
+        f.write(
+            "- Collision TTC is averaged over collision episodes only; the stage-4 "
+            "1.51 s value explains the short-trajectory FOV/L2 artifact.\n"
+        )
+        f.write(
+            "- Mono-PPO has 1,029,447 parameters versus 2,092,812 for Learned-w; "
+            "it is not capacity matched. Do not claim architecture superiority from this table alone.\n"
+        )
     return out
 
 
@@ -676,7 +854,7 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
         print(f"[Warn] matplotlib unavailable; skipping Fig.3 ({exc})")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.6), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.0), constrained_layout=True)
     ax = axes[0]
     for method in METHOD_ORDER:
         pts = [r for r in table1 if r.get("method_key") == method]
@@ -703,56 +881,328 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
     ax.set_xticks([0.35, 0.50, 0.60])
     ax.set_ylim(-0.04, 1.04)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
-    ax.text(0.02, 0.08, "(a)", transform=ax.transAxes, fontsize=11, va="bottom")
+    ax.tick_params(labelsize=9)
+    ax.text(0.5, 1.02, "(a)", transform=ax.transAxes, fontsize=11, va="bottom", ha="center")
 
     ax = axes[1]
-    scatter_rows = [r for r in table1 if r.get("Speed") == f"{float(args.mechanism_speed):.2f}"]
+    scatter_rows = _fig3b_rows(table1, speed=f"{float(args.mechanism_speed):.2f}")
+    label_offsets = {
+        "yonly": (8, -4),
+        "geomw": (8, -5),
+        "risk_only": (8, -5),
+        "rule_override": (8, -12),
+        "learnedw": (12, 10),
+    }
     for row in scatter_rows:
-        method = row.get("method_key")
-        if method not in METHOD_STYLE:
-            continue
+        method = str(row["method_key"])
         style = METHOD_STYLE[method]
-        x = _safe_float(row.get("Collision Mean", ""))
-        y = _safe_float(row.get("Task Success Mean", ""))
-        xerr = _safe_float(row.get("Collision Std", ""), default=0.0)
-        yerr = _safe_float(row.get("Task Success Std", ""), default=0.0)
-        if not (math.isfinite(x) and math.isfinite(y)):
-            continue
-        ax.errorbar(
-            [x],
-            [y],
-            xerr=[xerr],
-            yerr=[yerr],
+        success = _safe_float(row["Task Success Mean"])
+        collision = _safe_float(row["Collision Mean"])
+        mae = _safe_float(row["Follow MAE [m] Mean"])
+        _, _, point_size = _fig3b_scatter_size(method, success)
+        ax.scatter(
+            [collision],
+            [mae],
+            s=point_size,
             marker=style["marker"],
             color=style["color"],
-            linewidth=0.0,
-            elinewidth=1.0,
-            markersize=9.5 if method == "learnedw" else 6.0,
-            capsize=2.5,
+            edgecolor="white",
+            linewidth=0.8,
+            alpha=0.92,
+            zorder=5,
         )
-        dx = -0.075 if method == "yonly" else 0.015
-        dy = 0.035 if method in ("risk_only", "geomw") else 0.018
-        ax.annotate(SHORT_METHOD_LABELS.get(method, method), (x, y), xytext=(x + dx, y + dy), fontsize=8)
-    ax.set_xlabel("Collision rate")
-    ax.set_ylabel("Task Success")
-    ax.set_xlim(-0.03, 0.80)
-    ax.set_ylim(-0.05, 1.05)
-    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
-    ax.text(0.93, 0.96, "(b)", transform=ax.transAxes, fontsize=11, va="top")
+        ax.annotate(
+            SHORT_METHOD_LABELS[method],
+            (collision, mae),
+            xytext=label_offsets[method],
+            textcoords="offset points",
+            fontsize=8,
+            color=style["color"],
+            va="center",
+        )
+    ax.set_xlabel("Collision rate (lower is better)")
+    ax.set_ylabel("Follow MAE [m] (lower is better)")
+    ax.set_xlim(-0.03, 0.84)
+    ax.set_ylim(0.50, 1.38)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.42)
+    ax.tick_params(labelsize=9)
+    ax.text(0.5, 1.02, "(b)", transform=ax.transAxes, fontsize=11, va="bottom", ha="center")
     ax.annotate(
         "Better",
-        xy=(0.50, 0.98),
-        xytext=(0.67, 0.88),
-        arrowprops=dict(arrowstyle="->", color="#333333", linewidth=0.8),
+        xy=(0.08, 0.80),
+        xytext=(0.19, 0.94),
+        arrowprops=dict(arrowstyle="->", color="#444444", linewidth=0.9),
         fontsize=8,
-        color="#333333",
+        color="#444444",
+        ha="center",
+    )
+    ax.text(
+        0.98,
+        0.97,
+        "Point area encodes Task Success",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        color="#444444",
     )
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=5, frameon=False, fontsize=8, bbox_to_anchor=(0.5, 1.16))
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=5,
+        frameon=False,
+        fontsize=8,
+        bbox_to_anchor=(0.5, 1.10),
+    )
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(args.output_dir, f"fig3_main_performance.{ext}"), dpi=300, bbox_inches="tight")
+        fig.savefig(
+            os.path.join(args.output_dir, f"fig3_main_performance.{ext}"),
+            dpi=300,
+            bbox_inches="tight",
+        )
     plt.close(fig)
+
+
+def _fig3b_rows(table1: Sequence[Dict], speed: str = "0.60") -> List[Dict]:
+    rows = {
+        str(row.get("method_key", "")): row
+        for row in table1
+        if str(row.get("Speed", "")) == speed and str(row.get("method_key", "")) in METHOD_ORDER
+    }
+    missing = [method for method in METHOD_ORDER if method not in rows]
+    if missing:
+        raise RuntimeError(
+            f"Fig.3(b) candidate data incomplete at {speed} m/s; missing methods: {', '.join(missing)}"
+        )
+
+    required_metrics = (
+        "Task Success Mean",
+        "Collision Mean",
+        "Follow MAE [m] Mean",
+        "Row-progress Mean",
+    )
+    for method, row in rows.items():
+        missing_metrics = [
+            metric for metric in required_metrics
+            if not math.isfinite(_safe_float(row.get(metric, "")))
+        ]
+        if missing_metrics:
+            raise RuntimeError(
+                f"Fig.3(b) candidate data incomplete for {method}: {', '.join(missing_metrics)}"
+            )
+
+    anchors = {
+        "learnedw": {
+            "Task Success Mean": 0.953,
+            "Collision Mean": 0.039,
+            "Follow MAE [m] Mean": 0.623,
+            "Row-progress Mean": 0.985,
+        },
+        "rule_override": {
+            "Task Success Mean": 0.734,
+            "Collision Mean": 0.211,
+        },
+        "risk_only": {
+            "Task Success Mean": 0.008,
+            "Collision Mean": 0.294,
+            "Follow MAE [m] Mean": 1.305,
+            "Row-progress Mean": 0.715,
+        },
+        "geomw": {
+            "Task Success Mean": 0.003,
+            "Collision Mean": 0.427,
+        },
+        "yonly": {
+            "Task Success Mean": 0.000,
+            "Collision Mean": 0.714,
+            "Row-progress Mean": 0.794,
+        },
+    }
+    for method, expected in anchors.items():
+        row = rows[method]
+        for metric, target in expected.items():
+            value = _safe_float(row.get(metric, ""))
+            tolerance = 0.012 if "MAE" in metric else 0.004
+            if abs(value - target) > tolerance:
+                raise RuntimeError(
+                    f"Fig.3(b) anchor mismatch for {method}/{metric}: "
+                    f"got {value:.6f}, expected about {target:.3f}"
+                )
+    return [rows[method] for method in METHOD_ORDER]
+
+
+def _marker_fill_area_factor(method: str) -> float:
+    from matplotlib.markers import MarkerStyle
+
+    marker = METHOD_STYLE[method]["marker"]
+    marker_style = MarkerStyle(marker)
+    path = marker_style.get_path().transformed(marker_style.get_transform())
+    signed_area = 0.0
+    for polygon in path.to_polygons(closed_only=True):
+        for idx in range(len(polygon) - 1):
+            x0, y0 = polygon[idx]
+            x1, y1 = polygon[idx + 1]
+            signed_area += 0.5 * (float(x0) * float(y1) - float(x1) * float(y0))
+    area = abs(signed_area)
+    if area <= 1e-9:
+        raise RuntimeError(f"Fig.3(b) marker has zero fill area: method={method}, marker={marker}")
+    return area
+
+
+def _fig3b_scatter_size(method: str, success: float) -> Tuple[float, float, float]:
+    target_fill_area = 64.0 + 420.0 * success
+    marker_fill_factor = _marker_fill_area_factor(method)
+    scatter_area = target_fill_area / marker_fill_factor
+    return target_fill_area, marker_fill_factor, scatter_area
+
+
+def _plot_fig3b_scatter_sized(args, table1: Sequence[Dict]) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except Exception as exc:
+        print(f"[Warn] matplotlib unavailable; skipping Fig.3(b) scatter ({exc})")
+        return
+
+    rows = _fig3b_rows(table1, speed="0.60")
+    audit_rows: List[Dict] = []
+    for row in rows:
+        method = str(row["method_key"])
+        success = _safe_float(row["Task Success Mean"])
+        collision = _safe_float(row["Collision Mean"])
+        mae = _safe_float(row["Follow MAE [m] Mean"])
+        progress = _safe_float(row["Row-progress Mean"])
+        target_fill_area, marker_fill_factor, scatter_area = _fig3b_scatter_size(method, success)
+        audit_rows.append(
+            {
+                "Method": SHORT_METHOD_LABELS[method],
+                "Task Success": f"{success:.6f}",
+                "Collision": f"{collision:.6f}",
+                "Follow MAE [m]": f"{mae:.6f}",
+                "Row-progress": f"{progress:.6f}",
+                "Target filled area": f"{target_fill_area:.3f}",
+                "Marker fill-area factor": f"{marker_fill_factor:.6f}",
+                "Matplotlib scatter area": f"{scatter_area:.3f}",
+            }
+        )
+    _write_csv(
+        os.path.join(args.output_dir, "fig3b_scatter_sized_data_060.csv"),
+        audit_rows,
+        [
+            "Method", "Task Success", "Collision", "Follow MAE [m]", "Row-progress",
+            "Target filled area", "Marker fill-area factor", "Matplotlib scatter area",
+        ],
+    )
+
+    fig, ax = plt.subplots(figsize=(5.1, 3.9), constrained_layout=True)
+    label_offsets = {
+        "yonly": (8, -4),
+        "geomw": (8, -5),
+        "risk_only": (8, -5),
+        "rule_override": (8, -12),
+        "learnedw": (12, 10),
+    }
+    for row in rows:
+        method = str(row["method_key"])
+        style = METHOD_STYLE[method]
+        success = _safe_float(row["Task Success Mean"])
+        collision = _safe_float(row["Collision Mean"])
+        mae = _safe_float(row["Follow MAE [m] Mean"])
+        _, _, point_size = _fig3b_scatter_size(method, success)
+        ax.scatter(
+            [collision],
+            [mae],
+            s=point_size,
+            marker=style["marker"],
+            color=style["color"],
+            edgecolor="white",
+            linewidth=0.8,
+            alpha=0.92,
+            zorder=5,
+        )
+        ax.annotate(
+            SHORT_METHOD_LABELS[method],
+            (collision, mae),
+            xytext=label_offsets[method],
+            textcoords="offset points",
+            fontsize=9,
+            color=style["color"],
+            va="center",
+        )
+    ax.set_xlabel("Collision rate (lower is better)", fontsize=10)
+    ax.set_ylabel("Follow MAE [m] (lower is better)", fontsize=10)
+    ax.set_xlim(-0.03, 0.84)
+    ax.set_ylim(0.50, 1.38)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.42)
+    ax.tick_params(labelsize=9)
+    ax.annotate(
+        "Better",
+        xy=(0.08, 0.80),
+        xytext=(0.19, 0.94),
+        arrowprops=dict(arrowstyle="->", color="#444444", linewidth=0.9),
+        fontsize=9,
+        color="#444444",
+        ha="center",
+    )
+    ax.text(
+        0.98,
+        0.97,
+        "Point area encodes Task Success",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        color="#444444",
+    )
+    method_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=METHOD_STYLE[method]["marker"],
+            color="none",
+            markerfacecolor=METHOD_STYLE[method]["color"],
+            markeredgecolor="white",
+            markersize=8 if method == "learnedw" else 6,
+            label=SHORT_METHOD_LABELS[method],
+        )
+        for method in METHOD_ORDER
+    ]
+    ax.legend(
+        handles=method_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.17),
+        ncol=3,
+        frameon=False,
+        fontsize=9,
+        handletextpad=0.4,
+        columnspacing=1.0,
+    )
+    for ext in ("pdf", "png"):
+        fig.savefig(
+            os.path.join(args.output_dir, f"fig3b_scatter_sized.{ext}"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+    plt.close(fig)
+
+    with open(
+        os.path.join(args.output_dir, "fig3b_scatter_sized_notes.md"),
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("# Fig.3(b) scatter notes\n\n")
+        f.write(
+            "- Scatter encoding: x = Collision rate, y = Follow MAE [m], and "
+            "target filled marker area = 64 + 420 x Task Success. Matplotlib scatter "
+            "area is divided by the actual normalized marker-path fill area, computed "
+            "from MarkerStyle polygons. No hand-tuned marker compensation is used. "
+            "Lower-left is better.\n"
+        )
 
 
 def _plot_fig4(args) -> None:
@@ -893,6 +1343,8 @@ def _infer_fig6_roots_from_metric_csvs(args) -> List[str]:
         getattr(args, "internal_all_csv", ""),
         getattr(args, "risk_all_csv", ""),
         getattr(args, "rule_all_csv", ""),
+        getattr(args, "additive_all_csv", ""),
+        getattr(args, "velocity_search_all_csv", ""),
         getattr(args, "learnedw_diag_all_csv", ""),
     ):
         for row in _read_csv(str(csv_path)):
@@ -1643,12 +2095,39 @@ def _plot_fig6(args) -> None:
     except Exception as exc:
         raise RuntimeError(f"matplotlib unavailable; cannot draw Fig.6 ({exc})") from exc
 
-    selected, selected_meta, selection_mode, candidate_rows = _choose_fig6_selection(
-        datasets,
-        getattr(args, "fig6_episode_id", None),
-        candidate_csv,
-        int(getattr(args, "fig6_candidate_rank", 0)),
-    )
+    try:
+        selected, selected_meta, selection_mode, candidate_rows = _choose_fig6_selection(
+            datasets,
+            getattr(args, "fig6_episode_id", None),
+            candidate_csv,
+            int(getattr(args, "fig6_candidate_rank", 0)),
+        )
+    except RuntimeError as exc:
+        existing_png = os.path.join(args.output_dir, "fig6_trajectories_stage4.png")
+        existing_pdf = os.path.join(args.output_dir, "fig6_trajectories_stage4.pdf")
+        if bool(getattr(args, "fig6_required", False)) or not os.path.isfile(existing_png):
+            raise
+        image = plt.imread(existing_png)
+        height_px, width_px = image.shape[:2]
+        fallback_fig = plt.figure(
+            figsize=(width_px / 300.0, height_px / 300.0),
+            dpi=300,
+        )
+        fallback_ax = fallback_fig.add_axes([0.0, 0.0, 1.0, 1.0])
+        fallback_ax.imshow(image)
+        fallback_ax.axis("off")
+        fallback_fig.savefig(existing_pdf, dpi=300, bbox_inches="tight", pad_inches=0.0)
+        plt.close(fallback_fig)
+        args._fig6_regeneration_mode = "raster-wrapped PDF; original timeseries unavailable locally"
+        args._fig6_regeneration_warning = str(exc)
+        print(
+            "[Warn] Fig.6 source timeseries are unavailable locally; preserved the "
+            "approved PNG and created a raster-wrapped PDF. Re-run on the server for "
+            f"a vector PDF. Detail: {exc}"
+        )
+        return
+    args._fig6_regeneration_mode = "vector redraw from timeseries"
+    args._fig6_regeneration_warning = ""
     obstacle_refs = set()
     for key, rows in selected.items():
         obstacle_refs.add(_canonical_obstacles(rows[0].get("obstacles_json", "")))
@@ -1925,21 +2404,46 @@ def _reward_cfg_value(source: str, name: str) -> str:
 
 
 def _build_appendix_a1(args) -> List[Dict]:
-    src = _read_text("legged_gym/scripts/train_highlevel.py")
+    learned_meta = _checkpoint_meta(args.learnedw_ckpt)
+    risk_meta = _checkpoint_meta(args.risk_only_ckpt)
+    shared_keys = (
+        "num_steps",
+        "num_envs",
+        "lr",
+        "gamma",
+        "gae_lambda",
+        "entropy_coef",
+        "clip_range",
+        "value_loss_coef",
+        "max_grad_norm",
+        "mini_batch_size",
+        "num_epochs",
+    )
+    mismatched = [
+        key for key in shared_keys
+        if learned_meta.get(key) != risk_meta.get(key)
+    ]
+    if mismatched:
+        raise RuntimeError(
+            "Learned-w and Risk-only PPO settings differ: " + ", ".join(mismatched)
+        )
+    ckpt_source = "final Learned-w/Risk-only checkpoint metadata"
     rows = [
         ("Algorithm", "PPO custom loop", "train_highlevel.py"),
-        ("Steps per iter", _arg_default(src, "num_steps"), "train_highlevel.py --num_steps default"),
-        ("Num envs", str(args.paper_train_num_envs) if args.paper_train_num_envs else "N/A", "paper command argument"),
-        ("Learning rate", str(args.paper_train_lr), "paper training command"),
-        ("Gamma", _arg_default(src, "gamma"), "train_highlevel.py --gamma default"),
-        ("GAE lambda", _arg_default(src, "gae_lambda"), "train_highlevel.py --gae_lambda default"),
-        ("Entropy coef", _arg_default(src, "entropy_coef"), "train_highlevel.py --entropy_coef default"),
-        ("Clip epsilon", _arg_default(src, "clip_range"), "train_highlevel.py --clip_range default"),
-        ("Value loss coef", _arg_default(src, "value_loss_coef"), "train_highlevel.py --value_loss_coef default"),
-        ("Max grad norm", _arg_default(src, "max_grad_norm"), "train_highlevel.py --max_grad_norm default"),
-        ("Mini-batch", _arg_default(src, "mini_batch_size"), "train_highlevel.py --mini_batch_size default"),
-        ("Epochs", _arg_default(src, "num_epochs"), "train_highlevel.py --num_epochs default"),
-        ("Total iters", _arg_default(src, "num_iterations"), "train_highlevel.py --num_iterations default"),
+        ("Steps per iter", str(learned_meta["num_steps"]), ckpt_source),
+        ("Num envs", str(learned_meta["num_envs"]), ckpt_source),
+        ("Learning rate", str(learned_meta["lr"]), ckpt_source),
+        ("Gamma", str(learned_meta["gamma"]), ckpt_source),
+        ("GAE lambda", str(learned_meta["gae_lambda"]), ckpt_source),
+        ("Entropy coef", str(learned_meta["entropy_coef"]), ckpt_source),
+        ("Clip epsilon", str(learned_meta["clip_range"]), ckpt_source),
+        ("Value loss coef", str(learned_meta["value_loss_coef"]), ckpt_source),
+        ("Max grad norm", str(learned_meta["max_grad_norm"]), ckpt_source),
+        ("Mini-batch", str(learned_meta["mini_batch_size"]), ckpt_source),
+        ("Epochs", str(learned_meta["num_epochs"]), ckpt_source),
+        ("Training budget [iters]", str(args.paper_train_iters), "paper training command"),
+        ("Selected Learned-w checkpoint iter", _checkpoint_iteration(args.learnedw_ckpt), args.learnedw_ckpt),
+        ("Selected Risk-only checkpoint iter", _checkpoint_iteration(args.risk_only_ckpt), args.risk_only_ckpt),
         ("Optimizer", "Adam", "train_highlevel.py optimizer construction"),
     ]
     out = [{"Item": k, "Value": v, "Source": s} for k, v, s in rows]
@@ -1953,7 +2457,8 @@ def _build_appendix_a1(args) -> List[Dict]:
 def _build_appendix_a2(args) -> List[Dict]:
     scene_src = _read_text("legged_gym/envs/hex_v4/hex_scenes_config.py")
     pcr_block = _class_block(scene_src, "HexPCRLineAvoidBasicCfg", "HexPCRLineAvoidBasicCfgPPO")
-    train_src = _read_text("legged_gym/scripts/train_highlevel.py")
+    learned_meta = _checkpoint_meta(args.learnedw_ckpt)
+    ckpt_source = "final Learned-w checkpoint metadata"
     rows = [
         ("pcr_progress_reward_scale", _assign_value(pcr_block, "pcr_progress_reward_scale"), "HexPCRLineAvoidBasicCfg.navigation"),
         ("pcr_progress_cap", _assign_value(pcr_block, "pcr_progress_cap"), "HexPCRLineAvoidBasicCfg.navigation"),
@@ -1970,10 +2475,11 @@ def _build_appendix_a2(args) -> List[Dict]:
         ("avoid_band_penalty_scale", _assign_value(pcr_block, "avoid_band_penalty_scale"), "HexPCRLineAvoidBasicCfg.navigation"),
         ("avoid_row_gap_scale", _reward_cfg_value(pcr_block, "avoid_row_gap_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
         ("avoid_row_cmdx_scale", _reward_cfg_value(pcr_block, "avoid_row_cmdx_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
-        ("pcr_w_aux_coef", _arg_default(train_src, "pcr_w_aux_coef"), "train_highlevel.py --pcr_w_aux_coef default"),
-        ("pcr_w_aux_risk_f_threshold", _arg_default(train_src, "pcr_w_aux_risk_f_threshold"), "train_highlevel.py default"),
-        ("pcr_w_aux_risk_margin", _arg_default(train_src, "pcr_w_aux_risk_margin"), "train_highlevel.py default"),
-        ("pcr_w_aux_cmd_cos_threshold", _arg_default(train_src, "pcr_w_aux_cmd_cos_threshold"), "train_highlevel.py default"),
+        ("pcr_w_aux_enable", str(bool(learned_meta["pcr_w_aux_enable"])), ckpt_source),
+        ("pcr_w_aux_coef", str(learned_meta["pcr_w_aux_coef"]), ckpt_source),
+        ("pcr_w_aux_risk_f_threshold", str(learned_meta["pcr_w_aux_risk_f_threshold"]), ckpt_source),
+        ("pcr_w_aux_risk_margin", str(learned_meta["pcr_w_aux_risk_margin"]), ckpt_source),
+        ("pcr_w_aux_cmd_cos_threshold", str(learned_meta["pcr_w_aux_cmd_cos_threshold"]), ckpt_source),
         ("gate_smooth_penalty", _reward_cfg_value(pcr_block, "gate_smooth_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
         ("risk_barrier_scale", _reward_cfg_value(pcr_block, "risk_barrier_scale"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
         ("time_penalty", _reward_cfg_value(pcr_block, "time_penalty"), "HexPCRLineAvoidBasicCfg.reward_cfg"),
@@ -1991,10 +2497,32 @@ def _build_appendix_a3(args) -> List[Dict]:
     avoid_block = _class_block(scene_src, "HexAvoidBasicCfg", "HexAvoidBasicCfgPPO")
     pcr_block = _class_block(scene_src, "HexPCRLineAvoidBasicCfg", "HexPCRLineAvoidBasicCfgPPO")
     terrain_src = _read_text("legged_gym/envs/hex_v4/hex_terrain_config.py")
+    base_src = _read_text("legged_gym/envs/base/legged_robot_config.py")
+    learned_meta = _checkpoint_meta(args.learnedw_ckpt)
+    obs_contract = learned_meta.get("observation_contract", {})
+    if not isinstance(obs_contract, dict):
+        raise RuntimeError("Learned-w checkpoint observation_contract is missing.")
+    training_task = str(learned_meta.get("task", "N/A"))
+    checkpoint_source = "final Learned-w checkpoint observation contract"
+    fov = (
+        f"{float(obs_contract['camera_horizontal_fov_deg']):g} x "
+        f"{float(obs_contract['camera_vertical_fov_deg']):g}"
+    )
+    depth_range = (
+        f"[{float(obs_contract['camera_near_m']):g},"
+        f"{float(obs_contract['camera_far_m']):g}]"
+    )
+    map_shape = (
+        f"{int(obs_contract['affordance_map_size'])} x "
+        f"{int(obs_contract['affordance_map_size'])}"
+    )
     rows = [
-        ("Task", "s_pcr_line_avoid_basic", "eval/train command"),
+        ("Training task", training_task, args.learnedw_ckpt),
+        ("Evaluation task", "s_pcr_line_avoid_basic stage 4", "eval command"),
         ("Eval target speeds", ",".join(SPEEDS), "run_pcr_main_table_eval command"),
-        ("Training target speed", _assign_value(pcr_block, "moving_target_pcr_line_speed"), "HexPCRLineAvoidBasicCfg.navigation"),
+        ("Training target-speed range [m/s]", "0.25-0.65", "HexGround._sample_pcr_new_curriculum"),
+        ("Training obstacle rows", "2-5", "HexGround._sample_pcr_new_curriculum / stage layouts"),
+        ("Curriculum budget [episodes]", "120000", "HexPCRNewCfg.navigation"),
         ("Episode length [s]", _assign_value(avoid_block, "episode_length_s"), "HexAvoidBasicCfg.env"),
         ("Stage-4 passage width min [m]", _assign_value(avoid_block, "avoid_stage4_width_min"), "HexAvoidBasicCfg.terrain"),
         ("Capsule obstacle radius [m]", _assign_value(avoid_block, "avoid_capsule_radius"), "HexAvoidBasicCfg.terrain"),
@@ -2002,9 +2530,21 @@ def _build_appendix_a3(args) -> List[Dict]:
         ("Box slots", _assign_value(avoid_block, "avoid_box_slots"), "HexAvoidBasicCfg.terrain"),
         ("Wall slots", _assign_value(avoid_block, "avoid_wall_slots"), "HexAvoidBasicCfg.terrain"),
         ("Terrain seed", _assign_value(avoid_block, "avoid_seed"), "HexAvoidBasicCfg.terrain"),
+        ("Obstacle position jitter [m]", _assign_value(avoid_block, "avoid_fixed_preset_jitter_xy"), "HexAvoidBasicCfg.terrain"),
+        ("Mirrored layouts", str(_assign_value(avoid_block, "avoid_fixed_presets_use_mirror")), "HexAvoidBasicCfg.terrain"),
+        ("Friction randomization enabled", _assign_value(base_src, "randomize_friction"), "LeggedRobotCfg.domain_rand"),
         ("Friction range", _assign_value(terrain_src, "friction_range"), "hex_terrain_config.domain_rand"),
-        ("Observation noise enabled", _assign_value(terrain_src, "add_noise"), "hex_terrain_config.noise"),
-        ("Depth clip range", _assign_value(terrain_src, "clip_range"), "hex_terrain_config"),
+        ("Base-mass randomization enabled", _assign_value(base_src, "randomize_base_mass"), "LeggedRobotCfg.domain_rand"),
+        ("External pushes enabled", _assign_value(terrain_src, "push_robots"), "hex_terrain_config.domain_rand"),
+        ("Low-level observation noise enabled", _assign_value(base_src, "add_noise"), "LeggedRobotCfg.noise"),
+        ("High-level training affordance", "actor-only scene GT; camera disabled", args.learnedw_ckpt),
+        ("Deployment sensor target", str(learned_meta.get("sim2real_sensor_target", "Intel RealSense D435i")), args.learnedw_ckpt),
+        ("Depth resolution", f"{int(obs_contract['camera_width'])} x {int(obs_contract['camera_height'])}", checkpoint_source),
+        ("Depth FOV H x V [deg]", fov, checkpoint_source),
+        ("Depth range [m]", depth_range, checkpoint_source),
+        ("Configured/effective depth rate [Hz]", f"{obs_contract['camera_fps_cfg']} / {float(obs_contract['camera_effective_rate_hz']):.1f}", checkpoint_source),
+        ("High-level rate [Hz]", f"{float(obs_contract['high_level_rate_hz']):.1f}", checkpoint_source),
+        ("Affordance map", f"{map_shape}, extent {float(obs_contract['affordance_map_extent_m']):g} m", checkpoint_source),
     ]
     out = [{"Item": k, "Value": v, "Source": s} for k, v, s in rows]
     fields = ["Item", "Value", "Source"]
@@ -2015,27 +2555,49 @@ def _build_appendix_a3(args) -> List[Dict]:
 
 
 def _build_appendix_a4(args) -> List[Dict]:
-    planner_src = _read_text("rsl_rl/algorithms/high_level_planner.py")
-    learned_rows = _raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"])
-    risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
-    learned_params = _params_lookup(learned_rows).get((f"{float(args.mechanism_speed):.2f}", "learnedw"), "N/A")
-    risk_params = _params_lookup(risk_rows).get((f"{float(args.mechanism_speed):.2f}", "risk_only"), "N/A")
+    learned_meta = _checkpoint_meta(args.learnedw_ckpt)
+    risk_meta = _checkpoint_meta(args.risk_only_ckpt)
+    learned_sd = _checkpoint_state_dict(args.learnedw_ckpt)
+    risk_sd = _checkpoint_state_dict(args.risk_only_ckpt)
+    avoid_sd = _checkpoint_state_dict(args.avoid_ckpt)
+    learned_aff = _shape(learned_sd, "affordance_encoder.cnn.0.weight")
+    learned_state = _shape(learned_sd, "state_encoder.mlp.0.weight")
+    learned_goal = _shape(learned_sd, "goal_encoder.mlp.0.weight")
+    risk_state = _shape(risk_sd, "state_encoder.mlp.0.weight")
+    risk_goal = _shape(risk_sd, "goal_encoder.mlp.0.weight")
+    fusion = _shape(learned_sd, "fusion.0.weight")
+    fusion2 = _shape(learned_sd, "fusion.2.weight")
+    avoid_state = _shape(avoid_sd, "state_encoder.mlp.0.weight")
+    avoid_goal = _shape(avoid_sd, "goal_encoder.mlp.0.weight")
+    avoid_cmd = _shape(avoid_sd, "cmd_mean_head.2.weight")
+    learned_policy_params = _state_dict_param_count(learned_sd)
+    risk_policy_params = _state_dict_param_count(risk_sd)
+    avoid_params = _state_dict_param_count(avoid_sd)
     rows = [
-        ("Affordance encoder", "AffordanceCNNEncoder(channels, 128)", "GatePolicy"),
-        ("State encoder", "StateEncoder(state_dim=9, 64)", "GatePolicy"),
-        ("Goal encoder", "GoalEncoder(goal_dim=2, 32)", "GatePolicy"),
-        ("Difficulty input", "1 scalar", "fusion_dim = 128 + 64 + 32 + 1"),
-        ("Shared trunk", "225 -> 256 -> 256, ELU", "GatePolicy.fusion"),
-        ("Gate y head", "256 -> 64 -> 1, Softplus; Beta mean/action", "GatePolicy.y_alpha_head/y_beta_head"),
-        ("Learned-w head", "256 -> 64 -> 1, Softplus; only when learned_w=True", "GatePolicy.w_alpha_head/w_beta_head"),
-        ("Critic", "Separate encoders + trunk + value head 256 -> 64 -> 1", "GatePolicy.critic_*"),
-        ("Risk-only params", risk_params, "eval metrics params_total"),
-        ("Learned-w params", learned_params, "eval metrics params_total"),
+        ("Affordance encoder", f"{learned_aff[1]} channels -> 32 -> 64 -> 128", args.learnedw_ckpt),
+        ("Learned-w state encoder", f"{learned_state[1]} -> 64 -> 64 -> 64", args.learnedw_ckpt),
+        ("Learned-w goal encoder", f"{learned_goal[1]} -> 32 -> 32 (2 goal + 16 conflict features)", args.learnedw_ckpt),
+        ("Risk-only state/goal encoders", f"{risk_state[1]} -> 64; {risk_goal[1]} -> 32", args.risk_only_ckpt),
+        (
+            "Difficulty input",
+            "1 scalar slot; disabled/zero in final checkpoints",
+            f"gate_use_difficulty={learned_meta.get('gate_use_difficulty', False)}",
+        ),
+        ("Shared trunk", f"{fusion[1]} -> {fusion[0]} -> {fusion2[0]}, ELU", args.learnedw_ckpt),
+        ("Gate y head", "256 -> 64 -> Beta(alpha,beta)", args.learnedw_ckpt),
+        ("Learned-w head", "256 -> 64 -> Beta(alpha,beta)", args.learnedw_ckpt),
+        ("Risk-only actor output", str(risk_meta.get("actor_output_dim", 1)), args.risk_only_ckpt),
+        ("Learned-w actor output", str(learned_meta.get("actor_output_dim", 2)), args.learnedw_ckpt),
+        ("Critic", "Separate encoders + 225 -> 256 -> 256 -> 64 -> 1", args.learnedw_ckpt),
+        ("Avoid expert", f"state {avoid_state[1]}, goal {avoid_goal[1]}, command output {avoid_cmd[0]}", args.avoid_ckpt),
+        ("Fixed Avoid expert params", str(avoid_params), args.avoid_ckpt),
+        ("Risk-only policy params", str(risk_policy_params), args.risk_only_ckpt),
+        ("Learned-w policy params", str(learned_policy_params), args.learnedw_ckpt),
+        ("Risk-only high-level total", str(risk_policy_params + avoid_params), "policy + fixed Avoid expert"),
+        ("Learned-w high-level total", str(learned_policy_params + avoid_params), "policy + fixed Avoid expert"),
         ("Follow expert", "Analytic", "train_highlevel.py _compute_moe_follow_cmd_from_goal"),
         ("Low-level locomotion", "Fixed checkpoint", "eval/train command low_level_ckpt"),
     ]
-    if "fusion_dim = 128 + 64 + 32 + 1" not in planner_src:
-        rows.append(("Audit warning", "GatePolicy dimensions not found by text check", "rsl_rl/algorithms/high_level_planner.py"))
     out = [{"Component": k, "Value": v, "Source": s} for k, v, s in rows]
     fields = ["Component", "Value", "Source"]
     _write_csv(os.path.join(args.output_dir, "tableA4_network_structure.csv"), out, fields)
@@ -2054,38 +2616,63 @@ def _write_manifest(
     path = os.path.join(args.output_dir, "MANIFEST.md")
     risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
     risk_only_mode = _risk_only_source_mode(args, risk_rows)
+    generated_files = [
+        "fig3_main_performance.pdf",
+        "fig3_main_performance.png",
+        "fig3b_scatter_sized.pdf",
+        "fig3b_scatter_sized.png",
+        "fig3b_scatter_sized_data_060.csv",
+        "fig3b_scatter_sized_notes.md",
+        "fig4_mechanism.pdf",
+        "fig4_mechanism.png",
+        "fig6_trajectories_stage4.pdf",
+        "fig6_trajectories_stage4.png",
+        "fig6_trajectories_stage4_sources.csv",
+        "fig6_trajectory_episode_candidates.csv",
+        "table1_main_performance_stage4.csv",
+        "table1_main_performance_stage4.md",
+        "table1_main_performance_stage4.tex",
+        "table2_mechanism_ablation.csv",
+        "table2_mechanism_ablation.md",
+        "table2_mechanism_ablation.tex",
+        "table3_mono_ppo_stage_probe.csv",
+        "table3_mono_ppo_stage_probe.md",
+        "table3_mono_ppo_stage_probe.tex",
+        "table3_mono_ppo_stage_probe_notes.md",
+        "tableA1_ppo_hyperparams.csv",
+        "tableA1_ppo_hyperparams.md",
+        "tableA1_ppo_hyperparams.tex",
+        "tableA2_reward_terms.csv",
+        "tableA2_reward_terms.md",
+        "tableA2_reward_terms.tex",
+        "tableA3_domain_randomization.csv",
+        "tableA3_domain_randomization.md",
+        "tableA3_domain_randomization.tex",
+        "tableA4_network_structure.csv",
+        "tableA4_network_structure.md",
+        "tableA4_network_structure.tex",
+        "tableA5_delta_y_full.csv",
+        "tableA5_delta_y_full.md",
+        "tableA5_delta_y_full.tex",
+        "tableA5_delta_y_full_notes.md",
+    ]
+    missing_outputs = [
+        name
+        for name in generated_files
+        if not os.path.isfile(os.path.join(args.output_dir, name))
+        or os.path.getsize(os.path.join(args.output_dir, name)) <= 0
+    ]
+    if missing_outputs:
+        raise RuntimeError(
+            "Final paper output validation failed; missing or empty files: "
+            + ", ".join(missing_outputs)
+        )
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Final Paper Outputs v3\n\n")
         f.write("Generated files:\n\n")
-        generated_files = [
-            "fig3_main_performance.pdf",
-            "fig3_main_performance.png",
-            "fig4_mechanism.pdf",
-            "fig4_mechanism.png",
-            "table1_main_performance_stage4.csv",
-            "table1_main_performance_stage4.md",
-            "table1_main_performance_stage4.tex",
-            "table2_mechanism_ablation.csv",
-            "table2_mechanism_ablation.md",
-            "table2_mechanism_ablation.tex",
-            "table3_mono_ppo_stage_probe.csv",
-            "table3_mono_ppo_stage_probe.md",
-            "table3_mono_ppo_stage_probe.tex",
-            "tableA1_ppo_hyperparams.tex",
-            "tableA2_reward_terms.tex",
-            "tableA3_domain_randomization.tex",
-            "tableA4_network_structure.tex",
-            "tableA5_delta_y_full.tex",
-        ]
-        if os.path.exists(os.path.join(args.output_dir, "fig6_trajectories_stage4.png")):
-            generated_files[4:4] = [
-                "fig6_trajectories_stage4.pdf",
-                "fig6_trajectories_stage4.png",
-                "fig6_trajectories_stage4_sources.csv",
-                "fig6_trajectory_episode_candidates.csv",
-            ]
         for name in generated_files:
-            f.write(f"- {name}\n")
+            size = os.path.getsize(os.path.join(args.output_dir, name))
+            f.write(f"- {name} ({size} bytes)\n")
         f.write("\nRow counts:\n\n")
         f.write(f"- Table I audit rows: {len(table1)}\n")
         f.write(f"- Table II rows: {len(table2)}\n")
@@ -2099,33 +2686,56 @@ def _write_manifest(
             ("risk_aggregate_csv", args.risk_aggregate_csv),
             ("rule_all_csv", args.rule_all_csv),
             ("rule_aggregate_csv", args.rule_aggregate_csv),
+            ("additive_all_csv", getattr(args, "additive_all_csv", "")),
+            ("velocity_search_all_csv", getattr(args, "velocity_search_all_csv", "")),
             ("learnedw_diag_all_csv", args.learnedw_diag_all_csv),
             ("learnedw_diag_aggregate_csv", args.learnedw_diag_aggregate_csv),
+            ("learnedw_split_all_csv", args.learnedw_split_all_csv),
             ("mono_stage2_path", args.mono_stage2_path),
             ("mono_stage3_path", args.mono_stage3_path),
             ("mono_stage4_all_csv", args.mono_stage4_all_csv),
+            ("mono_stage_snapshot_csv", args.mono_stage_snapshot_csv),
             ("learnedw_mechanism_dir", args.learnedw_mechanism_dir),
+            ("learnedw_ckpt", args.learnedw_ckpt),
+            ("risk_only_ckpt", args.risk_only_ckpt),
+            ("avoid_ckpt", args.avoid_ckpt),
             ("fig6_timeseries_root", args.fig6_timeseries_root),
         ]:
             f.write(f"- {label}: `{src}` (mtime={_file_stamp(src)})\n")
+        f.write("\nCheckpoint SHA256:\n\n")
+        for label, src in [
+            ("learnedw_ckpt", args.learnedw_ckpt),
+            ("risk_only_ckpt", args.risk_only_ckpt),
+            ("avoid_ckpt", args.avoid_ckpt),
+        ]:
+            f.write(f"- {label}: `{_file_sha256(src)}`\n")
         f.write("\nRisk-only source mode:\n\n")
         f.write(f"- requested: `{args.risk_only_source_mode}`\n")
         f.write(f"- resolved: `{risk_only_mode}`\n")
+        f.write("\nFig.6 regeneration:\n\n")
+        f.write(
+            f"- mode: `{getattr(args, '_fig6_regeneration_mode', 'not generated')}`\n"
+        )
+        warning = str(getattr(args, "_fig6_regeneration_warning", "") or "")
+        if warning:
+            f.write(f"- warning: `{warning}`\n")
         f.write("\nValidation checklist:\n\n")
         f.write("- Table I: expected 15 rows = 3 speeds x 5 methods; Mono-PPO is intentionally excluded.\n")
         f.write("- Table I: Risk-only 0.60 success should be about 0.008 +/- 0.008.\n")
+        f.write("- Fig.3(b): the selected scatter uses the five Table I methods at 0.60 m/s; marker-area encoding and the Learned-w star compensation are recorded in fig3b_scatter_sized_notes.md.\n")
         f.write("- Table II: speed is fixed by --mechanism_speed, default 0.60.\n")
         f.write("- Table II: Risk-only note must say trained from scratch and no learned-w channel.\n")
         f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
-        f.write("- Table A5: contains Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
+        f.write("- Table A5: contains no N/A values in Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
         f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
         f.write("- Fig.6: if requested, 0.60 m/s timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; the audited default candidate requires Learned-w success and prioritizes one row-3 collision, one row-4 collision, one early lost/timeout, and one late lost/timeout trajectory without mixing mirrored layouts.\n")
-        f.write("- Table III: expected stages 2, 3, and 4; use --allow_incomplete_mono_stage_probe only for local dry-runs.\n")
+        f.write("- Table III: fixed 0.35 m/s, stages 2/3/4, seed 1; Collision TTC averages collision episodes only.\n")
+        f.write("- Table III: Mono-PPO has 1,029,447 params and is not capacity matched to Learned-w; treat it as a diagnostic probe.\n")
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build final PCR-Net paper tables and figures.")
-    parser.add_argument("--output_dir", default="agents/final_paper_outputs")
+    parser.add_argument("--output_dir", default="agents/final_paper_outputs_v3")
     parser.add_argument(
         "--internal_all_csv",
         default="agents/eval_data_seed23/pcr_main_table/pcr_main_table_all_metrics_with_rollout_20260529.csv",
@@ -2136,11 +2746,11 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--risk_all_csv",
-        default="agents/eval_data_risk_only/pcr_main_table/pcr_main_table_all_metrics_20260601_223036.csv",
+        default="agents/eval_data_risk_only/pcr_main_table/pcr_main_table_all_metrics_20260610_170313.csv",
     )
     parser.add_argument(
         "--risk_aggregate_csv",
-        default="agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260601_223036.csv",
+        default="agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260610_170313.csv",
     )
     parser.add_argument(
         "--risk_only_source_mode",
@@ -2157,12 +2767,27 @@ def build_argparser() -> argparse.ArgumentParser:
         default="agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv",
     )
     parser.add_argument(
+        "--additive_all_csv",
+        default="",
+        help="Optional Additive-Fusion all-metrics CSV. Empty keeps the existing five-method paper table unchanged.",
+    )
+    parser.add_argument(
+        "--velocity_search_all_csv",
+        default="",
+        help="Optional Velocity-Search all-metrics CSV. Empty keeps the existing five-method paper table unchanged.",
+    )
+    parser.add_argument(
         "--learnedw_diag_all_csv",
         default="agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv",
     )
     parser.add_argument(
         "--learnedw_diag_aggregate_csv",
         default="agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_aggregate_20260602_141845.csv",
+    )
+    parser.add_argument(
+        "--learnedw_split_all_csv",
+        default="agents/eval_data_fig6_trajectories_worldxy/pcr_main_table/pcr_main_table_all_metrics_20260612_044839.csv",
+        help="Current Learned-w diagnostic CSV containing the full C_unsafe component split for Table A5.",
     )
     parser.add_argument(
         "--mono_stage2_path",
@@ -2177,12 +2802,21 @@ def build_argparser() -> argparse.ArgumentParser:
         default="agents/eval_data_mono_targetview/pcr_main_table/pcr_main_table_all_metrics_20260604_160305.csv",
     )
     parser.add_argument(
+        "--mono_stage_snapshot_csv",
+        default="agents/eval_data_mono_targetview_stage_probe/table3_stage_probe_snapshot_20260604.csv",
+        help="Audited fallback snapshot used when stage2/3 metrics.json files are not present locally.",
+    )
+    parser.add_argument(
         "--learnedw_mechanism_dir",
         default="agents/eval_data/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260526_204857",
     )
     parser.add_argument("--mechanism_speed", type=float, default=0.60)
     parser.add_argument("--paper_train_num_envs", type=int, default=256)
     parser.add_argument("--paper_train_lr", type=str, default="6e-5")
+    parser.add_argument("--paper_train_iters", type=int, default=1000)
+    parser.add_argument("--learnedw_ckpt", default="agents/moe_teacher_best_learnedw.pt")
+    parser.add_argument("--risk_only_ckpt", default="agents/moe_teacher_best_risk_only.pt")
+    parser.add_argument("--avoid_ckpt", default="agents/avoid_best.pt")
     parser.add_argument(
         "--fig6_timeseries_root",
         default=None,
@@ -2258,6 +2892,7 @@ def main() -> None:
     table2 = _build_table2(args)
     table3 = _build_table3(args)
     _plot_fig3(args, table1)
+    _plot_fig3b_scatter_sized(args, table1)
     _plot_fig4(args)
     _plot_fig6(args)
     _copy_legacy_mechanism_png(args)

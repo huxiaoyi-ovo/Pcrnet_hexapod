@@ -2,9 +2,12 @@
 \toprule
 Item & Value & Source \\
 \midrule
-Task & s\_pcr\_line\_avoid\_basic & eval/train command \\
+Training task & s\_pcr\_new & agents/moe\_teacher\_best\_learnedw.pt \\
+Evaluation task & s\_pcr\_line\_avoid\_basic stage 4 & eval command \\
 Eval target speeds & 0.35,0.50,0.60 & run\_pcr\_main\_table\_eval command \\
-Training target speed & 0.35 & HexPCRLineAvoidBasicCfg.navigation \\
+Training target-speed range [m/s] & 0.25-0.65 & HexGround.\_sample\_pcr\_new\_curriculum \\
+Training obstacle rows & 2-5 & HexGround.\_sample\_pcr\_new\_curriculum / stage layouts \\
+Curriculum budget [episodes] & 120000 & HexPCRNewCfg.navigation \\
 Episode length [s] & 50 & HexAvoidBasicCfg.env \\
 Stage-4 passage width min [m] & 0.75 & HexAvoidBasicCfg.terrain \\
 Capsule obstacle radius [m] & 0.15 & HexAvoidBasicCfg.terrain \\
@@ -12,8 +15,20 @@ Capsule slots & 13 & HexAvoidBasicCfg.terrain \\
 Box slots & 0 & HexAvoidBasicCfg.terrain \\
 Wall slots & 0 & HexAvoidBasicCfg.terrain \\
 Terrain seed & 7001 & HexAvoidBasicCfg.terrain \\
+Obstacle position jitter [m] & 0.06 & HexAvoidBasicCfg.terrain \\
+Mirrored layouts & False & HexAvoidBasicCfg.terrain \\
+Friction randomization enabled & True & LeggedRobotCfg.domain\_rand \\
 Friction range & [0.8,1.2] & hex\_terrain\_config.domain\_rand \\
-Observation noise enabled & True & hex\_terrain\_config.noise \\
-Depth clip range & [0.2,3.0] & hex\_terrain\_config \\
+Base-mass randomization enabled & False & LeggedRobotCfg.domain\_rand \\
+External pushes enabled & False & hex\_terrain\_config.domain\_rand \\
+Low-level observation noise enabled & True & LeggedRobotCfg.noise \\
+High-level training affordance & actor-only scene GT; camera disabled & agents/moe\_teacher\_best\_learnedw.pt \\
+Deployment sensor target & Intel RealSense D435i & agents/moe\_teacher\_best\_learnedw.pt \\
+Depth resolution & 1280 x 720 & final Learned-w checkpoint observation contract \\
+Depth FOV H x V [deg] & 87 x 58 & final Learned-w checkpoint observation contract \\
+Depth range [m] & [0.28,3] & final Learned-w checkpoint observation contract \\
+Configured/effective depth rate [Hz] & 30 / 25.0 & final Learned-w checkpoint observation contract \\
+High-level rate [Hz] & 10.0 & final Learned-w checkpoint observation contract \\
+Affordance map & 32 x 32, extent 3 m & final Learned-w checkpoint observation contract \\
 \bottomrule
 \end{tabular}

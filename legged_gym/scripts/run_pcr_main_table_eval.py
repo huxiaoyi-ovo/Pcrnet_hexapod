@@ -78,6 +78,20 @@ METHODS: Dict[str, Dict] = {
             "0.30",
         ],
     },
+    "additive_fusion": {
+        "ckpt_arg": "yonly_ckpt",
+        "flags": [
+            "--yonly",
+            "--additive_fusion",
+        ],
+    },
+    "velocity_search": {
+        "ckpt_arg": "yonly_ckpt",
+        "flags": [
+            "--yonly",
+            "--velocity_search",
+        ],
+    },
     "mono_ppo": {
         "ckpt_arg": "mono_ppo_ckpt",
         "flags": ["--mono_ppo"],
@@ -175,6 +189,14 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
     if bool(getattr(args, "headless", False)):
         cmd.append("--headless")
     cmd.extend(method_cfg["flags"])
+    if method == "velocity_search":
+        cmd.extend(["--velocity_search_split", str(args.velocity_search_split)])
+        if str(getattr(args, "velocity_search_hparams_json", "") or "").strip():
+            cmd.extend(["--velocity_search_hparams_json", str(args.velocity_search_hparams_json)])
+        if getattr(args, "velocity_search_body_radius_m", None) is not None:
+            cmd.extend(["--velocity_search_body_radius_m", str(args.velocity_search_body_radius_m)])
+        if getattr(args, "velocity_search_min_clearance_margin", None) is not None:
+            cmd.extend(["--velocity_search_min_clearance_margin", str(args.velocity_search_min_clearance_margin)])
     return cmd
 
 
@@ -219,6 +241,14 @@ def parse_args():
     parser.add_argument("--output_root", type=str, default="agents/eval_data_seed23")
     parser.add_argument("--summary_dir", type=str, default="agents/eval_data_seed23/pcr_main_table")
     parser.add_argument("--extra_summary_paths", type=str, default="", help="extra metrics dirs/files to include in final table")
+    parser.add_argument(
+        "--velocity_search_split",
+        choices=("validation_layout", "main_test", "heldout_test"),
+        default="main_test",
+    )
+    parser.add_argument("--velocity_search_hparams_json", type=str, default="")
+    parser.add_argument("--velocity_search_body_radius_m", type=float, default=None)
+    parser.add_argument("--velocity_search_min_clearance_margin", type=float, default=None)
     parser.add_argument("--yonly_ckpt", type=str, default="agents/moe_teacher_best_yonly.pt")
     parser.add_argument("--geomw_ckpt", type=str, default="agents/moe_teacher_best_w0.15.pt")
     parser.add_argument("--learnedw_ckpt", type=str, default="agents/moe_teacher_best_learnedw.pt")

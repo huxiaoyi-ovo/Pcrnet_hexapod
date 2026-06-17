@@ -1,0 +1,2 @@
+Speed,Method,Seed,Task Success,Collision,Follow MAE,Unsafe Rate,C_avoid Rate,CSI@C_avoid,Num Episodes,Checkpoint,Source
+0.60,velocity_search,1,0.0,1.0,0.09806546433405441,0.16279069767441862,0.0,,4,/home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym/agents/moe_teacher_best_yonly.pt,agents/eval_data_velocity_search_smoke/s_0.6/moe_teacher_s_pcr_line_avoid_basic_velocity_search_validation_layout_seed1_20260615_210229/metrics.json

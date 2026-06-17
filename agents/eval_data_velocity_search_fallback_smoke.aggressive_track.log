@@ -1,0 +1,166 @@
+Importing module 'gym_38' (/home/hxy/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/hxy/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/hxy/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/hxy/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/hxy/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[PlayHigh] resolved runtime ablation config:
+[PlayHigh]   w_mode: ckpt=none, cli=none, final=none
+[PlayHigh]   w_tau: ckpt=0.25, cli=<unset>, final=0.25
+[PlayHigh]   w_blend_mode: ckpt=multiply, cli=<unset>, final=multiply
+[PlayHigh]   w_disable_gate_safe_clamp: ckpt=False, cli=<unset>, final=False
+[PlayHigh] s_pcr_line_avoid_basic target speed override: 0.350 -> 0.600 m/s
+Setting seed: 1
+begin loading asset
+end loading asset
+------>dof props<------------
+ ('hasLimits', 'lower', 'upper', 'driveMode', 'velocity', 'effort', 'stiffness', 'damping', 'friction', 'armature')
+[( True, -0.6981317, 1.5707964, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -1.5707964, 0.6981317, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -0.6981317, 0.6981317, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -1.5707964, 0.6981317, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -0.6981317, 1.5707964, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -0.6981317, 0.6981317, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.0943952, 2.1816616, 3, 5., 27., 0., 0., 0., 0.)
+ ( True, -2.7052603, 2.443461 , 3, 5., 27., 0., 0., 0., 0.)]
+[Scene] s_avoid_basic obstacle pool: capsule_slots=13, box_slots=0, wall_slots=0, capsule_d=0.30, box=(0.40,0.40,0.50), wall=(0.12,6.00,0.50)
+[Scene] s_avoid_basic pooled obstacle body: fix_base_link=False(capsule/box), mass=100000.0, wall_mass=50000.0, lin_damp=1000.0, ang_damp=1000.0
+---------->noise_vec.shape= torch.Size([230])
+--------------->load motor net from /home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym/resources/actuator_nets/DM4340_24v_0929.pth<---------------------
+[Env] actor-only GT affordance enabled: scene actors only, no heightfield fallback.
+Actor MLP: Sequential(
+  (0): Linear(in_features=75, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=18, bias=True)
+)
+Critic MLP: Sequential(
+  (0): Linear(in_features=230, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=1, bias=True)
+)
+[PlayHigh] s_avoid stage override -> 4
+[Debug][s_avoid_filter] tag=s_avoid_obs_0 actor_index=1 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_0 shape filter=0
+[Debug][s_avoid_sync] slot=0 actor_index=1 active=1 target_filter=0 root_xyz=(-0.996,-0.650,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_1 actor_index=2 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_1 shape filter=0
+[Debug][s_avoid_sync] slot=1 actor_index=2 active=1 target_filter=0 root_xyz=(0.230,-0.708,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_2 actor_index=3 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_2 shape filter=0
+[Debug][s_avoid_sync] slot=2 actor_index=3 active=1 target_filter=0 root_xyz=(0.830,-0.604,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_3 actor_index=4 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_3 shape filter=0
+[Debug][s_avoid_sync] slot=3 actor_index=4 active=1 target_filter=0 root_xyz=(-0.851,1.237,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_4 actor_index=5 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_4 shape filter=0
+[Debug][s_avoid_sync] slot=4 actor_index=5 active=1 target_filter=0 root_xyz=(-0.360,1.227,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_5 actor_index=6 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_5 shape filter=0
+[Debug][s_avoid_sync] slot=5 actor_index=6 active=1 target_filter=0 root_xyz=(-1.029,3.124,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_6 actor_index=7 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_6 shape filter=0
+[Debug][s_avoid_sync] slot=6 actor_index=7 active=1 target_filter=0 root_xyz=(0.244,3.058,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_7 actor_index=8 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_7 shape filter=0
+[Debug][s_avoid_sync] slot=7 actor_index=8 active=1 target_filter=0 root_xyz=(0.906,3.132,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_8 actor_index=9 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_8 shape filter=0
+[Debug][s_avoid_sync] slot=8 actor_index=9 active=1 target_filter=0 root_xyz=(-0.828,4.965,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_9 actor_index=10 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_9 shape filter=0
+[Debug][s_avoid_sync] slot=9 actor_index=10 active=1 target_filter=0 root_xyz=(-0.397,5.013,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_10 actor_index=11 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_10 shape filter=0
+[Debug][s_avoid_sync] slot=10 actor_index=11 active=1 target_filter=0 root_xyz=(-1.050,6.797,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_11 actor_index=12 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_11 shape filter=0
+[Debug][s_avoid_sync] slot=11 actor_index=12 active=1 target_filter=0 root_xyz=(0.251,6.791,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_12 actor_index=13 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug] s_avoid_obs_12 shape filter=0
+[Debug][s_avoid_sync] slot=12 actor_index=13 active=1 target_filter=0 root_xyz=(0.855,6.861,0.250)
+[Warn] low_level_ckpt 加载路径与 checkpoint 记录路径不同，本次不强制停止；请确认两者对应同一份底层权重：low_level_ckpt: current play runtime=/home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym/agents/low_level_best.pt, gate ckpt=/home/dell/RL_hexapod_gym/logs/hex_ground/Dec31_16-52-59_/model_6000.pt
+[Eval] level 1/1 difficulty=1.000 target_episodes=8
+[PlayHigh] s_avoid stage override -> 4
+[Debug][s_avoid_filter] tag=s_avoid_obs_0 actor_index=1 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=0 actor_index=1 active=1 target_filter=0 root_xyz=(-0.842,-0.638,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_1 actor_index=2 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=1 actor_index=2 active=1 target_filter=0 root_xyz=(-0.279,-0.639,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_2 actor_index=3 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=2 actor_index=3 active=1 target_filter=0 root_xyz=(1.051,-0.665,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_3 actor_index=4 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=3 actor_index=4 active=1 target_filter=0 root_xyz=(0.293,1.275,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_4 actor_index=5 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=4 actor_index=5 active=1 target_filter=0 root_xyz=(0.902,1.173,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_5 actor_index=6 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=5 actor_index=6 active=1 target_filter=0 root_xyz=(-0.909,3.157,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_6 actor_index=7 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=6 actor_index=7 active=1 target_filter=0 root_xyz=(-0.215,3.075,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_7 actor_index=8 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=7 actor_index=8 active=1 target_filter=0 root_xyz=(1.092,3.114,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_8 actor_index=9 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=8 actor_index=9 active=1 target_filter=0 root_xyz=(0.356,5.032,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_9 actor_index=10 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=9 actor_index=10 active=1 target_filter=0 root_xyz=(0.814,4.952,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_10 actor_index=11 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=10 actor_index=11 active=1 target_filter=0 root_xyz=(-0.849,6.791,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_11 actor_index=12 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=11 actor_index=12 active=1 target_filter=0 root_xyz=(-0.200,6.885,0.250)
+[Debug][s_avoid_filter] tag=s_avoid_obs_12 actor_index=13 target=0 before=[0] after=[0] contact=[0.029999999329447746] rest=[0.0]
+[Debug][s_avoid_sync] slot=12 actor_index=13 active=1 target_filter=0 root_xyz=(1.026,6.880,0.250)
+[Eval] progress level=1/1 difficulty=1.000 level_eps=1/8 total_eps=1/8 elapsed=5.0s
+[Eval] progress level=1/1 difficulty=1.000 level_eps=5/8 total_eps=5/8 elapsed=10.2s
+[Eval] progress level=1/1 difficulty=1.000 level_eps=7/8 total_eps=7/8 elapsed=15.3s
+[Eval] mechanism plot: agents/eval_data_velocity_search_fallback_smoke/aggressive_track/moe_teacher_s_pcr_line_avoid_basic_velocity_search_validation_layout_seed1_20260617_135007/mechanism_risk_bins.png
+[Eval] mechanism plot: agents/eval_data_velocity_search_fallback_smoke/aggressive_track/moe_teacher_s_pcr_line_avoid_basic_velocity_search_validation_layout_seed1_20260617_135007/mechanism_priv_conflict_bins.png
+Loading extension module gymtorch...
+========================================================================
+Independent Eval Complete
+Output: agents/eval_data_velocity_search_fallback_smoke/aggressive_track/moe_teacher_s_pcr_line_avoid_basic_velocity_search_validation_layout_seed1_20260617_135007
+------------------------------------------------------------------------
+Task success / row-progress: 0.0000 / 0.1000
+Episode diagnostics full/strict/event/event+collision/collision/zero-progress-timeout: 0.0000 / 0.0000 / 0.0000 / 0.0000 / 0.8750 / 0.0000
+Priv-conflict step/score/CSI/CSS/RCM: 0.1502 / 0.1456 / -0.0000 / 0.0000 / 0.0000
+Priv-conflict signed_w/delta_y in/out: 0.0000 / 0.0000 / 0.0000
+Priv-conflict phase signed_w approach/inside/release: 0.0000 / 0.0000 / nan
+Priv-conflict phase delta_y approach/inside/release: 0.0000 / 0.0000 / nan
+Unsafe-conflict step/CSI/CSS/RCM: 0.1174 / -0.0000 / 0.0000 / 0.0000
+Unsafe-conflict signed_w/delta_y in/out: 0.0000 / 0.0000 / 0.0000
+C_avoid/C_stop step/CSI: 0.0235 / -0.0000 | 0.0939 / -0.0000
+Rollout risk F/A/S/gap: 0.2852 / 0.1913 / 0.1062 / 0.2735
+Target FOV in/all/lost/maxLost/bearing p95[deg]: 0.9671 / 1.0000 / 0.0329 / 4 / 28.26
+L1/L2/L3/task safety/follow/progress/task: 0.1250 / 0.7500 / 0.0000 / 0.0000
+Goal-command corr gx-cx/gx-yaw/gy-cy: -0.1081 / -0.3210 / 0.4202
+CmdX bias/std/entropy pos/neg: 0.0671 / 0.3166 / 0.5097 / 0.4909 / 0.4148
+Follow MAE/RMSE [m]: 0.2747 / 0.3116
+Time-to-success [s] mean/med/p95: nan / nan / nan
+CoT mean/med/p95: 3.2693 / 3.1551 / 3.7933
+Inference latency [ms] p50/p95: 11.9244 / 17.4417
+Params total/trainable: 2058890 / 2058890
+========================================================================

@@ -578,6 +578,568 @@ def _ensure_delta_y_diag(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.
     return gate_diag
 
 
+def _compute_additive_fusion_diag(
+    env,
+    args,
+    aff_map: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Eval-only baseline: lateral Avoid + forward/yaw Follow, no gate policy."""
+    diag = th._pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
+    cmd_a_eff = diag["cmd_a_eff"]
+    cmd = cmd_f + cmd_a_eff
+    ref = diag["risk_F"]
+    nan = torch.full_like(ref, float("nan"))
+    zero = torch.zeros_like(ref)
+    one = torch.ones_like(ref)
+    return {
+        "cmd": cmd,
+        "cmd_f": cmd_f,
+        "cmd_a": cmd_a_eff,
+        "gate_y_raw": nan,
+        "gate_y": nan,
+        "gate_y_safe": nan,
+        "y_eff": nan,
+        "w": nan,
+        "signed_w": nan,
+        "signed_w_active": zero,
+        "w_support_correction": zero,
+        "risk_diff_correction": zero,
+        "delta_y_w_raw": nan,
+        "delta_y_w_used": nan,
+        "delta_y_r": nan,
+        "delta_y_total": nan,
+        "risk_memory": zero,
+        "follow_weight": one,
+        "avoid_weight": one,
+        "additive_fusion_raw": cmd,
+        "additive_lateral_projection": one,
+        **diag,
+    }
+
+
+def _resolve_velocity_search_hparams(args) -> Dict[str, float]:
+    defaults = {
+        "vx_samples": 7,
+        "vy_samples": 5,
+        "w_samples": 5,
+        "rollout_horizon_s": 1.2,
+        "rollout_dt_s": 0.15,
+        "body_radius_m": 0.32,
+        "footprint_radius_m": 0.32,  # legacy alias: body_radius_m
+        "min_clearance_margin": 0.08,
+        "clear_weight": 3.0,
+        "target_dist_weight": 1.0,
+        "bearing_weight": 0.35,
+        "progress_weight": 0.45,
+        "forward_weight": 0.0,
+        "forward_min_v": 0.15,
+        "smooth_weight": 0.20,
+        "target_weight": 1.0,  # legacy alias: target_dist_weight
+        "risk_weight": 3.0,    # legacy alias: clear_weight
+        "speed_weight": 0.25,  # legacy alias: progress_weight
+        "lateral_weight": 0.05,
+        "risk_filter_threshold": 0.65,
+        "filter_mode": "soft",
+        "fallback": "stop",
+    }
+    path = str(getattr(args, "velocity_search_hparams_json", "") or "").strip()
+    if path:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"velocity search hparams json must be a dict: {path}")
+        if isinstance(loaded.get("hparams", None), dict):
+            loaded = loaded["hparams"]
+        defaults.update(loaded)
+    cli_map = {
+        "vx_samples": getattr(args, "velocity_search_vx_samples", None),
+        "vy_samples": getattr(args, "velocity_search_vy_samples", None),
+        "w_samples": getattr(args, "velocity_search_w_samples", None),
+        "rollout_horizon_s": getattr(args, "velocity_search_rollout_horizon_s", None),
+        "rollout_dt_s": getattr(args, "velocity_search_rollout_dt_s", None),
+        "body_radius_m": getattr(args, "velocity_search_body_radius_m", None),
+        "footprint_radius_m": getattr(args, "velocity_search_footprint_radius_m", None),
+        "min_clearance_margin": getattr(args, "velocity_search_min_clearance_margin", None),
+        "clear_weight": getattr(args, "velocity_search_clear_weight", None),
+        "target_dist_weight": getattr(args, "velocity_search_target_dist_weight", None),
+        "bearing_weight": getattr(args, "velocity_search_bearing_weight", None),
+        "progress_weight": getattr(args, "velocity_search_progress_weight", None),
+        "forward_weight": getattr(args, "velocity_search_forward_weight", None),
+        "forward_min_v": getattr(args, "velocity_search_forward_min_v", None),
+        "smooth_weight": getattr(args, "velocity_search_smooth_weight", None),
+        "target_weight": getattr(args, "velocity_search_target_weight", None),
+        "risk_weight": getattr(args, "velocity_search_risk_weight", None),
+        "speed_weight": getattr(args, "velocity_search_speed_weight", None),
+        "lateral_weight": getattr(args, "velocity_search_lateral_weight", None),
+        "risk_filter_threshold": getattr(args, "velocity_search_risk_filter_threshold", None),
+        "filter_mode": getattr(args, "velocity_search_filter_mode", None),
+        "fallback": getattr(args, "velocity_search_fallback", None),
+    }
+    for key, value in cli_map.items():
+        if value is not None:
+            defaults[key] = value
+    defaults["vx_samples"] = int(max(3, defaults["vx_samples"]))
+    defaults["vy_samples"] = int(max(2, defaults["vy_samples"]))
+    defaults["w_samples"] = int(max(3, defaults["w_samples"]))
+    defaults["rollout_horizon_s"] = float(max(0.2, defaults["rollout_horizon_s"]))
+    defaults["rollout_dt_s"] = float(max(0.05, defaults["rollout_dt_s"]))
+    if "body_radius_m" not in defaults or defaults["body_radius_m"] is None:
+        defaults["body_radius_m"] = defaults.get("footprint_radius_m", 0.32)
+    defaults["body_radius_m"] = float(max(0.05, defaults["body_radius_m"]))
+    defaults["footprint_radius_m"] = float(max(0.05, defaults.get("footprint_radius_m", defaults["body_radius_m"])))
+    # Use body_radius_m as the planner-facing name; keep footprint_radius_m only for older json files.
+    defaults["footprint_radius_m"] = defaults["body_radius_m"]
+    defaults["min_clearance_margin"] = float(max(0.0, defaults["min_clearance_margin"]))
+    # Keep old json files usable while exposing the paper-facing cost names.
+    defaults["clear_weight"] = float(defaults.get("clear_weight", defaults.get("risk_weight", 3.0)))
+    defaults["target_dist_weight"] = float(defaults.get("target_dist_weight", defaults.get("target_weight", 1.0)))
+    defaults["progress_weight"] = float(defaults.get("progress_weight", defaults.get("speed_weight", 0.25)))
+    defaults["forward_weight"] = float(defaults["forward_weight"])
+    defaults["forward_min_v"] = float(max(0.0, defaults["forward_min_v"]))
+    defaults["bearing_weight"] = float(defaults["bearing_weight"])
+    defaults["smooth_weight"] = float(defaults["smooth_weight"])
+    defaults["target_weight"] = float(defaults["target_weight"])
+    defaults["risk_weight"] = float(defaults["risk_weight"])
+    defaults["speed_weight"] = float(defaults["speed_weight"])
+    defaults["lateral_weight"] = float(defaults["lateral_weight"])
+    defaults["risk_filter_threshold"] = float(defaults["risk_filter_threshold"])
+    defaults["filter_mode"] = str(defaults["filter_mode"]).strip().lower()
+    if defaults["filter_mode"] not in {"scale", "soft", "none"}:
+        raise ValueError(f"invalid velocity_search filter_mode: {defaults['filter_mode']}")
+    defaults["fallback"] = str(defaults["fallback"])
+    return defaults
+
+
+def _velocity_search_rollout_costs(
+    env,
+    args,
+    aff_map: torch.Tensor,
+    candidates: torch.Tensor,
+    goal_xy: torch.Tensor,
+    max_cmd: torch.Tensor,
+    hparams: Dict[str, float],
+    last_cmd: Optional[torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """Roll out constant body-frame velocity candidates on the local map."""
+    if aff_map.ndim != 4 or aff_map.size(1) < 1:
+        raise ValueError(f"aff_map shape invalid for velocity search: {tuple(aff_map.shape)}")
+    x_map = getattr(env, "affordance_x_map", None)
+    y_map = getattr(env, "affordance_y_map", None)
+    if x_map is None or y_map is None:
+        raise ValueError("velocity search requires affordance_x_map and affordance_y_map")
+
+    device = aff_map.device
+    dtype = candidates.dtype
+    n, k, _ = candidates.shape
+    x_map = x_map.to(device=device, dtype=dtype)
+    y_map = y_map.to(device=device, dtype=dtype)
+    if aff_map.shape[-2:] != x_map.shape:
+        raise ValueError("velocity search map grid shape mismatch")
+    visible = getattr(env, "affordance_visible_mask", None)
+    if visible is None:
+        visible = torch.ones_like(x_map, dtype=torch.bool, device=device)
+    else:
+        visible = visible.to(device=device, dtype=torch.bool)
+    occ = (aff_map[:, 0] > 0.5) & visible.view(1, *visible.shape)
+
+    horizon_s = float(hparams["rollout_horizon_s"])
+    dt = float(hparams["rollout_dt_s"])
+    steps = int(max(1, math.ceil(horizon_s / max(dt, 1e-6))))
+    radius = float(hparams["body_radius_m"])
+    clearance_margin = float(hparams["min_clearance_margin"])
+    extent = float(getattr(env, "affordance_map_extent", 3.0))
+    x_min = float(x_map.min().detach().cpu().item()) - 0.5 * radius
+    x_max = float(x_map.max().detach().cpu().item()) + 0.5 * radius
+    y_min = float(y_map.min().detach().cpu().item()) - 0.5 * radius
+    y_max = float(y_map.max().detach().cpu().item()) + 0.5 * radius
+
+    vx = candidates[:, :, 0]
+    vy = candidates[:, :, 1]
+    ww = candidates[:, :, 2]
+    x = torch.zeros((n, k), device=device, dtype=dtype)
+    y = torch.zeros((n, k), device=device, dtype=dtype)
+    yaw = torch.zeros((n, k), device=device, dtype=dtype)
+    min_center_dist = torch.full((n, k), float(extent), device=device, dtype=dtype)
+    collision = torch.zeros((n, k), device=device, dtype=torch.bool)
+    out_of_map_any = torch.zeros((n, k), device=device, dtype=torch.bool)
+
+    grid_x = x_map.view(1, 1, *x_map.shape)
+    grid_y = y_map.view(1, 1, *y_map.shape)
+    occ_view = occ.view(n, 1, *occ.shape[-2:])
+    fill = torch.full((n, k, *x_map.shape), float(extent), device=device, dtype=dtype)
+
+    for _ in range(steps):
+        c = torch.cos(yaw)
+        s = torch.sin(yaw)
+        x = x + (vx * c - vy * s) * dt
+        y = y + (vx * s + vy * c) * dt
+        yaw = yaw + ww * dt
+        out_of_map = (x < x_min) | (x > x_max) | (y < y_min) | (y > y_max)
+        out_of_map_any = out_of_map_any | out_of_map
+        dx = grid_x - x.view(n, k, 1, 1)
+        dy = grid_y - y.view(n, k, 1, 1)
+        center_dist_map = torch.sqrt(dx * dx + dy * dy + 1e-12)
+        selected = torch.where(occ_view, center_dist_map, fill)
+        step_center_dist = selected.flatten(2).amin(dim=2)
+        has_occ = occ.flatten(1).any(dim=1).view(n, 1)
+        step_center_dist = torch.where(has_occ, step_center_dist, torch.full_like(step_center_dist, float(extent)))
+        min_center_dist = torch.minimum(min_center_dist, step_center_dist)
+        collision = collision | (step_center_dist <= radius)
+
+    predicted_clearance = min_center_dist - radius
+    margin_clear = predicted_clearance >= clearance_margin
+    feasible = (~collision) & (~out_of_map_any) & margin_clear
+    final_x = x
+    final_y = y
+    final_yaw = yaw
+
+    safe_d, free_d = th._get_effective_safe_free_dist(
+        env,
+        getattr(args, "beta", None),
+        device=device,
+        dtype=dtype,
+    )
+    risk = env._risk_from_clearance(predicted_clearance.clamp_min(0.0), safe_d, free_d)
+
+    goal_norm = torch.norm(goal_xy, dim=-1, keepdim=True)
+    default_goal = torch.zeros_like(goal_xy)
+    default_goal[:, 1] = 1.0
+    goal_dir = torch.where(goal_norm > 1e-6, goal_xy / goal_norm.clamp_min(1e-6), default_goal)
+    final_xy = torch.stack([final_x, final_y], dim=-1)
+    target_vec = goal_xy.unsqueeze(1) - final_xy
+    target_dist = torch.norm(target_vec, dim=-1) / max(extent, 1e-6)
+    cy = torch.cos(final_yaw)
+    sy = torch.sin(final_yaw)
+    rel_x_body = cy * target_vec[:, :, 0] + sy * target_vec[:, :, 1]
+    rel_y_body = -sy * target_vec[:, :, 0] + cy * target_vec[:, :, 1]
+    bearing_cost = torch.abs(torch.atan2(rel_x_body, rel_y_body)) / math.pi
+    progress = torch.sum(final_xy * goal_dir.unsqueeze(1), dim=-1) / max(extent, 1e-6)
+    forward_progress = final_y / max(extent, 1e-6)
+
+    if torch.is_tensor(last_cmd) and last_cmd.shape == (n, 3):
+        prev = last_cmd.to(device=device, dtype=dtype)
+    else:
+        prev = torch.zeros((n, 3), device=device, dtype=dtype)
+    smooth = torch.norm((candidates - prev.unsqueeze(1)) / max_cmd.view(1, 1, 3).clamp_min(1e-6), dim=-1)
+    lateral_penalty = torch.abs(candidates[:, :, 0]) / torch.clamp(max_cmd[0].abs(), min=1e-6)
+
+    cost = (
+        float(hparams["clear_weight"]) * risk
+        + float(hparams["target_dist_weight"]) * target_dist
+        + float(hparams["bearing_weight"]) * bearing_cost
+        - float(hparams["progress_weight"]) * progress
+        - float(hparams["forward_weight"]) * forward_progress
+        + float(hparams["smooth_weight"]) * smooth
+        + float(hparams["lateral_weight"]) * lateral_penalty
+    )
+    cost = torch.where(feasible, cost, torch.full_like(cost, float("inf")))
+    forward_mask = candidates[:, :, 1] >= float(hparams["forward_min_v"])
+    forward_feasible = forward_mask & feasible
+    forward_cost = torch.where(forward_feasible, cost, torch.full_like(cost, float("inf")))
+    best_forward_idx = torch.argmin(forward_cost, dim=1)
+    batch_idx = torch.arange(n, device=device)
+    has_forward_feasible = forward_feasible.any(dim=1)
+    best_forward_cost = torch.where(
+        has_forward_feasible,
+        forward_cost[batch_idx, best_forward_idx],
+        torch.full((n,), float("inf"), device=device, dtype=dtype),
+    )
+    best_forward_clearance = torch.where(
+        has_forward_feasible,
+        predicted_clearance[batch_idx, best_forward_idx],
+        torch.full((n,), float("nan"), device=device, dtype=dtype),
+    )
+    return {
+        "cost": cost,
+        "risk": risk,
+        "predicted_clearance": predicted_clearance,
+        "feasible": feasible,
+        "collision": collision,
+        "out_of_map": out_of_map_any,
+        "margin_clear": margin_clear,
+        "candidate_count": torch.full((n,), k, device=device, dtype=dtype),
+        "feasible_count": feasible.sum(dim=1).to(dtype=dtype),
+        "infeasible_count": (~feasible).sum(dim=1).to(dtype=dtype),
+        "forward_candidate_count": forward_mask.sum(dim=1).to(dtype=dtype),
+        "forward_feasible_count": forward_feasible.sum(dim=1).to(dtype=dtype),
+        "forward_infeasible_collision_count": (forward_mask & collision).sum(dim=1).to(dtype=dtype),
+        "forward_infeasible_margin_count": (forward_mask & (~margin_clear)).sum(dim=1).to(dtype=dtype),
+        "forward_infeasible_out_of_map_count": (forward_mask & out_of_map_any).sum(dim=1).to(dtype=dtype),
+        "best_forward_feasible_cost": best_forward_cost,
+        "best_forward_feasible_clearance": best_forward_clearance,
+    }
+
+
+def _compute_velocity_search_diag(
+    env,
+    args,
+    aff_map: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+    goal: torch.Tensor,
+    hparams: Dict[str, float],
+) -> Dict[str, torch.Tensor]:
+    """DWA-style target-aware velocity-space search baseline; no gate policy."""
+    t0 = time.perf_counter()
+    diag = th._pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
+    ref = diag["risk_F"]
+    device = cmd_f.device
+    dtype = cmd_f.dtype
+    max_cmd = getattr(env.post_processor, "max_cmd", None)
+    if torch.is_tensor(max_cmd) and max_cmd.numel() >= 3:
+        max_cmd = max_cmd.to(device=device, dtype=dtype)
+    else:
+        max_cmd = torch.tensor([0.4, 0.8, 0.3], device=device, dtype=dtype)
+    vx_samples = int(hparams["vx_samples"])
+    vy_samples = int(hparams["vy_samples"])
+    w_samples = int(hparams["w_samples"])
+    def _merge_velocity_samples(base: torch.Tensor, extra_values: list, low: float, high: float) -> torch.Tensor:
+        extra = torch.tensor(extra_values, device=device, dtype=dtype).clamp(min=low, max=high)
+        vals = torch.cat([base, extra], dim=0)
+        vals = torch.round(vals * 10000.0) / 10000.0
+        return torch.unique(vals, sorted=True)
+
+    vx_base = torch.linspace(-float(max_cmd[0]), float(max_cmd[0]), vx_samples, device=device, dtype=dtype)
+    vy_base = torch.linspace(0.0, float(max_cmd[1]), vy_samples, device=device, dtype=dtype)
+    w_base = torch.linspace(-float(max_cmd[2]), float(max_cmd[2]), w_samples, device=device, dtype=dtype)
+    vx_vals = _merge_velocity_samples(
+        vx_base,
+        [-0.45, -0.35, -0.25, -0.15, 0.0, 0.15, 0.25, 0.35, 0.45],
+        -float(max_cmd[0]),
+        float(max_cmd[0]),
+    )
+    vy_vals = _merge_velocity_samples(
+        vy_base,
+        [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40],
+        0.0,
+        float(max_cmd[1]),
+    )
+    w_vals = _merge_velocity_samples(
+        w_base,
+        [-0.8, -0.4, 0.0, 0.4, 0.8],
+        -float(max_cmd[2]),
+        float(max_cmd[2]),
+    )
+    vx_grid, vy_grid, w_grid = torch.meshgrid(vx_vals, vy_vals, w_vals, indexing="ij")
+    cand_cmd = torch.stack([vx_grid.reshape(-1), vy_grid.reshape(-1), w_grid.reshape(-1)], dim=-1)
+    k = int(cand_cmd.shape[0])
+    n = int(cmd_f.shape[0])
+    cand_cmd_batch = cand_cmd.unsqueeze(0).expand(n, k, 3)
+
+    goal_xy = goal[:, :2].to(device=device, dtype=dtype)
+    try:
+        rollout = _velocity_search_rollout_costs(
+            env,
+            args,
+            aff_map,
+            cand_cmd_batch,
+            goal_xy,
+            max_cmd,
+            hparams,
+            getattr(env.post_processor, "last_cmd", None),
+        )
+        cost = rollout["cost"]
+        risk = rollout["risk"]
+        predicted_clearance = rollout["predicted_clearance"]
+        feasible = rollout["feasible"]
+        collision = rollout["collision"]
+        out_of_map = rollout["out_of_map"]
+        margin_clear = rollout["margin_clear"]
+        candidate_count = rollout["candidate_count"]
+        feasible_count = rollout["feasible_count"]
+        infeasible_count = rollout["infeasible_count"]
+    except Exception:
+        # Keep eval runnable on older envs, but mark the planner as having no feasible rollout.
+        cand_xy_batch = cand_cmd_batch[:, :, :2]
+        aff_rep = aff_map.repeat_interleave(k, dim=0)
+        cand_flat = cand_xy_batch.reshape(n * k, 2)
+        clearance = env._compute_clearance_along_cmd(aff_rep, cand_flat).view(n, k)
+        safe_d, free_d = th._get_effective_safe_free_dist(
+            env,
+            getattr(args, "beta", None),
+            device=device,
+            dtype=dtype,
+        )
+        risk = env._risk_from_clearance(clearance, safe_d, free_d)
+        predicted_clearance = clearance
+        collision = torch.zeros_like(risk, dtype=torch.bool)
+        out_of_map = torch.zeros_like(risk, dtype=torch.bool)
+        margin_clear = predicted_clearance >= float(hparams["min_clearance_margin"])
+        feasible = margin_clear
+        target_norm = torch.norm(cand_xy_batch - goal_xy.unsqueeze(1), dim=-1)
+        cost = float(hparams["clear_weight"]) * risk + float(hparams["target_dist_weight"]) * target_norm
+        candidate_count = torch.full((n,), k, device=device, dtype=dtype)
+        feasible_count = feasible.sum(dim=1).to(dtype=dtype)
+        infeasible_count = torch.zeros_like(feasible_count)
+        forward_mask = cand_cmd_batch[:, :, 1] >= float(hparams["forward_min_v"])
+        forward_feasible = forward_mask & feasible
+        forward_candidate_count = forward_mask.sum(dim=1).to(dtype=dtype)
+        forward_feasible_count = forward_feasible.sum(dim=1).to(dtype=dtype)
+        forward_infeasible_collision_count = torch.zeros_like(forward_feasible_count)
+        forward_infeasible_margin_count = (forward_mask & (~margin_clear)).sum(dim=1).to(dtype=dtype)
+        forward_infeasible_out_of_map_count = torch.zeros_like(forward_feasible_count)
+        forward_cost = torch.where(forward_feasible, cost, torch.full_like(cost, float("inf")))
+        best_forward_idx = torch.argmin(forward_cost, dim=1)
+        fallback_batch_idx = torch.arange(n, device=device)
+        has_forward_feasible = forward_feasible.any(dim=1)
+        best_forward_feasible_cost = torch.where(
+            has_forward_feasible,
+            forward_cost[fallback_batch_idx, best_forward_idx],
+            torch.full((n,), float("inf"), device=device, dtype=dtype),
+        )
+        best_forward_feasible_clearance = torch.where(
+            has_forward_feasible,
+            predicted_clearance[fallback_batch_idx, best_forward_idx],
+            torch.full((n,), float("nan"), device=device, dtype=dtype),
+        )
+    else:
+        forward_candidate_count = rollout["forward_candidate_count"]
+        forward_feasible_count = rollout["forward_feasible_count"]
+        forward_infeasible_collision_count = rollout["forward_infeasible_collision_count"]
+        forward_infeasible_margin_count = rollout["forward_infeasible_margin_count"]
+        forward_infeasible_out_of_map_count = rollout["forward_infeasible_out_of_map_count"]
+        best_forward_feasible_cost = rollout["best_forward_feasible_cost"]
+        best_forward_feasible_clearance = rollout["best_forward_feasible_clearance"]
+
+    finite_cost = torch.isfinite(cost)
+    feasible_any = feasible.any(dim=1)
+    filter_mode = str(hparams["filter_mode"]).strip().lower()
+    safe_mask = feasible & (risk <= float(hparams["risk_filter_threshold"]))
+    safe_any = safe_mask.any(dim=1)
+    if filter_mode == "none":
+        selection_cost = torch.where(
+            feasible,
+            cost - float(hparams["clear_weight"]) * risk,
+            torch.full_like(cost, float("inf")),
+        )
+    else:
+        selection_cost = torch.where(feasible, cost, torch.full_like(cost, float("inf")))
+    raw_cost = selection_cost
+    raw_idx = torch.argmin(raw_cost, dim=1)
+    safe_cost = torch.where(safe_mask, cost, torch.full_like(cost, float("inf")))
+    best_safe_idx = torch.argmin(safe_cost, dim=1)
+    safest_feasible_risk = torch.where(feasible, risk, torch.full_like(risk, float("inf")))
+    safest_idx = torch.argmin(safest_feasible_risk, dim=1)
+    fallback_mode = str(hparams["fallback"])
+    relaxed_idx = safest_idx if fallback_mode == "safest" else raw_idx
+    if filter_mode == "scale":
+        after_idx = torch.where(safe_any, best_safe_idx, relaxed_idx)
+    else:
+        after_idx = raw_idx
+
+    batch_idx = torch.arange(n, device=device)
+    cmd_search_raw = torch.zeros_like(cmd_f)
+    cmd_search_after_filter = torch.zeros_like(cmd_f)
+    cmd_search_raw[:, :3] = cand_cmd_batch[batch_idx, raw_idx, :3]
+    cmd_search_after_filter[:, :3] = cand_cmd_batch[batch_idx, after_idx, :3]
+    stop_cmd = torch.zeros_like(cmd_search_after_filter)
+    fallback_cmd = stop_cmd.clone()
+    cmd_search_raw = torch.where(feasible_any.view(-1, 1), cmd_search_raw, stop_cmd)
+    cmd_search_after_filter = torch.where(feasible_any.view(-1, 1), cmd_search_after_filter, stop_cmd)
+    cmd_safe = cmd_search_after_filter.clone()
+
+    nan = torch.full_like(ref, float("nan"))
+    zero = torch.zeros_like(ref)
+    raw_risk = torch.where(feasible_any, risk[batch_idx, raw_idx], torch.ones_like(ref))
+    safe_risk = torch.where(feasible_any, risk[batch_idx, after_idx], torch.ones_like(ref))
+    min_predicted_clearance = torch.where(
+        feasible_any,
+        torch.where(feasible, predicted_clearance, torch.full_like(predicted_clearance, float("inf"))).amin(dim=1),
+        torch.zeros_like(ref),
+    )
+    best_cost = torch.where(feasible_any, cost[batch_idx, after_idx], torch.full_like(ref, float("inf")))
+    actual_candidate_used = feasible_any
+    current_clearance = env._compute_clearance_from_affordance(aff_map).to(device=device, dtype=dtype) - float(hparams["body_radius_m"])
+    selected_rollout_min_clearance = torch.where(
+        actual_candidate_used,
+        predicted_clearance[batch_idx, after_idx],
+        current_clearance,
+    )
+    selected_rollout_collision_flag = torch.where(
+        actual_candidate_used,
+        collision[batch_idx, after_idx].to(dtype=dtype),
+        (current_clearance < 0.0).to(dtype=dtype),
+    )
+    selected_rollout_out_of_map_flag = torch.where(
+        actual_candidate_used,
+        out_of_map[batch_idx, after_idx].to(dtype=dtype),
+        torch.zeros_like(ref),
+    )
+    filter_changed = (
+        torch.norm(cmd_search_after_filter[:, :3] - cmd_search_raw[:, :3], dim=-1) > 1e-6
+    ).to(dtype=dtype)
+    no_feasible = ~feasible_any
+    risk_threshold_relaxed = feasible_any & (~safe_any) & (filter_mode == "scale")
+    invalid_cost = feasible_any & (~(finite_cost & feasible).any(dim=1))
+    fallback_used = no_feasible.to(dtype=dtype)
+    fallback_reason = torch.zeros_like(ref)
+    fallback_reason = torch.where(risk_threshold_relaxed, torch.full_like(fallback_reason, 2.0), fallback_reason)
+    fallback_reason = torch.where(no_feasible, torch.ones_like(fallback_reason), fallback_reason)
+    fallback_reason = torch.where(invalid_cost, torch.full_like(fallback_reason, 5.0), fallback_reason)
+    fallback_no_feasible = no_feasible.to(dtype=dtype)
+    fallback_risk_threshold = risk_threshold_relaxed.to(dtype=dtype)
+    fallback_collision = (no_feasible & collision.all(dim=1)).to(dtype=dtype)
+    fallback_margin = (no_feasible & (~margin_clear).all(dim=1)).to(dtype=dtype)
+    fallback_out_of_map = (no_feasible & out_of_map.all(dim=1)).to(dtype=dtype)
+    fallback_invalid_cost = invalid_cost.to(dtype=dtype)
+    compute_time_ms = torch.full_like(ref, 1000.0 * (time.perf_counter() - t0))
+    return {
+        "cmd": cmd_safe,
+        "cmd_f": cmd_f,
+        "cmd_a": diag["cmd_a_eff"],
+        "gate_y_raw": nan,
+        "gate_y": nan,
+        "gate_y_safe": nan,
+        "y_eff": nan,
+        "w": nan,
+        "signed_w": nan,
+        "signed_w_active": zero,
+        "w_support_correction": zero,
+        "risk_diff_correction": zero,
+        "delta_y_w_raw": nan,
+        "delta_y_w_used": nan,
+        "delta_y_r": nan,
+        "delta_y_total": nan,
+        "risk_memory": zero,
+        "cmd_search_raw": cmd_search_raw,
+        "cmd_search_after_filter": cmd_search_after_filter,
+        "cmd_safe": cmd_safe,
+        "velocity_search_raw_risk": raw_risk,
+        "velocity_search_safe_risk": safe_risk,
+        "velocity_search_filter_changed": filter_changed,
+        "velocity_search_safe_available": safe_any.to(dtype=dtype),
+        "velocity_search_compute_time_ms": compute_time_ms,
+        "velocity_search_candidate_count": candidate_count,
+        "velocity_search_feasible_count": feasible_count,
+        "velocity_search_infeasible_count": infeasible_count,
+        "velocity_search_feasible_count_after_margin": feasible_count,
+        "velocity_search_forward_candidate_count": forward_candidate_count,
+        "velocity_search_forward_feasible_count": forward_feasible_count,
+        "velocity_search_forward_infeasible_collision_count": forward_infeasible_collision_count,
+        "velocity_search_forward_infeasible_margin_count": forward_infeasible_margin_count,
+        "velocity_search_forward_infeasible_out_of_map_count": forward_infeasible_out_of_map_count,
+        "velocity_search_best_forward_feasible_cost": best_forward_feasible_cost,
+        "velocity_search_best_forward_feasible_clearance": best_forward_feasible_clearance,
+        "velocity_search_fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "fallback_no_feasible": fallback_no_feasible,
+        "fallback_risk_threshold": fallback_risk_threshold,
+        "fallback_collision": fallback_collision,
+        "fallback_margin": fallback_margin,
+        "fallback_out_of_map": fallback_out_of_map,
+        "fallback_invalid_cost": fallback_invalid_cost,
+        "velocity_search_min_predicted_clearance": min_predicted_clearance,
+        "velocity_search_best_cost": best_cost,
+        "selected_rollout_min_clearance": selected_rollout_min_clearance,
+        "selected_rollout_collision_flag": selected_rollout_collision_flag,
+        "selected_rollout_out_of_map_flag": selected_rollout_out_of_map_flag,
+        "fallback_cmd": fallback_cmd,
+        **diag,
+    }
+
+
 def _compute_moe_follow_cmd_from_goal(
     state_tensor: torch.Tensor,
     goal_tensor: torch.Tensor,
@@ -667,6 +1229,58 @@ class EpisodeAccumulator:
     gate_switch_count: int = 0
     cmd_jerk_lin_sum: float = 0.0
     cmd_jerk_ang_sum: float = 0.0
+    cmd_post_delta_abs_sum: float = 0.0
+    cmd_post_delta_x_abs_sum: float = 0.0
+    cmd_post_delta_y_abs_sum: float = 0.0
+    cmd_post_delta_w_abs_sum: float = 0.0
+    cmd_post_delta_y_sum: float = 0.0
+    cmd_post_rewrite_steps: int = 0
+    cmd_post_samples: int = 0
+    velocity_search_steps: int = 0
+    velocity_search_filter_change_steps: int = 0
+    velocity_search_safe_available_steps: int = 0
+    velocity_search_raw_risk_sum: float = 0.0
+    velocity_search_safe_risk_sum: float = 0.0
+    velocity_search_compute_time_ms_sum: float = 0.0
+    velocity_search_candidate_count_sum: float = 0.0
+    velocity_search_feasible_count_sum: float = 0.0
+    velocity_search_infeasible_count_sum: float = 0.0
+    velocity_search_feasible_count_after_margin_sum: float = 0.0
+    velocity_search_selected_v_lat_sum: float = 0.0
+    velocity_search_selected_v_fwd_sum: float = 0.0
+    velocity_search_selected_yaw_sum: float = 0.0
+    velocity_search_raw_y_sum: float = 0.0
+    velocity_search_after_filter_y_sum: float = 0.0
+    velocity_search_cmd_safe_y_sum: float = 0.0
+    velocity_search_cmd_safe_y_over_raw_y_sum: float = 0.0
+    velocity_search_cmd_safe_y_over_raw_y_steps: int = 0
+    velocity_search_forward_candidate_count_sum: float = 0.0
+    velocity_search_forward_feasible_count_sum: float = 0.0
+    velocity_search_forward_infeasible_collision_count_sum: float = 0.0
+    velocity_search_forward_infeasible_margin_count_sum: float = 0.0
+    velocity_search_forward_infeasible_out_of_map_count_sum: float = 0.0
+    velocity_search_best_forward_feasible_cost_sum: float = 0.0
+    velocity_search_best_forward_feasible_clearance_sum: float = 0.0
+    velocity_search_best_forward_feasible_steps: int = 0
+    actual_base_vel_x_sum: float = 0.0
+    actual_base_vel_y_sum: float = 0.0
+    actual_base_vel_w_sum: float = 0.0
+    actual_base_delta_x_sum: float = 0.0
+    actual_base_delta_y_sum: float = 0.0
+    row_progress_delta_sum: float = 0.0
+    actual_motion_steps: int = 0
+    velocity_search_fallback_steps: int = 0
+    fallback_no_feasible_steps: int = 0
+    fallback_risk_threshold_steps: int = 0
+    fallback_collision_steps: int = 0
+    fallback_margin_steps: int = 0
+    fallback_out_of_map_steps: int = 0
+    fallback_invalid_cost_steps: int = 0
+    velocity_search_min_predicted_clearance_sum: float = 0.0
+    velocity_search_best_cost_sum: float = 0.0
+    selected_rollout_min_clearance_sum: float = 0.0
+    selected_rollout_collision_steps: int = 0
+    selected_rollout_out_of_map_steps: int = 0
     rotate_only_steps: int = 0
     w_trigger_step: int = -1
     w_trigger_progress: float = float("nan")
@@ -795,6 +1409,10 @@ class EpisodeAccumulator:
     cmd_yaw_right_sum: float = 0.0
     cmd_x_left_sum: float = 0.0
     cmd_x_right_sum: float = 0.0
+    prev_robot_x: float = float("nan")
+    prev_robot_y: float = float("nan")
+    prev_robot_heading: float = float("nan")
+    prev_progress_val: float = float("nan")
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
     timeseries: list = field(default_factory=list)
@@ -820,6 +1438,11 @@ class EvalRunner:
         self.follow_aff_stack_buf = None
         self.avoid_aff_stack_buf = None
         self.done_prev = None
+        self.velocity_search_hparams = (
+            _resolve_velocity_search_hparams(self.args)
+            if bool(getattr(self.args, "velocity_search", False))
+            else {}
+        )
 
         self.mass_kg = self._estimate_robot_mass_kg()
         self.g = 9.81
@@ -1115,6 +1738,26 @@ class EvalRunner:
                     avoid_difficulty_input,
                     deterministic=True,
                 )
+                if bool(getattr(self.args, "velocity_search", False)):
+                    gate_diag = _compute_velocity_search_diag(
+                        self.env,
+                        self.args,
+                        gate_aff_input,
+                        cmd_f,
+                        cmd_a,
+                        goal,
+                        self.velocity_search_hparams,
+                    )
+                    return gate_diag["cmd"], None, gate_diag
+                if bool(getattr(self.args, "additive_fusion", False)):
+                    gate_diag = _compute_additive_fusion_diag(
+                        self.env,
+                        self.args,
+                        gate_aff_input,
+                        cmd_f,
+                        cmd_a,
+                    )
+                    return gate_diag["cmd"], None, gate_diag
                 gate_difficulty = difficulty if self.args.gate_use_difficulty else torch.zeros_like(difficulty)
                 if bool(getattr(self.args, "zero_local_map", False)):
                     gate_difficulty = torch.zeros_like(gate_difficulty)
@@ -1424,9 +2067,11 @@ class EvalRunner:
                 self.env.clearance_affordance_override = aff_for_post
                 self.env.clearance_override = None
                 self.env.reward_affordance_override = aff_for_post
+                is_additive_fusion = bool(getattr(self.args, "additive_fusion", False))
+                is_velocity_search = bool(getattr(self.args, "velocity_search", False))
                 gate_y_raw = (
                     gate_diag["gate_y_raw"]
-                    if isinstance(gate_diag, dict) and not self.is_mono_ppo
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo and not is_additive_fusion and not is_velocity_search
                     else None
                 )
                 pcr_risk_override = (
@@ -1472,6 +2117,39 @@ class EvalRunner:
                         "rule_follow_scale",
                         "rule_yaw_scale",
                         "rule_follow_suppression",
+                        "cmd_search_raw",
+                        "cmd_search_after_filter",
+                        "cmd_safe",
+                        "velocity_search_raw_risk",
+                        "velocity_search_safe_risk",
+                        "velocity_search_filter_changed",
+                        "velocity_search_safe_available",
+                        "velocity_search_compute_time_ms",
+                        "velocity_search_candidate_count",
+                        "velocity_search_feasible_count",
+                        "velocity_search_infeasible_count",
+                        "velocity_search_feasible_count_after_margin",
+                        "velocity_search_forward_candidate_count",
+                        "velocity_search_forward_feasible_count",
+                        "velocity_search_forward_infeasible_collision_count",
+                        "velocity_search_forward_infeasible_margin_count",
+                        "velocity_search_forward_infeasible_out_of_map_count",
+                        "velocity_search_best_forward_feasible_cost",
+                        "velocity_search_best_forward_feasible_clearance",
+                        "velocity_search_fallback_used",
+                        "fallback_reason",
+                        "fallback_no_feasible",
+                        "fallback_risk_threshold",
+                        "fallback_collision",
+                        "fallback_margin",
+                        "fallback_out_of_map",
+                        "fallback_invalid_cost",
+                        "velocity_search_min_predicted_clearance",
+                        "velocity_search_best_cost",
+                        "selected_rollout_min_clearance",
+                        "selected_rollout_collision_flag",
+                        "selected_rollout_out_of_map_flag",
+                        "fallback_cmd",
                     ):
                         if key in gate_diag:
                             post_info[key] = gate_diag[key].detach().clone()
@@ -1576,6 +2254,66 @@ class EvalRunner:
                     progress_val = float(np.clip(progress_val, 0.0, 1.0))
                     ai.progress_ratio_best = max(ai.progress_ratio_best, progress_val)
                     ai.progress_reached = ai.progress_reached or (progress_val > 0.0)
+                    actual_base_vel_x_v = float("nan")
+                    actual_base_vel_y_v = float("nan")
+                    actual_base_vel_w_v = float("nan")
+                    actual_base_delta_x_v = float("nan")
+                    actual_base_delta_y_v = float("nan")
+                    row_progress_delta_v = float("nan")
+                    env_impl_for_motion = getattr(self.env, "env", None)
+                    base_lin_vel_t = getattr(env_impl_for_motion, "base_lin_vel", None)
+                    base_ang_vel_t = getattr(env_impl_for_motion, "base_ang_vel", None)
+                    root_states_t = getattr(env_impl_for_motion, "root_states", None)
+                    if torch.is_tensor(base_lin_vel_t) and base_lin_vel_t.shape[0] > i and base_lin_vel_t.shape[1] >= 2:
+                        actual_base_vel_x_v = _safe_float(base_lin_vel_t[i, 0].item(), default=float("nan"))
+                        actual_base_vel_y_v = _safe_float(base_lin_vel_t[i, 1].item(), default=float("nan"))
+                    if torch.is_tensor(base_ang_vel_t) and base_ang_vel_t.shape[0] > i and base_ang_vel_t.shape[1] >= 3:
+                        actual_base_vel_w_v = _safe_float(base_ang_vel_t[i, 2].item(), default=float("nan"))
+                    current_robot_x_v = float("nan")
+                    current_robot_y_v = float("nan")
+                    current_heading_v = float("nan")
+                    if torch.is_tensor(root_states_t) and root_states_t.shape[0] > i and root_states_t.shape[1] >= 7:
+                        current_robot_x_v = _safe_float(root_states_t[i, 0].item(), default=float("nan"))
+                        current_robot_y_v = _safe_float(root_states_t[i, 1].item(), default=float("nan"))
+                        qx_v = _safe_float(root_states_t[i, 3].item(), default=0.0)
+                        qy_v = _safe_float(root_states_t[i, 4].item(), default=0.0)
+                        qz_v = _safe_float(root_states_t[i, 5].item(), default=0.0)
+                        qw_v = _safe_float(root_states_t[i, 6].item(), default=1.0)
+                        current_heading_v = math.atan2(
+                            2.0 * (qw_v * qz_v + qx_v * qy_v),
+                            1.0 - 2.0 * (qy_v * qy_v + qz_v * qz_v),
+                        )
+                    if (
+                        math.isfinite(current_robot_x_v)
+                        and math.isfinite(current_robot_y_v)
+                        and math.isfinite(ai.prev_robot_x)
+                        and math.isfinite(ai.prev_robot_y)
+                    ):
+                        heading_for_delta = ai.prev_robot_heading if math.isfinite(ai.prev_robot_heading) else current_heading_v
+                        if math.isfinite(heading_for_delta):
+                            dx_world = current_robot_x_v - ai.prev_robot_x
+                            dy_world = current_robot_y_v - ai.prev_robot_y
+                            cos_h = math.cos(heading_for_delta)
+                            sin_h = math.sin(heading_for_delta)
+                            actual_base_delta_x_v = cos_h * dx_world + sin_h * dy_world
+                            actual_base_delta_y_v = -sin_h * dx_world + cos_h * dy_world
+                            ai.actual_base_delta_x_sum += actual_base_delta_x_v
+                            ai.actual_base_delta_y_sum += actual_base_delta_y_v
+                    if math.isfinite(ai.prev_progress_val):
+                        row_progress_delta_v = progress_val - ai.prev_progress_val
+                        ai.row_progress_delta_sum += row_progress_delta_v
+                    if math.isfinite(actual_base_vel_x_v):
+                        ai.actual_base_vel_x_sum += actual_base_vel_x_v
+                    if math.isfinite(actual_base_vel_y_v):
+                        ai.actual_base_vel_y_sum += actual_base_vel_y_v
+                    if math.isfinite(actual_base_vel_w_v):
+                        ai.actual_base_vel_w_sum += actual_base_vel_w_v
+                    if math.isfinite(actual_base_vel_x_v) or math.isfinite(actual_base_delta_y_v):
+                        ai.actual_motion_steps += 1
+                    ai.prev_robot_x = current_robot_x_v
+                    ai.prev_robot_y = current_robot_y_v
+                    ai.prev_robot_heading = current_heading_v
+                    ai.prev_progress_val = progress_val
 
                     target_bearing_v = _safe_float(target_bearing[i].item(), default=float("nan"))
                     target_bearing_abs_v = _safe_float(target_bearing_abs[i].item(), default=float("nan"))
@@ -1676,6 +2414,31 @@ class EvalRunner:
                                 ai.cmd_jerk_lin_sum += math.hypot(dx, dy)
                                 ai.cmd_jerk_ang_sum += abs(dw)
                             ai.prev_cmd_final = cmd_final_v
+                        cmd_raw_post_t = post_info.get("cmd_raw", None)
+                        cmd_safe_post_t = post_info.get("cmd_override_final", None)
+                        if cmd_safe_post_t is None:
+                            cmd_safe_post_t = post_info.get("cmd_post", post_info.get("cmd_slew", None))
+                        if torch.is_tensor(cmd_raw_post_t) and torch.is_tensor(cmd_safe_post_t):
+                            cmd_raw_post_v = [
+                                float(x) for x in cmd_raw_post_t[i].detach().cpu().tolist()[:3]
+                            ]
+                            cmd_safe_post_v = [
+                                float(x) for x in cmd_safe_post_t[i].detach().cpu().tolist()[:3]
+                            ]
+                            deltas = [
+                                cmd_safe_post_v[j] - cmd_raw_post_v[j]
+                                for j in range(min(3, len(cmd_raw_post_v), len(cmd_safe_post_v)))
+                            ]
+                            if len(deltas) >= 3:
+                                abs_deltas = [abs(v) for v in deltas[:3]]
+                                ai.cmd_post_delta_x_abs_sum += abs_deltas[0]
+                                ai.cmd_post_delta_y_abs_sum += abs_deltas[1]
+                                ai.cmd_post_delta_w_abs_sum += abs_deltas[2]
+                                ai.cmd_post_delta_y_sum += deltas[1]
+                                ai.cmd_post_delta_abs_sum += sum(abs_deltas)
+                                ai.cmd_post_samples += 1
+                                if max(abs_deltas) > 1e-6:
+                                    ai.cmd_post_rewrite_steps += 1
 
                     if self.args.skill == "moe" and isinstance(post_info, dict):
                         gate_raw_t = post_info.get("gate_y_raw", None)
@@ -1699,6 +2462,39 @@ class EvalRunner:
                         rule_follow_scale_t = post_info.get("rule_follow_scale", None)
                         rule_yaw_scale_t = post_info.get("rule_yaw_scale", None)
                         rule_follow_suppression_t = post_info.get("rule_follow_suppression", None)
+                        cmd_search_raw_t = post_info.get("cmd_search_raw", None)
+                        cmd_search_after_filter_t = post_info.get("cmd_search_after_filter", None)
+                        cmd_safe_t = post_info.get("cmd_safe", None)
+                        velocity_search_raw_risk_t = post_info.get("velocity_search_raw_risk", None)
+                        velocity_search_safe_risk_t = post_info.get("velocity_search_safe_risk", None)
+                        velocity_search_filter_changed_t = post_info.get("velocity_search_filter_changed", None)
+                        velocity_search_safe_available_t = post_info.get("velocity_search_safe_available", None)
+                        velocity_search_compute_time_ms_t = post_info.get("velocity_search_compute_time_ms", None)
+                        velocity_search_candidate_count_t = post_info.get("velocity_search_candidate_count", None)
+                        velocity_search_feasible_count_t = post_info.get("velocity_search_feasible_count", None)
+                        velocity_search_infeasible_count_t = post_info.get("velocity_search_infeasible_count", None)
+                        velocity_search_feasible_count_after_margin_t = post_info.get("velocity_search_feasible_count_after_margin", None)
+                        velocity_search_forward_candidate_count_t = post_info.get("velocity_search_forward_candidate_count", None)
+                        velocity_search_forward_feasible_count_t = post_info.get("velocity_search_forward_feasible_count", None)
+                        velocity_search_forward_infeasible_collision_count_t = post_info.get("velocity_search_forward_infeasible_collision_count", None)
+                        velocity_search_forward_infeasible_margin_count_t = post_info.get("velocity_search_forward_infeasible_margin_count", None)
+                        velocity_search_forward_infeasible_out_of_map_count_t = post_info.get("velocity_search_forward_infeasible_out_of_map_count", None)
+                        velocity_search_best_forward_feasible_cost_t = post_info.get("velocity_search_best_forward_feasible_cost", None)
+                        velocity_search_best_forward_feasible_clearance_t = post_info.get("velocity_search_best_forward_feasible_clearance", None)
+                        velocity_search_fallback_used_t = post_info.get("velocity_search_fallback_used", None)
+                        fallback_reason_t = post_info.get("fallback_reason", None)
+                        fallback_no_feasible_t = post_info.get("fallback_no_feasible", None)
+                        fallback_risk_threshold_t = post_info.get("fallback_risk_threshold", None)
+                        fallback_collision_t = post_info.get("fallback_collision", None)
+                        fallback_margin_t = post_info.get("fallback_margin", None)
+                        fallback_out_of_map_t = post_info.get("fallback_out_of_map", None)
+                        fallback_invalid_cost_t = post_info.get("fallback_invalid_cost", None)
+                        velocity_search_min_predicted_clearance_t = post_info.get("velocity_search_min_predicted_clearance", None)
+                        velocity_search_best_cost_t = post_info.get("velocity_search_best_cost", None)
+                        selected_rollout_min_clearance_t = post_info.get("selected_rollout_min_clearance", None)
+                        selected_rollout_collision_flag_t = post_info.get("selected_rollout_collision_flag", None)
+                        selected_rollout_out_of_map_flag_t = post_info.get("selected_rollout_out_of_map_flag", None)
+                        fallback_cmd_t = post_info.get("fallback_cmd", None)
                         row_not_released_t = post_info.get("row_not_released", None)
                         conflict_t = post_info.get("conflict_score", None)
                         priv_conflict_t = post_info.get("priv_conflict_score", None)
@@ -1732,6 +2528,10 @@ class EvalRunner:
                         cmd_f_t = post_info.get("cmd_F", None)
                         cmd_a_t = post_info.get("cmd_A", None)
                         cmd_s_t = post_info.get("cmd_S", None)
+                        cmd_raw_post_t = post_info.get("cmd_raw", None)
+                        cmd_safe_post_t = post_info.get("cmd_override_final", None)
+                        if cmd_safe_post_t is None:
+                            cmd_safe_post_t = post_info.get("cmd_post", post_info.get("cmd_slew", None))
                         clearance_pp_t = post_info.get("clearance_pp", None)
                         safe_thr_t = post_info.get("post_safe_distance", None)
 
@@ -2035,6 +2835,38 @@ class EvalRunner:
                         cmd_f_v = [float("nan"), float("nan"), float("nan")]
                         cmd_a_v = [float("nan"), float("nan"), float("nan")]
                         cmd_s_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_search_raw_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_search_after_filter_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_safe_v = [float("nan"), float("nan"), float("nan")]
+                        velocity_search_compute_time_ms_v = float("nan")
+                        velocity_search_candidate_count_v = float("nan")
+                        velocity_search_feasible_count_v = float("nan")
+                        velocity_search_infeasible_count_v = float("nan")
+                        velocity_search_feasible_count_after_margin_v = float("nan")
+                        velocity_search_forward_candidate_count_v = float("nan")
+                        velocity_search_forward_feasible_count_v = float("nan")
+                        velocity_search_forward_infeasible_collision_count_v = float("nan")
+                        velocity_search_forward_infeasible_margin_count_v = float("nan")
+                        velocity_search_forward_infeasible_out_of_map_count_v = float("nan")
+                        velocity_search_best_forward_feasible_cost_v = float("nan")
+                        velocity_search_best_forward_feasible_clearance_v = float("nan")
+                        velocity_search_fallback_used_v = float("nan")
+                        fallback_reason_v = float("nan")
+                        fallback_no_feasible_v = float("nan")
+                        fallback_risk_threshold_v = float("nan")
+                        fallback_collision_v = float("nan")
+                        fallback_margin_v = float("nan")
+                        fallback_out_of_map_v = float("nan")
+                        fallback_invalid_cost_v = float("nan")
+                        velocity_search_min_predicted_clearance_v = float("nan")
+                        velocity_search_best_cost_v = float("nan")
+                        selected_rollout_min_clearance_v = float("nan")
+                        selected_rollout_collision_flag_v = float("nan")
+                        selected_rollout_out_of_map_flag_v = float("nan")
+                        fallback_cmd_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_raw_post_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_safe_post_v = [float("nan"), float("nan"), float("nan")]
+                        cmd_post_delta_v = [float("nan"), float("nan"), float("nan")]
                         if torch.is_tensor(cmd_f_t):
                             cmd_f_v = [float(x) for x in cmd_f_t[i].detach().cpu().tolist()[:3]]
                             for j in range(3):
@@ -2045,6 +2877,237 @@ class EvalRunner:
                                 ai.cmd_a_sum[j] += cmd_a_v[j]
                         if torch.is_tensor(cmd_s_t):
                             cmd_s_v = [float(x) for x in cmd_s_t[i].detach().cpu().tolist()[:3]]
+                        if torch.is_tensor(cmd_search_raw_t):
+                            cmd_search_raw_v = [float(x) for x in cmd_search_raw_t[i].detach().cpu().tolist()[:3]]
+                        if torch.is_tensor(cmd_search_after_filter_t):
+                            cmd_search_after_filter_v = [
+                                float(x) for x in cmd_search_after_filter_t[i].detach().cpu().tolist()[:3]
+                            ]
+                        if torch.is_tensor(cmd_safe_t):
+                            cmd_safe_v = [float(x) for x in cmd_safe_t[i].detach().cpu().tolist()[:3]]
+                        if torch.is_tensor(velocity_search_raw_risk_t) and torch.is_tensor(velocity_search_safe_risk_t):
+                            raw_risk_v = _safe_float(
+                                velocity_search_raw_risk_t[i].item(),
+                                default=float("nan"),
+                            )
+                            safe_risk_v = _safe_float(
+                                velocity_search_safe_risk_t[i].item(),
+                                default=float("nan"),
+                            )
+                            if math.isfinite(raw_risk_v) and math.isfinite(safe_risk_v):
+                                ai.velocity_search_steps += 1
+                                ai.velocity_search_raw_risk_sum += raw_risk_v
+                                ai.velocity_search_safe_risk_sum += safe_risk_v
+                                if torch.is_tensor(velocity_search_filter_changed_t):
+                                    ai.velocity_search_filter_change_steps += int(
+                                        bool(velocity_search_filter_changed_t[i].item())
+                                    )
+                                if torch.is_tensor(velocity_search_safe_available_t):
+                                    ai.velocity_search_safe_available_steps += int(
+                                        bool(velocity_search_safe_available_t[i].item())
+                                    )
+                                if torch.is_tensor(velocity_search_compute_time_ms_t):
+                                    velocity_search_compute_time_ms_v = _safe_float(
+                                        velocity_search_compute_time_ms_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_compute_time_ms_sum += _safe_float(
+                                        velocity_search_compute_time_ms_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_candidate_count_t):
+                                    velocity_search_candidate_count_v = _safe_float(
+                                        velocity_search_candidate_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_candidate_count_sum += _safe_float(
+                                        velocity_search_candidate_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_feasible_count_t):
+                                    velocity_search_feasible_count_v = _safe_float(
+                                        velocity_search_feasible_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_feasible_count_sum += _safe_float(
+                                        velocity_search_feasible_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_infeasible_count_t):
+                                    velocity_search_infeasible_count_v = _safe_float(
+                                        velocity_search_infeasible_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_infeasible_count_sum += _safe_float(
+                                        velocity_search_infeasible_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_feasible_count_after_margin_t):
+                                    velocity_search_feasible_count_after_margin_v = _safe_float(
+                                        velocity_search_feasible_count_after_margin_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_feasible_count_after_margin_sum += _safe_float(
+                                        velocity_search_feasible_count_after_margin_t[i].item(),
+                                        default=0.0,
+                                    )
+                                ai.velocity_search_selected_v_lat_sum += _safe_float(cmd_safe_v[0], default=0.0)
+                                ai.velocity_search_selected_v_fwd_sum += _safe_float(cmd_safe_v[1], default=0.0)
+                                ai.velocity_search_selected_yaw_sum += _safe_float(cmd_safe_v[2], default=0.0)
+                                ai.velocity_search_raw_y_sum += _safe_float(cmd_search_raw_v[1], default=0.0)
+                                ai.velocity_search_after_filter_y_sum += _safe_float(cmd_search_after_filter_v[1], default=0.0)
+                                ai.velocity_search_cmd_safe_y_sum += _safe_float(cmd_safe_v[1], default=0.0)
+                                if math.isfinite(cmd_search_raw_v[1]) and abs(cmd_search_raw_v[1]) > 1e-6:
+                                    ai.velocity_search_cmd_safe_y_over_raw_y_sum += _safe_float(
+                                        cmd_safe_v[1] / cmd_search_raw_v[1],
+                                        default=0.0,
+                                    )
+                                    ai.velocity_search_cmd_safe_y_over_raw_y_steps += 1
+                                if torch.is_tensor(velocity_search_forward_candidate_count_t):
+                                    velocity_search_forward_candidate_count_v = _safe_float(
+                                        velocity_search_forward_candidate_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_forward_candidate_count_sum += _safe_float(
+                                        velocity_search_forward_candidate_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_forward_feasible_count_t):
+                                    velocity_search_forward_feasible_count_v = _safe_float(
+                                        velocity_search_forward_feasible_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_forward_feasible_count_sum += _safe_float(
+                                        velocity_search_forward_feasible_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_forward_infeasible_collision_count_t):
+                                    velocity_search_forward_infeasible_collision_count_v = _safe_float(
+                                        velocity_search_forward_infeasible_collision_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_forward_infeasible_collision_count_sum += _safe_float(
+                                        velocity_search_forward_infeasible_collision_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_forward_infeasible_margin_count_t):
+                                    velocity_search_forward_infeasible_margin_count_v = _safe_float(
+                                        velocity_search_forward_infeasible_margin_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_forward_infeasible_margin_count_sum += _safe_float(
+                                        velocity_search_forward_infeasible_margin_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_forward_infeasible_out_of_map_count_t):
+                                    velocity_search_forward_infeasible_out_of_map_count_v = _safe_float(
+                                        velocity_search_forward_infeasible_out_of_map_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_forward_infeasible_out_of_map_count_sum += _safe_float(
+                                        velocity_search_forward_infeasible_out_of_map_count_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_best_forward_feasible_cost_t):
+                                    velocity_search_best_forward_feasible_cost_v = _safe_float(
+                                        velocity_search_best_forward_feasible_cost_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                if torch.is_tensor(velocity_search_best_forward_feasible_clearance_t):
+                                    velocity_search_best_forward_feasible_clearance_v = _safe_float(
+                                        velocity_search_best_forward_feasible_clearance_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                if math.isfinite(velocity_search_best_forward_feasible_cost_v):
+                                    ai.velocity_search_best_forward_feasible_cost_sum += velocity_search_best_forward_feasible_cost_v
+                                    ai.velocity_search_best_forward_feasible_steps += 1
+                                if math.isfinite(velocity_search_best_forward_feasible_clearance_v):
+                                    ai.velocity_search_best_forward_feasible_clearance_sum += velocity_search_best_forward_feasible_clearance_v
+                                if torch.is_tensor(velocity_search_fallback_used_t):
+                                    velocity_search_fallback_used_v = _safe_float(
+                                        velocity_search_fallback_used_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_fallback_steps += int(
+                                        bool(velocity_search_fallback_used_t[i].item())
+                                    )
+                                if torch.is_tensor(fallback_reason_t):
+                                    fallback_reason_v = _safe_float(fallback_reason_t[i].item(), default=float("nan"))
+                                if torch.is_tensor(fallback_no_feasible_t):
+                                    fallback_no_feasible_v = _safe_float(fallback_no_feasible_t[i].item(), default=float("nan"))
+                                    ai.fallback_no_feasible_steps += int(bool(fallback_no_feasible_t[i].item()))
+                                if torch.is_tensor(fallback_risk_threshold_t):
+                                    fallback_risk_threshold_v = _safe_float(fallback_risk_threshold_t[i].item(), default=float("nan"))
+                                    ai.fallback_risk_threshold_steps += int(bool(fallback_risk_threshold_t[i].item()))
+                                if torch.is_tensor(fallback_collision_t):
+                                    fallback_collision_v = _safe_float(fallback_collision_t[i].item(), default=float("nan"))
+                                    ai.fallback_collision_steps += int(bool(fallback_collision_t[i].item()))
+                                if torch.is_tensor(fallback_margin_t):
+                                    fallback_margin_v = _safe_float(fallback_margin_t[i].item(), default=float("nan"))
+                                    ai.fallback_margin_steps += int(bool(fallback_margin_t[i].item()))
+                                if torch.is_tensor(fallback_out_of_map_t):
+                                    fallback_out_of_map_v = _safe_float(fallback_out_of_map_t[i].item(), default=float("nan"))
+                                    ai.fallback_out_of_map_steps += int(bool(fallback_out_of_map_t[i].item()))
+                                if torch.is_tensor(fallback_invalid_cost_t):
+                                    fallback_invalid_cost_v = _safe_float(fallback_invalid_cost_t[i].item(), default=float("nan"))
+                                    ai.fallback_invalid_cost_steps += int(bool(fallback_invalid_cost_t[i].item()))
+                                if torch.is_tensor(velocity_search_min_predicted_clearance_t):
+                                    velocity_search_min_predicted_clearance_v = _safe_float(
+                                        velocity_search_min_predicted_clearance_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_min_predicted_clearance_sum += _safe_float(
+                                        velocity_search_min_predicted_clearance_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_best_cost_t):
+                                    velocity_search_best_cost_v = _safe_float(
+                                        velocity_search_best_cost_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_best_cost_sum += _safe_float(
+                                        velocity_search_best_cost_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(selected_rollout_min_clearance_t):
+                                    selected_rollout_min_clearance_v = _safe_float(
+                                        selected_rollout_min_clearance_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.selected_rollout_min_clearance_sum += _safe_float(
+                                        selected_rollout_min_clearance_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(selected_rollout_collision_flag_t):
+                                    selected_rollout_collision_flag_v = _safe_float(
+                                        selected_rollout_collision_flag_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.selected_rollout_collision_steps += int(
+                                        bool(selected_rollout_collision_flag_t[i].item())
+                                    )
+                                if torch.is_tensor(selected_rollout_out_of_map_flag_t):
+                                    selected_rollout_out_of_map_flag_v = _safe_float(
+                                        selected_rollout_out_of_map_flag_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.selected_rollout_out_of_map_steps += int(
+                                        bool(selected_rollout_out_of_map_flag_t[i].item())
+                                    )
+                                if torch.is_tensor(fallback_cmd_t):
+                                    fallback_cmd_v = [float(x) for x in fallback_cmd_t[i].detach().cpu().tolist()[:3]]
+                        if torch.is_tensor(cmd_raw_post_t) and torch.is_tensor(cmd_safe_post_t):
+                            cmd_raw_post_v = [
+                                float(x) for x in cmd_raw_post_t[i].detach().cpu().tolist()[:3]
+                            ]
+                            cmd_safe_post_v = [
+                                float(x) for x in cmd_safe_post_t[i].detach().cpu().tolist()[:3]
+                            ]
+                            if len(cmd_raw_post_v) >= 3 and len(cmd_safe_post_v) >= 3:
+                                cmd_post_delta_v = [
+                                    cmd_safe_post_v[j] - cmd_raw_post_v[j]
+                                    for j in range(3)
+                                ]
                         if near_miss_now:
                             ai.near_miss_steps += 1
 
@@ -2065,6 +3128,7 @@ class EvalRunner:
                             cmd_final_v = ai.prev_cmd_final if ai.prev_cmd_final is not None else [float("nan"), float("nan"), float("nan")]
                             ai.timeseries.append(
                                 {
+                                    "step": int(ai.step_hl),
                                     "step_hl": int(ai.step_hl),
                                     "time_s": float(ai.step_hl) * float(self.env.high_level_dt),
                                     "trajectory_frame": "world_xy_train_play",
@@ -2072,8 +3136,11 @@ class EvalRunner:
                                     "robot_y": robot_y_v,
                                     "target_x": target_x_v,
                                     "target_y": target_y_v,
+                                    "target_x_right": goal_x_v,
+                                    "target_y_forward": goal_y_v,
                                     "obstacles_json": _trajectory_obstacles_json(env_impl, i),
                                     "progress": float(progress_val),
+                                    "row_progress_delta": row_progress_delta_v,
                                     "follow_err_m": follow_err_step,
                                     "target_bearing_rad": target_bearing_v,
                                     "target_bearing_abs_rad": target_bearing_abs_v,
@@ -2152,6 +3219,57 @@ class EvalRunner:
                                     "cmd_s_x": cmd_s_v[0],
                                     "cmd_s_y": cmd_s_v[1],
                                     "cmd_s_w": cmd_s_v[2],
+                                    "cmd_search_raw_x": cmd_search_raw_v[0],
+                                    "cmd_search_raw_y": cmd_search_raw_v[1],
+                                    "cmd_search_raw_w": cmd_search_raw_v[2],
+                                    "cmd_search_after_filter_x": cmd_search_after_filter_v[0],
+                                    "cmd_search_after_filter_y": cmd_search_after_filter_v[1],
+                                    "cmd_search_after_filter_w": cmd_search_after_filter_v[2],
+                                    "cmd_safe_x": cmd_safe_v[0],
+                                    "cmd_safe_y": cmd_safe_v[1],
+                                    "cmd_safe_w": cmd_safe_v[2],
+                                    "actual_base_vel_x": actual_base_vel_x_v,
+                                    "actual_base_vel_y": actual_base_vel_y_v,
+                                    "actual_base_vel_w": actual_base_vel_w_v,
+                                    "actual_base_delta_x": actual_base_delta_x_v,
+                                    "actual_base_delta_y": actual_base_delta_y_v,
+                                    "velocity_search_compute_time_ms": velocity_search_compute_time_ms_v,
+                                    "velocity_search_candidate_count": velocity_search_candidate_count_v,
+                                    "velocity_search_feasible_count": velocity_search_feasible_count_v,
+                                    "velocity_search_infeasible_count": velocity_search_infeasible_count_v,
+                                    "velocity_search_feasible_count_after_margin": velocity_search_feasible_count_after_margin_v,
+                                    "velocity_search_forward_candidate_count": velocity_search_forward_candidate_count_v,
+                                    "velocity_search_forward_feasible_count": velocity_search_forward_feasible_count_v,
+                                    "velocity_search_forward_infeasible_collision_count": velocity_search_forward_infeasible_collision_count_v,
+                                    "velocity_search_forward_infeasible_margin_count": velocity_search_forward_infeasible_margin_count_v,
+                                    "velocity_search_forward_infeasible_out_of_map_count": velocity_search_forward_infeasible_out_of_map_count_v,
+                                    "velocity_search_best_forward_feasible_cost": velocity_search_best_forward_feasible_cost_v,
+                                    "velocity_search_best_forward_feasible_clearance": velocity_search_best_forward_feasible_clearance_v,
+                                    "velocity_search_fallback_used": velocity_search_fallback_used_v,
+                                    "fallback_reason": fallback_reason_v,
+                                    "fallback_no_feasible": fallback_no_feasible_v,
+                                    "fallback_risk_threshold": fallback_risk_threshold_v,
+                                    "fallback_collision": fallback_collision_v,
+                                    "fallback_margin": fallback_margin_v,
+                                    "fallback_out_of_map": fallback_out_of_map_v,
+                                    "fallback_invalid_cost": fallback_invalid_cost_v,
+                                    "velocity_search_min_predicted_clearance": velocity_search_min_predicted_clearance_v,
+                                    "velocity_search_best_cost": velocity_search_best_cost_v,
+                                    "selected_rollout_min_clearance": selected_rollout_min_clearance_v,
+                                    "selected_rollout_collision_flag": selected_rollout_collision_flag_v,
+                                    "selected_rollout_out_of_map_flag": selected_rollout_out_of_map_flag_v,
+                                    "fallback_cmd_x": fallback_cmd_v[0],
+                                    "fallback_cmd_y": fallback_cmd_v[1],
+                                    "fallback_cmd_w": fallback_cmd_v[2],
+                                    "cmd_raw_before_postprocess_x": cmd_raw_post_v[0],
+                                    "cmd_raw_before_postprocess_y": cmd_raw_post_v[1],
+                                    "cmd_raw_before_postprocess_w": cmd_raw_post_v[2],
+                                    "cmd_safe_after_postprocess_x": cmd_safe_post_v[0],
+                                    "cmd_safe_after_postprocess_y": cmd_safe_post_v[1],
+                                    "cmd_safe_after_postprocess_w": cmd_safe_post_v[2],
+                                    "cmd_post_delta_x": cmd_post_delta_v[0],
+                                    "cmd_post_delta_y": cmd_post_delta_v[1],
+                                    "cmd_post_delta_w": cmd_post_delta_v[2],
                                     "cmd_final_x": cmd_final_v[0],
                                     "cmd_final_y": cmd_final_v[1],
                                     "cmd_final_w": cmd_final_v[2],
@@ -2367,6 +3485,200 @@ class EvalRunner:
                         cmd_x_right_mean - cmd_x_left_mean
                         if math.isfinite(cmd_x_right_mean) and math.isfinite(cmd_x_left_mean)
                         else float("nan")
+                    )
+                    cmd_post_denom = float(max(ai.cmd_post_samples, 1))
+                    cmd_post_delta_abs_mean = (
+                        ai.cmd_post_delta_abs_sum / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    cmd_post_delta_x_abs_mean = (
+                        ai.cmd_post_delta_x_abs_sum / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    cmd_post_delta_y_abs_mean = (
+                        ai.cmd_post_delta_y_abs_sum / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    cmd_post_delta_y_signed_mean = (
+                        ai.cmd_post_delta_y_sum / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    cmd_post_delta_w_abs_mean = (
+                        ai.cmd_post_delta_w_abs_sum / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    cmd_post_rewrite_rate = (
+                        ai.cmd_post_rewrite_steps / cmd_post_denom
+                        if ai.cmd_post_samples > 0 else float("nan")
+                    )
+                    velocity_search_denom = float(max(ai.velocity_search_steps, 1))
+                    velocity_search_filter_change_rate = (
+                        ai.velocity_search_filter_change_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_safe_available_rate = (
+                        ai.velocity_search_safe_available_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_raw_risk_mean = (
+                        ai.velocity_search_raw_risk_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_safe_risk_mean = (
+                        ai.velocity_search_safe_risk_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_compute_time_ms_mean = (
+                        ai.velocity_search_compute_time_ms_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_candidate_count_mean = (
+                        ai.velocity_search_candidate_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_feasible_count_mean = (
+                        ai.velocity_search_feasible_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_infeasible_count_mean = (
+                        ai.velocity_search_infeasible_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_feasible_count_after_margin_mean = (
+                        ai.velocity_search_feasible_count_after_margin_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_selected_v_lat_mean = (
+                        ai.velocity_search_selected_v_lat_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_selected_v_fwd_mean = (
+                        ai.velocity_search_selected_v_fwd_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_selected_yaw_mean = (
+                        ai.velocity_search_selected_yaw_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_raw_y_mean = (
+                        ai.velocity_search_raw_y_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_after_filter_y_mean = (
+                        ai.velocity_search_after_filter_y_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_cmd_safe_y_mean = (
+                        ai.velocity_search_cmd_safe_y_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_cmd_safe_y_over_raw_y_ratio = (
+                        ai.velocity_search_cmd_safe_y_over_raw_y_sum
+                        / float(max(ai.velocity_search_cmd_safe_y_over_raw_y_steps, 1))
+                        if ai.velocity_search_cmd_safe_y_over_raw_y_steps > 0 else float("nan")
+                    )
+                    velocity_search_forward_candidate_count_mean = (
+                        ai.velocity_search_forward_candidate_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_forward_feasible_count_mean = (
+                        ai.velocity_search_forward_feasible_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_forward_infeasible_collision_count_mean = (
+                        ai.velocity_search_forward_infeasible_collision_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_forward_infeasible_margin_count_mean = (
+                        ai.velocity_search_forward_infeasible_margin_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_forward_infeasible_out_of_map_count_mean = (
+                        ai.velocity_search_forward_infeasible_out_of_map_count_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_best_forward_feasible_cost_mean = (
+                        ai.velocity_search_best_forward_feasible_cost_sum
+                        / float(max(ai.velocity_search_best_forward_feasible_steps, 1))
+                        if ai.velocity_search_best_forward_feasible_steps > 0 else float("nan")
+                    )
+                    velocity_search_best_forward_feasible_clearance_mean = (
+                        ai.velocity_search_best_forward_feasible_clearance_sum
+                        / float(max(ai.velocity_search_best_forward_feasible_steps, 1))
+                        if ai.velocity_search_best_forward_feasible_steps > 0 else float("nan")
+                    )
+                    actual_motion_denom = float(max(ai.actual_motion_steps, 1))
+                    actual_base_vel_x_mean = (
+                        ai.actual_base_vel_x_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    actual_base_vel_y_mean = (
+                        ai.actual_base_vel_y_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    actual_base_vel_w_mean = (
+                        ai.actual_base_vel_w_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    actual_base_delta_x_mean = (
+                        ai.actual_base_delta_x_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    actual_base_delta_y_mean = (
+                        ai.actual_base_delta_y_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    row_progress_delta_mean = (
+                        ai.row_progress_delta_sum / actual_motion_denom
+                        if ai.actual_motion_steps > 0 else float("nan")
+                    )
+                    velocity_search_fallback_rate = (
+                        ai.velocity_search_fallback_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_no_feasible_rate = (
+                        ai.fallback_no_feasible_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_risk_threshold_rate = (
+                        ai.fallback_risk_threshold_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_collision_rate = (
+                        ai.fallback_collision_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_margin_rate = (
+                        ai.fallback_margin_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_out_of_map_rate = (
+                        ai.fallback_out_of_map_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    fallback_invalid_cost_rate = (
+                        ai.fallback_invalid_cost_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_min_predicted_clearance_mean = (
+                        ai.velocity_search_min_predicted_clearance_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_best_cost_mean = (
+                        ai.velocity_search_best_cost_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    selected_rollout_min_clearance_mean = (
+                        ai.selected_rollout_min_clearance_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    selected_rollout_collision_rate = (
+                        ai.selected_rollout_collision_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    selected_rollout_out_of_map_rate = (
+                        ai.selected_rollout_out_of_map_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
                     )
                     episode_rows.append(
                         {
@@ -2780,6 +4092,53 @@ class EvalRunner:
                             "cmd_x_right_mean": cmd_x_right_mean,
                             "yaw_directional_response": yaw_directional_response,
                             "lateral_directional_response": lateral_directional_response,
+                            "cmd_post_delta_abs_mean": cmd_post_delta_abs_mean,
+                            "cmd_post_delta_x_abs_mean": cmd_post_delta_x_abs_mean,
+                            "cmd_post_delta_y_abs_mean": cmd_post_delta_y_abs_mean,
+                            "cmd_post_delta_y_signed_mean": cmd_post_delta_y_signed_mean,
+                            "cmd_post_delta_w_abs_mean": cmd_post_delta_w_abs_mean,
+                            "cmd_post_rewrite_rate": cmd_post_rewrite_rate,
+                            "velocity_search_filter_change_rate": velocity_search_filter_change_rate,
+                            "velocity_search_safe_available_rate": velocity_search_safe_available_rate,
+                            "velocity_search_raw_risk_mean": velocity_search_raw_risk_mean,
+                            "velocity_search_safe_risk_mean": velocity_search_safe_risk_mean,
+                            "velocity_search_compute_time_ms_mean": velocity_search_compute_time_ms_mean,
+                            "velocity_search_candidate_count_mean": velocity_search_candidate_count_mean,
+                            "velocity_search_feasible_count_mean": velocity_search_feasible_count_mean,
+                            "velocity_search_infeasible_count_mean": velocity_search_infeasible_count_mean,
+                            "velocity_search_feasible_count_after_margin_mean": velocity_search_feasible_count_after_margin_mean,
+                            "velocity_search_selected_v_lat_mean": velocity_search_selected_v_lat_mean,
+                            "velocity_search_selected_v_fwd_mean": velocity_search_selected_v_fwd_mean,
+                            "velocity_search_selected_yaw_mean": velocity_search_selected_yaw_mean,
+                            "velocity_search_raw_y_mean": velocity_search_raw_y_mean,
+                            "velocity_search_after_filter_y_mean": velocity_search_after_filter_y_mean,
+                            "cmd_safe_y_mean": velocity_search_cmd_safe_y_mean,
+                            "cmd_safe_y_over_raw_y_ratio": velocity_search_cmd_safe_y_over_raw_y_ratio,
+                            "actual_base_vel_x_mean": actual_base_vel_x_mean,
+                            "actual_base_vel_y_mean": actual_base_vel_y_mean,
+                            "actual_base_vel_w_mean": actual_base_vel_w_mean,
+                            "actual_base_delta_x_mean": actual_base_delta_x_mean,
+                            "actual_base_delta_y_mean": actual_base_delta_y_mean,
+                            "row_progress_delta_mean": row_progress_delta_mean,
+                            "velocity_search_forward_candidate_count_mean": velocity_search_forward_candidate_count_mean,
+                            "velocity_search_forward_feasible_count_mean": velocity_search_forward_feasible_count_mean,
+                            "velocity_search_forward_infeasible_collision_count_mean": velocity_search_forward_infeasible_collision_count_mean,
+                            "velocity_search_forward_infeasible_margin_count_mean": velocity_search_forward_infeasible_margin_count_mean,
+                            "velocity_search_forward_infeasible_out_of_map_count_mean": velocity_search_forward_infeasible_out_of_map_count_mean,
+                            "velocity_search_best_forward_feasible_cost_mean": velocity_search_best_forward_feasible_cost_mean,
+                            "velocity_search_best_forward_feasible_clearance_mean": velocity_search_best_forward_feasible_clearance_mean,
+                            "velocity_search_fallback_rate": velocity_search_fallback_rate,
+                            "fallback_no_feasible_rate": fallback_no_feasible_rate,
+                            "fallback_risk_threshold_rate": fallback_risk_threshold_rate,
+                            "fallback_collision_rate": fallback_collision_rate,
+                            "fallback_margin_rate": fallback_margin_rate,
+                            "fallback_out_of_map_rate": fallback_out_of_map_rate,
+                            "fallback_invalid_cost_rate": fallback_invalid_cost_rate,
+                            "velocity_search_min_predicted_clearance_mean": velocity_search_min_predicted_clearance_mean,
+                            "velocity_search_best_cost_mean": velocity_search_best_cost_mean,
+                            "selected_rollout_min_clearance_mean": selected_rollout_min_clearance_mean,
+                            "selected_rollout_collision_rate": selected_rollout_collision_rate,
+                            "selected_rollout_out_of_map_rate": selected_rollout_out_of_map_rate,
                             "goal_x_left_steps": ai.goal_x_left_steps,
                             "goal_x_right_steps": ai.goal_x_right_steps,
                             "goal_cmd_corr_steps": ai.goal_cmd_corr_steps,
@@ -3436,6 +4795,121 @@ class EvalRunner:
         cmd_x_right_vals = _clean([r.get("cmd_x_right_mean", float("nan")) for r in rows])
         yaw_response_vals = _clean([r.get("yaw_directional_response", float("nan")) for r in rows])
         lateral_response_vals = _clean([r.get("lateral_directional_response", float("nan")) for r in rows])
+        cmd_post_delta_abs_vals = _clean([r.get("cmd_post_delta_abs_mean", float("nan")) for r in rows])
+        cmd_post_delta_x_abs_vals = _clean([r.get("cmd_post_delta_x_abs_mean", float("nan")) for r in rows])
+        cmd_post_delta_y_abs_vals = _clean([r.get("cmd_post_delta_y_abs_mean", float("nan")) for r in rows])
+        cmd_post_delta_y_signed_vals = _clean([r.get("cmd_post_delta_y_signed_mean", float("nan")) for r in rows])
+        cmd_post_delta_w_abs_vals = _clean([r.get("cmd_post_delta_w_abs_mean", float("nan")) for r in rows])
+        cmd_post_rewrite_vals = _clean([r.get("cmd_post_rewrite_rate", float("nan")) for r in rows])
+        velocity_search_filter_change_vals = _clean([
+            r.get("velocity_search_filter_change_rate", float("nan")) for r in rows
+        ])
+        velocity_search_safe_available_vals = _clean([
+            r.get("velocity_search_safe_available_rate", float("nan")) for r in rows
+        ])
+        velocity_search_raw_risk_vals = _clean([
+            r.get("velocity_search_raw_risk_mean", float("nan")) for r in rows
+        ])
+        velocity_search_safe_risk_vals = _clean([
+            r.get("velocity_search_safe_risk_mean", float("nan")) for r in rows
+        ])
+        velocity_search_compute_time_vals = _clean([
+            r.get("velocity_search_compute_time_ms_mean", float("nan")) for r in rows
+        ])
+        velocity_search_candidate_count_vals = _clean([
+            r.get("velocity_search_candidate_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_feasible_count_vals = _clean([
+            r.get("velocity_search_feasible_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_infeasible_count_vals = _clean([
+            r.get("velocity_search_infeasible_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_feasible_count_after_margin_vals = _clean([
+            r.get("velocity_search_feasible_count_after_margin_mean", float("nan")) for r in rows
+        ])
+        velocity_search_selected_v_lat_vals = _clean([
+            r.get("velocity_search_selected_v_lat_mean", float("nan")) for r in rows
+        ])
+        velocity_search_selected_v_fwd_vals = _clean([
+            r.get("velocity_search_selected_v_fwd_mean", float("nan")) for r in rows
+        ])
+        velocity_search_selected_yaw_vals = _clean([
+            r.get("velocity_search_selected_yaw_mean", float("nan")) for r in rows
+        ])
+        velocity_search_raw_y_vals = _clean([
+            r.get("velocity_search_raw_y_mean", float("nan")) for r in rows
+        ])
+        velocity_search_after_filter_y_vals = _clean([
+            r.get("velocity_search_after_filter_y_mean", float("nan")) for r in rows
+        ])
+        cmd_safe_y_vals = _clean([r.get("cmd_safe_y_mean", float("nan")) for r in rows])
+        cmd_safe_y_over_raw_y_vals = _clean([
+            r.get("cmd_safe_y_over_raw_y_ratio", float("nan")) for r in rows
+        ])
+        actual_base_vel_x_vals = _clean([r.get("actual_base_vel_x_mean", float("nan")) for r in rows])
+        actual_base_vel_y_vals = _clean([r.get("actual_base_vel_y_mean", float("nan")) for r in rows])
+        actual_base_vel_w_vals = _clean([r.get("actual_base_vel_w_mean", float("nan")) for r in rows])
+        actual_base_delta_x_vals = _clean([r.get("actual_base_delta_x_mean", float("nan")) for r in rows])
+        actual_base_delta_y_vals = _clean([r.get("actual_base_delta_y_mean", float("nan")) for r in rows])
+        row_progress_delta_vals = _clean([r.get("row_progress_delta_mean", float("nan")) for r in rows])
+        velocity_search_forward_candidate_count_vals = _clean([
+            r.get("velocity_search_forward_candidate_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_forward_feasible_count_vals = _clean([
+            r.get("velocity_search_forward_feasible_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_forward_infeasible_collision_count_vals = _clean([
+            r.get("velocity_search_forward_infeasible_collision_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_forward_infeasible_margin_count_vals = _clean([
+            r.get("velocity_search_forward_infeasible_margin_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_forward_infeasible_out_of_map_count_vals = _clean([
+            r.get("velocity_search_forward_infeasible_out_of_map_count_mean", float("nan")) for r in rows
+        ])
+        velocity_search_best_forward_feasible_cost_vals = _clean([
+            r.get("velocity_search_best_forward_feasible_cost_mean", float("nan")) for r in rows
+        ])
+        velocity_search_best_forward_feasible_clearance_vals = _clean([
+            r.get("velocity_search_best_forward_feasible_clearance_mean", float("nan")) for r in rows
+        ])
+        velocity_search_fallback_vals = _clean([
+            r.get("velocity_search_fallback_rate", float("nan")) for r in rows
+        ])
+        fallback_no_feasible_vals = _clean([
+            r.get("fallback_no_feasible_rate", float("nan")) for r in rows
+        ])
+        fallback_risk_threshold_vals = _clean([
+            r.get("fallback_risk_threshold_rate", float("nan")) for r in rows
+        ])
+        fallback_collision_vals = _clean([
+            r.get("fallback_collision_rate", float("nan")) for r in rows
+        ])
+        fallback_margin_vals = _clean([
+            r.get("fallback_margin_rate", float("nan")) for r in rows
+        ])
+        fallback_out_of_map_vals = _clean([
+            r.get("fallback_out_of_map_rate", float("nan")) for r in rows
+        ])
+        fallback_invalid_cost_vals = _clean([
+            r.get("fallback_invalid_cost_rate", float("nan")) for r in rows
+        ])
+        velocity_search_min_clearance_vals = _clean([
+            r.get("velocity_search_min_predicted_clearance_mean", float("nan")) for r in rows
+        ])
+        velocity_search_best_cost_vals = _clean([
+            r.get("velocity_search_best_cost_mean", float("nan")) for r in rows
+        ])
+        selected_rollout_clearance_vals = _clean([
+            r.get("selected_rollout_min_clearance_mean", float("nan")) for r in rows
+        ])
+        selected_rollout_collision_vals = _clean([
+            r.get("selected_rollout_collision_rate", float("nan")) for r in rows
+        ])
+        selected_rollout_out_of_map_vals = _clean([
+            r.get("selected_rollout_out_of_map_rate", float("nan")) for r in rows
+        ])
         w_clearance_f_corr = _pearson_corr(
             [float(r.get("w_mean", float("nan"))) for r in rows],
             [float(r.get("clearance_f_mean", float("nan"))) for r in rows],
@@ -3633,6 +5107,147 @@ class EvalRunner:
             "lateral_directional_response": (
                 float(np.mean(lateral_response_vals)) if lateral_response_vals else float("nan")
             ),
+            "cmd_post_delta_abs_mean": (
+                float(np.mean(cmd_post_delta_abs_vals)) if cmd_post_delta_abs_vals else float("nan")
+            ),
+            "cmd_post_delta_x_abs_mean": (
+                float(np.mean(cmd_post_delta_x_abs_vals)) if cmd_post_delta_x_abs_vals else float("nan")
+            ),
+            "cmd_post_delta_y_abs_mean": (
+                float(np.mean(cmd_post_delta_y_abs_vals)) if cmd_post_delta_y_abs_vals else float("nan")
+            ),
+            "cmd_post_delta_y_signed_mean": (
+                float(np.mean(cmd_post_delta_y_signed_vals)) if cmd_post_delta_y_signed_vals else float("nan")
+            ),
+            "cmd_post_delta_w_abs_mean": (
+                float(np.mean(cmd_post_delta_w_abs_vals)) if cmd_post_delta_w_abs_vals else float("nan")
+            ),
+            "cmd_post_rewrite_rate": (
+                float(np.mean(cmd_post_rewrite_vals)) if cmd_post_rewrite_vals else float("nan")
+            ),
+            "velocity_search_filter_change_rate": (
+                float(np.mean(velocity_search_filter_change_vals)) if velocity_search_filter_change_vals else float("nan")
+            ),
+            "velocity_search_safe_available_rate": (
+                float(np.mean(velocity_search_safe_available_vals)) if velocity_search_safe_available_vals else float("nan")
+            ),
+            "velocity_search_raw_risk_mean": (
+                float(np.mean(velocity_search_raw_risk_vals)) if velocity_search_raw_risk_vals else float("nan")
+            ),
+            "velocity_search_safe_risk_mean": (
+                float(np.mean(velocity_search_safe_risk_vals)) if velocity_search_safe_risk_vals else float("nan")
+            ),
+            "velocity_search_compute_time_ms_mean": (
+                float(np.mean(velocity_search_compute_time_vals)) if velocity_search_compute_time_vals else float("nan")
+            ),
+            "velocity_search_candidate_count_mean": (
+                float(np.mean(velocity_search_candidate_count_vals)) if velocity_search_candidate_count_vals else float("nan")
+            ),
+            "velocity_search_feasible_count_mean": (
+                float(np.mean(velocity_search_feasible_count_vals)) if velocity_search_feasible_count_vals else float("nan")
+            ),
+            "velocity_search_infeasible_count_mean": (
+                float(np.mean(velocity_search_infeasible_count_vals)) if velocity_search_infeasible_count_vals else float("nan")
+            ),
+            "velocity_search_feasible_count_after_margin_mean": (
+                float(np.mean(velocity_search_feasible_count_after_margin_vals)) if velocity_search_feasible_count_after_margin_vals else float("nan")
+            ),
+            "velocity_search_selected_v_lat_mean": (
+                float(np.mean(velocity_search_selected_v_lat_vals)) if velocity_search_selected_v_lat_vals else float("nan")
+            ),
+            "velocity_search_selected_v_fwd_mean": (
+                float(np.mean(velocity_search_selected_v_fwd_vals)) if velocity_search_selected_v_fwd_vals else float("nan")
+            ),
+            "velocity_search_selected_yaw_mean": (
+                float(np.mean(velocity_search_selected_yaw_vals)) if velocity_search_selected_yaw_vals else float("nan")
+            ),
+            "velocity_search_raw_y_mean": (
+                float(np.mean(velocity_search_raw_y_vals)) if velocity_search_raw_y_vals else float("nan")
+            ),
+            "velocity_search_after_filter_y_mean": (
+                float(np.mean(velocity_search_after_filter_y_vals)) if velocity_search_after_filter_y_vals else float("nan")
+            ),
+            "cmd_safe_y_mean": (
+                float(np.mean(cmd_safe_y_vals)) if cmd_safe_y_vals else float("nan")
+            ),
+            "cmd_safe_y_over_raw_y_ratio": (
+                float(np.mean(cmd_safe_y_over_raw_y_vals)) if cmd_safe_y_over_raw_y_vals else float("nan")
+            ),
+            "actual_base_vel_x_mean": (
+                float(np.mean(actual_base_vel_x_vals)) if actual_base_vel_x_vals else float("nan")
+            ),
+            "actual_base_vel_y_mean": (
+                float(np.mean(actual_base_vel_y_vals)) if actual_base_vel_y_vals else float("nan")
+            ),
+            "actual_base_vel_w_mean": (
+                float(np.mean(actual_base_vel_w_vals)) if actual_base_vel_w_vals else float("nan")
+            ),
+            "actual_base_delta_x_mean": (
+                float(np.mean(actual_base_delta_x_vals)) if actual_base_delta_x_vals else float("nan")
+            ),
+            "actual_base_delta_y_mean": (
+                float(np.mean(actual_base_delta_y_vals)) if actual_base_delta_y_vals else float("nan")
+            ),
+            "row_progress_delta_mean": (
+                float(np.mean(row_progress_delta_vals)) if row_progress_delta_vals else float("nan")
+            ),
+            "velocity_search_forward_candidate_count_mean": (
+                float(np.mean(velocity_search_forward_candidate_count_vals)) if velocity_search_forward_candidate_count_vals else float("nan")
+            ),
+            "velocity_search_forward_feasible_count_mean": (
+                float(np.mean(velocity_search_forward_feasible_count_vals)) if velocity_search_forward_feasible_count_vals else float("nan")
+            ),
+            "velocity_search_forward_infeasible_collision_count_mean": (
+                float(np.mean(velocity_search_forward_infeasible_collision_count_vals)) if velocity_search_forward_infeasible_collision_count_vals else float("nan")
+            ),
+            "velocity_search_forward_infeasible_margin_count_mean": (
+                float(np.mean(velocity_search_forward_infeasible_margin_count_vals)) if velocity_search_forward_infeasible_margin_count_vals else float("nan")
+            ),
+            "velocity_search_forward_infeasible_out_of_map_count_mean": (
+                float(np.mean(velocity_search_forward_infeasible_out_of_map_count_vals)) if velocity_search_forward_infeasible_out_of_map_count_vals else float("nan")
+            ),
+            "velocity_search_best_forward_feasible_cost_mean": (
+                float(np.mean(velocity_search_best_forward_feasible_cost_vals)) if velocity_search_best_forward_feasible_cost_vals else float("nan")
+            ),
+            "velocity_search_best_forward_feasible_clearance_mean": (
+                float(np.mean(velocity_search_best_forward_feasible_clearance_vals)) if velocity_search_best_forward_feasible_clearance_vals else float("nan")
+            ),
+            "velocity_search_fallback_rate": (
+                float(np.mean(velocity_search_fallback_vals)) if velocity_search_fallback_vals else float("nan")
+            ),
+            "fallback_no_feasible_rate": (
+                float(np.mean(fallback_no_feasible_vals)) if fallback_no_feasible_vals else float("nan")
+            ),
+            "fallback_risk_threshold_rate": (
+                float(np.mean(fallback_risk_threshold_vals)) if fallback_risk_threshold_vals else float("nan")
+            ),
+            "fallback_collision_rate": (
+                float(np.mean(fallback_collision_vals)) if fallback_collision_vals else float("nan")
+            ),
+            "fallback_margin_rate": (
+                float(np.mean(fallback_margin_vals)) if fallback_margin_vals else float("nan")
+            ),
+            "fallback_out_of_map_rate": (
+                float(np.mean(fallback_out_of_map_vals)) if fallback_out_of_map_vals else float("nan")
+            ),
+            "fallback_invalid_cost_rate": (
+                float(np.mean(fallback_invalid_cost_vals)) if fallback_invalid_cost_vals else float("nan")
+            ),
+            "velocity_search_min_predicted_clearance_mean": (
+                float(np.mean(velocity_search_min_clearance_vals)) if velocity_search_min_clearance_vals else float("nan")
+            ),
+            "velocity_search_best_cost_mean": (
+                float(np.mean(velocity_search_best_cost_vals)) if velocity_search_best_cost_vals else float("nan")
+            ),
+            "selected_rollout_min_clearance_mean": (
+                float(np.mean(selected_rollout_clearance_vals)) if selected_rollout_clearance_vals else float("nan")
+            ),
+            "selected_rollout_collision_rate": (
+                float(np.mean(selected_rollout_collision_vals)) if selected_rollout_collision_vals else float("nan")
+            ),
+            "selected_rollout_out_of_map_rate": (
+                float(np.mean(selected_rollout_out_of_map_vals)) if selected_rollout_out_of_map_vals else float("nan")
+            ),
             "inference_latency_ms_p50": _quantile(latency_ms_samples, 0.50),
             "inference_latency_ms_p95": _quantile(latency_ms_samples, 0.95),
         }
@@ -3760,6 +5375,8 @@ class EvalRunner:
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
             }
 
+        is_additive_fusion = bool(getattr(self.args, "additive_fusion", False))
+        is_velocity_search = bool(getattr(self.args, "velocity_search", False))
         result = {
             "protocol": {
                 "task": self.args.task,
@@ -3815,6 +5432,10 @@ class EvalRunner:
                 "policy_variant": (
                     "mono_ppo"
                     if bool(getattr(self.args, "mono_ppo", False))
+                    else "additive_fusion"
+                    if is_additive_fusion
+                    else "velocity_search"
+                    if is_velocity_search
                     else "rule_override"
                     if bool(getattr(self.args, "rule_override", False))
                     else {"none": "yonly", "geom": "geomw", "risk_only": "risk_only", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
@@ -3824,23 +5445,70 @@ class EvalRunner:
                     self.policy_meta.get("policy_variant", self.policy_meta.get("trained_w_mode", None))
                     if isinstance(self.policy_meta, dict) else None
                 ),
-                "uses_learned_w_output": bool(th.is_learned_w_mode(str(self.args.w_mode))),
-                "uses_learned_w_for_control": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode))
+                "uses_gate_policy": bool(
+                    self.args.skill == "moe"
+                    and not getattr(self.args, "mono_ppo", False)
+                    and not is_additive_fusion
+                    and not is_velocity_search
                 ),
-                "uses_risk_diff_correction": bool(th.is_learnedw2_mode(str(self.args.w_mode)) or th.is_risk_only_mode(str(self.args.w_mode))),
+                "uses_learned_w_output": bool(
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                ),
+                "uses_learned_w_for_control": bool(
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                ),
+                "uses_additive_fusion": bool(is_additive_fusion),
+                "uses_velocity_search": bool(is_velocity_search),
+                "uses_target_aware_velocity_search": bool(is_velocity_search),
+                "velocity_search_definition": (
+                    "DWA-style target-aware velocity-space local planner: samples high-level "
+                    "[v_lat,v_fwd,omega], rolls out constant body-frame commands on the same local map, "
+                    "rejects footprint collisions as infeasible, then selects by tracking-clearance cost."
+                    if is_velocity_search else ""
+                ),
+                "uses_lateral_projection": bool(is_additive_fusion),
+                "shared_postprocess": True,
+                "uses_risk_diff_correction": bool(
+                    (th.is_learnedw2_mode(str(self.args.w_mode)) or th.is_risk_only_mode(str(self.args.w_mode)))
+                    and not is_additive_fusion
+                    and not is_velocity_search
+                ),
                 "delta_y_w_forced_zero": False,
                 "mono_ppo": bool(getattr(self.args, "mono_ppo", False)),
                 "uses_follow_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
                 "uses_avoid_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
-                "uses_pcr_gate": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
+                "uses_pcr_gate": bool(
+                    self.args.skill == "moe"
+                    and not getattr(self.args, "mono_ppo", False)
+                    and not is_additive_fusion
+                    and not is_velocity_search
+                ),
                 "uses_follow_expert_for_metrics": bool(self.args.skill == "moe"),
                 "uses_avoid_expert_for_metrics": bool(self.args.skill == "moe" and self.avoid_model is not None),
                 "conflict_metrics_available": bool(
                     (not getattr(self.args, "mono_ppo", False))
                     or (self.args.skill == "moe" and self.avoid_model is not None)
                 ),
-                "mechanism_metrics_available": bool(not getattr(self.args, "mono_ppo", False)),
+                "mechanism_metrics_available": bool(
+                    not getattr(self.args, "mono_ppo", False)
+                    and not is_additive_fusion
+                    and not is_velocity_search
+                ),
+                "velocity_search_split": str(getattr(self.args, "velocity_search_split", "")),
+                "velocity_search_hparams_source": (
+                    "json" if str(getattr(self.args, "velocity_search_hparams_json", "") or "").strip()
+                    else "default_or_cli"
+                ),
+                "velocity_search_hparams_json": str(getattr(self.args, "velocity_search_hparams_json", "") or ""),
+                "velocity_search_chosen_hparams": dict(self.velocity_search_hparams) if is_velocity_search else {},
+                "velocity_search_validation_tuning_protocol": (
+                    "Tune weights only with velocity_search_split=validation_layout; "
+                    "main_test and heldout_test must use a saved chosen-hparams JSON without further changes."
+                    if is_velocity_search else ""
+                ),
+                "velocity_search_hparams_frozen_for_eval": bool(
+                    is_velocity_search and str(getattr(self.args, "velocity_search_split", "main_test")) != "validation_layout"
+                ),
                 "mono_ppo_conflict_metrics_note": (
                     "For Mono-PPO, conflict rates are eval-only diagnostics computed from the same "
                     "analytic Follow candidate and diagnostic Avoid candidate; they are not policy inputs."
@@ -3981,6 +5649,20 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             os.path.join(out_dir, "resolved_protocol.json"),
             resolved_protocol,
         )
+    protocol = metrics.get("protocol", {})
+    if isinstance(protocol, dict) and protocol.get("policy_variant") == "velocity_search":
+        with open(os.path.join(out_dir, "velocity_search_chosen_hparams.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "split": protocol.get("velocity_search_split", ""),
+                    "hparams": protocol.get("velocity_search_chosen_hparams", {}),
+                    "validation_tuning_protocol": protocol.get("velocity_search_validation_tuning_protocol", ""),
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
 
     rows = metrics.get("per_episode", [])
     fieldnames = [
@@ -4182,6 +5864,53 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "cmd_x_right_mean",
         "yaw_directional_response",
         "lateral_directional_response",
+        "cmd_post_delta_abs_mean",
+        "cmd_post_delta_x_abs_mean",
+        "cmd_post_delta_y_abs_mean",
+        "cmd_post_delta_y_signed_mean",
+        "cmd_post_delta_w_abs_mean",
+        "cmd_post_rewrite_rate",
+        "velocity_search_filter_change_rate",
+        "velocity_search_safe_available_rate",
+        "velocity_search_raw_risk_mean",
+        "velocity_search_safe_risk_mean",
+        "velocity_search_compute_time_ms_mean",
+        "velocity_search_candidate_count_mean",
+        "velocity_search_feasible_count_mean",
+        "velocity_search_infeasible_count_mean",
+        "velocity_search_feasible_count_after_margin_mean",
+        "velocity_search_selected_v_lat_mean",
+        "velocity_search_selected_v_fwd_mean",
+        "velocity_search_selected_yaw_mean",
+        "velocity_search_raw_y_mean",
+        "velocity_search_after_filter_y_mean",
+        "cmd_safe_y_mean",
+        "cmd_safe_y_over_raw_y_ratio",
+        "actual_base_vel_x_mean",
+        "actual_base_vel_y_mean",
+        "actual_base_vel_w_mean",
+        "actual_base_delta_x_mean",
+        "actual_base_delta_y_mean",
+        "row_progress_delta_mean",
+        "velocity_search_forward_candidate_count_mean",
+        "velocity_search_forward_feasible_count_mean",
+        "velocity_search_forward_infeasible_collision_count_mean",
+        "velocity_search_forward_infeasible_margin_count_mean",
+        "velocity_search_forward_infeasible_out_of_map_count_mean",
+        "velocity_search_best_forward_feasible_cost_mean",
+        "velocity_search_best_forward_feasible_clearance_mean",
+        "velocity_search_fallback_rate",
+        "fallback_no_feasible_rate",
+        "fallback_risk_threshold_rate",
+        "fallback_collision_rate",
+        "fallback_margin_rate",
+        "fallback_out_of_map_rate",
+        "fallback_invalid_cost_rate",
+        "velocity_search_min_predicted_clearance_mean",
+        "velocity_search_best_cost_mean",
+        "selected_rollout_min_clearance_mean",
+        "selected_rollout_collision_rate",
+        "selected_rollout_out_of_map_rate",
         "goal_x_left_steps",
         "goal_x_right_steps",
         "goal_cmd_corr_steps",
@@ -4237,6 +5966,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "episode_collision_final",
             "episode_target_lost",
             "episode_row_progress",
+            "step",
             "step_hl",
             "time_s",
             "trajectory_frame",
@@ -4244,8 +5974,11 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "robot_y",
             "target_x",
             "target_y",
+            "target_x_right",
+            "target_y_forward",
             "obstacles_json",
             "progress",
+            "row_progress_delta",
             "follow_err_m",
             "target_bearing_rad",
             "target_bearing_abs_rad",
@@ -4321,6 +6054,57 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "cmd_s_x",
             "cmd_s_y",
             "cmd_s_w",
+            "cmd_search_raw_x",
+            "cmd_search_raw_y",
+            "cmd_search_raw_w",
+            "cmd_search_after_filter_x",
+            "cmd_search_after_filter_y",
+            "cmd_search_after_filter_w",
+            "cmd_safe_x",
+            "cmd_safe_y",
+            "cmd_safe_w",
+            "actual_base_vel_x",
+            "actual_base_vel_y",
+            "actual_base_vel_w",
+            "actual_base_delta_x",
+            "actual_base_delta_y",
+            "velocity_search_compute_time_ms",
+            "velocity_search_candidate_count",
+            "velocity_search_feasible_count",
+            "velocity_search_infeasible_count",
+            "velocity_search_feasible_count_after_margin",
+            "velocity_search_forward_candidate_count",
+            "velocity_search_forward_feasible_count",
+            "velocity_search_forward_infeasible_collision_count",
+            "velocity_search_forward_infeasible_margin_count",
+            "velocity_search_forward_infeasible_out_of_map_count",
+            "velocity_search_best_forward_feasible_cost",
+            "velocity_search_best_forward_feasible_clearance",
+            "velocity_search_fallback_used",
+            "fallback_reason",
+            "fallback_no_feasible",
+            "fallback_risk_threshold",
+            "fallback_collision",
+            "fallback_margin",
+            "fallback_out_of_map",
+            "fallback_invalid_cost",
+            "velocity_search_min_predicted_clearance",
+            "velocity_search_best_cost",
+            "selected_rollout_min_clearance",
+            "selected_rollout_collision_flag",
+            "selected_rollout_out_of_map_flag",
+            "fallback_cmd_x",
+            "fallback_cmd_y",
+            "fallback_cmd_w",
+            "cmd_raw_before_postprocess_x",
+            "cmd_raw_before_postprocess_y",
+            "cmd_raw_before_postprocess_w",
+            "cmd_safe_after_postprocess_x",
+            "cmd_safe_after_postprocess_y",
+            "cmd_safe_after_postprocess_w",
+            "cmd_post_delta_x",
+            "cmd_post_delta_y",
+            "cmd_post_delta_w",
             "cmd_final_x",
             "cmd_final_y",
             "cmd_final_w",
@@ -4523,6 +6307,36 @@ def parse_args():
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
+    parser.add_argument("--additive_fusion", action="store_true", help="eval-only baseline: cmd_F + lateral-projected cmd_A")
+    parser.add_argument("--velocity_search", action="store_true", help="eval-only target-aware velocity-space search baseline")
+    parser.add_argument(
+        "--velocity_search_split",
+        choices=("validation_layout", "main_test", "heldout_test"),
+        default="main_test",
+    )
+    parser.add_argument("--velocity_search_hparams_json", type=str, default="")
+    parser.add_argument("--velocity_search_vx_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_vy_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_w_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_rollout_horizon_s", type=float, default=None)
+    parser.add_argument("--velocity_search_rollout_dt_s", type=float, default=None)
+    parser.add_argument("--velocity_search_body_radius_m", type=float, default=None)
+    parser.add_argument("--velocity_search_footprint_radius_m", type=float, default=None)
+    parser.add_argument("--velocity_search_min_clearance_margin", type=float, default=None)
+    parser.add_argument("--velocity_search_clear_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_target_dist_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_bearing_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_progress_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_forward_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_forward_min_v", type=float, default=None)
+    parser.add_argument("--velocity_search_smooth_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_target_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_risk_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_speed_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_lateral_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_risk_filter_threshold", type=float, default=None)
+    parser.add_argument("--velocity_search_filter_mode", choices=("scale", "soft", "none"), default=None)
+    parser.add_argument("--velocity_search_fallback", choices=("stop", "safest", "raw"), default=None)
     parser.add_argument("--rule_k", type=float, default=8.0)
     parser.add_argument("--rule_margin", type=float, default=0.10)
     parser.add_argument("--rule_hard_thr", type=float, default=0.45)
@@ -4619,10 +6433,36 @@ def parse_args():
             parser.error("--mono_ppo 只支持 --skill moe")
         if args.rule_override:
             parser.error("--mono_ppo 不允许同时启用 --rule_override")
+        if args.additive_fusion:
+            parser.error("--mono_ppo 不允许同时启用 --additive_fusion")
+        if args.velocity_search:
+            parser.error("--mono_ppo 不允许同时启用 --velocity_search")
         if any((args.yonly, args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
             parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wriskonly/--wlearned/--wlearned2")
         if args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
+        selected_w_mode = "none"
+    elif args.additive_fusion:
+        if args.skill != "moe":
+            parser.error("--additive_fusion 只支持 --skill moe")
+        if args.rule_override:
+            parser.error("--additive_fusion 不允许同时启用 --rule_override")
+        if args.velocity_search:
+            parser.error("--additive_fusion 不允许同时启用 --velocity_search")
+        if any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--additive_fusion 不允许同时指定 --wgeom/--wriskonly/--wlearned/--wlearned2")
+        if args.w_mode is not None and str(args.w_mode).lower() != "none":
+            parser.error("--additive_fusion 不使用 GatePolicy/w，--w_mode 必须为 none")
+        selected_w_mode = "none"
+    elif args.velocity_search:
+        if args.skill != "moe":
+            parser.error("--velocity_search 只支持 --skill moe")
+        if args.rule_override:
+            parser.error("--velocity_search 不允许同时启用 --rule_override")
+        if any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--velocity_search 不允许同时指定 --wgeom/--wriskonly/--wlearned/--wlearned2")
+        if args.w_mode is not None and str(args.w_mode).lower() != "none":
+            parser.error("--velocity_search 不使用 GatePolicy/w，--w_mode 必须为 none")
         selected_w_mode = "none"
     elif args.yonly:
         selected_w_mode = "none"
@@ -4700,6 +6540,10 @@ def main():
     ts = time.strftime("%Y%m%d_%H%M%S")
     if bool(getattr(args, "mono_ppo", False)):
         variant_tag = "mono_ppo"
+    elif bool(getattr(args, "additive_fusion", False)):
+        variant_tag = "additive_fusion"
+    elif bool(getattr(args, "velocity_search", False)):
+        variant_tag = f"velocity_search_{str(args.velocity_search_split)}"
     elif bool(getattr(args, "rule_override", False)):
         variant_tag = (
             f"rule_override_k{float(args.rule_k):g}_m{float(args.rule_margin):g}_"

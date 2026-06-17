@@ -4,7 +4,7 @@ import rospy, os, time, argparse, torch
 import numpy  as np
 from BC_learning.Agent_utils import EGPO_Agent
 from interface.msg import joy_command
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Bool, Float64MultiArray
 
 
 
@@ -22,6 +22,9 @@ MANUAL_DEADBAND = 1e-6
 pcr_enabled = False
 latest_pcr_cmd = None
 latest_pcr_stamp = 0.0
+hardware_fault = False
+left_feedback_received = False
+right_feedback_received = False
 
 
 def PublishDefaultStand():
@@ -32,12 +35,24 @@ def PublishDefaultStand():
     q_des_pub.publish(q_des_msgs)
 
 
+def FeedbackReady():
+    if not left_feedback_received or not right_feedback_received:
+        rospy.logwarn_throttle(
+            1.0,
+            "[run_agent2] waiting for initial motor feedback: left=%d right=%d",
+            int(left_feedback_received),
+            int(right_feedback_received),
+        )
+        return False
+    return True
+
+
 def ProcessCommand(msg:joy_command, source="legacy"):
     global agent, last_actions, q_des_msgs,tic
     with command_lock:
-        if l_cur_time<0.01 or r_cur_time<0.01:
-            print("waiting for latest cur")
-            # return
+        if hardware_fault:
+            rospy.logerr_throttle(1.0, "[run_agent2] hardware fault latched; command rejected")
+            return
         if msg.disable_torque:
             q_des_msgs.data[0]=motor_mode.Disable
             q_des_pub.publish(q_des_msgs)
@@ -45,6 +60,12 @@ def ProcessCommand(msg:joy_command, source="legacy"):
         if msg.stop or msg.disable_pump or msg.action_valve:
             PublishDefaultStand()
             print(f"process source={source}, safety stand, stop={int(msg.stop)}, disable_pump={int(msg.disable_pump)}, action_valve={int(msg.action_valve)}")
+            return
+        if msg.set_init:
+            PublishDefaultStand()
+            print(f"process source={source}, set_init=1, default stand")
+            return
+        if not FeedbackReady():
             return
 
         command=torch.tensor([[msg.set_init,msg.x_vec,msg.y_vec,msg.w_twist]],dtype=torch.float32,device=device)
@@ -106,6 +127,8 @@ def ManualCommandIsIdle(msg:joy_command):
 def ManualCommandCb(msg:joy_command):
     global pcr_enabled
     with command_lock:
+        if hardware_fault:
+            return
         if msg.change_mode:
             pcr_enabled = True
             ClearPcrCache()
@@ -135,6 +158,8 @@ def BuildPcrSpeedCommand(cmd_data):
 def PcrCommandCb(msg:joy_command):
     global latest_pcr_cmd, latest_pcr_stamp
     with command_lock:
+        if hardware_fault:
+            return
         x_vec = float(np.clip(msg.x_vec, -1.0, 1.0))
         y_vec = float(np.clip(msg.y_vec, -1.0, 1.0))
         w_twist = float(np.clip(msg.w_twist, -1.0, 1.0))
@@ -153,7 +178,7 @@ def PcrCommandCb(msg:joy_command):
 def PcrControlTick(_):
     global pcr_enabled
     with command_lock:
-        if not pcr_enabled:
+        if hardware_fault or not pcr_enabled:
             return
 
         if latest_pcr_cmd is None:
@@ -173,28 +198,59 @@ def PcrControlTick(_):
 def LegacyCommandCb(msg:joy_command):
     global pcr_enabled
     with command_lock:
+        if hardware_fault:
+            return
         if pcr_enabled:
             pcr_enabled = False
             ClearPcrCache()
         ProcessCommand(msg, source="legacy")
 
 
+def HardwareFaultCb(msg:Bool):
+    global hardware_fault, pcr_enabled
+    if not msg.data:
+        return
+    with command_lock:
+        if hardware_fault:
+            return
+        hardware_fault = True
+        pcr_enabled = False
+        ClearPcrCache()
+        q_des_msgs.data[0] = motor_mode.Disable
+        q_des_pub.publish(q_des_msgs)
+        rospy.logfatal(
+            "[run_agent2] CAN serial fault latched; Disable published once and all commands rejected until node restart"
+        )
+
+
 def UpdateQState(msg:Float64MultiArray,lr_index):
     global q_cur, q_dot_cur, q_torq, tic, r_cur_time, l_cur_time
+    global left_feedback_received, right_feedback_received
+    if len(msg.data) != 27:
+        rospy.logerr_throttle(
+            1.0,
+            "[run_agent2] invalid %s motor feedback length: %d",
+            lr_index,
+            len(msg.data),
+        )
+        return
     msg_data=torch.tensor(msg.data,device=device).reshape(3,9)
+    if not torch.isfinite(msg_data).all():
+        rospy.logerr_throttle(1.0, "[run_agent2] non-finite %s motor feedback rejected", lr_index)
+        return
     if lr_index=='l':
         q_cur[0,0:3]=msg_data[:,0:3]
         q_torq[0,0:3]=msg_data[:,3:6]
         q_dot_cur[0,0:3]=msg_data[:,6:9]
         l_cur_time=time.time()-tic
-        print("lll")
+        left_feedback_received = True
 
     elif lr_index=='r':
         q_cur[0,3:6]=msg_data[:,0:3]
         q_torq[0,3:6]=msg_data[:,3:6]
         q_dot_cur[0,3:6]=msg_data[:,6:9]
         r_cur_time=time.time()-tic
-        print("rrr")
+        right_feedback_received = True
     
 
 
@@ -228,6 +284,9 @@ if __name__=='__main__':
     pcr_enabled = False
     latest_pcr_cmd = None
     latest_pcr_stamp = 0.0
+    hardware_fault = False
+    left_feedback_received = False
+    right_feedback_received = False
     command_lock = threading.RLock()
 
     q_default = torch.zeros(6,3,dtype=torch.float32,device=device)
@@ -250,7 +309,7 @@ if __name__=='__main__':
         q_default[i,0]=thigh
         q_default[i,1]=knee
         q_default[i,2]=ankle
-    #IMU观测 LB LM LF RB RM RF
+    # Joint/state order: LB LF LM RB RF RM
     acc = torch.zeros(1,3,dtype=torch.float32,device=device)
     omega = torch.zeros(1,3,dtype=torch.float32,device=device)
     quat = torch.zeros(1,4,dtype=torch.float32,device=device)
@@ -262,6 +321,15 @@ if __name__=='__main__':
     agent.load_state_dict(torch.load(model_path)) #为了方便复制粘贴,放到主目录下方
     agent.eval()
     agent.to(device)
+
+    test_pub = rospy.Publisher('test',Float64MultiArray,queue_size=10)
+    q_des_pub = rospy.Publisher('/sita_des',Float64MultiArray,queue_size=1)
+    hardware_fault_sub = rospy.Subscriber(
+        '/can_control/serial_fault',
+        Bool,
+        HardwareFaultCb,
+        queue_size=1,
+    )
 
     if args.legacy_command_topic:
         command_sub=rospy.Subscriber(args.legacy_command_topic,joy_command,LegacyCommandCb,queue_size=1)
@@ -278,18 +346,10 @@ if __name__=='__main__':
     left_cur_sub=rospy.Subscriber('/left_sita_cur',Float64MultiArray,UpdateQState,callback_args='l',queue_size=1)
     right_cur_sub=rospy.Subscriber('/right_sita_cur',Float64MultiArray,UpdateQState,callback_args='r',queue_size=1)
 
-    test_pub = rospy.Publisher('test',Float64MultiArray,queue_size=10)
-    
-    q_des_pub = rospy.Publisher('/sita_des',Float64MultiArray,queue_size=1)
     pcr_control_timer = rospy.Timer(rospy.Duration(1.0 / LOWLEVEL_HZ), PcrControlTick)
 
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
-
-
-
-
 
 

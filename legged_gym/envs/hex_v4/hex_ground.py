@@ -700,10 +700,16 @@ class HexGround(LeggedRobot):
             return
         cap_slots = int(self.s_avoid_capsule_slot_count)
         box_end = cap_slots + int(self.s_avoid_box_slot_count)
-        color_active_capsule = gymapi.Vec3(0.15, 0.90, 0.25)
-        color_active_box = gymapi.Vec3(0.95, 0.78, 0.18)
-        color_active_wall = gymapi.Vec3(0.92, 0.20, 0.20)
-        color_inactive = gymapi.Vec3(0.35, 0.35, 0.35)
+        if bool(getattr(self, "paper_video_visuals", False)):
+            color_active_capsule = gymapi.Vec3(0.43, 0.45, 0.46)
+            color_active_box = gymapi.Vec3(0.39, 0.40, 0.41)
+            color_active_wall = gymapi.Vec3(0.35, 0.37, 0.39)
+            color_inactive = gymapi.Vec3(0.22, 0.23, 0.24)
+        else:
+            color_active_capsule = gymapi.Vec3(0.15, 0.90, 0.25)
+            color_active_box = gymapi.Vec3(0.95, 0.78, 0.18)
+            color_active_wall = gymapi.Vec3(0.92, 0.20, 0.20)
+            color_inactive = gymapi.Vec3(0.35, 0.35, 0.35)
         for env_id in env_ids.tolist():
             handles = self.s_avoid_actor_handles[env_id]
             active = self.s_avoid_active[env_id]
@@ -980,6 +986,7 @@ class HexGround(LeggedRobot):
 
     def _init_camera_buffers(self):
         """初始化相机图像接收buffer"""
+        output_size = int(getattr(self.camera_cfg, "output_size", self.camera_cfg.height))
         self.depth_raw = torch.zeros(
             self.num_envs,
             self.camera_cfg.height,
@@ -991,8 +998,8 @@ class HexGround(LeggedRobot):
         self.depth_images = torch.zeros(
             self.num_envs,
             1,
-            self.camera_cfg.height,
-            self.camera_cfg.width,
+            output_size,
+            output_size,
             dtype=torch.float32,
             device=self.device,
             requires_grad=False,
@@ -3508,6 +3515,69 @@ class HexGround(LeggedRobot):
         stage12_spawn_y = -1.6
         debug_case = self._get_s_avoid_debug_case()
 
+        forced_obstacles_world = getattr(self, "s_avoid_forced_obstacles_world", None)
+        if forced_obstacles_world is not None:
+            configured_radius = float(getattr(self.cfg.terrain, "avoid_capsule_radius", 0.15))
+            for env_id in env_ids.tolist():
+                active, pos_local, quat = self._get_s_avoid_stage_template()
+                active[:] = False
+                pos_local[:, :] = 0.0
+                pos_local[:, 2] = -5.0
+                env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
+                for item in forced_obstacles_world:
+                    slot = int(item["slot"])
+                    if slot < 0 or slot >= cap_slots:
+                        raise RuntimeError(
+                            f"Forced Fig.6 obstacle slot={slot} is outside capsule slots [0,{cap_slots})"
+                        )
+                    radius = float(item.get("r", configured_radius))
+                    if abs(radius - configured_radius) > 1e-4:
+                        raise RuntimeError(
+                            "Forced Fig.6 obstacle radius does not match the live scene: "
+                            f"source={radius:.4f}, runtime={configured_radius:.4f}"
+                        )
+                    active[slot] = True
+                    pos_local[slot] = np.array(
+                        [
+                            float(item["x"]) - float(env_origin[0]),
+                            float(item["y"]) - float(env_origin[1]),
+                            cap_z,
+                        ],
+                        dtype=np.float32,
+                    )
+                    quat[slot] = np.array(
+                        [
+                            self.s_avoid_capsule_quat.x,
+                            self.s_avoid_capsule_quat.y,
+                            self.s_avoid_capsule_quat.z,
+                            self.s_avoid_capsule_quat.w,
+                        ],
+                        dtype=np.float32,
+                    )
+                pos_world = pos_local.copy()
+                pos_world[:, 0] += env_origin[0]
+                pos_world[:, 1] += env_origin[1]
+                pos_world[:, 2] += env_origin[2]
+                stage = 4
+                band_x_min, band_x_max, band_y_min, band_y_max = self._compute_s_avoid_band_world(
+                    env_id=env_id,
+                    stage=stage,
+                    active=active,
+                    pos_local=pos_local,
+                    quat=quat,
+                )
+                self.s_avoid_stage_per_env[env_id] = stage
+                self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
+                self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
+                self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+                self.s_avoid_band_x_min[env_id] = band_x_min
+                self.s_avoid_band_x_max[env_id] = band_x_max
+                self.s_avoid_band_y_min[env_id] = band_y_min
+                self.s_avoid_band_y_max[env_id] = band_y_max
+            self._sync_s_avoid_obstacles(env_ids)
+            self._update_pcr_new_curriculum_extras()
+            return
+
         if self.s_avoid_direct_single_obstacle:
             local_x, local_y = self._get_s_avoid_debug_local_pose()
             flat_indices = self.s_avoid_actor_indices[env_ids].reshape(-1).contiguous()
@@ -4539,6 +4609,14 @@ class HexGround(LeggedRobot):
         y_forward = torch.sqrt(torch.clamp(desired * desired - dx * dx, min=min_forward * min_forward))
         target_local[:, 1] = robot_local[:, 1] + y_forward
         self.target_world[env_ids] = self.env_origins[env_ids, :2] + target_local
+        forced_target_start_world = getattr(self, "pcr_line_forced_target_start_world", None)
+        if forced_target_start_world is not None:
+            forced_target = torch.tensor(
+                forced_target_start_world,
+                dtype=self.target_world.dtype,
+                device=self.device,
+            )
+            self.target_world[env_ids] = forced_target.unsqueeze(0).expand(env_ids.numel(), -1)
         self.target_vel_world[env_ids].zero_()
         self.target_heading[env_ids] = 0.0
         self.target_heading_des[env_ids] = 0.0
@@ -5237,10 +5315,17 @@ class HexGround(LeggedRobot):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
+        wallclock_step = bool(getattr(self, "paper_video_wallclock_step", False))
+        wallclock_start = time.perf_counter() if wallclock_step else None
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         # step physics and render each frame
-        self.render()
+        self.render(
+            sync_frame_time=(
+                not bool(getattr(self, "paper_video_fast_viewer", False))
+                and not wallclock_step
+            )
+        )
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             # print("------------>self torqures.shape:",self.torques.shape)
@@ -5256,6 +5341,10 @@ class HexGround(LeggedRobot):
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+        if wallclock_start is not None:
+            remaining = float(self.dt) - (time.perf_counter() - wallclock_start)
+            if remaining > 0.0:
+                time.sleep(remaining)
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
         # return self.obs_buf, self.obs_vgf_buf, self.obs_terrain_buf, self.rew_buf, self.reset_buf, self.extras
 
@@ -5266,10 +5355,17 @@ class HexGround(LeggedRobot):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
+        wallclock_step = bool(getattr(self, "paper_video_wallclock_step", False))
+        wallclock_start = time.perf_counter() if wallclock_step else None
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         # step physics and render each frame
-        self.render()
+        self.render(
+            sync_frame_time=(
+                not bool(getattr(self, "paper_video_fast_viewer", False))
+                and not wallclock_step
+            )
+        )
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             # print("------------>self torqures.shape:",self.torques.shape)
@@ -5288,7 +5384,11 @@ class HexGround(LeggedRobot):
         self.obs_vgf_buf = torch.clip(self.obs_vgf_buf, -clip_obs, clip_obs)
         self.obs_terrain_buf = torch.clip(self.obs_terrain_buf, -clip_obs, clip_obs)
 
-        if self.enable_camera and self.camera_cfg is not None:
+        if (
+            self.enable_camera
+            and self.camera_cfg is not None
+            and not bool(getattr(self, "suppress_step_camera_refresh", False))
+        ):
             if not hasattr(self, "depth_raw") or not hasattr(self, "depth_images"):
                 self._init_camera_buffers()
             if self.common_step_counter % self.camera_cfg.capture_interval == 0:
@@ -5297,6 +5397,10 @@ class HexGround(LeggedRobot):
                 self.depth_images[:] = processed
 
         obs_dict = self._build_obs_dict()
+        if wallclock_start is not None:
+            remaining = float(self.dt) - (time.perf_counter() - wallclock_start)
+            if remaining > 0.0:
+                time.sleep(remaining)
         return obs_dict, self.rew_buf, self.reset_buf, self.extras
 
     # def _create_envs(self):

@@ -1,0 +1,31 @@
+\documentclass[tikz,border=3pt]{standalone}
+\input{common.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[input neuron] (I-1) at (0.00,3.25) {$M_t$};
+  \node[input neuron] (I-2) at (0.00,2.45) {$s_t$};
+  \node[input neuron] (I-3) at (0.00,1.65) {$g_t$};
+  \node[input neuron] (I-4) at (0.00,0.85) {$d_t$};
+
+  \node[hidden neuron] (H-1) at (1.40,3.25) {};
+  \node[hidden neuron] (H-2) at (1.40,2.45) {};
+  \node[hidden neuron] (H-3) at (1.40,1.65) {};
+  \node[hidden neuron] (H-4) at (1.40,0.85) {};
+
+  \node[output neuron] (O-1) at (2.80,3.05) {$v_x$};
+  \node[output neuron] (O-2) at (2.80,2.05) {$v_y$};
+  \node[output neuron] (O-3) at (2.80,1.05) {$\omega$};
+
+  \connectinputhidden{1,2,3,4}{1,2,3,4}
+  \connecthiddenoutput{1,2,3,4}{1,2,3}
+
+  \node[parameter,anchor=east] at (-0.58,3.25) {$M_t:2\times32^2$};
+  \node[parameter,anchor=east] at (-0.58,2.45) {$s_t:14$};
+  \node[parameter,anchor=east] at (-0.58,1.65) {$g_t:2$};
+  \node[parameter,anchor=east] at (-0.58,0.85) {$d_t:1$ (zero)};
+  \node[parameter,anchor=west] at (3.36,3.05) {$v_x$};
+  \node[parameter,anchor=west] at (3.36,2.05) {$v_y$};
+  \node[parameter,anchor=west] at (3.36,1.05) {$\omega$};
+\end{tikzpicture}
+\end{document}

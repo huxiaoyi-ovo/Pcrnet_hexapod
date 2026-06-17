@@ -60,8 +60,8 @@ MUX_OUTPUT_TOPIC="/usr/command"
 MUX_RATE_HZ="50"
 MUX_PCR_TIMEOUT_S="0.35"
 MUX_MANUAL_TIMEOUT_S="0.2"
-CAMERA_HEIGHT_M="0.37"
-CAMERA_PITCH_DOWN_DEG="15"
+CAMERA_HEIGHT_M="0.23"
+CAMERA_PITCH_DOWN_DEG="0"
 RECORD_BUTTON_INDEX="12"
 RECORD_OUTPUT_ROOT="${HOME}/pcr_records"
 
@@ -113,8 +113,8 @@ Options:
   --mux_rate_hz HZ             Deprecated.
   --mux_pcr_timeout_s SEC      Deprecated.
   --mux_manual_timeout_s SEC   Deprecated.
-  --camera_height_m VALUE      Default: 0.37
-  --camera_pitch_down_deg VAL  Default: 15
+  --camera_height_m VALUE      Default: 0.23
+  --camera_pitch_down_deg VAL  Default: 0
   --camera_arg ARG             Append one raw argument to the camera command.
   --pcr_arg ARG                Append one raw argument to the PCR command.
 EOF

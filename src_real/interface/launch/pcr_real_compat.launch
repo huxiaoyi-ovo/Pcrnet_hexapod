@@ -18,8 +18,8 @@
     <arg name="lowlevel_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/low_level_best.pt"/>
     <arg name="yolo_model" default="$(find interface)/scripts/pcr_real/yolov8n.pt"/>
 
-    <arg name="camera_height_m" default="0.37"/>
-    <arg name="camera_pitch_down_deg" default="15"/>
+    <arg name="camera_height_m" default="0.23"/>
+    <arg name="camera_pitch_down_deg" default="0"/>
     <arg name="map_size" default="32"/>
     <arg name="map_extent_m" default="3.0"/>
     <arg name="pcr_usr_command_topic" default="/usr/command_pcr"/>

@@ -2743,6 +2743,9 @@ class HierarchicalHexapodEnv:
             return
 
         if hasattr(self.env, "_get_depth_images") and hasattr(self.env, "_process_depth_for_network"):
+            capture_pre_hook = getattr(self, "camera_capture_pre_hook", None)
+            if callable(capture_pre_hook):
+                capture_pre_hook()
             depth_raw = self.env._get_depth_images()
             processed = self.env._process_depth_for_network(depth_raw)
             self.env.depth_images[:] = processed
@@ -4313,7 +4316,9 @@ class HierarchicalHexapodEnv:
             self.prev_goal_world = current_goal_world
         
         # 3. 计算高层奖励
-        self._refresh_depth_images()
+        self._refresh_depth_images(
+            force=bool(getattr(self, "force_camera_refresh_each_high_level", False))
+        )
         reward_obs = self._get_high_level_obs()
         self.last_obs = reward_obs
         robot_pos = self.env.root_states[:, :3]

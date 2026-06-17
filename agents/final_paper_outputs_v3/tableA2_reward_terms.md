@@ -15,10 +15,11 @@
 | avoid_band_penalty_scale | 0.8 | HexPCRLineAvoidBasicCfg.navigation |
 | avoid_row_gap_scale | 10.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
 | avoid_row_cmdx_scale | 3.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
-| pcr_w_aux_coef | 0.05 | train_highlevel.py --pcr_w_aux_coef default |
-| pcr_w_aux_risk_f_threshold | 0.4 | train_highlevel.py default |
-| pcr_w_aux_risk_margin | 0.10 | train_highlevel.py default |
-| pcr_w_aux_cmd_cos_threshold | 0.5 | train_highlevel.py default |
+| pcr_w_aux_enable | True | final Learned-w checkpoint metadata |
+| pcr_w_aux_coef | 0.05 | final Learned-w checkpoint metadata |
+| pcr_w_aux_risk_f_threshold | 0.25 | final Learned-w checkpoint metadata |
+| pcr_w_aux_risk_margin | 0.05 | final Learned-w checkpoint metadata |
+| pcr_w_aux_cmd_cos_threshold | 0.5 | final Learned-w checkpoint metadata |
 | gate_smooth_penalty | 0.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
 | risk_barrier_scale | 0.0 | HexPCRLineAvoidBasicCfg.reward_cfg |
 | time_penalty | -0.01 | HexPCRLineAvoidBasicCfg.reward_cfg |

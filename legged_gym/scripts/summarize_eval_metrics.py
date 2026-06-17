@@ -17,7 +17,16 @@ PAPER_METRICS: List[Tuple[str, str]] = [
     ("C_avoid Rate", "avoid_conflict_step_rate"),
     ("CSI@C_avoid", "avoid_conflict_suppression_index"),
 ]
-METHOD_ORDER = ["yonly", "geomw", "risk_only", "rule_override", "mono_ppo", "learnedw"]
+METHOD_ORDER = [
+    "yonly",
+    "geomw",
+    "risk_only",
+    "rule_override",
+    "additive_fusion",
+    "velocity_search",
+    "mono_ppo",
+    "learnedw",
+]
 
 
 def _find_metrics_json(paths: List[str]) -> List[str]:
@@ -45,6 +54,10 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "skill": protocol.get("skill", ""),
         "seed": protocol.get("seed", ""),
         "policy_variant": protocol.get("policy_variant", ""),
+        "velocity_search_split": protocol.get("velocity_search_split", ""),
+        "velocity_search_hparams_source": protocol.get("velocity_search_hparams_source", ""),
+        "velocity_search_hparams_json": protocol.get("velocity_search_hparams_json", ""),
+        "velocity_search_hparams_frozen_for_eval": protocol.get("velocity_search_hparams_frozen_for_eval", ""),
         "beta": protocol.get("beta", ""),
         "w_mode": protocol.get("w_mode", ""),
         "w_tau": protocol.get("w_tau", ""),
@@ -123,6 +136,53 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "cmd_x_right_mean": overall.get("cmd_x_right_mean", ""),
         "yaw_directional_response": overall.get("yaw_directional_response", ""),
         "lateral_directional_response": overall.get("lateral_directional_response", ""),
+        "cmd_post_delta_abs_mean": overall.get("cmd_post_delta_abs_mean", ""),
+        "cmd_post_delta_x_abs_mean": overall.get("cmd_post_delta_x_abs_mean", ""),
+        "cmd_post_delta_y_abs_mean": overall.get("cmd_post_delta_y_abs_mean", ""),
+        "cmd_post_delta_y_signed_mean": overall.get("cmd_post_delta_y_signed_mean", ""),
+        "cmd_post_delta_w_abs_mean": overall.get("cmd_post_delta_w_abs_mean", ""),
+        "cmd_post_rewrite_rate": overall.get("cmd_post_rewrite_rate", ""),
+        "velocity_search_filter_change_rate": overall.get("velocity_search_filter_change_rate", ""),
+        "velocity_search_safe_available_rate": overall.get("velocity_search_safe_available_rate", ""),
+        "velocity_search_raw_risk_mean": overall.get("velocity_search_raw_risk_mean", ""),
+        "velocity_search_safe_risk_mean": overall.get("velocity_search_safe_risk_mean", ""),
+        "velocity_search_compute_time_ms_mean": overall.get("velocity_search_compute_time_ms_mean", ""),
+        "velocity_search_candidate_count_mean": overall.get("velocity_search_candidate_count_mean", ""),
+        "velocity_search_feasible_count_mean": overall.get("velocity_search_feasible_count_mean", ""),
+        "velocity_search_infeasible_count_mean": overall.get("velocity_search_infeasible_count_mean", ""),
+        "velocity_search_feasible_count_after_margin_mean": overall.get("velocity_search_feasible_count_after_margin_mean", ""),
+        "velocity_search_selected_v_lat_mean": overall.get("velocity_search_selected_v_lat_mean", ""),
+        "velocity_search_selected_v_fwd_mean": overall.get("velocity_search_selected_v_fwd_mean", ""),
+        "velocity_search_selected_yaw_mean": overall.get("velocity_search_selected_yaw_mean", ""),
+        "velocity_search_raw_y_mean": overall.get("velocity_search_raw_y_mean", ""),
+        "velocity_search_after_filter_y_mean": overall.get("velocity_search_after_filter_y_mean", ""),
+        "cmd_safe_y_mean": overall.get("cmd_safe_y_mean", ""),
+        "cmd_safe_y_over_raw_y_ratio": overall.get("cmd_safe_y_over_raw_y_ratio", ""),
+        "actual_base_vel_x_mean": overall.get("actual_base_vel_x_mean", ""),
+        "actual_base_vel_y_mean": overall.get("actual_base_vel_y_mean", ""),
+        "actual_base_vel_w_mean": overall.get("actual_base_vel_w_mean", ""),
+        "actual_base_delta_x_mean": overall.get("actual_base_delta_x_mean", ""),
+        "actual_base_delta_y_mean": overall.get("actual_base_delta_y_mean", ""),
+        "row_progress_delta_mean": overall.get("row_progress_delta_mean", ""),
+        "velocity_search_forward_candidate_count_mean": overall.get("velocity_search_forward_candidate_count_mean", ""),
+        "velocity_search_forward_feasible_count_mean": overall.get("velocity_search_forward_feasible_count_mean", ""),
+        "velocity_search_forward_infeasible_collision_count_mean": overall.get("velocity_search_forward_infeasible_collision_count_mean", ""),
+        "velocity_search_forward_infeasible_margin_count_mean": overall.get("velocity_search_forward_infeasible_margin_count_mean", ""),
+        "velocity_search_forward_infeasible_out_of_map_count_mean": overall.get("velocity_search_forward_infeasible_out_of_map_count_mean", ""),
+        "velocity_search_best_forward_feasible_cost_mean": overall.get("velocity_search_best_forward_feasible_cost_mean", ""),
+        "velocity_search_best_forward_feasible_clearance_mean": overall.get("velocity_search_best_forward_feasible_clearance_mean", ""),
+        "velocity_search_fallback_rate": overall.get("velocity_search_fallback_rate", ""),
+        "fallback_no_feasible_rate": overall.get("fallback_no_feasible_rate", ""),
+        "fallback_risk_threshold_rate": overall.get("fallback_risk_threshold_rate", ""),
+        "fallback_collision_rate": overall.get("fallback_collision_rate", ""),
+        "fallback_margin_rate": overall.get("fallback_margin_rate", ""),
+        "fallback_out_of_map_rate": overall.get("fallback_out_of_map_rate", ""),
+        "fallback_invalid_cost_rate": overall.get("fallback_invalid_cost_rate", ""),
+        "velocity_search_min_predicted_clearance_mean": overall.get("velocity_search_min_predicted_clearance_mean", ""),
+        "velocity_search_best_cost_mean": overall.get("velocity_search_best_cost_mean", ""),
+        "selected_rollout_min_clearance_mean": overall.get("selected_rollout_min_clearance_mean", ""),
+        "selected_rollout_collision_rate": overall.get("selected_rollout_collision_rate", ""),
+        "selected_rollout_out_of_map_rate": overall.get("selected_rollout_out_of_map_rate", ""),
         "w_clearance_f_corr": overall.get("w_clearance_f_corr", ""),
         "w_risk_f_corr": overall.get("w_risk_f_corr", ""),
         "w_risk_delta_corr": overall.get("w_risk_delta_corr", ""),
@@ -175,6 +235,10 @@ def _method_from_protocol(protocol: Dict, src_path: str = "") -> str:
     variant = str(protocol.get("policy_variant", "") or "").strip().lower()
     w_mode = str(protocol.get("w_mode", "") or "").strip().lower()
     text = f"{variant} {w_mode} {src_path}".lower()
+    if "velocity_search" in text or "velocity-search" in text:
+        return "velocity_search"
+    if "additive_fusion" in text or "additive-fusion" in text:
+        return "additive_fusion"
     if "risk_only" in text or "risk-only" in text or bool(protocol.get("risk_only", False)):
         return "risk_only"
     if "rule_override" in text or "rule-override" in text:

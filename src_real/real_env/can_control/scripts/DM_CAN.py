@@ -1,4 +1,4 @@
-from time import sleep
+from time import monotonic, sleep
 import numpy as np
 from enum import IntEnum
 from struct import unpack
@@ -23,6 +23,8 @@ class Motor:
         self.state_q = float(0)
         self.state_dq = float(0)
         self.state_tau = float(0)
+        self.feedback_count = 0
+        self.last_feedback_monotonic = 0.0
         self.SlaveID = SlaveID
         self.MasterID = MasterID
         self.MotorType = MotorType
@@ -34,6 +36,8 @@ class Motor:
         self.state_q = q
         self.state_dq = dq
         self.state_tau = tau
+        self.feedback_count += 1
+        self.last_feedback_monotonic = monotonic()
 
     def getPosition(self):
         """
@@ -253,6 +257,7 @@ class MotorControl:
         # 把上次没有解析完的剩下的也放进来
         data_recv = b''.join([self.data_save, self.serial_.read_all()])
         packets = self.__extract_packets(data_recv)
+        updated_motor_ids = set()
         if self.debug_recv and self.debug_recv_count < self.debug_recv_limit:
             raw_hex = data_recv.hex()
             print(f"[DM_CAN_DEBUG] recv bytes={len(data_recv)} packets={len(packets)} raw={raw_hex[:240]}")
@@ -261,7 +266,10 @@ class MotorControl:
             data = packet[7:15]
             CANID = (packet[6] << 24) | (packet[5] << 16) | (packet[4] << 8) | packet[3]
             CMD = packet[1]
-            self.__process_packet(data, CANID, CMD)
+            motor_id = self.__process_packet(data, CANID, CMD)
+            if motor_id is not None:
+                updated_motor_ids.add(motor_id)
+        return updated_motor_ids
 
     def recv_set_param_data(self):
         data_recv = self.serial_.read_all()
@@ -277,31 +285,36 @@ class MotorControl:
         if CMD == 0x11:
             if CANID != 0x00:
                 if CANID in self.motors_map:
+                    motor = self.motors_map[CANID]
                     q_uint = np.uint16((np.uint16(data[1]) << 8) | data[2])
                     dq_uint = np.uint16((np.uint16(data[3]) << 4) | (data[4] >> 4))
                     tau_uint = np.uint16(((data[4] & 0xf) << 8) | data[5])
-                    MotorType_recv = self.motors_map[CANID].MotorType
+                    MotorType_recv = motor.MotorType
                     Q_MAX = self.Limit_Param[MotorType_recv][0]
                     DQ_MAX = self.Limit_Param[MotorType_recv][1]
                     TAU_MAX = self.Limit_Param[MotorType_recv][2]
                     recv_q = uint_to_float(q_uint, -Q_MAX, Q_MAX, 16)
                     recv_dq = uint_to_float(dq_uint, -DQ_MAX, DQ_MAX, 12)
                     recv_tau = uint_to_float(tau_uint, -TAU_MAX, TAU_MAX, 12)
-                    self.motors_map[CANID].recv_data(recv_q, recv_dq, recv_tau)
+                    motor.recv_data(recv_q, recv_dq, recv_tau)
+                    return motor.SlaveID
             else:
                 MasterID=data[0] & 0x0f
                 if MasterID in self.motors_map:
+                    motor = self.motors_map[MasterID]
                     q_uint = np.uint16((np.uint16(data[1]) << 8) | data[2])
                     dq_uint = np.uint16((np.uint16(data[3]) << 4) | (data[4] >> 4))
                     tau_uint = np.uint16(((data[4] & 0xf) << 8) | data[5])
-                    MotorType_recv = self.motors_map[MasterID].MotorType
+                    MotorType_recv = motor.MotorType
                     Q_MAX = self.Limit_Param[MotorType_recv][0]
                     DQ_MAX = self.Limit_Param[MotorType_recv][1]
                     TAU_MAX = self.Limit_Param[MotorType_recv][2]
                     recv_q = uint_to_float(q_uint, -Q_MAX, Q_MAX, 16)
                     recv_dq = uint_to_float(dq_uint, -DQ_MAX, DQ_MAX, 12)
                     recv_tau = uint_to_float(tau_uint, -TAU_MAX, TAU_MAX, 12)
-                    self.motors_map[MasterID].recv_data(recv_q, recv_dq, recv_tau)
+                    motor.recv_data(recv_q, recv_dq, recv_tau)
+                    return motor.SlaveID
+        return None
 
 
     def __process_set_param_packet(self, data, CANID, CMD):

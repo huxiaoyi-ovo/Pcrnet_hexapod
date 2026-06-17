@@ -60,6 +60,21 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-06-15 RA-L 投稿前补救实验代码
+
+- [x] ~~[P0] 完成 Additive-Fusion eval-only 对照：直接相加 `u_F` 与 lateral-projected `u_A`，共用 post-processing 和诊断汇总；必须记录 command 被 clamp 的比例，用于回应“正交命令为何不用直接相加”的质疑；若时间允许，额外支持 `normalized_additive_fusion` 作为 appendix 备选，但主表先只放 `additive_fusion`。~~
+- [ ] [P0] 正式补跑 Additive-Fusion 三速三 seed：smoke 显示 0.60 下 `Task Success=0.50 / Collision=0.50 / Row-progress=0.85 / Follow MAE=0.326`，说明直接相加能推进和跟随但安全不稳；下一步按主表口径跑 `stage4 × speeds 0.35/0.50/0.60 × seeds 1/2/3 × 128 episodes`，用于决定它进入主表还是作为 Direct command fusion 消融单独呈现。
+- [x] ~~[P0] 升级 Target-aware Velocity-Space Search 对照：保持不接完整 ROS DWA、不宣称完整 DWA；从单步启发式命令枚举升级为 DWA-style 速度空间局部规划器，必须加入 1.0-1.5s 多步 rollout、body-frame 位姿积分、footprint collision 直接 infeasible、安全 fallback、`compute_time_ms / feasible_count / infeasible_count / fallback_rate / min_predicted_clearance / best_cost` 诊断，并继续保留 validation tuning protocol 与 `cmd_search_raw / cmd_search_after_filter / cmd_safe` 记录。~~
+- [ ] [P0] 继续收敛 Velocity-Search 外部对照定位：当前已确认它存在两端失败模式，`scale/safe` 口径偏安全但不推进，`soft/aggressive` 口径能推进但 0.35 也高碰撞；下一步停止无限调参，只做 `safe / balanced / tracking` 三个 preset 在 `validation_layout` 上的有限验证（speed=0.35/0.60，seed=1，episodes=32，num_envs=32），用于判断是否存在可进主表的 balanced 点；若三者都无法同时满足低碰撞与有效 row-progress，则将 Velocity-Search 定位为 diagnostic external local-planning baseline，不进入主表。
+- [ ] [P0] 完成 Learned-w 推理期因果消融：同一 checkpoint 下支持禁用 `Delta y_w`、`Delta y_r`、`risk_memory`，并保存 raw/used delta，生成 inference ablation 表。
+- [ ] [P0] 新增 layout 分层评测：保留主表场景不变，明确区分 `validation_layout` 和 `heldout_test`；validation 只用于 Velocity-Search 调参，heldout_test 只用于最终评估，并输出独立 held-out 表。
+- [ ] [P0] 完成实机 trial 统计分析：按 method/layout/trial 保存 session 与 metrics，新增 bag 分析脚本输出 trial-level 和 summary CSV；必须支持 `manual_collision / manual_target_lost / manual_final_row_clearance / manual_intervention / manual_success / failure_reason`，最终 real-robot success 以人工标注为准，自动指标只作为辅助。
+- [ ] [P0] 集成新增对照到 summary/final table 输出：统一 method tag、metadata 和最终表格，保证新增结果自动汇总且不污染已有五方法主表。
+
+## 2026-06-15 实机双侧真实反馈就绪与陈旧反馈停机
+
+- [x] ~~[P0] 让 CAN 状态帧提供逐电机真实回包计数与时间；B 初始化前左右两侧必须各自拿齐 9 个电机新回包并完成双侧握手，运行中任一电机反馈陈旧或 Pos_vel 期间出现共享故障时立即中断并锁存停机，禁止全零/旧状态冒充有效反馈。~~
+
 ## 2026-06-11 实机手柄持续控制串口负载修复
 
 - [x] ~~[P0] 移除手柄路径 `/sita_des` 的 0/8/8 ms 三连发，改为与 PCR 相同的单次均匀发布；CAN 侧只保留最新命令，并在首次串口 I/O 故障后停止继续写入，避免连续推杆时突发负载击穿 USB 串口后形成错误风暴。~~
@@ -2202,3 +2217,11 @@
 ## 2026-06-15 论文视频仿真可视化
 
 - [x] Must: 为 `play_highlevel.py` 增加独立论文视频模式，同步展示虚拟深度相机、actor 实际 `local_map_2ch`、3D 相机视锥、perception 红点与机身坐标系执行速度箭头；只改变 viewer 显示，不改变训练、评测、观测或控制口径。
+- [x] Must: 为 Fig.6 五种方法增加 Stage 4 场景复现入口，按已审定 episode 恢复确定性障碍布局，保留高层策略与底层六足的真实在线行为，用于论文视频录制。
+- [x] Must: 修正 Fig.6 回放中全局 `episode_id` 与环境内部场景序号混用的问题，改为从最终 source 清单和原始 timeseries 精确注入障碍物与目标初始状态，并在运行前校验 LayoutID。
+
+## 2026-06-15 PCR 实机安全默认值与反馈保护
+
+- [x] Must: 将 `src_real` 实机 PCR 默认相机安装参数收口为 `camera_height_m=0.23`、`camera_pitch_down_deg=0`，避免每次实机命令都依赖额外参数覆盖。
+- [x] Must: 恢复 CAN 侧 `sita_des` 进入电机前的关节范围检查，按 `LB/LF/LM` 与 `RB/RF/RM` 的 URDF 真实关节范围限幅；畸形或非有限命令触发共享故障锁存。
+- [x] Must: `run_agent2.py` 在左右电机各返回至少一帧有效反馈前禁止进入运动策略；不使用时间超时门控，避免事件触发反馈与命令准入互相等待。

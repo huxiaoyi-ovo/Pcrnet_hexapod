@@ -1,0 +1,33 @@
+\documentclass[tikz,border=3pt]{standalone}
+\input{common.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[input neuron] (I-1) at (0.00,3.60) {$a$};
+  \node[input neuron] (I-2) at (0.00,2.85) {$q$};
+  \node[input neuron] (I-3) at (0.00,2.10) {$\dot q$};
+  \node[input neuron] (I-4) at (0.00,1.35) {$\tau$};
+  \node[input neuron] (I-5) at (0.00,0.60) {$u$};
+
+  \node[hidden neuron] (H-1) at (1.42,3.30) {};
+  \node[hidden neuron] (H-2) at (1.42,2.50) {};
+  \node[hidden neuron] (H-3) at (1.42,1.70) {};
+  \node[hidden neuron] (H-4) at (1.42,0.90) {};
+
+  \node[output neuron] (O-1) at (2.84,3.35) {$q_1^\ast$};
+  \node[output neuron] (O-2) at (2.84,2.55) {$q_2^\ast$};
+  \node[font=\bfseries\large] at (2.84,1.95) {$\vdots$};
+  \node[output neuron] (O-3) at (2.84,1.25) {$q_{18}^\ast$};
+
+  \connectinputhidden{1,2,3,4,5}{1,2,3,4}
+  \connecthiddenoutput{1,2,3,4}{1,2,3}
+
+  \node[parameter,anchor=east] at (-0.58,3.60) {$a_{t-1}:18$};
+  \node[parameter,anchor=east] at (-0.58,2.85) {$q_t-q_0:18$};
+  \node[parameter,anchor=east] at (-0.58,2.10) {$\dot q_t:18$};
+  \node[parameter,anchor=east] at (-0.58,1.35) {$\tau_t:18$};
+  \node[parameter,anchor=east] at (-0.58,0.60) {$u_{\mathrm{exec}}:3$};
+  \node[parameter,anchor=west] at (3.40,2.55)
+    {$q_{\mathrm{des}}:18$};
+\end{tikzpicture}
+\end{document}

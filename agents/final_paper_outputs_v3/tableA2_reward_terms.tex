@@ -17,10 +17,11 @@ terminal\_fail\_penalty & -10.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
 avoid\_band\_penalty\_scale & 0.8 & HexPCRLineAvoidBasicCfg.navigation \\
 avoid\_row\_gap\_scale & 10.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
 avoid\_row\_cmdx\_scale & 3.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
-pcr\_w\_aux\_coef & 0.05 & train\_highlevel.py --pcr\_w\_aux\_coef default \\
-pcr\_w\_aux\_risk\_f\_threshold & 0.4 & train\_highlevel.py default \\
-pcr\_w\_aux\_risk\_margin & 0.10 & train\_highlevel.py default \\
-pcr\_w\_aux\_cmd\_cos\_threshold & 0.5 & train\_highlevel.py default \\
+pcr\_w\_aux\_enable & True & final Learned-w checkpoint metadata \\
+pcr\_w\_aux\_coef & 0.05 & final Learned-w checkpoint metadata \\
+pcr\_w\_aux\_risk\_f\_threshold & 0.25 & final Learned-w checkpoint metadata \\
+pcr\_w\_aux\_risk\_margin & 0.05 & final Learned-w checkpoint metadata \\
+pcr\_w\_aux\_cmd\_cos\_threshold & 0.5 & final Learned-w checkpoint metadata \\
 gate\_smooth\_penalty & 0.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
 risk\_barrier\_scale & 0.0 & HexPCRLineAvoidBasicCfg.reward\_cfg \\
 time\_penalty & -0.01 & HexPCRLineAvoidBasicCfg.reward\_cfg \\

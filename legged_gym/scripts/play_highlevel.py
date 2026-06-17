@@ -6,6 +6,7 @@ Play a high-level (Teacher/Student) planner with Isaac Gym visualization.
 import os
 import sys
 import argparse
+import hashlib
 import math
 import types
 import json
@@ -14,7 +15,7 @@ from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
-from isaacgym import gymapi
+from isaacgym import gymapi, gymutil
 import torch
 import numpy as np
 
@@ -24,6 +25,203 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
 from legged_gym.scripts import train_highlevel as th
+
+
+FIG6_SCENE_REPLAY = {
+    "yonly": {
+        "episode": 33,
+        "layout_id": "7c2464b169",
+        "ckpt": "agents/moe_teacher_best_yonly.pt",
+        "w_alias": "yonly",
+        "expected": "follow_lost",
+    },
+    "geomw": {
+        "episode": 35,
+        "layout_id": "177bd0911c",
+        "ckpt": "agents/moe_teacher_best_w0.15.pt",
+        "w_alias": "wgeom",
+        "expected": "collision",
+    },
+    "risk_only": {
+        "episode": 55,
+        "layout_id": "945df599e6",
+        "ckpt": "agents/moe_teacher_best_risk_only.pt",
+        "w_alias": "wriskonly",
+        "expected": "follow_lost",
+    },
+    "rule_override": {
+        "episode": 49,
+        "layout_id": "57a237d3ba",
+        "ckpt": "agents/moe_teacher_best_yonly.pt",
+        "w_alias": "yonly",
+        "expected": "collision",
+        "rule_override": True,
+    },
+    "learnedw": {
+        "episode": 5,
+        "layout_id": "567eda011f",
+        "ckpt": "agents/moe_teacher_best_learnedw.pt",
+        "w_alias": "wlearned2",
+        "expected": "success",
+    },
+}
+
+
+def _fig6_method_from_label(label: str) -> str:
+    text = str(label or "").strip().lower().replace("-", "_")
+    aliases = {
+        "y_only": "yonly",
+        "geom_w": "geomw",
+        "risk_only": "risk_only",
+        "rule_override": "rule_override",
+        "learned_w": "learnedw",
+    }
+    return aliases.get(text, text)
+
+
+def _resolve_fig6_source_path(source: str, source_root: Optional[str]) -> str:
+    candidates = []
+    if os.path.isabs(source):
+        candidates.append(source)
+    else:
+        candidates.append(os.path.join(PROJECT_ROOT, source))
+        if source_root:
+            root = os.path.abspath(os.path.expanduser(source_root))
+            candidates.append(os.path.join(root, source))
+            candidates.append(os.path.join(root, os.path.basename(os.path.dirname(source)), os.path.basename(source)))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    raise FileNotFoundError(
+        "Fig.6 source timeseries is missing. Checked: " + ", ".join(os.path.abspath(p) for p in candidates)
+    )
+
+
+def _load_fig6_scene_replay_data(args, method: str) -> dict:
+    sources_csv = os.path.abspath(os.path.expanduser(str(args.fig6_sources_csv)))
+    if not os.path.isfile(sources_csv):
+        raise FileNotFoundError(f"Fig.6 source manifest not found: {sources_csv}")
+
+    selected = None
+    with open(sources_csv, "r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            if _fig6_method_from_label(row.get("Method", "")) == method:
+                selected = row
+                break
+    if selected is None:
+        raise RuntimeError(f"Fig.6 source manifest has no row for method={method}: {sources_csv}")
+
+    episode_id = str(selected.get("RawEpisode", selected.get("Episode", ""))).strip()
+    source_path = _resolve_fig6_source_path(
+        str(selected.get("Source", "")).strip(),
+        getattr(args, "fig6_source_root", None),
+    )
+    episode_rows = []
+    with open(source_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        required = {
+            "episode_id",
+            "time_s",
+            "trajectory_frame",
+            "robot_x",
+            "robot_y",
+            "target_x",
+            "target_y",
+            "obstacles_json",
+            "episode_termination_reason",
+        }
+        missing = sorted(required.difference(reader.fieldnames or []))
+        if missing:
+            raise RuntimeError(f"Fig.6 timeseries is missing fields {missing}: {source_path}")
+        episode_rows = [row for row in reader if str(row.get("episode_id", "")).strip() == episode_id]
+    if not episode_rows:
+        raise RuntimeError(f"Fig.6 episode={episode_id} not found in {source_path}")
+    episode_rows.sort(key=lambda row: (float(row["time_s"]), int(float(row.get("step_hl", 0)))))
+
+    first = episode_rows[0]
+    if str(first.get("trajectory_frame", "")) != "world_xy_train_play":
+        raise RuntimeError(
+            "Fig.6 replay requires world_xy_train_play coordinates, got "
+            f"{first.get('trajectory_frame')} in {source_path}"
+        )
+    try:
+        raw_obstacles = json.loads(first.get("obstacles_json", "[]"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid obstacles_json in {source_path}: {exc}") from exc
+    obstacles = []
+    for index, item in enumerate(raw_obstacles):
+        if not isinstance(item, dict):
+            continue
+        obstacles.append(
+            {
+                "slot": int(item.get("slot", index)),
+                "x": float(item["x"]),
+                "y": float(item["y"]),
+                "r": float(item.get("r", 0.15)),
+            }
+        )
+    obstacles.sort(key=lambda item: (item["slot"], item["x"], item["y"]))
+    if not obstacles:
+        raise RuntimeError(f"Fig.6 episode has no obstacles: {source_path} episode={episode_id}")
+
+    layout_obstacles = [
+        {
+            "slot": int(item["slot"]),
+            "x": round(float(item["x"]), 4),
+            "y": round(float(item["y"]), 4),
+            "r": round(float(item["r"]), 4),
+        }
+        for item in obstacles
+    ]
+    layout_text = json.dumps(layout_obstacles, separators=(",", ":"), sort_keys=True)
+    layout_id = hashlib.sha1(layout_text.encode("utf-8")).hexdigest()[:10]
+    expected_layout_id = str(FIG6_SCENE_REPLAY[method]["layout_id"])
+    manifest_layout_id = str(selected.get("LayoutID", "")).strip()
+    if layout_id != expected_layout_id or (manifest_layout_id and layout_id != manifest_layout_id):
+        raise RuntimeError(
+            "Fig.6 source layout mismatch: "
+            f"computed={layout_id}, expected={expected_layout_id}, manifest={manifest_layout_id}"
+        )
+
+    source_speed = 0.60
+    first_time_s = float(first["time_s"])
+    target_intercepts = []
+    target_x_values = []
+    for row in episode_rows[: min(10, len(episode_rows))]:
+        time_s = float(row["time_s"])
+        target_x_values.append(float(row["target_x"]))
+        target_intercepts.append(float(row["target_y"]) - source_speed * time_s)
+    if max(target_x_values) - min(target_x_values) > 1e-4:
+        raise RuntimeError(f"Fig.6 source target is not a fixed-x line: {source_path}")
+    if max(target_intercepts) - min(target_intercepts) > 5e-3:
+        raise RuntimeError(
+            "Fig.6 source target does not match the 0.60 m/s line motion contract: "
+            f"intercept_span={max(target_intercepts) - min(target_intercepts):.6f}m"
+        )
+    target_start_world = [
+        float(np.median(np.asarray(target_x_values, dtype=np.float64))),
+        float(np.median(np.asarray(target_intercepts, dtype=np.float64))),
+    ]
+    if abs(target_start_world[0] - (-0.60)) > 1e-3:
+        raise RuntimeError(
+            "Fig.6 source world origin is incompatible with single-env replay: "
+            f"target_line_x={target_start_world[0]:.6f}, expected=-0.600000"
+        )
+    termination = str(episode_rows[-1].get("episode_termination_reason", "")).strip().lower()
+    expected_termination = str(FIG6_SCENE_REPLAY[method]["expected"])
+    if termination != expected_termination:
+        raise RuntimeError(
+            f"Fig.6 termination mismatch: source={termination}, expected={expected_termination}"
+        )
+    return {
+        "episode_id": int(episode_id),
+        "source_path": source_path,
+        "layout_id": layout_id,
+        "obstacles_world": obstacles,
+        "target_start_world": target_start_world,
+        "source_first_time_s": first_time_s,
+        "expected_termination": expected_termination,
+    }
 
 
 def _load_experiment_meta_from_ckpt(path: Optional[str], device: torch.device) -> Optional[dict]:
@@ -63,6 +261,94 @@ def _record_play_runtime_override(args, key: str, value) -> None:
     if key in th.RUNTIME_ABLATION_ARG_KEYS:
         runtime_overrides[key] = value
     setattr(args, "_runtime_ablation_cli_overrides", runtime_overrides)
+
+
+def _apply_fig6_scene_replay_args(args, raw_argv) -> None:
+    method = str(getattr(args, "fig6_scene_replay", "") or "").strip().lower()
+    if not method:
+        return
+    spec = FIG6_SCENE_REPLAY[method]
+    args.task = "s_pcr_line_avoid_basic"
+    args.mode = "teacher"
+    args.skill = "moe"
+    args.seed = 1
+    args.num_envs = 1
+    args.avoid_stage_override = 4
+    args.pcr_line_target_speed = 0.60
+    args.pcr_line_target_speed_scale = None
+    args.show_reset_reason = True
+    if not _argv_has_option(raw_argv, "--pcr_ckpt", "--teacher_ckpt"):
+        args.pcr_ckpt = os.path.join(PROJECT_ROOT, str(spec["ckpt"]))
+        args.teacher_ckpt = args.pcr_ckpt
+
+    for alias in ("yonly", "wgeom", "wriskonly", "wlearned", "wlearned2"):
+        setattr(args, alias, alias == spec["w_alias"])
+    args.rule_override = bool(spec.get("rule_override", False))
+    if method == "risk_only":
+        args.signed_w_gamma_risk = 0.15
+        args.w_disable_gate_safe_clamp = True
+    if method == "learnedw":
+        args.signed_w_lambda = 0.30
+        args.signed_w_gamma_risk = 0.15
+        args.signed_w_margin = 0.05
+        args.w_disable_gate_safe_clamp = True
+        args.risk_memory = True
+        args.risk_memory_l_clear = 0.40
+        args.pcr_w_aux_enable = True
+        args.pcr_w_aux_coef = 0.05
+        args.pcr_w_aux_risk_f_threshold = 0.25
+        args.pcr_w_aux_risk_margin = 0.05
+        args.pcr_w_aux_cmd_cos_threshold = 0.5
+    args._fig6_scene_replay_data = _load_fig6_scene_replay_data(args, method)
+    print(
+        "[PlayHigh] Fig.6 scene replay: method={} episode={} expected={} "
+        "layout={} seed=1 stage=4 target_speed=0.60 source={}".format(
+            method,
+            spec["episode"],
+            spec["expected"],
+            args._fig6_scene_replay_data["layout_id"],
+            args._fig6_scene_replay_data["source_path"],
+        )
+    )
+
+
+def _register_fig6_runtime_overrides(args) -> None:
+    method = str(getattr(args, "fig6_scene_replay", "") or "").strip().lower()
+    if not method:
+        return
+    overrides = {
+        "yonly": {
+            "w_mode": "none",
+        },
+        "geomw": {
+            "w_mode": "geom",
+            "w_tau": 0.15,
+            "w_blend_mode": "multiply",
+            "w_disable_gate_safe_clamp": True,
+        },
+        "risk_only": {
+            "w_mode": "risk_only",
+            "signed_w_gamma_risk": 0.15,
+            "w_disable_gate_safe_clamp": True,
+        },
+        "rule_override": {
+            "w_mode": "none",
+        },
+        "learnedw": {
+            "w_mode": "learnedw2",
+            "w_blend_mode": "multiply",
+            "signed_w_lambda": 0.30,
+            "signed_w_gamma_risk": 0.15,
+            "signed_w_margin": 0.05,
+            "w_disable_gate_safe_clamp": True,
+            "risk_memory": True,
+            "risk_memory_l_clear": 0.40,
+            "risk_memory_velocity_source": "body",
+        },
+    }[method]
+    for key, value in overrides.items():
+        setattr(args, key, value)
+        _record_play_runtime_override(args, key, value)
 
 
 def _selected_play_w_alias(args) -> Optional[str]:
@@ -210,6 +496,66 @@ def _compute_moe_follow_cmd_from_goal(
     )
 
 
+def _compute_rule_override_cmd(
+    args,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+    risk_f: torch.Tensor,
+    risk_a: torch.Tensor,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Match the paper Rule-Override command used by eval_highlevel.py."""
+    risk_gap = risk_f - risk_a
+    k = float(getattr(args, "rule_k", 8.0))
+    margin = float(getattr(args, "rule_margin", 0.10))
+    hard_thr = float(getattr(args, "rule_hard_thr", 0.45))
+    s_min = float(getattr(args, "rule_s_min", 0.85))
+    slow_ratio = float(getattr(args, "rule_slow_ratio", 0.10))
+    yaw_keep_loss = float(getattr(args, "rule_yaw_keep_loss", 0.30))
+
+    s = torch.sigmoid(k * (risk_gap - margin))
+    s = torch.where(risk_f > hard_thr, torch.maximum(s, torch.full_like(s, s_min)), s)
+    s = torch.clamp(s, 0.0, 1.0)
+    follow_scale = torch.clamp(1.0 - s + slow_ratio * s, 0.0, 1.0)
+    yaw_scale = torch.clamp(1.0 - yaw_keep_loss * s, 0.0, 1.0)
+
+    cmd = torch.zeros_like(cmd_f)
+    cmd[:, 0] = cmd_a[:, 0]
+    cmd[:, 1] = follow_scale * cmd_f[:, 1]
+    cmd[:, 2] = yaw_scale * cmd_f[:, 2]
+    return cmd, {
+        "rule_s": s,
+        "rule_risk_gap": risk_gap,
+        "rule_follow_scale": follow_scale,
+        "rule_yaw_scale": yaw_scale,
+    }
+
+
+def _current_s_avoid_layout_id(env_impl, env_id: int = 0) -> str:
+    active = getattr(env_impl, "s_avoid_active", None)
+    pos_world = getattr(env_impl, "s_avoid_pos_world", None)
+    if not torch.is_tensor(active) or not torch.is_tensor(pos_world):
+        return ""
+    cap_slots = min(
+        int(getattr(env_impl, "s_avoid_capsule_slot_count", 0)),
+        int(active.shape[1]),
+    )
+    radius = float(getattr(getattr(env_impl.cfg, "terrain", None), "avoid_capsule_radius", 0.15))
+    obstacles = []
+    for slot in range(cap_slots):
+        if not bool(active[env_id, slot].item()):
+            continue
+        obstacles.append(
+            {
+                "slot": int(slot),
+                "x": round(float(pos_world[env_id, slot, 0].item()), 4),
+                "y": round(float(pos_world[env_id, slot, 1].item()), 4),
+                "r": round(radius, 4),
+            }
+        )
+    text = json.dumps(obstacles, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+
+
 def compute_play_affordance_bundle(args, env, obs, vision_model=None):
     """Build the same affordance inputs used by play_highlevel."""
     if obs is None:
@@ -276,6 +622,12 @@ def _ensure_play_runtime_arg_defaults(args) -> None:
         "camera_save": False,
         "camera_dir": "outputs/play_highlevel_camera",
         "camera_env": 0,
+        "paper_video_debug": False,
+        "paper_video_viewer_width": 1920,
+        "paper_video_viewer_height": 1080,
+        "paper_video_panel_width": 1600,
+        "paper_video_panel_height": 680,
+        "paper_video_panel_interval": 1,
         "debug_cmd": False,
         "debug_interval": 10,
         "metrics_dir": None,
@@ -911,22 +1263,33 @@ def _extract_local_map_fov_debug(env, env_id: int = 0) -> dict:
     tilt_down = float(getattr(env, "camera_tilt_down_rad", 0.0))
     near_clip = float(getattr(env, "camera_near", 0.0))
     far_clip = float(getattr(env, "camera_far", 0.0))
+    z_ground = root_z - base_height_nominal + 0.05
+    camera_height_above_ground = max(1e-3, cam_world_z - z_ground)
 
-    near_down = max(1e-4, tilt_down + half_vfov)
-    far_down = max(1e-4, tilt_down - half_vfov)
-    near_ground = _ground_range_from_camera_ray(cam_world_z, near_down, near_clip, far_clip)
-    far_ground = _ground_range_from_camera_ray(cam_world_z, far_down, near_clip, far_clip)
+    bottom_down = tilt_down + half_vfov
+    top_down = tilt_down - half_vfov
+    near_ground = _ground_range_from_camera_ray(
+        camera_height_above_ground,
+        max(1e-4, bottom_down),
+        near_clip,
+        far_clip,
+    )
+    far_ground = _ground_range_from_camera_ray(
+        camera_height_above_ground,
+        max(1e-4, top_down),
+        near_clip,
+        far_clip,
+    )
     if far_ground < near_ground:
         near_ground, far_ground = far_ground, near_ground
 
     bearing_center = float(getattr(env, "camera_bearing_rad", 0.0))
-    bearing_left = bearing_center + half_hfov
-    bearing_right = bearing_center - half_hfov
+    bearing_left = bearing_center - half_hfov
+    bearing_right = bearing_center + half_hfov
     dir_left = _bearing_to_world_dir(yaw_world, bearing_left)
     dir_right = _bearing_to_world_dir(yaw_world, bearing_right)
     dir_center = _bearing_to_world_dir(yaw_world, bearing_center)
 
-    z_ground = 0.05
     cam_world = np.array([cam_world_xy[0], cam_world_xy[1], cam_world_z], dtype=np.float32)
 
     def _ground_point(direction_xy: np.ndarray, distance_m: float) -> np.ndarray:
@@ -944,8 +1307,54 @@ def _extract_local_map_fov_debug(env, env_id: int = 0) -> dict:
     left_far = _ground_point(dir_left, far_ground)
     right_far = _ground_point(dir_right, far_ground)
     center_far = _ground_point(dir_center, far_ground)
+
+    near_slant = max(0.02, near_clip)
+    far_slant = max(near_slant + 0.05, far_clip)
+
+    def _clip_slant_to_ground(down_angle_rad: float, slant_m: float) -> float:
+        if down_angle_rad <= 1e-4:
+            return slant_m
+        ground_slant = camera_height_above_ground / max(math.sin(down_angle_rad), 1e-6)
+        return min(slant_m, max(0.02, ground_slant))
+
+    def _frustum_point(bearing_rad: float, down_angle_rad: float, slant_m: float) -> np.ndarray:
+        slant_m = _clip_slant_to_ground(down_angle_rad, slant_m)
+        horizontal_scale = math.cos(down_angle_rad)
+        local_x = horizontal_scale * math.sin(bearing_rad)
+        local_y = horizontal_scale * math.cos(bearing_rad)
+        world_xy = _local_xy_to_world_xy(yaw_world, local_x, local_y)
+        return np.array(
+            [
+                cam_world[0] + slant_m * world_xy[0],
+                cam_world[1] + slant_m * world_xy[1],
+                cam_world[2] - slant_m * math.sin(down_angle_rad),
+            ],
+            dtype=np.float32,
+        )
+
+    near_corners = np.stack(
+        [
+            _frustum_point(bearing_left, top_down, near_slant),
+            _frustum_point(bearing_right, top_down, near_slant),
+            _frustum_point(bearing_right, bottom_down, near_slant),
+            _frustum_point(bearing_left, bottom_down, near_slant),
+        ],
+        axis=0,
+    )
+    far_corners = np.stack(
+        [
+            _frustum_point(bearing_left, top_down, far_slant),
+            _frustum_point(bearing_right, top_down, far_slant),
+            _frustum_point(bearing_right, bottom_down, far_slant),
+            _frustum_point(bearing_left, bottom_down, far_slant),
+        ],
+        axis=0,
+    )
     return {
         "camera_world": cam_world,
+        "ground_z": z_ground,
+        "near_corners": near_corners,
+        "far_corners": far_corners,
         "left_near": left_near,
         "right_near": right_near,
         "left_far": left_far,
@@ -965,24 +1374,640 @@ def _draw_local_map_fov_debug_lines(env, viewer, env_id: int = 0) -> None:
         return
 
     camera_world = np.asarray(fov_dbg["camera_world"], dtype=np.float32)
+    near_corners = np.asarray(fov_dbg["near_corners"], dtype=np.float32)
+    far_corners = np.asarray(fov_dbg["far_corners"], dtype=np.float32)
     left_near = np.asarray(fov_dbg["left_near"], dtype=np.float32)
     right_near = np.asarray(fov_dbg["right_near"], dtype=np.float32)
     left_far = np.asarray(fov_dbg["left_far"], dtype=np.float32)
     right_far = np.asarray(fov_dbg["right_far"], dtype=np.float32)
     center_far = np.asarray(fov_dbg["center_far"], dtype=np.float32)
 
-    segments = [
-        (left_near, right_near, (0.2, 0.9, 1.0)),
-        (left_far, right_far, (1.0, 0.6, 0.1)),
-        (left_near, left_far, (1.0, 0.9, 0.2)),
-        (right_near, right_far, (1.0, 0.9, 0.2)),
-        (camera_world, left_far, (0.5, 0.8, 1.0)),
-        (camera_world, right_far, (0.5, 0.8, 1.0)),
-        (camera_world, center_far, (1.0, 1.0, 1.0)),
-    ]
+    frustum_color = (0.15, 0.85, 1.0)
+    far_plane_color = (1.0, 0.55, 0.10)
+    ground_color = (1.0, 0.90, 0.15)
+    segments = []
+    for idx in range(4):
+        next_idx = (idx + 1) % 4
+        segments.append((near_corners[idx], near_corners[next_idx], frustum_color))
+        segments.append((far_corners[idx], far_corners[next_idx], far_plane_color))
+        segments.append((camera_world, far_corners[idx], frustum_color))
+    segments.extend(
+        [
+            (left_near, right_near, ground_color),
+            (left_far, right_far, ground_color),
+            (left_near, left_far, ground_color),
+            (right_near, right_far, ground_color),
+            (camera_world, center_far, (1.0, 1.0, 1.0)),
+        ]
+    )
     vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
     colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
     env_impl.gym.add_lines(viewer, env_impl.envs[env_id], len(segments), vertices, colors)
+
+
+def _extract_local_map_perception_debug_points(
+    env,
+    local_map_2ch: torch.Tensor,
+    env_id: int = 0,
+    occupancy_threshold: float = 0.5,
+) -> np.ndarray:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or not hasattr(env_impl, "root_states"):
+        return np.zeros((0, 3), dtype=np.float32)
+    if not torch.is_tensor(local_map_2ch):
+        return np.zeros((0, 3), dtype=np.float32)
+    if local_map_2ch.ndim == 4:
+        if env_id < 0 or env_id >= local_map_2ch.shape[0]:
+            return np.zeros((0, 3), dtype=np.float32)
+        local_map = local_map_2ch[env_id]
+    elif local_map_2ch.ndim == 3:
+        local_map = local_map_2ch
+    else:
+        return np.zeros((0, 3), dtype=np.float32)
+    if local_map.shape[0] < 1:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    occupancy = local_map[0].detach()
+    visible = getattr(env, "affordance_visible_mask", None)
+    occupied = occupancy > float(occupancy_threshold)
+    if torch.is_tensor(visible):
+        visible_t = visible
+        if visible_t.ndim == 3:
+            visible_t = visible_t[min(max(env_id, 0), visible_t.shape[0] - 1)]
+        if tuple(visible_t.shape) == tuple(occupied.shape):
+            occupied = occupied & visible_t.to(device=occupied.device, dtype=torch.bool)
+    occupied_idx = torch.nonzero(occupied, as_tuple=False)
+    if occupied_idx.numel() == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    x_map = getattr(env, "affordance_x_map", None)
+    y_map = getattr(env, "affordance_y_map", None)
+    if not torch.is_tensor(x_map) or not torch.is_tensor(y_map):
+        return np.zeros((0, 3), dtype=np.float32)
+    if tuple(x_map.shape) != tuple(occupied.shape) or tuple(y_map.shape) != tuple(occupied.shape):
+        return np.zeros((0, 3), dtype=np.float32)
+
+    max_points = 96
+    if occupied_idx.shape[0] > max_points:
+        keep = torch.linspace(
+            0,
+            occupied_idx.shape[0] - 1,
+            max_points,
+            device=occupied_idx.device,
+        ).round().long()
+        occupied_idx = occupied_idx[keep]
+    idx_x = occupied_idx[:, 0]
+    idx_y = occupied_idx[:, 1]
+    x_local = x_map.to(occupied_idx.device)[idx_x, idx_y].detach().cpu().numpy()
+    y_local = y_map.to(occupied_idx.device)[idx_x, idx_y].detach().cpu().numpy()
+
+    root = env_impl.root_states[env_id]
+    root_z = float(root[2].item())
+    quat = root[3:7].detach().cpu().numpy()
+    x_q, y_q, z_q, w_q = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+    yaw_world = math.atan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q))
+    root_xy = root[:2].detach().cpu().numpy().astype(np.float32, copy=False)
+
+    origin_local_xy = getattr(env, "affordance_origin_local_xy", None)
+    if torch.is_tensor(origin_local_xy) and origin_local_xy.numel() >= 2:
+        origin_local_x = float(origin_local_xy[0].item())
+        origin_local_y = float(origin_local_xy[1].item())
+    else:
+        origin_local_x = 0.0
+        origin_local_y = 0.0
+    origin_world_xy = root_xy + _local_xy_to_world_xy(
+        yaw_world,
+        origin_local_x,
+        origin_local_y,
+    )
+    base_height_nominal = float(
+        getattr(getattr(env_impl.cfg, "init_state", None), "pos", [0.0, 0.0, root_z])[2]
+    )
+    marker_z = root_z - base_height_nominal + 0.10
+
+    points = np.empty((occupied_idx.shape[0], 3), dtype=np.float32)
+    cos_h = math.cos(yaw_world)
+    sin_h = math.sin(yaw_world)
+    points[:, 0] = origin_world_xy[0] + cos_h * x_local - sin_h * y_local
+    points[:, 1] = origin_world_xy[1] + sin_h * x_local + cos_h * y_local
+    points[:, 2] = marker_z
+    return points
+
+
+def _draw_local_map_perception_debug_points(
+    env,
+    viewer,
+    local_map_2ch: torch.Tensor,
+    env_id: int = 0,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs"):
+        return
+    points = _extract_local_map_perception_debug_points(
+        env,
+        local_map_2ch,
+        env_id=env_id,
+    )
+    if points.shape[0] == 0:
+        return
+
+    cell_size = float(getattr(env, "affordance_cell_size", 0.10))
+    radius = min(0.045, max(0.025, 0.32 * cell_size))
+    geom_key = round(radius, 4)
+    cached_key = getattr(env, "_play_perception_point_geom_key", None)
+    if cached_key != geom_key or not hasattr(env, "_play_perception_point_geom"):
+        env._play_perception_point_geom = gymutil.WireframeSphereGeometry(
+            radius,
+            4,
+            4,
+            color=(1.0, 0.0, 0.0),
+        )
+        env._play_perception_point_geom_key = geom_key
+    for point in points:
+        pose = gymapi.Transform(
+            gymapi.Vec3(float(point[0]), float(point[1]), float(point[2])),
+            r=None,
+        )
+        gymutil.draw_lines(
+            env._play_perception_point_geom,
+            env_impl.gym,
+            viewer,
+            env_impl.envs[env_id],
+            pose,
+        )
+
+
+def _draw_play_debug_trajectory_history(
+    env,
+    viewer,
+    robot_history,
+    target_history,
+    env_id: int = 0,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs"):
+        return
+
+    def _draw_polyline(history, color) -> None:
+        if len(history) < 2:
+            return
+        points = np.asarray(history, dtype=np.float32)
+        vertices = np.stack([points[:-1], points[1:]], axis=1)
+        colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), vertices.shape[0], axis=0)
+        env_impl.gym.add_lines(
+            viewer,
+            env_impl.envs[env_id],
+            vertices.shape[0],
+            vertices,
+            colors,
+        )
+
+    _draw_polyline(robot_history, (1.0, 0.0, 0.0))
+    _draw_polyline(target_history, (0.0, 1.0, 0.0))
+    if not target_history:
+        return
+    if not hasattr(env, "_play_debug_target_sphere"):
+        env._play_debug_target_sphere = gymutil.WireframeSphereGeometry(
+            0.04,
+            6,
+            6,
+            color=(0.0, 1.0, 0.0),
+        )
+    target = target_history[-1]
+    pose = gymapi.Transform(
+        gymapi.Vec3(float(target[0]), float(target[1]), float(target[2])),
+        r=None,
+    )
+    gymutil.draw_lines(
+        env._play_debug_target_sphere,
+        env_impl.gym,
+        viewer,
+        env_impl.envs[env_id],
+        pose,
+    )
+
+
+def _draw_velocity_command_debug(
+    env,
+    viewer,
+    cmd_exec,
+    env_id: int = 0,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None or cmd_exec is None:
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs") or not hasattr(env_impl, "root_states"):
+        return
+    cmd_np = np.asarray(cmd_exec, dtype=np.float32).reshape(-1)
+    if cmd_np.size < 3 or not np.isfinite(cmd_np[:3]).all():
+        return
+
+    root = env_impl.root_states[env_id]
+    origin = root[:3].detach().cpu().numpy().astype(np.float32, copy=True)
+    origin[2] += 0.18
+    quat = root[3:7].detach().cpu().numpy()
+    x_q, y_q, z_q, w_q = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+    yaw_world = math.atan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q))
+
+    segments = []
+
+    def _append_segment(p0, p1, color, width: float = 0.018) -> None:
+        p0 = np.asarray(p0, dtype=np.float32)
+        p1 = np.asarray(p1, dtype=np.float32)
+        delta = p1 - p0
+        norm_xy = float(np.linalg.norm(delta[:2]))
+        offsets = [np.zeros(3, dtype=np.float32)]
+        if norm_xy > 1e-6:
+            direction = delta[:2] / norm_xy
+            perp = np.array([-direction[1], direction[0], 0.0], dtype=np.float32)
+            offsets.extend(
+                [
+                    perp * width,
+                    -perp * width,
+                    np.array([0.0, 0.0, width], dtype=np.float32),
+                    np.array([0.0, 0.0, -width], dtype=np.float32),
+                ]
+            )
+        for offset in offsets:
+            segments.append((p0 + offset, p1 + offset, color))
+
+    def _append_arrow(local_x: float, local_y: float, color) -> None:
+        world_xy = _local_xy_to_world_xy(yaw_world, local_x, local_y)
+        end = origin + np.array([world_xy[0], world_xy[1], 0.0], dtype=np.float32)
+        delta = end - origin
+        norm = float(np.linalg.norm(delta[:2]))
+        if norm <= 1e-5:
+            return
+        direction = delta[:2] / norm
+        perp = np.array([-direction[1], direction[0]], dtype=np.float32)
+        head_len = min(0.22, max(0.075, 0.34 * norm))
+        head_width = 0.70 * head_len
+        back_xy = end[:2] - direction * head_len
+        left = np.array([back_xy[0] + perp[0] * head_width, back_xy[1] + perp[1] * head_width, end[2]], dtype=np.float32)
+        right = np.array([back_xy[0] - perp[0] * head_width, back_xy[1] - perp[1] * head_width, end[2]], dtype=np.float32)
+        _append_segment(origin.copy(), end, color)
+        _append_segment(end, left, color)
+        _append_segment(end, right, color)
+
+    linear_scale = 1.85
+    if abs(float(cmd_np[0])) >= 0.01:
+        _append_arrow(linear_scale * float(cmd_np[0]), 0.0, (1.0, 0.20, 0.15))
+    if abs(float(cmd_np[1])) >= 0.01:
+        _append_arrow(0.0, linear_scale * float(cmd_np[1]), (0.10, 1.0, 0.25))
+
+    omega = float(cmd_np[2])
+    if abs(omega) >= 0.01:
+        sign = 1.0 if omega > 0.0 else -1.0
+        radius = 0.42
+        arc_angle = min(2.25, max(0.35, 2.8 * abs(omega)))
+        angles = np.linspace(0.0, sign * arc_angle, 13, dtype=np.float32)
+        arc_points = []
+        for angle in angles:
+            local_x = radius * math.sin(float(angle))
+            local_y = radius * math.cos(float(angle))
+            world_xy = _local_xy_to_world_xy(yaw_world, local_x, local_y)
+            arc_points.append(
+                origin + np.array([world_xy[0], world_xy[1], 0.06], dtype=np.float32)
+            )
+        omega_color = (0.20, 0.55, 1.0)
+        for idx in range(len(arc_points) - 1):
+            _append_segment(arc_points[idx], arc_points[idx + 1], omega_color, width=0.014)
+        tip = arc_points[-1]
+        tangent = arc_points[-1] - arc_points[-2]
+        tangent_norm = float(np.linalg.norm(tangent[:2]))
+        if tangent_norm > 1e-6:
+            tangent_xy = tangent[:2] / tangent_norm
+            perp = np.array([-tangent_xy[1], tangent_xy[0]], dtype=np.float32)
+            back = tip[:2] - tangent_xy * 0.11
+            for side in (-1.0, 1.0):
+                head = np.array(
+                    [
+                        back[0] + side * perp[0] * 0.075,
+                        back[1] + side * perp[1] * 0.075,
+                        tip[2],
+                    ],
+                    dtype=np.float32,
+                )
+                _append_segment(tip, head, omega_color, width=0.014)
+
+    if not segments:
+        return
+    vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
+    colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
+    env_impl.gym.add_lines(viewer, env_impl.envs[env_id], len(segments), vertices, colors)
+
+
+def _configure_paper_video_scene(env, args) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None:
+        return
+    env_impl.paper_video_visuals = True
+    env_impl.paper_video_fast_viewer = False
+
+    try:
+        for env_id, actor_handle in enumerate(env_impl.actor_handles):
+            env_handle = env_impl.envs[env_id]
+            body_names = env_impl.gym.get_actor_rigid_body_names(env_handle, actor_handle)
+            for body_idx, body_name in enumerate(body_names):
+                name = str(body_name).lower()
+                if "toe" in name or "foot" in name:
+                    color = gymapi.Vec3(0.07, 0.08, 0.09)
+                elif "ankle" in name:
+                    color = gymapi.Vec3(0.18, 0.20, 0.22)
+                elif "knee" in name:
+                    color = gymapi.Vec3(0.28, 0.30, 0.32)
+                elif "thigh" in name:
+                    color = gymapi.Vec3(0.38, 0.40, 0.42)
+                else:
+                    color = gymapi.Vec3(0.23, 0.25, 0.27)
+                env_impl.gym.set_rigid_body_color(
+                    env_handle,
+                    actor_handle,
+                    body_idx,
+                    gymapi.MESH_VISUAL,
+                    color,
+                )
+    except Exception as exc:
+        print(f"[PlayHigh] paper-video robot palette unavailable: {exc}")
+
+    update_obstacle_colors = getattr(env_impl, "_update_s_avoid_debug_colors", None)
+    if callable(update_obstacle_colors):
+        try:
+            update_obstacle_colors(torch.arange(env_impl.num_envs, device=env_impl.device))
+        except Exception as exc:
+            print(f"[PlayHigh] paper-video obstacle colors unavailable: {exc}")
+    print(
+        "[PlayHigh] paper-video visuals enabled: viewer={}x{}, panel={}x{}, default Isaac Gym lighting".format(
+            int(args.paper_video_viewer_width),
+            int(args.paper_video_viewer_height),
+            int(args.paper_video_panel_width),
+            int(args.paper_video_panel_height),
+        )
+    )
+
+
+def _update_paper_video_viewer_camera(
+    env,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    viewer = getattr(env_impl, "viewer", None) if env_impl is not None else None
+    if env_impl is None or viewer is None:
+        return
+    camera_pos = np.array([0.0, -5.0, 7.0], dtype=np.float32)
+    camera_target = np.array([0.0, 3.0, 0.25], dtype=np.float32)
+    env_impl.gym.viewer_camera_look_at(
+        viewer,
+        None,
+        gymapi.Vec3(float(camera_pos[0]), float(camera_pos[1]), float(camera_pos[2])),
+        gymapi.Vec3(float(camera_target[0]), float(camera_target[1]), float(camera_target[2])),
+    )
+    print("[PlayHigh] fixed rear viewer camera: position=(0.00, -5.00, 7.00), target=(0.00, 3.00, 0.25)")
+
+
+def _draw_paper_video_ground_reference(
+    env,
+    viewer,
+    env_id: int = 0,
+) -> None:
+    env_impl = getattr(env, "env", None)
+    if env_impl is None or viewer is None:
+        return
+    if not bool(getattr(env_impl, "paper_video_visuals", False)):
+        return
+    if not hasattr(env_impl, "gym") or not hasattr(env_impl, "envs") or not hasattr(env_impl, "root_states"):
+        return
+    root = env_impl.root_states[env_id]
+    root_xy = root[:2].detach().cpu().numpy().astype(np.float32, copy=False)
+    base_height = float(getattr(getattr(env_impl.cfg, "init_state", None), "pos", [0.0, 0.0, 0.1])[2])
+    ground_z = float(root[2].item()) - base_height + 0.018
+    x_min, x_max = -1.65, 1.65
+    y_min = math.floor((float(root_xy[1]) - 1.5) * 2.0) / 2.0
+    y_max = y_min + 10.0
+    segments = []
+    y = y_min
+    while y <= y_max + 1e-5:
+        color = (0.44, 0.46, 0.48) if abs((y * 2.0) % 2.0) < 1e-5 else (0.34, 0.36, 0.38)
+        segments.append(((x_min, y, ground_z), (x_max, y, ground_z), color))
+        y += 0.5
+    x = x_min
+    while x <= x_max + 1e-5:
+        color = (0.50, 0.52, 0.54) if abs(x) < 1e-5 else (0.34, 0.36, 0.38)
+        segments.append(((x, y_min, ground_z), (x, y_max, ground_z), color))
+        x += 0.5
+    segments.append(((0.0, y_min, ground_z + 0.004), (0.0, y_max, ground_z + 0.004), (0.68, 0.70, 0.72)))
+    vertices = np.asarray([coord for p0, p1, _ in segments for coord in (*p0, *p1)], dtype=np.float32)
+    colors = np.asarray([channel for _, _, color in segments for channel in color], dtype=np.float32)
+    env_impl.gym.add_lines(viewer, env_impl.envs[env_id], len(segments), vertices, colors)
+
+
+def _compose_paper_video_panel(
+    cv2,
+    depth_m: np.ndarray,
+    actor_local_map: np.ndarray,
+    visible_mask: Optional[np.ndarray],
+    cmd_exec: np.ndarray,
+    *,
+    near_m: float,
+    far_m: float,
+    mode_label: str,
+    step_idx: int,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    width = max(1200, int(width))
+    height = max(560, int(height))
+    canvas = np.full((height, width, 3), (18, 21, 26), dtype=np.uint8)
+    margin = 28
+    gap = 22
+    header_h = 76
+    footer_h = 92
+    card_y = header_h
+    card_h = height - header_h - footer_h - margin
+    card_w = (width - 2 * margin - 2 * gap) // 3
+    title_color = (238, 241, 245)
+    muted = (158, 169, 181)
+
+    cv2.putText(
+        canvas,
+        "PCR-Net  |  Simulation Perception and Control",
+        (margin, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.92,
+        title_color,
+        2,
+        cv2.LINE_AA,
+    )
+    status = f"{mode_label}   step {int(step_idx):05d}"
+    status_size = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 1)[0]
+    cv2.putText(
+        canvas,
+        status,
+        (width - margin - status_size[0], 38),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        muted,
+        1,
+        cv2.LINE_AA,
+    )
+
+    def _card(index: int, title: str):
+        x0 = margin + index * (card_w + gap)
+        y0 = card_y
+        cv2.rectangle(canvas, (x0, y0), (x0 + card_w, y0 + card_h), (31, 36, 43), -1)
+        cv2.rectangle(canvas, (x0, y0), (x0 + card_w, y0 + card_h), (65, 73, 84), 1)
+        cv2.putText(
+            canvas,
+            title,
+            (x0 + 16, y0 + 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            title_color,
+            1,
+            cv2.LINE_AA,
+        )
+        return x0, y0
+
+    def _paste_fit(image: np.ndarray, x0: int, y0: int, box_w: int, box_h: int, interpolation) -> None:
+        img_h, img_w = image.shape[:2]
+        scale = min(float(box_w) / max(img_w, 1), float(box_h) / max(img_h, 1))
+        out_w = max(1, int(round(img_w * scale)))
+        out_h = max(1, int(round(img_h * scale)))
+        resized = cv2.resize(image, (out_w, out_h), interpolation=interpolation)
+        px = x0 + (box_w - out_w) // 2
+        py = y0 + (box_h - out_h) // 2
+        canvas[py:py + out_h, px:px + out_w] = resized
+
+    depth = np.asarray(depth_m, dtype=np.float32)
+    depth_valid = np.isfinite(depth)
+    depth = np.nan_to_num(depth, nan=far_m, posinf=far_m, neginf=far_m)
+    depth_display_max = max(360, min(640, card_w - 24))
+    depth_max_dim = max(depth.shape[:2]) if depth.ndim >= 2 else 0
+    if depth_max_dim > depth_display_max:
+        scale = float(depth_display_max) / float(depth_max_dim)
+        resize_shape = (
+            max(1, int(round(depth.shape[1] * scale))),
+            max(1, int(round(depth.shape[0] * scale))),
+        )
+        depth = cv2.resize(depth, resize_shape, interpolation=cv2.INTER_AREA)
+        depth_valid = cv2.resize(
+            depth_valid.astype(np.uint8),
+            resize_shape,
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(np.bool_)
+    depth = np.clip(depth, near_m, far_m)
+    depth_norm = (depth - near_m) / max(far_m - near_m, 1e-6)
+    depth_u8 = np.clip((1.0 - depth_norm) * 255.0, 0.0, 255.0).astype(np.uint8)
+    depth_vis = cv2.cvtColor(depth_u8, cv2.COLOR_GRAY2BGR)
+    depth_vis[~depth_valid] = (24, 26, 29)
+    x0, y0 = _card(0, "Virtual Depth Camera | Policy Input")
+    _paste_fit(depth_vis, x0 + 12, y0 + 46, card_w - 24, card_h - 82, cv2.INTER_AREA)
+    cv2.putText(
+        canvas,
+        f"{near_m:.2f} m  near                         far  {far_m:.1f} m",
+        (x0 + 16, y0 + card_h - 16),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.43,
+        muted,
+        1,
+        cv2.LINE_AA,
+    )
+
+    local_map = np.asarray(actor_local_map, dtype=np.float32)
+    if local_map.ndim != 3 or local_map.shape[0] < 2:
+        local_map = np.zeros((2, 32, 32), dtype=np.float32)
+    occ = np.clip(np.nan_to_num(local_map[0]), 0.0, 1.0)
+    clearance = np.clip(np.nan_to_num(local_map[1]), 0.0, 1.0)
+    if visible_mask is None or np.asarray(visible_mask).shape != occ.shape:
+        visible = np.ones_like(occ, dtype=np.bool_)
+    else:
+        visible = np.asarray(visible_mask, dtype=np.bool_)
+
+    occ_disp = np.flipud(occ.T)
+    clear_disp = np.flipud(clearance.T)
+    visible_disp = np.flipud(visible.T)
+    occ_vis = np.full((*occ_disp.shape, 3), (34, 39, 46), dtype=np.uint8)
+    occ_strength = occ_disp[..., None]
+    occupied_color = np.array([45, 64, 232], dtype=np.float32)
+    occ_vis = np.clip(
+        occ_vis.astype(np.float32) * (1.0 - occ_strength)
+        + occupied_color.reshape(1, 1, 3) * occ_strength,
+        0,
+        255,
+    ).astype(np.uint8)
+    occ_vis[~visible_disp] = (16, 18, 22)
+
+    clear_u8 = np.clip(clear_disp * 255.0, 0.0, 255.0).astype(np.uint8)
+    clear_vis = cv2.applyColorMap(clear_u8, cv2.COLORMAP_VIRIDIS)
+    clear_vis[~visible_disp] = (16, 18, 22)
+
+    for index, title, image in (
+        (1, "Actor Occupancy", occ_vis),
+        (2, "Actor Clearance / Free Space", clear_vis),
+    ):
+        x0, y0 = _card(index, title)
+        map_size_px = min(card_w - 44, card_h - 78)
+        map_scaled = cv2.resize(image, (map_size_px, map_size_px), interpolation=cv2.INTER_NEAREST)
+        px = x0 + (card_w - map_size_px) // 2
+        py = y0 + 48 + max(0, (card_h - 70 - map_size_px) // 2)
+        canvas[py:py + map_size_px, px:px + map_size_px] = map_scaled
+        grid_n = int(occ.shape[0])
+        if grid_n <= 40:
+            for grid_idx in range(0, grid_n + 1, 4):
+                gx = px + int(round(grid_idx * map_size_px / grid_n))
+                gy = py + int(round(grid_idx * map_size_px / grid_n))
+                cv2.line(canvas, (gx, py), (gx, py + map_size_px), (75, 80, 87), 1)
+                cv2.line(canvas, (px, gy), (px + map_size_px, gy), (75, 80, 87), 1)
+        robot_x = px + map_size_px // 2
+        robot_y = py + map_size_px - 4
+        cv2.arrowedLine(
+            canvas,
+            (robot_x, robot_y),
+            (robot_x, max(py + 8, robot_y - 34)),
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+            tipLength=0.35,
+        )
+
+    cmd = np.asarray(cmd_exec, dtype=np.float32).reshape(-1)
+    if cmd.size < 3:
+        cmd = np.zeros(3, dtype=np.float32)
+    footer_y = height - footer_h + 24
+    cv2.putText(
+        canvas,
+        "Executed body command",
+        (margin, footer_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        muted,
+        1,
+        cv2.LINE_AA,
+    )
+    command_specs = [
+        ("lateral x", float(cmd[0]), "m/s", (54, 72, 235)),
+        ("forward y", float(cmd[1]), "m/s", (62, 205, 92)),
+        ("yaw", float(cmd[2]), "rad/s", (235, 142, 48)),
+    ]
+    command_x = margin + 230
+    block_w = (width - command_x - margin) // 3
+    for idx, (label, value, unit, color) in enumerate(command_specs):
+        bx = command_x + idx * block_w
+        cv2.line(canvas, (bx, footer_y - 15), (bx, footer_y + 30), color, 5, cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            f"{label}  {value:+.3f} {unit}",
+            (bx + 14, footer_y + 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.60,
+            title_color,
+            1,
+            cv2.LINE_AA,
+        )
+    return canvas
 
 
 def _draw_s_avoid_row_gap_debug_lines(
@@ -2068,6 +3093,16 @@ def parse_args():
     parser.add_argument("--camera_dir", type=str, default="outputs/play_highlevel_camera", help="Camera output dir")
     parser.add_argument("--camera_interval", type=int, default=None, help="Camera capture interval")
     parser.add_argument("--camera_env", type=int, default=0, help="Env index for camera output")
+    parser.add_argument(
+        "--paper_video_debug",
+        action="store_true",
+        help="论文视频显示：高清 viewer、虚拟深度图、actor local map、3D FOV 与实时执行命令箭头",
+    )
+    parser.add_argument("--paper_video_viewer_width", type=int, default=1920, help="论文视频主 viewer 宽度")
+    parser.add_argument("--paper_video_viewer_height", type=int, default=1080, help="论文视频主 viewer 高度")
+    parser.add_argument("--paper_video_panel_width", type=int, default=1600, help="论文视频感知窗口宽度")
+    parser.add_argument("--paper_video_panel_height", type=int, default=680, help="论文视频感知窗口高度")
+    parser.add_argument("--paper_video_panel_interval", type=int, default=1, help="论文视频感知窗口刷新间隔，1 表示每帧刷新")
     parser.add_argument("--cmd_slew_lin", type=float, default=0.2, help="命令线速度变化率限制")
     parser.add_argument("--cmd_slew_ang", type=float, default=0.4, help="命令角速度变化率限制")
     parser.add_argument("--cmd_safe_dist", type=float, default=None, help="安全距离阈值（None 使用默认 clearance）")
@@ -2168,6 +3203,37 @@ def parse_args():
         help="按倍率覆盖 s_pcr_line_avoid_basic 默认脚本目标速度",
     )
     parser.add_argument(
+        "--fig6_scene_replay",
+        type=str,
+        default=None,
+        choices=sorted(FIG6_SCENE_REPLAY),
+        help="恢复最终 Fig.6 对应方法的 Stage 4 障碍布局，并由真实策略在线运行",
+    )
+    parser.add_argument(
+        "--fig6_sources_csv",
+        type=str,
+        default=os.path.join(
+            PROJECT_ROOT,
+            "agents",
+            "final_paper_outputs_v3",
+            "fig6_trajectories_stage4_sources.csv",
+        ),
+        help="最终 Fig.6 轨迹来源清单",
+    )
+    parser.add_argument(
+        "--fig6_source_root",
+        type=str,
+        default=None,
+        help="原始 timeseries 不在项目默认相对路径时使用的根目录",
+    )
+    parser.add_argument("--rule_override", action="store_true", help="使用论文 Rule-Override 规则替换 Gate 融合输出")
+    parser.add_argument("--rule_k", type=float, default=8.0)
+    parser.add_argument("--rule_margin", type=float, default=0.10)
+    parser.add_argument("--rule_hard_thr", type=float, default=0.45)
+    parser.add_argument("--rule_s_min", type=float, default=0.85)
+    parser.add_argument("--rule_slow_ratio", type=float, default=0.10)
+    parser.add_argument("--rule_yaw_keep_loss", type=float, default=0.30)
+    parser.add_argument(
         "--expert_k_yaw",
         type=float,
         default=None,
@@ -2255,6 +3321,7 @@ def parse_args():
     )
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
+    _apply_fig6_scene_replay_args(args, raw_argv)
     if not hasattr(args, "physics_engine"):
         args.physics_engine = gymapi.SIM_PHYSX
     if not hasattr(args, "sim_device_type"):
@@ -2300,6 +3367,7 @@ def parse_args():
         args.skill = "follow"
     th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
     _apply_play_common_defaults(args, raw_argv)
+    _register_fig6_runtime_overrides(args)
     if bool(getattr(args, "mono_ppo", False)):
         if args.skill != "moe":
             parser.error("--mono_ppo 只支持 --skill moe")
@@ -2359,6 +3427,12 @@ def main():
     if (args.expert_heading_lock is not None) and (args.expert_heading_release is not None):
         if not (float(args.expert_heading_release) < float(args.expert_heading_lock)):
             raise ValueError("--expert_heading_release must be < --expert_heading_lock")
+    paper_video_debug = bool(getattr(args, "paper_video_debug", False))
+    if paper_video_debug:
+        if args.headless:
+            raise ValueError("--paper_video_debug 需要 viewer，不能与 --headless 同时使用")
+        args.debug = True
+        args.num_envs = 1
     debug = bool(getattr(args, "debug", False))
     def dprint(*vals, **kwargs):
         if debug:
@@ -2383,13 +3457,15 @@ def main():
 
     camera_cv2 = None
     camera_warned_no_cv2 = False
-    if args.camera_show:
+    if args.camera_show or paper_video_debug:
         try:
             import cv2
             camera_cv2 = cv2
         except Exception as exc:
-            print(f"[PlayHigh] ⚠ cv2 not available ({exc}); disabling camera_show.")
+            print(f"[PlayHigh] ⚠ cv2 not available ({exc}); disabling camera windows.")
             args.camera_show = False
+            paper_video_debug = False
+            args.paper_video_debug = False
 
     if args.camera_save:
         os.makedirs(args.camera_dir, exist_ok=True)
@@ -2406,7 +3482,39 @@ def main():
         _maybe_apply_pcr_new_play_overrides(args, env_cfg)
         _maybe_apply_pcr_line_play_overrides(args, env_cfg)
         _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
+        if paper_video_debug:
+            if hasattr(env_cfg, "sensor") and hasattr(env_cfg.sensor, "depth_camera"):
+                # Display-only camera: keep the policy observation contract unchanged.
+                env_cfg.sensor.depth_camera.enable = True
+            if hasattr(env_cfg, "viewer"):
+                env_cfg.viewer.width = max(960, int(args.paper_video_viewer_width))
+                env_cfg.viewer.height = max(540, int(args.paper_video_viewer_height))
+                env_cfg.viewer.supersampling_horizontal = 1
+                env_cfg.viewer.supersampling_vertical = 1
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
+    if paper_video_debug:
+        # Capture depth once per high-level step after clearing viewer-only overlays.
+        # Low-level viewer updates remain active at their original 50 Hz cadence.
+        env.env.debug_viz = False
+        env.env.foot_traj_viz = False
+        env.env.suppress_step_camera_refresh = True
+        env.env.paper_video_wallclock_step = True
+        env.force_camera_refresh_each_high_level = True
+        viewer_for_capture = getattr(env.env, "viewer", None)
+        if viewer_for_capture is not None:
+            def _clear_paper_video_lines_before_depth():
+                env.env.gym.clear_lines(viewer_for_capture)
+
+            env.camera_capture_pre_hook = _clear_paper_video_lines_before_depth
+        _configure_paper_video_scene(env, args)
+        if camera_cv2 is not None:
+            camera_cv2.namedWindow("PCR-Net | Perception", camera_cv2.WINDOW_NORMAL)
+            camera_cv2.resizeWindow(
+                "PCR-Net | Perception",
+                max(1200, int(args.paper_video_panel_width)),
+                max(560, int(args.paper_video_panel_height)),
+            )
+        _update_paper_video_viewer_camera(env)
     is_pcr_demo_task = bool(getattr(env, "is_pcr_line_task", False))
     if args.camera_interval is None:
         args.camera_interval = int(getattr(getattr(env.env, "camera_cfg", None), "capture_interval", 1))
@@ -2451,7 +3559,11 @@ def main():
         dprint("[PlayHigh] curriculum disabled; start at level 0")
     _maybe_apply_s_avoid_stage_override_runtime(args, env)
     if hasattr(env, "env") and hasattr(env.env, "debug_viz"):
-        env.env.debug_viz = bool(getattr(args, "debug", False)) or static_avoid_debug or is_pcr_demo_task
+        env.env.debug_viz = (
+            False
+            if paper_video_debug
+            else bool(getattr(args, "debug", False)) or static_avoid_debug or is_pcr_demo_task
+        )
     if is_pcr_demo_task and not args.headless:
         print("[PlayHigh] PCR demo visualization enabled: moving target point + target/robot trajectories.")
     vision_model = None
@@ -2537,7 +3649,51 @@ def main():
         return compute_play_affordance_bundle(args, env, current_obs, vision_model)
 
     _maybe_apply_s_avoid_stage_override_runtime(args, env)
+    fig6_replay_data = getattr(args, "_fig6_scene_replay_data", None)
+    if isinstance(fig6_replay_data, dict):
+        env.env.s_avoid_forced_obstacles_world = list(fig6_replay_data["obstacles_world"])
+        env.env.pcr_line_forced_target_start_world = tuple(fig6_replay_data["target_start_world"])
+        print(
+            "[PlayHigh] Fig.6 exact scene armed: episode={} obstacles={} target_start=({:.4f},{:.4f}); "
+            "every reset restores the source scene.".format(
+                fig6_replay_data["episode_id"],
+                len(fig6_replay_data["obstacles_world"]),
+                fig6_replay_data["target_start_world"][0],
+                fig6_replay_data["target_start_world"][1],
+            )
+        )
     obs = env.reset()
+    fig6_method = str(getattr(args, "fig6_scene_replay", "") or "").strip().lower()
+    if fig6_method:
+        actual_layout_id = _current_s_avoid_layout_id(env.env)
+        expected_layout_id = str(fig6_replay_data["layout_id"])
+        print(
+            f"[PlayHigh] Fig.6 layout check: actual={actual_layout_id} "
+            f"expected={expected_layout_id}"
+        )
+        if actual_layout_id != expected_layout_id:
+            raise RuntimeError(
+                "Fig.6 obstacle layout mismatch; refusing to record a different scene. "
+                f"method={fig6_method}, episode={fig6_replay_data['episode_id']}"
+            )
+        runtime_target = env.env.target_world[0, :2].detach().cpu().numpy()
+        expected_target = np.asarray(fig6_replay_data["target_start_world"], dtype=np.float32)
+        target_error = float(np.linalg.norm(runtime_target - expected_target))
+        print(
+            "[PlayHigh] Fig.6 target-start check: actual=({:.4f},{:.4f}) "
+            "expected=({:.4f},{:.4f}) error={:.6f}m".format(
+                runtime_target[0],
+                runtime_target[1],
+                expected_target[0],
+                expected_target[1],
+                target_error,
+            )
+        )
+        if target_error > 1e-4:
+            raise RuntimeError(
+                "Fig.6 target initial state mismatch; refusing to record a different scene. "
+                f"error={target_error:.6f}m"
+            )
     aff_bundle = _get_aff_bundle(obs)
     raw_aff_map = aff_bundle["raw_aff"]
     aff_map = aff_bundle["policy_aff"]
@@ -2715,8 +3871,19 @@ def main():
     axis_disp_count = 0
     track_ep_cmd_pred_x = []
     track_ep_cmd_exec_x = []
+    debug_robot_trajectory = []
+    debug_target_trajectory = []
     teacher_dump_interval_s = max(float(getattr(args, "dump_teacher_every_s", 0.0)), 0.0)
     high_level_dt = float(getattr(env, "high_level_dt", float(env.env.dt) * float(args.decimation)))
+    if not np.isfinite(high_level_dt) or high_level_dt <= 0.0:
+        raise ValueError(f"Invalid high_level_dt for play pacing: {high_level_dt}")
+    if paper_video_debug:
+        print(
+            "[PlayHigh] paper-video timing: high_level_dt={:.4f}s ({:.2f} Hz), viewer=50 Hz wallclock".format(
+                high_level_dt,
+                1.0 / high_level_dt,
+            )
+        )
     teacher_dump_interval_steps = 0
     next_teacher_dump_step = 0
     if teacher_dump_interval_s > 0.0:
@@ -2830,6 +3997,9 @@ def main():
                 if is_gate and bool(getattr(args, "zero_local_map", False))
                 else aff_bundle["gate_aff"]
             )
+            paper_video_actor_map = aff_bundle["avoid_aff"]
+            if bool(getattr(args, "zero_local_map", False)):
+                paper_video_actor_map = torch.zeros_like(paper_video_actor_map)
             if not expert_only_mode:
                 with torch.no_grad():
                     if is_gate:
@@ -2898,6 +4068,32 @@ def main():
                             cmd_a,
                             learned_w=learned_w,
                         )
+                        if bool(getattr(args, "rule_override", False)):
+                            cmd_rule, rule_info = _compute_rule_override_cmd(
+                                args,
+                                gate_diag["cmd_f"],
+                                gate_diag["cmd_a"],
+                                gate_diag["risk_F"],
+                                gate_diag["risk_A"],
+                            )
+                            follow_scale = rule_info["rule_follow_scale"]
+                            zero = torch.zeros_like(follow_scale)
+                            one = torch.ones_like(follow_scale)
+                            gate_diag["cmd"] = cmd_rule
+                            gate_diag["gate_y_raw"] = one
+                            gate_diag["gate_y"] = one
+                            gate_diag["gate_y_safe"] = one
+                            gate_diag["y_eff"] = follow_scale
+                            gate_diag["w"] = torch.full_like(follow_scale, 0.5)
+                            gate_diag["signed_w"] = zero
+                            gate_diag["signed_w_active"] = zero
+                            gate_diag["w_support_correction"] = zero
+                            gate_diag["risk_diff_correction"] = zero
+                            gate_diag["delta_y_w_raw"] = zero
+                            gate_diag["delta_y_w_used"] = zero
+                            gate_diag["delta_y_r"] = zero
+                            gate_diag["delta_y_total"] = follow_scale - one
+                            gate_diag.update(rule_info)
                         gate_y = gate_diag["y_eff"]
                         cmd = gate_diag["cmd"]
                     else:
@@ -3184,24 +4380,79 @@ def main():
             step_yaw = 0.0
             cmd_omega_track = 0.0
             band_debug = _extract_s_avoid_band_debug(env, env_id=track_env_idx)
-            if input_enabled and debug and getattr(args, "task", "") == "s_avoid_basic":
+            sensor_debug = (
+                input_enabled
+                and debug
+                and obs is not None
+                and "local_map_2ch" in obs
+                and (
+                    getattr(args, "skill", "") in ("avoid", "moe")
+                    or th.is_pcr_line_task_name(str(getattr(args, "task", "")))
+                )
+            )
+            if sensor_debug:
                 env_impl = getattr(env, "env", None)
                 post_info_dbg = info.get("post_info") if isinstance(info, dict) else None
                 cmd_exec_mean_dbg = None
+                perception_map_dbg = paper_video_actor_map
                 if isinstance(post_info_dbg, dict):
                     cmd_exec_mean_t = post_info_dbg.get("cmd_exec_mean", None)
                     if torch.is_tensor(cmd_exec_mean_t):
                         cmd_exec_mean_dbg = cmd_exec_mean_t[track_env_idx].detach().cpu().numpy()
+                if cmd_exec_mean_dbg is None and env_impl is not None and hasattr(env_impl, "commands"):
+                    cmd_exec_mean_dbg = env_impl.commands[track_env_idx, :3].detach().cpu().numpy()
+                if th.is_pcr_line_task_name(str(getattr(args, "task", ""))):
+                    if bool(dones[track_env_idx].item()):
+                        debug_robot_trajectory.clear()
+                        debug_target_trajectory.clear()
+                    if env_impl is not None and hasattr(env_impl, "root_states"):
+                        robot_dbg = env_impl.root_states[track_env_idx, :3].detach().cpu().numpy().astype(
+                            np.float32,
+                            copy=True,
+                        )
+                        target_world_dbg = getattr(env_impl, "target_world", None)
+                        if torch.is_tensor(target_world_dbg):
+                            target_xy_dbg = target_world_dbg[track_env_idx, :2].detach().cpu().numpy()
+                            target_dbg = np.array(
+                                [
+                                    float(target_xy_dbg[0]),
+                                    float(target_xy_dbg[1]),
+                                    float(robot_dbg[2] + 0.06),
+                                ],
+                                dtype=np.float32,
+                            )
+                            debug_robot_trajectory.append(robot_dbg)
+                            debug_target_trajectory.append(target_dbg)
                 if env_impl is not None and hasattr(env_impl, "gym"):
                     env_impl.gym.clear_lines(viewer)
-                _draw_s_avoid_band_debug_lines(env, viewer, env_id=track_env_idx)
-                _draw_local_map_fov_debug_lines(env, viewer, env_id=track_env_idx)
-                _draw_s_avoid_row_gap_debug_lines(
+                _draw_play_debug_trajectory_history(
                     env,
                     viewer,
+                    debug_robot_trajectory,
+                    debug_target_trajectory,
                     env_id=track_env_idx,
-                    cmd_exec_mean=cmd_exec_mean_dbg,
                 )
+                _draw_local_map_fov_debug_lines(env, viewer, env_id=track_env_idx)
+                _draw_local_map_perception_debug_points(
+                    env,
+                    viewer,
+                    perception_map_dbg,
+                    env_id=track_env_idx,
+                )
+                _draw_velocity_command_debug(
+                    env,
+                    viewer,
+                    cmd_exec_mean_dbg,
+                    env_id=track_env_idx,
+                )
+                if getattr(args, "task", "") == "s_avoid_basic":
+                    _draw_s_avoid_band_debug_lines(env, viewer, env_id=track_env_idx)
+                    _draw_s_avoid_row_gap_debug_lines(
+                        env,
+                        viewer,
+                        env_id=track_env_idx,
+                        cmd_exec_mean=cmd_exec_mean_dbg,
+                    )
             if hasattr(env.env, "root_states"):
                 root = env.env.root_states[track_env_idx]
                 pos_xy = root[:2].detach().cpu().numpy()
@@ -4002,25 +5253,84 @@ def main():
                 )
 
             if not args.headless:
-                env.env.render()
+                # The low-level loop already performs realtime synchronization.
+                # Submit the freshly redrawn overlays without adding another delay.
+                env.env.render(sync_frame_time=not paper_video_debug)
 
-            if args.camera_enable and (step_idx % args.camera_interval == 0):
+            paper_video_panel_interval = max(1, int(getattr(args, "paper_video_panel_interval", 2)))
+            paper_video_panel_due = (
+                paper_video_debug
+                and camera_cv2 is not None
+                and (step_idx % paper_video_panel_interval == 0)
+            )
+            camera_due = bool(args.camera_enable) and (step_idx % args.camera_interval == 0)
+            if camera_due or paper_video_panel_due:
                 depth_np = None
-                if hasattr(env.env, "_get_depth_images"):
+                policy_depth_m_np = None
+                if hasattr(env.env, "depth_raw"):
+                    depth_np = env.env.depth_raw[args.camera_env].detach().cpu().numpy()
+                elif hasattr(env.env, "_get_depth_images"):
                     depth = env.env._get_depth_images()
                     depth_np = depth[args.camera_env].detach().cpu().numpy()
-                elif hasattr(env.env, "depth_images"):
-                    depth = env.env.depth_images
-                    depth_np = depth[args.camera_env, 0].detach().cpu().numpy()
 
                 if depth_np is not None:
-                    depth_min = float(depth_np.min())
-                    depth_max = float(depth_np.max())
-                    depth_norm = (depth_np - depth_min) / (max(depth_max - depth_min, 1e-6))
+                    cam_cfg = getattr(env.env, "camera_cfg", None)
+                    near_m = float(getattr(cam_cfg, "near_clip", np.nanmin(depth_np)))
+                    far_m = float(getattr(cam_cfg, "far_clip", np.nanmax(depth_np)))
+                    if hasattr(env.env, "depth_images"):
+                        policy_depth_np = (
+                            env.env.depth_images[args.camera_env, 0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                        policy_depth_m_np = (
+                            np.clip(policy_depth_np, 0.0, 1.0) * (far_m - near_m) + near_m
+                        )
+                    else:
+                        policy_depth_m_np = depth_np
+                    depth_norm = (np.clip(depth_np, near_m, far_m) - near_m) / max(far_m - near_m, 1e-6)
                     depth_u8 = (depth_norm * 255.0).astype("uint8")
 
-                    if args.camera_show and camera_cv2 is not None:
-                        depth_vis = camera_cv2.applyColorMap(255 - depth_u8, camera_cv2.COLORMAP_TURBO)
+                    if paper_video_panel_due:
+                        actor_map_np = (
+                            paper_video_actor_map[args.camera_env]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                        visible_mask_np = None
+                        visible_mask_t = getattr(env, "affordance_visible_mask", None)
+                        if torch.is_tensor(visible_mask_t):
+                            visible_mask_np = visible_mask_t.detach().cpu().numpy()
+                        cmd_panel = None
+                        if isinstance(post_info, dict):
+                            cmd_panel_t = post_info.get("cmd_exec_mean", None)
+                            if torch.is_tensor(cmd_panel_t):
+                                cmd_panel = cmd_panel_t[args.camera_env].detach().cpu().numpy()
+                        if cmd_panel is None and hasattr(env.env, "commands"):
+                            cmd_panel = env.env.commands[args.camera_env, :3].detach().cpu().numpy()
+                        if cmd_panel is None:
+                            cmd_panel = np.zeros(3, dtype=np.float32)
+                        panel = _compose_paper_video_panel(
+                            camera_cv2,
+                            policy_depth_m_np,
+                            actor_map_np,
+                            visible_mask_np,
+                            cmd_panel,
+                            near_m=near_m,
+                            far_m=far_m,
+                            mode_label=f"{args.mode.upper()} / {str(getattr(args, 'w_mode', 'none')).upper()}",
+                            step_idx=step_idx,
+                            width=int(args.paper_video_panel_width),
+                            height=int(args.paper_video_panel_height),
+                        )
+                        camera_cv2.imshow("PCR-Net | Perception", panel)
+                        camera_cv2.waitKey(1)
+                    elif args.camera_show and camera_cv2 is not None:
+                        depth_vis = camera_cv2.cvtColor(255 - depth_u8, camera_cv2.COLOR_GRAY2BGR)
                         camera_cv2.imshow("play_highlevel_depth", depth_vis)
                         camera_cv2.waitKey(1)
 
@@ -4029,12 +5339,14 @@ def main():
                         png_path = os.path.join(args.camera_dir, f"depth_{camera_frame_idx:06d}.png")
                         np.save(npy_path, depth_np.astype("float32"))
                         if camera_cv2 is not None:
-                            depth_vis = camera_cv2.applyColorMap(255 - depth_u8, camera_cv2.COLORMAP_TURBO)
+                            depth_vis = camera_cv2.cvtColor(255 - depth_u8, camera_cv2.COLOR_GRAY2BGR)
                             camera_cv2.imwrite(png_path, depth_vis)
                         elif not camera_warned_no_cv2:
                             print("[PlayHigh] ⚠ cv2 unavailable; skipping depth PNG output.")
                             camera_warned_no_cv2 = True
                         camera_frame_idx += 1
+            elif paper_video_debug and camera_cv2 is not None:
+                camera_cv2.waitKey(1)
 
             step_idx += 1
             if args.max_steps > 0 and step_idx >= args.max_steps:
@@ -4045,6 +5357,11 @@ def main():
         stop_reason = "keyboard_interrupt"
         print("[PlayHigh] keyboard interrupt received; exporting current metrics.")
     finally:
+        if camera_cv2 is not None:
+            try:
+                camera_cv2.destroyAllWindows()
+            except Exception:
+                pass
         if e_s_metrics.get("enabled", False):
             _finalize_active_e_s_metrics(e_s_metrics, reason=stop_reason)
             _export_e_s_metrics(e_s_metrics, final=True, stop_reason=stop_reason)

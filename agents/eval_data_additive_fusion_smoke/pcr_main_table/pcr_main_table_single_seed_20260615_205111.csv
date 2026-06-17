@@ -1,0 +1,2 @@
+Speed,Method,Seed,Task Success,Collision,Follow MAE,Unsafe Rate,C_avoid Rate,CSI@C_avoid,Num Episodes,Checkpoint,Source
+0.60,additive_fusion,1,0.5,0.5,0.3264932409159346,0.21159153633854647,0.062557497700092,,8,/home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym/agents/moe_teacher_best_yonly.pt,agents/eval_data_additive_fusion_smoke/s_0.6/moe_teacher_s_pcr_line_avoid_basic_additive_fusion_seed1_20260615_205109/metrics.json

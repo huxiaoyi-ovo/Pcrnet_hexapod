@@ -1,0 +1,26 @@
+{
+  "hparams": {
+    "bearing_weight": 0.15,
+    "body_radius_m": 0.32,
+    "clear_weight": 2.0,
+    "fallback": "stop",
+    "footprint_radius_m": 0.32,
+    "forward_weight": 6.0,
+    "lateral_weight": 0.8,
+    "min_clearance_margin": 0.08,
+    "progress_weight": 1.0,
+    "risk_filter_threshold": 1.0,
+    "risk_weight": 3.0,
+    "rollout_dt_s": 0.15,
+    "rollout_horizon_s": 1.2,
+    "smooth_weight": 0.1,
+    "speed_weight": 0.25,
+    "target_dist_weight": 0.8,
+    "target_weight": 1.0,
+    "vx_samples": 7,
+    "vy_samples": 5,
+    "w_samples": 5
+  },
+  "split": "validation_layout",
+  "validation_tuning_protocol": "Tune weights only with velocity_search_split=validation_layout; main_test and heldout_test must use a saved chosen-hparams JSON without further changes."
+}
