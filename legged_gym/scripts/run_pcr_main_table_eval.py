@@ -197,6 +197,14 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
             cmd.extend(["--velocity_search_body_radius_m", str(args.velocity_search_body_radius_m)])
         if getattr(args, "velocity_search_min_clearance_margin", None) is not None:
             cmd.extend(["--velocity_search_min_clearance_margin", str(args.velocity_search_min_clearance_margin)])
+        if bool(getattr(args, "velocity_search_use_dynamic_window", False)):
+            cmd.append("--velocity_search_use_dynamic_window")
+        if getattr(args, "velocity_search_acc_lat_max", None) is not None:
+            cmd.extend(["--velocity_search_acc_lat_max", str(args.velocity_search_acc_lat_max)])
+        if getattr(args, "velocity_search_acc_fwd_max", None) is not None:
+            cmd.extend(["--velocity_search_acc_fwd_max", str(args.velocity_search_acc_fwd_max)])
+        if getattr(args, "velocity_search_acc_yaw_max", None) is not None:
+            cmd.extend(["--velocity_search_acc_yaw_max", str(args.velocity_search_acc_yaw_max)])
     return cmd
 
 
@@ -249,6 +257,10 @@ def parse_args():
     parser.add_argument("--velocity_search_hparams_json", type=str, default="")
     parser.add_argument("--velocity_search_body_radius_m", type=float, default=None)
     parser.add_argument("--velocity_search_min_clearance_margin", type=float, default=None)
+    parser.add_argument("--velocity_search_use_dynamic_window", action="store_true")
+    parser.add_argument("--velocity_search_acc_lat_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_fwd_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_yaw_max", type=float, default=None)
     parser.add_argument("--yonly_ckpt", type=str, default="agents/moe_teacher_best_yonly.pt")
     parser.add_argument("--geomw_ckpt", type=str, default="agents/moe_teacher_best_w0.15.pt")
     parser.add_argument("--learnedw_ckpt", type=str, default="agents/moe_teacher_best_learnedw.pt")

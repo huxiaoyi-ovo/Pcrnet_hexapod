@@ -565,14 +565,14 @@ def _risk_only_source_mode(args, rows: Sequence[Dict[str, str]]) -> str:
 def _table2_note(method: str, risk_only_mode: str = "auto") -> str:
     if method == "risk_only":
         if risk_only_mode == "trained":
-            return "Trained from scratch with risk-difference term Δy_r only; no learned-w channel"
+            return "Trained from scratch with Δy_r only; no learned-w channel"
         return "LEGACY eval-only source; rerun trained Risk-only before using this row."
     if method == "learnedw":
-        return "Learned signed-w channel with analytic risk-difference term"
+        return "Learned conflict-conditioned w channel"
     if method == "geomw":
-        return "Geometric w; no learned-w channel"
+        return "Hand-designed geometric w"
     if method == "yonly":
-        return "No w channel"
+        return "No arbitration channel"
     return ""
 
 
@@ -591,28 +591,34 @@ def _build_table2(args) -> List[Dict]:
     all_rows.extend(_raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"]))
     all_rows.extend(_raw_rows_from_all_csv([args.learnedw_diag_all_csv], methods=["learnedw"]))
     deltas = _delta_lookup(all_rows, methods=["risk_only", "learnedw"])
-    params = _params_lookup(all_rows)
     risk_only_mode = _risk_only_source_mode(args, all_rows)
 
     out: List[Dict] = []
     for method in MECHANISM_METHOD_ORDER:
         agg = aggregate_lookup.get((speed, method), {})
         d = deltas.get((speed, method), {})
-        delta_total = d.get("unsafe_conflict_delta_y_total_mean", float("nan"))
+        delta_y_w_avoid = d.get("avoid_conflict_delta_y_w_used_mean", float("nan"))
+        delta_y_r_avoid = d.get("avoid_conflict_delta_y_r_mean", float("nan"))
+        has_w_channel = method == "learnedw"
+        has_risk_term = method in ("risk_only", "learnedw")
         row = {
             "Method": SHORT_METHOD_LABELS.get(method, method),
             "C_avoid Rate": _fmt(_safe_float(agg.get("C_avoid Rate Mean", ""))),
             "CSI@C_avoid": _fmt(_safe_float(agg.get("CSI@C_avoid Mean", ""))),
-            "Δy_total@C_unsafe": (
-                _fmt_small_nonzero(delta_total, digits=4)
-                if method in ("risk_only", "learnedw")
+            "Δy_w@C_avoid": (
+                _fmt_small_nonzero(delta_y_w_avoid, digits=4)
+                if has_w_channel
                 else "N/A"
             ),
-            "Params": params.get((speed, method), "N/A"),
+            "Δy_r@C_avoid": (
+                _fmt_small_nonzero(delta_y_r_avoid, digits=4)
+                if has_risk_term
+                else "N/A"
+            ),
             "Notes": _table2_note(method, risk_only_mode=risk_only_mode),
         }
         out.append(row)
-    fields = ["Method", "C_avoid Rate", "CSI@C_avoid", "Δy_total@C_unsafe", "Params", "Notes"]
+    fields = ["Method", "C_avoid Rate", "CSI@C_avoid", "Δy_w@C_avoid", "Δy_r@C_avoid", "Notes"]
     _write_csv(os.path.join(args.output_dir, "table2_mechanism_ablation.csv"), out, fields)
     _write_markdown(os.path.join(args.output_dir, "table2_mechanism_ablation.md"), out, fields)
     _write_latex_booktabs(os.path.join(args.output_dir, "table2_mechanism_ablation.tex"), out, fields)
@@ -678,6 +684,67 @@ def _build_table_a5(args) -> List[Dict]:
         f.write(
             "- Each row reports components from one internally consistent source; "
             "Delta y_total is not used to back-calculate missing components.\n"
+        )
+    return out
+
+
+def _build_table_dwa_diagnostic(args) -> List[Dict]:
+    root = getattr(args, "velocity_search_preset_root", "")
+    specs = [
+        ("Safe", "0.35", os.path.join(root, "velocity_search_safe", "s_0.35")),
+        ("Safe", "0.60", os.path.join(root, "velocity_search_safe", "s_0.60")),
+        ("Balanced", "0.35", os.path.join(root, "velocity_search_balanced", "s_0.35")),
+        ("Balanced", "0.60", os.path.join(root, "velocity_search_balanced", "s_0.60")),
+        ("Tracking", "0.35", os.path.join(root, "velocity_search_tracking", "s_0.35")),
+        ("Tracking", "0.60", os.path.join(root, "velocity_search_tracking", "s_0.60")),
+    ]
+    out: List[Dict] = []
+    for preset_label, speed_label, search_dir in specs:
+        matches = sorted(glob.glob(os.path.join(search_dir, "**", "metrics.json"), recursive=True))
+        if not matches:
+            raise FileNotFoundError(f"Missing Velocity-Search diagnostic metrics: {search_dir}")
+        data = _load_metrics_json(matches[-1])
+        overall = data.get("overall", {}) if isinstance(data, dict) else {}
+        dynamic_rate = _safe_float(overall.get("velocity_search_dynamic_window_enabled_rate", float("nan")))
+        if not math.isfinite(dynamic_rate) or dynamic_rate < 0.99:
+            raise ValueError(
+                "Velocity-Search diagnostic table now requires dynamic-window eval metrics; "
+                f"got dynamic_window_enabled_rate={dynamic_rate} from {matches[-1]}"
+            )
+        out.append(
+            {
+                "Preset": preset_label,
+                "Speed": speed_label,
+                "Success ↑": _fmt(_safe_float(overall.get("success_rate", ""))),
+                "Collision ↓": _fmt(_safe_float(overall.get("episode_collision_rate", ""))),
+                "Row-prog. ↑": _fmt(_safe_float(overall.get("progress_rate", ""))),
+                "Follow MAE ↓": _fmt(_safe_float(overall.get("follow_mae_m_mean", ""))),
+            }
+        )
+    fields = [
+        "Preset",
+        "Speed",
+        "Success ↑",
+        "Collision ↓",
+        "Row-prog. ↑",
+        "Follow MAE ↓",
+    ]
+    _write_csv(os.path.join(args.output_dir, "tableA_dwa_velocity_search_diagnostic.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA_dwa_velocity_search_diagnostic.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA_dwa_velocity_search_diagnostic.tex"), out, fields)
+    with open(
+        os.path.join(args.output_dir, "tableA_dwa_velocity_search_diagnostic_notes.md"),
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("# DWA-style velocity-search diagnostic notes\n\n")
+        f.write(
+            "The table reports bounded validation presets for the dynamic-window Target-aware "
+            "Velocity-Space Search baseline. Each row enables the dynamic-window candidate filter "
+            "before short-horizon rollout and footprint checking. Safe costs reduce collision but "
+            "suppress row progress; tracking-oriented costs reduce following error but incur frequent "
+            "collisions. This baseline is therefore treated as a diagnostic planner-style external "
+            "alternative, not as a main-table competitor.\n"
         )
     return out
 
@@ -2655,6 +2722,10 @@ def _write_manifest(
         "tableA5_delta_y_full.md",
         "tableA5_delta_y_full.tex",
         "tableA5_delta_y_full_notes.md",
+        "tableA_dwa_velocity_search_diagnostic.csv",
+        "tableA_dwa_velocity_search_diagnostic.md",
+        "tableA_dwa_velocity_search_diagnostic.tex",
+        "tableA_dwa_velocity_search_diagnostic_notes.md",
     ]
     missing_outputs = [
         name
@@ -2775,6 +2846,11 @@ def build_argparser() -> argparse.ArgumentParser:
         "--velocity_search_all_csv",
         default="",
         help="Optional Velocity-Search all-metrics CSV. Empty keeps the existing five-method paper table unchanged.",
+    )
+    parser.add_argument(
+        "--velocity_search_preset_root",
+        default="agents/eval_data_velocity_search_dynamic_window_preset_validation",
+        help="Dynamic-window bounded validation root for the DWA-style Velocity-Search diagnostic table.",
     )
     parser.add_argument(
         "--learnedw_diag_all_csv",
@@ -2901,6 +2977,7 @@ def main() -> None:
     _build_appendix_a3(args)
     _build_appendix_a4(args)
     table_a5 = _build_table_a5(args)
+    _build_table_dwa_diagnostic(args)
     _write_manifest(args, table1, table2, table3, table_a5)
     print(f"Final paper outputs v3 written to: {args.output_dir}")
 

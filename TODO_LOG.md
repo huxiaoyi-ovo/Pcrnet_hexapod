@@ -2225,3 +2225,19 @@
 - [x] Must: 将 `src_real` 实机 PCR 默认相机安装参数收口为 `camera_height_m=0.23`、`camera_pitch_down_deg=0`，避免每次实机命令都依赖额外参数覆盖。
 - [x] Must: 恢复 CAN 侧 `sita_des` 进入电机前的关节范围检查，按 `LB/LF/LM` 与 `RB/RF/RM` 的 URDF 真实关节范围限幅；畸形或非有限命令触发共享故障锁存。
 - [x] Must: `run_agent2.py` 在左右电机各返回至少一帧有效反馈前禁止进入运动策略；不使用时间超时门控，避免事件触发反馈与命令准入互相等待。
+
+## 2026-06-17 Table II 机制诊断口径收紧
+
+- [x] Must: Table II 从性能/容量混合口径收口为机制诊断口径，保留 `C_avoid Rate` 与 `CSI@C_avoid`，并将 `Delta y_total@C_unsafe` / `Params` 替换为 `Delta y_w@C_avoid` 与 `Delta y_r@C_avoid`，直接支撑 learned-w channel 在冲突窗口内的贡献解释。
+
+## 2026-06-17 DWA-style 外部诊断表
+
+- [x] Must: 将 Target-aware Velocity-Space Search 只作为外部诊断替代路线，不进入主表；最终输出读取 bounded validation 的 safe / balanced / tracking preset，报告 safety-following trade-off，而不是包装成强主表 baseline。
+
+## 2026-06-17 Velocity-Search dynamic-window 诊断增强
+
+- [x] Must: 为 Target-aware Velocity-Space Search 增加可选 dynamic-window candidate filter，只约束 velocity-search 候选速度可达性，不影响 Learned-w / Additive-Fusion / Rule-Override；记录过滤前后候选数量和 rejected count，用于判断候选可达性是否导致 feasible_count 塌陷。
+
+## 2026-06-17 DWA-style 最终诊断表切换到 dynamic-window 版本
+
+- [x] Must: 最终 `tableA_dwa_velocity_search_diagnostic` 不再读取旧 Velocity-Search preset 结果，而是读取启用 dynamic-window candidate filter 的 Safe / Balanced / Tracking × 0.35 / 0.60 结果；若任一行不是 dynamic-window eval，生成表格时直接报错，避免旧结果混入论文最终表。

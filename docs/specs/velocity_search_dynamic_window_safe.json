@@ -1,0 +1,26 @@
+{
+  "hparams": {
+    "use_dynamic_window": true,
+    "acc_lat_max": 2.0,
+    "acc_fwd_max": 3.0,
+    "acc_yaw_max": 4.0,
+    "vx_samples": 7,
+    "vy_samples": 5,
+    "w_samples": 5,
+    "rollout_horizon_s": 1.2,
+    "rollout_dt_s": 0.15,
+    "body_radius_m": 0.32,
+    "min_clearance_margin": 0.08,
+    "clear_weight": 5.0,
+    "target_dist_weight": 0.7,
+    "bearing_weight": 0.25,
+    "progress_weight": 0.15,
+    "forward_weight": 0.0,
+    "forward_min_v": 0.15,
+    "smooth_weight": 0.35,
+    "lateral_weight": 0.03,
+    "risk_filter_threshold": 0.50,
+    "filter_mode": "scale",
+    "fallback": "stop"
+  }
+}

@@ -17,9 +17,9 @@ Generated files:
 - table1_main_performance_stage4.csv (1259 bytes)
 - table1_main_performance_stage4.md (1569 bytes)
 - table1_main_performance_stage4.tex (1795 bytes)
-- table2_mechanism_ablation.csv (389 bytes)
-- table2_mechanism_ablation.md (497 bytes)
-- table2_mechanism_ablation.tex (539 bytes)
+- table2_mechanism_ablation.csv (338 bytes)
+- table2_mechanism_ablation.md (446 bytes)
+- table2_mechanism_ablation.tex (496 bytes)
 - table3_mono_ppo_stage_probe.csv (698 bytes)
 - table3_mono_ppo_stage_probe.md (478 bytes)
 - table3_mono_ppo_stage_probe.tex (474 bytes)
@@ -40,6 +40,10 @@ Generated files:
 - tableA5_delta_y_full.md (1237 bytes)
 - tableA5_delta_y_full.tex (1281 bytes)
 - tableA5_delta_y_full_notes.md (361 bytes)
+- tableA_dwa_velocity_search_diagnostic.csv (195 bytes)
+- tableA_dwa_velocity_search_diagnostic.md (311 bytes)
+- tableA_dwa_velocity_search_diagnostic.tex (346 bytes)
+- tableA_dwa_velocity_search_diagnostic_notes.md (482 bytes)
 
 Row counts:
 
@@ -56,6 +60,8 @@ Source files and paths:
 - risk_aggregate_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260610_170313.csv` (mtime=2026-06-10 17:34:20)
 - rule_all_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_all_metrics_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
 - rule_aggregate_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
+- additive_all_csv: `` (mtime=missing)
+- velocity_search_all_csv: `` (mtime=missing)
 - learnedw_diag_all_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
 - learnedw_diag_aggregate_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_aggregate_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
 - learnedw_split_all_csv: `agents/eval_data_fig6_trajectories_worldxy/pcr_main_table/pcr_main_table_all_metrics_20260612_044839.csv` (mtime=2026-06-12 11:25:44)

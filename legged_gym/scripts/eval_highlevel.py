@@ -643,6 +643,10 @@ def _resolve_velocity_search_hparams(args) -> Dict[str, float]:
         "risk_filter_threshold": 0.65,
         "filter_mode": "soft",
         "fallback": "stop",
+        "use_dynamic_window": False,
+        "acc_lat_max": 1.0,
+        "acc_fwd_max": 1.5,
+        "acc_yaw_max": 2.0,
     }
     path = str(getattr(args, "velocity_search_hparams_json", "") or "").strip()
     if path:
@@ -676,6 +680,9 @@ def _resolve_velocity_search_hparams(args) -> Dict[str, float]:
         "risk_filter_threshold": getattr(args, "velocity_search_risk_filter_threshold", None),
         "filter_mode": getattr(args, "velocity_search_filter_mode", None),
         "fallback": getattr(args, "velocity_search_fallback", None),
+        "acc_lat_max": getattr(args, "velocity_search_acc_lat_max", None),
+        "acc_fwd_max": getattr(args, "velocity_search_acc_fwd_max", None),
+        "acc_yaw_max": getattr(args, "velocity_search_acc_yaw_max", None),
     }
     for key, value in cli_map.items():
         if value is not None:
@@ -709,6 +716,13 @@ def _resolve_velocity_search_hparams(args) -> Dict[str, float]:
     if defaults["filter_mode"] not in {"scale", "soft", "none"}:
         raise ValueError(f"invalid velocity_search filter_mode: {defaults['filter_mode']}")
     defaults["fallback"] = str(defaults["fallback"])
+    defaults["use_dynamic_window"] = bool(
+        defaults.get("use_dynamic_window", False)
+        or getattr(args, "velocity_search_use_dynamic_window", False)
+    )
+    defaults["acc_lat_max"] = float(max(0.0, defaults["acc_lat_max"]))
+    defaults["acc_fwd_max"] = float(max(0.0, defaults["acc_fwd_max"]))
+    defaults["acc_yaw_max"] = float(max(0.0, defaults["acc_yaw_max"]))
     return defaults
 
 
@@ -721,6 +735,7 @@ def _velocity_search_rollout_costs(
     max_cmd: torch.Tensor,
     hparams: Dict[str, float],
     last_cmd: Optional[torch.Tensor],
+    candidate_reachable_mask: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """Roll out constant body-frame velocity candidates on the local map."""
     if aff_map.ndim != 4 or aff_map.size(1) < 1:
@@ -834,6 +849,15 @@ def _velocity_search_rollout_costs(
         + float(hparams["smooth_weight"]) * smooth
         + float(hparams["lateral_weight"]) * lateral_penalty
     )
+    if torch.is_tensor(candidate_reachable_mask):
+        reachable = candidate_reachable_mask.to(device=device, dtype=torch.bool)
+        if reachable.shape != feasible.shape:
+            raise ValueError(
+                "velocity search dynamic-window mask shape mismatch: "
+                f"mask={tuple(reachable.shape)}, feasible={tuple(feasible.shape)}"
+            )
+        feasible = feasible & reachable
+
     cost = torch.where(feasible, cost, torch.full_like(cost, float("inf")))
     forward_mask = candidates[:, :, 1] >= float(hparams["forward_min_v"])
     forward_feasible = forward_mask & feasible
@@ -924,9 +948,49 @@ def _compute_velocity_search_diag(
     )
     vx_grid, vy_grid, w_grid = torch.meshgrid(vx_vals, vy_vals, w_vals, indexing="ij")
     cand_cmd = torch.stack([vx_grid.reshape(-1), vy_grid.reshape(-1), w_grid.reshape(-1)], dim=-1)
-    k = int(cand_cmd.shape[0])
     n = int(cmd_f.shape[0])
+    k_before_dynamic_window = int(cand_cmd.shape[0])
+    dynamic_window_enabled = bool(hparams.get("use_dynamic_window", False))
+    dynamic_window_mask: Optional[torch.Tensor] = None
+    if dynamic_window_enabled:
+        last_cmd = getattr(env.post_processor, "last_cmd", None)
+        if torch.is_tensor(last_cmd) and last_cmd.shape == (n, 3):
+            prev_cmd = last_cmd.to(device=device, dtype=dtype)
+        else:
+            prev_cmd = torch.zeros((n, 3), device=device, dtype=dtype)
+        dt_dyn = float(getattr(env, "high_level_dt", hparams.get("rollout_dt_s", 0.1)))
+        dt_dyn = max(1e-6, dt_dyn)
+        acc_limit = torch.tensor(
+            [
+                float(hparams.get("acc_lat_max", 1.0)),
+                float(hparams.get("acc_fwd_max", 1.5)),
+                float(hparams.get("acc_yaw_max", 2.0)),
+            ],
+            device=device,
+            dtype=dtype,
+        ) * dt_dyn
+        diff = torch.abs(cand_cmd.view(1, k_before_dynamic_window, 3) - prev_cmd.view(n, 1, 3))
+        dynamic_window_mask_full = (diff <= acc_limit.view(1, 1, 3) + 1e-6).all(dim=-1)
+        keep_any = dynamic_window_mask_full.any(dim=0)
+        if bool(keep_any.any().item()):
+            cand_cmd = cand_cmd[keep_any]
+            dynamic_window_mask = dynamic_window_mask_full[:, keep_any]
+        else:
+            # Keep one stopped candidate so downstream fallback accounting stays well-defined.
+            stop_idx = torch.argmin(torch.norm(cand_cmd, dim=-1))
+            cand_cmd = cand_cmd[stop_idx: stop_idx + 1]
+            dynamic_window_mask = torch.zeros((n, 1), device=device, dtype=torch.bool)
+    k = int(cand_cmd.shape[0])
     cand_cmd_batch = cand_cmd.unsqueeze(0).expand(n, k, 3)
+    if dynamic_window_mask is None:
+        dynamic_window_after_count = torch.full((n,), k, device=device, dtype=dtype)
+        dynamic_window_rejected_count = torch.zeros((n,), device=device, dtype=dtype)
+    else:
+        dynamic_window_after_count = dynamic_window_mask.sum(dim=1).to(dtype=dtype)
+        dynamic_window_rejected_count = (
+            float(k_before_dynamic_window) - dynamic_window_after_count
+        ).to(dtype=dtype)
+    dynamic_window_before_count = torch.full((n,), k_before_dynamic_window, device=device, dtype=dtype)
 
     goal_xy = goal[:, :2].to(device=device, dtype=dtype)
     try:
@@ -939,6 +1003,7 @@ def _compute_velocity_search_diag(
             max_cmd,
             hparams,
             getattr(env.post_processor, "last_cmd", None),
+            candidate_reachable_mask=dynamic_window_mask,
         )
         cost = rollout["cost"]
         risk = rollout["risk"]
@@ -968,6 +1033,8 @@ def _compute_velocity_search_diag(
         out_of_map = torch.zeros_like(risk, dtype=torch.bool)
         margin_clear = predicted_clearance >= float(hparams["min_clearance_margin"])
         feasible = margin_clear
+        if torch.is_tensor(dynamic_window_mask):
+            feasible = feasible & dynamic_window_mask.to(device=device, dtype=torch.bool)
         target_norm = torch.norm(cand_xy_batch - goal_xy.unsqueeze(1), dim=-1)
         cost = float(hparams["clear_weight"]) * risk + float(hparams["target_dist_weight"]) * target_norm
         candidate_count = torch.full((n,), k, device=device, dtype=dtype)
@@ -1111,6 +1178,10 @@ def _compute_velocity_search_diag(
         "velocity_search_filter_changed": filter_changed,
         "velocity_search_safe_available": safe_any.to(dtype=dtype),
         "velocity_search_compute_time_ms": compute_time_ms,
+        "velocity_search_dynamic_window_enabled": torch.full_like(ref, 1.0 if dynamic_window_enabled else 0.0),
+        "velocity_search_candidate_count_before_dynamic_window": dynamic_window_before_count,
+        "velocity_search_candidate_count_after_dynamic_window": dynamic_window_after_count,
+        "velocity_search_dynamic_window_rejected_count": dynamic_window_rejected_count,
         "velocity_search_candidate_count": candidate_count,
         "velocity_search_feasible_count": feasible_count,
         "velocity_search_infeasible_count": infeasible_count,
@@ -1242,6 +1313,10 @@ class EpisodeAccumulator:
     velocity_search_raw_risk_sum: float = 0.0
     velocity_search_safe_risk_sum: float = 0.0
     velocity_search_compute_time_ms_sum: float = 0.0
+    velocity_search_dynamic_window_enabled_steps: int = 0
+    velocity_search_candidate_count_before_dynamic_window_sum: float = 0.0
+    velocity_search_candidate_count_after_dynamic_window_sum: float = 0.0
+    velocity_search_dynamic_window_rejected_count_sum: float = 0.0
     velocity_search_candidate_count_sum: float = 0.0
     velocity_search_feasible_count_sum: float = 0.0
     velocity_search_infeasible_count_sum: float = 0.0
@@ -2125,6 +2200,10 @@ class EvalRunner:
                         "velocity_search_filter_changed",
                         "velocity_search_safe_available",
                         "velocity_search_compute_time_ms",
+                        "velocity_search_dynamic_window_enabled",
+                        "velocity_search_candidate_count_before_dynamic_window",
+                        "velocity_search_candidate_count_after_dynamic_window",
+                        "velocity_search_dynamic_window_rejected_count",
                         "velocity_search_candidate_count",
                         "velocity_search_feasible_count",
                         "velocity_search_infeasible_count",
@@ -2470,6 +2549,10 @@ class EvalRunner:
                         velocity_search_filter_changed_t = post_info.get("velocity_search_filter_changed", None)
                         velocity_search_safe_available_t = post_info.get("velocity_search_safe_available", None)
                         velocity_search_compute_time_ms_t = post_info.get("velocity_search_compute_time_ms", None)
+                        velocity_search_dynamic_window_enabled_t = post_info.get("velocity_search_dynamic_window_enabled", None)
+                        velocity_search_candidate_count_before_dynamic_window_t = post_info.get("velocity_search_candidate_count_before_dynamic_window", None)
+                        velocity_search_candidate_count_after_dynamic_window_t = post_info.get("velocity_search_candidate_count_after_dynamic_window", None)
+                        velocity_search_dynamic_window_rejected_count_t = post_info.get("velocity_search_dynamic_window_rejected_count", None)
                         velocity_search_candidate_count_t = post_info.get("velocity_search_candidate_count", None)
                         velocity_search_feasible_count_t = post_info.get("velocity_search_feasible_count", None)
                         velocity_search_infeasible_count_t = post_info.get("velocity_search_infeasible_count", None)
@@ -2863,6 +2946,10 @@ class EvalRunner:
                         selected_rollout_min_clearance_v = float("nan")
                         selected_rollout_collision_flag_v = float("nan")
                         selected_rollout_out_of_map_flag_v = float("nan")
+                        velocity_search_dynamic_window_enabled_v = float("nan")
+                        velocity_search_candidate_count_before_dynamic_window_v = float("nan")
+                        velocity_search_candidate_count_after_dynamic_window_v = float("nan")
+                        velocity_search_dynamic_window_rejected_count_v = float("nan")
                         fallback_cmd_v = [float("nan"), float("nan"), float("nan")]
                         cmd_raw_post_v = [float("nan"), float("nan"), float("nan")]
                         cmd_safe_post_v = [float("nan"), float("nan"), float("nan")]
@@ -2913,6 +3000,41 @@ class EvalRunner:
                                     )
                                     ai.velocity_search_compute_time_ms_sum += _safe_float(
                                         velocity_search_compute_time_ms_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_dynamic_window_enabled_t):
+                                    velocity_search_dynamic_window_enabled_v = _safe_float(
+                                        velocity_search_dynamic_window_enabled_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_dynamic_window_enabled_steps += int(
+                                        bool(velocity_search_dynamic_window_enabled_t[i].item())
+                                    )
+                                if torch.is_tensor(velocity_search_candidate_count_before_dynamic_window_t):
+                                    velocity_search_candidate_count_before_dynamic_window_v = _safe_float(
+                                        velocity_search_candidate_count_before_dynamic_window_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_candidate_count_before_dynamic_window_sum += _safe_float(
+                                        velocity_search_candidate_count_before_dynamic_window_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_candidate_count_after_dynamic_window_t):
+                                    velocity_search_candidate_count_after_dynamic_window_v = _safe_float(
+                                        velocity_search_candidate_count_after_dynamic_window_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_candidate_count_after_dynamic_window_sum += _safe_float(
+                                        velocity_search_candidate_count_after_dynamic_window_t[i].item(),
+                                        default=0.0,
+                                    )
+                                if torch.is_tensor(velocity_search_dynamic_window_rejected_count_t):
+                                    velocity_search_dynamic_window_rejected_count_v = _safe_float(
+                                        velocity_search_dynamic_window_rejected_count_t[i].item(),
+                                        default=float("nan"),
+                                    )
+                                    ai.velocity_search_dynamic_window_rejected_count_sum += _safe_float(
+                                        velocity_search_dynamic_window_rejected_count_t[i].item(),
                                         default=0.0,
                                     )
                                 if torch.is_tensor(velocity_search_candidate_count_t):
@@ -3234,6 +3356,10 @@ class EvalRunner:
                                     "actual_base_delta_x": actual_base_delta_x_v,
                                     "actual_base_delta_y": actual_base_delta_y_v,
                                     "velocity_search_compute_time_ms": velocity_search_compute_time_ms_v,
+                                    "velocity_search_dynamic_window_enabled": velocity_search_dynamic_window_enabled_v,
+                                    "velocity_search_candidate_count_before_dynamic_window": velocity_search_candidate_count_before_dynamic_window_v,
+                                    "velocity_search_candidate_count_after_dynamic_window": velocity_search_candidate_count_after_dynamic_window_v,
+                                    "velocity_search_dynamic_window_rejected_count": velocity_search_dynamic_window_rejected_count_v,
                                     "velocity_search_candidate_count": velocity_search_candidate_count_v,
                                     "velocity_search_feasible_count": velocity_search_feasible_count_v,
                                     "velocity_search_infeasible_count": velocity_search_infeasible_count_v,
@@ -3530,6 +3656,22 @@ class EvalRunner:
                     )
                     velocity_search_compute_time_ms_mean = (
                         ai.velocity_search_compute_time_ms_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_dynamic_window_enabled_rate = (
+                        ai.velocity_search_dynamic_window_enabled_steps / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_candidate_count_before_dynamic_window_mean = (
+                        ai.velocity_search_candidate_count_before_dynamic_window_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_candidate_count_after_dynamic_window_mean = (
+                        ai.velocity_search_candidate_count_after_dynamic_window_sum / velocity_search_denom
+                        if ai.velocity_search_steps > 0 else float("nan")
+                    )
+                    velocity_search_dynamic_window_rejected_count_mean = (
+                        ai.velocity_search_dynamic_window_rejected_count_sum / velocity_search_denom
                         if ai.velocity_search_steps > 0 else float("nan")
                     )
                     velocity_search_candidate_count_mean = (
@@ -4103,6 +4245,10 @@ class EvalRunner:
                             "velocity_search_raw_risk_mean": velocity_search_raw_risk_mean,
                             "velocity_search_safe_risk_mean": velocity_search_safe_risk_mean,
                             "velocity_search_compute_time_ms_mean": velocity_search_compute_time_ms_mean,
+                            "velocity_search_dynamic_window_enabled_rate": velocity_search_dynamic_window_enabled_rate,
+                            "velocity_search_candidate_count_before_dynamic_window_mean": velocity_search_candidate_count_before_dynamic_window_mean,
+                            "velocity_search_candidate_count_after_dynamic_window_mean": velocity_search_candidate_count_after_dynamic_window_mean,
+                            "velocity_search_dynamic_window_rejected_count_mean": velocity_search_dynamic_window_rejected_count_mean,
                             "velocity_search_candidate_count_mean": velocity_search_candidate_count_mean,
                             "velocity_search_feasible_count_mean": velocity_search_feasible_count_mean,
                             "velocity_search_infeasible_count_mean": velocity_search_infeasible_count_mean,
@@ -4816,6 +4962,18 @@ class EvalRunner:
         velocity_search_compute_time_vals = _clean([
             r.get("velocity_search_compute_time_ms_mean", float("nan")) for r in rows
         ])
+        velocity_search_dynamic_window_enabled_vals = _clean([
+            r.get("velocity_search_dynamic_window_enabled_rate", float("nan")) for r in rows
+        ])
+        velocity_search_candidate_count_before_dynamic_window_vals = _clean([
+            r.get("velocity_search_candidate_count_before_dynamic_window_mean", float("nan")) for r in rows
+        ])
+        velocity_search_candidate_count_after_dynamic_window_vals = _clean([
+            r.get("velocity_search_candidate_count_after_dynamic_window_mean", float("nan")) for r in rows
+        ])
+        velocity_search_dynamic_window_rejected_count_vals = _clean([
+            r.get("velocity_search_dynamic_window_rejected_count_mean", float("nan")) for r in rows
+        ])
         velocity_search_candidate_count_vals = _clean([
             r.get("velocity_search_candidate_count_mean", float("nan")) for r in rows
         ])
@@ -5139,6 +5297,18 @@ class EvalRunner:
             ),
             "velocity_search_compute_time_ms_mean": (
                 float(np.mean(velocity_search_compute_time_vals)) if velocity_search_compute_time_vals else float("nan")
+            ),
+            "velocity_search_dynamic_window_enabled_rate": (
+                float(np.mean(velocity_search_dynamic_window_enabled_vals)) if velocity_search_dynamic_window_enabled_vals else float("nan")
+            ),
+            "velocity_search_candidate_count_before_dynamic_window_mean": (
+                float(np.mean(velocity_search_candidate_count_before_dynamic_window_vals)) if velocity_search_candidate_count_before_dynamic_window_vals else float("nan")
+            ),
+            "velocity_search_candidate_count_after_dynamic_window_mean": (
+                float(np.mean(velocity_search_candidate_count_after_dynamic_window_vals)) if velocity_search_candidate_count_after_dynamic_window_vals else float("nan")
+            ),
+            "velocity_search_dynamic_window_rejected_count_mean": (
+                float(np.mean(velocity_search_dynamic_window_rejected_count_vals)) if velocity_search_dynamic_window_rejected_count_vals else float("nan")
             ),
             "velocity_search_candidate_count_mean": (
                 float(np.mean(velocity_search_candidate_count_vals)) if velocity_search_candidate_count_vals else float("nan")
@@ -5875,6 +6045,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "velocity_search_raw_risk_mean",
         "velocity_search_safe_risk_mean",
         "velocity_search_compute_time_ms_mean",
+        "velocity_search_dynamic_window_enabled_rate",
+        "velocity_search_candidate_count_before_dynamic_window_mean",
+        "velocity_search_candidate_count_after_dynamic_window_mean",
+        "velocity_search_dynamic_window_rejected_count_mean",
         "velocity_search_candidate_count_mean",
         "velocity_search_feasible_count_mean",
         "velocity_search_infeasible_count_mean",
@@ -6069,6 +6243,10 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "actual_base_delta_x",
             "actual_base_delta_y",
             "velocity_search_compute_time_ms",
+            "velocity_search_dynamic_window_enabled",
+            "velocity_search_candidate_count_before_dynamic_window",
+            "velocity_search_candidate_count_after_dynamic_window",
+            "velocity_search_dynamic_window_rejected_count",
             "velocity_search_candidate_count",
             "velocity_search_feasible_count",
             "velocity_search_infeasible_count",
@@ -6337,6 +6515,10 @@ def parse_args():
     parser.add_argument("--velocity_search_risk_filter_threshold", type=float, default=None)
     parser.add_argument("--velocity_search_filter_mode", choices=("scale", "soft", "none"), default=None)
     parser.add_argument("--velocity_search_fallback", choices=("stop", "safest", "raw"), default=None)
+    parser.add_argument("--velocity_search_use_dynamic_window", action="store_true")
+    parser.add_argument("--velocity_search_acc_lat_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_fwd_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_yaw_max", type=float, default=None)
     parser.add_argument("--rule_k", type=float, default=8.0)
     parser.add_argument("--rule_margin", type=float, default=0.10)
     parser.add_argument("--rule_hard_thr", type=float, default=0.45)
