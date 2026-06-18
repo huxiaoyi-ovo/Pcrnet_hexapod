@@ -798,7 +798,7 @@ def _latest_heldout_all_csv(args) -> str:
 
 def _build_table_heldout_irregular(args) -> List[Dict]:
     source_csv = _latest_heldout_all_csv(args)
-    methods = ["rule_override", "additive_fusion", "risk_only", "learnedw"]
+    methods = ["learnedw", "rule_override", "additive_fusion"]
     rows = _raw_rows_from_all_csv([source_csv], methods=methods) if source_csv else []
     rows = [
         row for row in rows
@@ -839,9 +839,9 @@ def _build_table_heldout_irregular(args) -> List[Dict]:
             f.write(f"Source CSV: `{source_csv}`\n\n")
             f.write(
                 "This eval-only table uses the Stage-4 heldout_irregular_rows layout at 0.60 m/s. "
-                "The layout is not used for training or validation tuning. It is non-mirrored, breaks "
-                "strict alternating rows, includes consecutive same-side rows, variable row spacing, "
-                "variable passage widths, and limited-size mixed obstacle shapes.\n"
+                "The layout is not used for training or validation tuning. The main-text table intentionally "
+                "reports only PCR-Net, Rule-Override, and Additive-Fusion, using 3 eval seeds and "
+                "64 episodes per seed.\n"
             )
             if not out:
                 f.write("\nWarning: source CSV was found but no 0.60 held-out rows were selected.\n")
@@ -3008,6 +3008,11 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Optional all-metrics CSV for the held-out irregular-row eval-only table.",
     )
     parser.add_argument(
+        "--heldout_table_only",
+        action="store_true",
+        help="Only build the held-out irregular-row table and notes.",
+    )
+    parser.add_argument(
         "--learnedw_diag_all_csv",
         default="agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv",
     )
@@ -3119,6 +3124,10 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argparser().parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    if bool(getattr(args, "heldout_table_only", False)):
+        _build_table_heldout_irregular(args)
+        print(f"Held-out irregular-row table written to: {args.output_dir}")
+        return
     table1 = _build_table1(args)
     table2 = _build_table2(args)
     table3 = _build_table3(args)

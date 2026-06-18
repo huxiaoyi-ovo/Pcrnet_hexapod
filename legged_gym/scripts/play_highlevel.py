@@ -2723,6 +2723,8 @@ def _maybe_apply_eval_layout_overrides(args, env_cfg) -> None:
     terrain_cfg.avoid_fixed_presets_use_mirror = False
     terrain_cfg.avoid_fixed_preset_jitter_xy = 0.0
     terrain_cfg.avoid_fixed_row_y_spacing_scale = 1.0
+    if getattr(args, "seed", None) is not None:
+        terrain_cfg.avoid_seed = int(args.seed)
     print(
         "[PlayHigh] eval_layout=heldout_irregular_rows: "
         "stage4 randomized same-row/inner-row mixed-shape layout"
