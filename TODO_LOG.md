@@ -2254,8 +2254,13 @@
 
 - [x] Must: 将 PCR 实机默认命令上限调到与 `run_agent2.py` 的速度解释一致，使默认最终低层命令可达约 `x=0.4`、`y=0.8`，同时保留命令行覆盖能力。
 
+## 2026-06-18 PCR 实机零命令发布修复
+
+- [x] Must: 修复 `pcr_realplay.py` 在 target/local_map 暂时缺失时异常分支字段不完整导致节点退出的问题，保证 `/usr/command_pcr` 至少持续发布零速度与 debug，便于判断是输入无效还是策略无输出。
+
 ## 2026-06-17 Held-out irregular-row eval-only 补救实验
 
 - [x] Must: 增加 `heldout_irregular_rows` eval-only 布局，固定 Stage 4、0.60 m/s、非镜像不规则障碍行，允许有限尺寸的混合障碍形状；只用于最终评测，不进入训练、validation tuning 或主表调参。
 - [x] Must: 输出 held-out 表格与真实仿真布局导出文件，保证表格指标、障碍位置和可视化均来自同一次 eval 环境状态。
 - [x] Must: 将 `heldout_irregular_rows` 从高难 stress test 收口为温和 OOD：保持或略放松 Stage 4 行距，主要改变障碍排布与形状类型，并以 box 为主，避免第一行过窄导致泛化结论被难度混淆。
+- [ ] Must: 正文 held-out 小表固定为 `heldout_irregular_rows @ 0.60 m/s`，只比较 PCR-Net / Rule-Override / Additive-Fusion，3 eval seeds、64 episodes/seed；不加入大图，不混入 Risk-only 或 DWA-style 诊断结果。

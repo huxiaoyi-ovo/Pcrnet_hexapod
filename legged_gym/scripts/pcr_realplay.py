@@ -1196,6 +1196,34 @@ class PcrRealplay:
                 twist.angular.z = float(cmd[2])
                 self.cmd_pub.publish(twist)
 
+    def _zero_result(self, reason: str) -> Dict[str, Any]:
+        zero_cmd = np.zeros(3, dtype=np.float32)
+        return {
+            "cmd_f": zero_cmd.copy(),
+            "cmd_a": zero_cmd.copy(),
+            "cmd_policy": zero_cmd.copy(),
+            "cmd_safe": zero_cmd.copy(),
+            "target_valid": False,
+            "target_too_close": False,
+            "depth_invalid": True,
+            "gate_y": 0.0,
+            "w": 0.0,
+            "y_eff": 0.0,
+            "risk_F": 0.0,
+            "risk_A": 0.0,
+            "risk_F_raw": 0.0,
+            "risk_A_raw": 0.0,
+            "front_distance_risk": 0.0,
+            "risk_memory": 0.0,
+            "row_not_released": 0.0,
+            "clearance_F": 0.0,
+            "clearance_A": 0.0,
+            "conflict_score": 0.0,
+            "actor_difficulty": 0.0,
+            "has_real_risk_map": False,
+            "safety": {"reasons": [str(reason)], "dry_run": not bool(self.args.publish_cmd)},
+        }
+
     def run_once(self) -> Dict[str, Any]:
         snap = self._get_snapshot()
         result = self.policy_step(snap)
@@ -1213,22 +1241,7 @@ class PcrRealplay:
                 try:
                     self.run_once()
                 except RealPcrRuntimeError as exc:
-                    zero = {
-                        "cmd_policy": np.zeros(3, dtype=np.float32),
-                        "cmd_safe": np.zeros(3, dtype=np.float32),
-                        "target_valid": False,
-                        "target_too_close": False,
-                        "depth_invalid": True,
-                        "gate_y": 0.0,
-                        "w": 0.0,
-                        "y_eff": 0.0,
-                        "risk_F": 0.0,
-                        "risk_A": 0.0,
-                        "risk_memory": 0.0,
-                        "row_not_released": 0.0,
-                        "safety": {"reasons": [str(exc)], "dry_run": not bool(self.args.publish_cmd)},
-                    }
-                    self.publish_or_print(zero)
+                    self.publish_or_print(self._zero_result(str(exc)))
                 time.sleep(1.0 / max(float(self.args.rate_hz), 1e-6))
             return
         if self.rospy is None:
@@ -1238,22 +1251,7 @@ class PcrRealplay:
             try:
                 self.run_once()
             except RealPcrRuntimeError as exc:
-                zero = {
-                    "cmd_policy": np.zeros(3, dtype=np.float32),
-                    "cmd_safe": np.zeros(3, dtype=np.float32),
-                    "target_valid": False,
-                    "target_too_close": False,
-                    "depth_invalid": True,
-                    "gate_y": 0.0,
-                    "w": 0.0,
-                    "y_eff": 0.0,
-                    "risk_F": 0.0,
-                    "risk_A": 0.0,
-                    "risk_memory": 0.0,
-                    "row_not_released": 0.0,
-                    "safety": {"reasons": [str(exc)], "dry_run": not bool(self.args.publish_cmd)},
-                }
-                self.publish_or_print(zero)
+                self.publish_or_print(self._zero_result(str(exc)))
             rate.sleep()
 
 
