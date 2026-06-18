@@ -357,7 +357,7 @@ if __name__=='__main__':
         print(f"[run_agent2] manual topic: {args.manual_command_topic}")
         print(f"[run_agent2] PCR topic: {args.pcr_command_topic}")
         print(f"[run_agent2] manual change_mode enables PCR speed input; any other manual command disables it")
-        print("[run_agent2] manual and PCR commands use one /sita_des publish per control update")
+        print("[run_agent2] manual commands use the original repeated /sita_des publish rhythm; PCR uses 50Hz single publish")
     imu_sub = rospy.Subscriber('/imu/model_states',Float64MultiArray,UpdateRootState,queue_size=1)
     # q_cur_sub = rospy.Subscriber('/sita_cur',Float64MultiArray,UpdateQState,queue_size=10)
     left_cur_sub=rospy.Subscriber('/left_sita_cur',Float64MultiArray,UpdateQState,callback_args='l',queue_size=1)
