@@ -27,12 +27,26 @@ left_feedback_received = False
 right_feedback_received = False
 
 
-def PublishDefaultStand():
+def PubCommand(_):
+    with command_lock:
+        if hardware_fault or pcr_enabled:
+            return
+        q_des_pub.publish(q_des_msgs)
+
+
+def PublishCommand(use_triple_pub=False):
+    q_des_pub.publish(q_des_msgs)
+    if use_triple_pub:
+        rospy.Timer(rospy.Duration(0.008), PubCommand, oneshot=True)
+        rospy.Timer(rospy.Duration(0.008), PubCommand, oneshot=True)
+
+
+def PublishDefaultStand(use_triple_pub=False):
     q_des=torch.cat([q_default,torch.zeros(size=(6,4),dtype=torch.float,device=device)],dim=1)
     q_des[:,6]=-999
     q_des_msgs.data[0]=motor_mode.Pos_vel
     q_des_msgs.data[1:]=q_des.view(-1)
-    q_des_pub.publish(q_des_msgs)
+    PublishCommand(use_triple_pub=use_triple_pub)
 
 
 def FeedbackReady():
@@ -50,6 +64,7 @@ def FeedbackReady():
 def ProcessCommand(msg:joy_command, source="legacy"):
     global agent, last_actions, q_des_msgs,tic
     with command_lock:
+        use_triple_pub = source in ("manual", "legacy")
         if hardware_fault:
             rospy.logerr_throttle(1.0, "[run_agent2] hardware fault latched; command rejected")
             return
@@ -58,11 +73,13 @@ def ProcessCommand(msg:joy_command, source="legacy"):
             q_des_pub.publish(q_des_msgs)
             return
         if msg.stop or msg.disable_pump or msg.action_valve:
-            PublishDefaultStand()
+            PublishDefaultStand(use_triple_pub=use_triple_pub)
+            test_pub.publish(q_des_msgs)
             print(f"process source={source}, safety stand, stop={int(msg.stop)}, disable_pump={int(msg.disable_pump)}, action_valve={int(msg.action_valve)}")
             return
         if msg.set_init:
-            PublishDefaultStand()
+            PublishDefaultStand(use_triple_pub=use_triple_pub)
+            test_pub.publish(q_des_msgs)
             print(f"process source={source}, set_init=1, default stand")
             return
         if not FeedbackReady():
@@ -92,11 +109,11 @@ def ProcessCommand(msg:joy_command, source="legacy"):
             q_des_msgs.data[0]=motor_mode.Traj_follow
             q_des_msgs.data[1:]=q_des.view(-1)
         else:
-            PublishDefaultStand()
+            PublishDefaultStand(use_triple_pub=use_triple_pub)
         # print(time.time()-tic)
         tic = time.time()
         if msg.set_init==0:
-            q_des_pub.publish(q_des_msgs)
+            PublishCommand(use_triple_pub=use_triple_pub)
         test_pub.publish(q_des_msgs)
         #这里注销掉,然后在定时器中再打开可以确保收到的是0.2s左右的
         status = f"process source={source}, set_init={int(msg.set_init)}, x={msg.x_vec:.3f}, y={msg.y_vec:.3f}, yaw={msg.w_twist:.3f}, r time={r_cur_time}, l time={l_cur_time}"
@@ -351,5 +368,3 @@ if __name__=='__main__':
     print(f" device ={device} ; load agent from {model_path}")
     print("------------------->run agent2 ready<-------------------")
     rospy.spin()
-
-

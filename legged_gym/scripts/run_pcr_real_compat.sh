@@ -60,8 +60,8 @@ MUX_OUTPUT_TOPIC="/usr/command"
 MUX_RATE_HZ="50"
 MUX_PCR_TIMEOUT_S="0.35"
 MUX_MANUAL_TIMEOUT_S="0.2"
-CAMERA_HEIGHT_M="0.37"
-CAMERA_PITCH_DOWN_DEG="15"
+CAMERA_HEIGHT_M="0.23"
+CAMERA_PITCH_DOWN_DEG="0"
 RECORD_BUTTON_INDEX="12"
 RECORD_OUTPUT_ROOT="${HOME}/pcr_records"
 
@@ -113,8 +113,8 @@ Options:
   --mux_rate_hz HZ             Deprecated.
   --mux_pcr_timeout_s SEC      Deprecated.
   --mux_manual_timeout_s SEC   Deprecated.
-  --camera_height_m VALUE      Default: 0.37
-  --camera_pitch_down_deg VAL  Default: 15
+  --camera_height_m VALUE      Default: 0.23
+  --camera_pitch_down_deg VAL  Default: 0
   --camera_arg ARG             Append one raw argument to the camera command.
   --pcr_arg ARG                Append one raw argument to the PCR command.
 EOF
@@ -361,7 +361,7 @@ if [[ "${USE_TMUX}" -eq 1 && -z "${PCR_REAL_COMPAT_IN_TMUX:-}" ]]; then
         fi
     fi
     if [[ "${START_PCR}" -eq 1 ]]; then
-        PCR_CMD=(python3 "${CODE_DIR}/pcr_realplay.py" --pcr_ckpt "${PCR_CKPT}" --avoid_ckpt "${AVOID_CKPT}" --lowlevel_ckpt "${LOWLEVEL_CKPT}" --cmd_backend usr_command --usr_command_topic "${PCR_USR_COMMAND_TOPIC}" --device "${PCR_DEVICE}" --rate_hz "${RATE_HZ}" --risk_memory --max_cmd_x 0.06 --max_cmd_y 0.10 --max_cmd_yaw 0.20)
+        PCR_CMD=(python3 "${CODE_DIR}/pcr_realplay.py" --pcr_ckpt "${PCR_CKPT}" --avoid_ckpt "${AVOID_CKPT}" --lowlevel_ckpt "${LOWLEVEL_CKPT}" --cmd_backend usr_command --usr_command_topic "${PCR_USR_COMMAND_TOPIC}" --device "${PCR_DEVICE}" --rate_hz "${RATE_HZ}" --risk_memory --max_cmd_x 0.40 --max_cmd_y 0.80 --max_cmd_yaw 0.375)
         if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
             PCR_CMD+=(--obs_file "${OBS_FILE}")
         fi
@@ -545,9 +545,9 @@ if [[ "${START_PCR}" -eq 1 ]]; then
         --device "${PCR_DEVICE}"
         --rate_hz "${RATE_HZ}"
         --risk_memory
-        --max_cmd_x 0.06
-        --max_cmd_y 0.10
-        --max_cmd_yaw 0.20
+        --max_cmd_x 0.40
+        --max_cmd_y 0.80
+        --max_cmd_yaw 0.375
     )
     if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
         PCR_CMD+=(--obs_file "${OBS_FILE}")

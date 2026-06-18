@@ -186,6 +186,10 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         "--timeseries_stride",
         str(args.timeseries_stride),
     ]
+    if str(getattr(args, "eval_layout", "") or "").strip():
+        cmd.extend(["--eval_layout", str(args.eval_layout)])
+    if str(getattr(args, "export_eval_layout_debug", "") or "").strip():
+        cmd.extend(["--export_eval_layout_debug", str(args.export_eval_layout_debug)])
     if bool(getattr(args, "headless", False)):
         cmd.append("--headless")
     cmd.extend(method_cfg["flags"])
@@ -249,6 +253,8 @@ def parse_args():
     parser.add_argument("--output_root", type=str, default="agents/eval_data_seed23")
     parser.add_argument("--summary_dir", type=str, default="agents/eval_data_seed23/pcr_main_table")
     parser.add_argument("--extra_summary_paths", type=str, default="", help="extra metrics dirs/files to include in final table")
+    parser.add_argument("--eval_layout", type=str, default="", choices=["", "heldout_irregular_rows"])
+    parser.add_argument("--export_eval_layout_debug", type=str, default="")
     parser.add_argument(
         "--velocity_search_split",
         choices=("validation_layout", "main_test", "heldout_test"),

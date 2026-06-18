@@ -361,7 +361,7 @@ if [[ "${USE_TMUX}" -eq 1 && -z "${PCR_REAL_COMPAT_IN_TMUX:-}" ]]; then
         fi
     fi
     if [[ "${START_PCR}" -eq 1 ]]; then
-        PCR_CMD=(python3 "${CODE_DIR}/pcr_realplay.py" --pcr_ckpt "${PCR_CKPT}" --avoid_ckpt "${AVOID_CKPT}" --lowlevel_ckpt "${LOWLEVEL_CKPT}" --cmd_backend usr_command --usr_command_topic "${PCR_USR_COMMAND_TOPIC}" --device "${PCR_DEVICE}" --rate_hz "${RATE_HZ}" --risk_memory --max_cmd_x 0.06 --max_cmd_y 0.10 --max_cmd_yaw 0.20)
+        PCR_CMD=(python3 "${CODE_DIR}/pcr_realplay.py" --pcr_ckpt "${PCR_CKPT}" --avoid_ckpt "${AVOID_CKPT}" --lowlevel_ckpt "${LOWLEVEL_CKPT}" --cmd_backend usr_command --usr_command_topic "${PCR_USR_COMMAND_TOPIC}" --device "${PCR_DEVICE}" --rate_hz "${RATE_HZ}" --risk_memory --max_cmd_x 0.40 --max_cmd_y 0.80 --max_cmd_yaw 0.375)
         if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
             PCR_CMD+=(--obs_file "${OBS_FILE}")
         fi
@@ -545,9 +545,9 @@ if [[ "${START_PCR}" -eq 1 ]]; then
         --device "${PCR_DEVICE}"
         --rate_hz "${RATE_HZ}"
         --risk_memory
-        --max_cmd_x 0.06
-        --max_cmd_y 0.10
-        --max_cmd_yaw 0.20
+        --max_cmd_x 0.40
+        --max_cmd_y 0.80
+        --max_cmd_yaw 0.375
     )
     if [[ "${FILE_BRIDGE}" -eq 1 ]]; then
         PCR_CMD+=(--obs_file "${OBS_FILE}")

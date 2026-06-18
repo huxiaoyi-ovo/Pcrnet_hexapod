@@ -1987,6 +1987,9 @@ class HexGround(LeggedRobot):
 
     def _get_s_avoid_fixed_stage_row_y(self, stage: int):
         stage = int(stage)
+        eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+        if eval_layout == "heldout_irregular_rows" and stage == 4:
+            return (0.60, 1.93, 3.04, 4.47, 5.56)
         base_row_y = tuple(
             float(y)
             for y in getattr(
@@ -2014,6 +2017,9 @@ class HexGround(LeggedRobot):
 
     def _get_s_avoid_fixed_stage_row_counts(self, stage: int):
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
+        eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+        if eval_layout == "heldout_irregular_rows" and int(stage) == 4:
+            return (3, 2, 3, 2, 3)
         if int(stage) == 1:
             return tuple(3 for _ in row_y)
         return tuple(3 if (row_idx % 2) == 0 else 2 for row_idx in range(len(row_y)))
@@ -2063,6 +2069,24 @@ class HexGround(LeggedRobot):
 
     def _get_s_avoid_fixed_stage_layouts(self, stage: int):
         stage = int(stage)
+        eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+        if eval_layout == "heldout_irregular_rows" and stage == 4:
+            return [
+                {
+                    "name": "heldout_irregular_rows_mixed_shapes",
+                    "capsules": [
+                        (-0.92, 0.60), (-0.30, 0.60), (0.98, 0.60),
+                        (-0.82, 1.93), (-0.22, 1.93),
+                        (-1.03, 3.04), (0.86, 3.04),
+                        (-0.95, 4.47), (-0.38, 4.47),
+                        (-1.08, 5.56), (0.92, 5.56),
+                    ],
+                    "boxes": [
+                        (0.28, 3.04, 8.0),
+                        (0.18, 5.56, -10.0),
+                    ],
+                }
+            ]
         open_right_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_right", None)
         open_left_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_left", None)
         open_right_even_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_right_even", None)

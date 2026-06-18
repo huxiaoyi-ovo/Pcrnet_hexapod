@@ -688,28 +688,64 @@ def _build_table_a5(args) -> List[Dict]:
     return out
 
 
+def _speed_dir_tags(speed_label: str) -> List[str]:
+    value = float(speed_label)
+    tags = [f"s_{speed_label}", f"s_{value:g}", f"s_{value:.2f}"]
+    out: List[str] = []
+    for tag in tags:
+        if tag not in out:
+            out.append(tag)
+    return out
+
+
+def _speed_matches_source(source: str, speed_label: str) -> bool:
+    source = str(source)
+    for tag in _speed_dir_tags(speed_label):
+        if f"/{tag}/" in source or source.endswith(f"/{tag}") or f"\\{tag}\\" in source:
+            return True
+    return False
+
+
+def _load_velocity_search_diagnostic_overall(preset_dir: str, speed_label: str) -> Tuple[Dict, str]:
+    for tag in _speed_dir_tags(speed_label):
+        search_dir = os.path.join(preset_dir, tag)
+        matches = sorted(glob.glob(os.path.join(search_dir, "**", "metrics.json"), recursive=True))
+        if matches:
+            data = _load_metrics_json(matches[-1])
+            overall = data.get("overall", {}) if isinstance(data, dict) else {}
+            return overall, matches[-1]
+
+    csv_matches = sorted(
+        glob.glob(os.path.join(preset_dir, "pcr_main_table", "pcr_main_table_all_metrics_*.csv"))
+    )
+    for csv_path in reversed(csv_matches):
+        for row in _read_csv(csv_path):
+            if _speed_matches_source(row.get("source", ""), speed_label):
+                return row, csv_path
+
+    raise FileNotFoundError(
+        f"Missing dynamic-window Velocity-Search diagnostic metrics: {preset_dir}, speed={speed_label}"
+    )
+
+
 def _build_table_dwa_diagnostic(args) -> List[Dict]:
     root = getattr(args, "velocity_search_preset_root", "")
     specs = [
-        ("Safe", "0.35", os.path.join(root, "velocity_search_safe", "s_0.35")),
-        ("Safe", "0.60", os.path.join(root, "velocity_search_safe", "s_0.60")),
-        ("Balanced", "0.35", os.path.join(root, "velocity_search_balanced", "s_0.35")),
-        ("Balanced", "0.60", os.path.join(root, "velocity_search_balanced", "s_0.60")),
-        ("Tracking", "0.35", os.path.join(root, "velocity_search_tracking", "s_0.35")),
-        ("Tracking", "0.60", os.path.join(root, "velocity_search_tracking", "s_0.60")),
+        ("Conservative", "0.35", os.path.join(root, "velocity_search_safe")),
+        ("Conservative", "0.60", os.path.join(root, "velocity_search_safe")),
+        ("Balanced", "0.35", os.path.join(root, "velocity_search_balanced")),
+        ("Balanced", "0.60", os.path.join(root, "velocity_search_balanced")),
+        ("Tracking", "0.35", os.path.join(root, "velocity_search_tracking")),
+        ("Tracking", "0.60", os.path.join(root, "velocity_search_tracking")),
     ]
     out: List[Dict] = []
-    for preset_label, speed_label, search_dir in specs:
-        matches = sorted(glob.glob(os.path.join(search_dir, "**", "metrics.json"), recursive=True))
-        if not matches:
-            raise FileNotFoundError(f"Missing Velocity-Search diagnostic metrics: {search_dir}")
-        data = _load_metrics_json(matches[-1])
-        overall = data.get("overall", {}) if isinstance(data, dict) else {}
+    for preset_label, speed_label, preset_dir in specs:
+        overall, source_path = _load_velocity_search_diagnostic_overall(preset_dir, speed_label)
         dynamic_rate = _safe_float(overall.get("velocity_search_dynamic_window_enabled_rate", float("nan")))
         if not math.isfinite(dynamic_rate) or dynamic_rate < 0.99:
             raise ValueError(
                 "Velocity-Search diagnostic table now requires dynamic-window eval metrics; "
-                f"got dynamic_window_enabled_rate={dynamic_rate} from {matches[-1]}"
+                f"got dynamic_window_enabled_rate={dynamic_rate} from {source_path}"
             )
         out.append(
             {
@@ -741,11 +777,74 @@ def _build_table_dwa_diagnostic(args) -> List[Dict]:
         f.write(
             "The table reports bounded validation presets for the dynamic-window Target-aware "
             "Velocity-Space Search baseline. Each row enables the dynamic-window candidate filter "
-            "before short-horizon rollout and footprint checking. Safe costs reduce collision but "
-            "suppress row progress; tracking-oriented costs reduce following error but incur frequent "
-            "collisions. This baseline is therefore treated as a diagnostic planner-style external "
-            "alternative, not as a main-table competitor.\n"
+            "before short-horizon rollout and footprint checking. The conservative preset suppresses "
+            "row progress without achieving reliable safety, while tracking-oriented costs improve "
+            "progress but still incur frequent collisions. This baseline is therefore treated as a "
+            "diagnostic planner-style external alternative, not as a main-table competitor.\n"
         )
+    return out
+
+
+def _latest_heldout_all_csv(args) -> str:
+    explicit = str(getattr(args, "heldout_layout_all_csv", "") or "").strip()
+    if explicit:
+        return explicit
+    root = str(getattr(args, "heldout_layout_root", "") or "").strip()
+    if not root:
+        return ""
+    matches = sorted(glob.glob(os.path.join(root, "heldout_table", "pcr_main_table_all_metrics_*.csv")))
+    return matches[-1] if matches else ""
+
+
+def _build_table_heldout_irregular(args) -> List[Dict]:
+    source_csv = _latest_heldout_all_csv(args)
+    methods = ["rule_override", "additive_fusion", "risk_only", "learnedw"]
+    rows = _raw_rows_from_all_csv([source_csv], methods=methods) if source_csv else []
+    rows = [
+        row for row in rows
+        if (row.get("_speed") or _infer_speed(row)) == "0.60"
+        and str(row.get("eval_layout", "") or "").strip() == "heldout_irregular_rows"
+    ]
+    metrics = [
+        ("Task Success", "success_rate"),
+        ("Row-progress", "progress_ratio_mean"),
+        ("Collision", "episode_collision_rate"),
+        ("Follow MAE [m]", "follow_mae_m_mean"),
+    ]
+    table = _aggregate_raw(rows, metrics, methods) if rows else []
+    out: List[Dict] = []
+    for row in table:
+        out.append(
+            {
+                "Method": row.get("Method", ""),
+                "Task Success ↑": row.get("Task Success", ""),
+                "Row-progress ↑": row.get("Row-progress", ""),
+                "Collision ↓": row.get("Collision", ""),
+                "Follow MAE ↓": row.get("Follow MAE [m]", ""),
+            }
+        )
+    fields = ["Method", "Task Success ↑", "Row-progress ↑", "Collision ↓", "Follow MAE ↓"]
+    _write_csv(os.path.join(args.output_dir, "tableA_heldout_irregular_rows.csv"), out, fields)
+    _write_markdown(os.path.join(args.output_dir, "tableA_heldout_irregular_rows.md"), out, fields)
+    _write_latex_booktabs(os.path.join(args.output_dir, "tableA_heldout_irregular_rows.tex"), out, fields)
+    notes_path = os.path.join(args.output_dir, "tableA_heldout_irregular_rows_notes.md")
+    with open(notes_path, "w", encoding="utf-8") as f:
+        f.write("# Held-out irregular-row notes\n\n")
+        if not source_csv:
+            f.write(
+                "No held-out irregular-row CSV was found. Pass --heldout_layout_all_csv or "
+                "run eval into --heldout_layout_root to populate this table.\n"
+            )
+        else:
+            f.write(f"Source CSV: `{source_csv}`\n\n")
+            f.write(
+                "This eval-only table uses the Stage-4 heldout_irregular_rows layout at 0.60 m/s. "
+                "The layout is not used for training or validation tuning. It is non-mirrored, breaks "
+                "strict alternating rows, includes consecutive same-side rows, variable row spacing, "
+                "variable passage widths, and limited-size mixed obstacle shapes.\n"
+            )
+            if not out:
+                f.write("\nWarning: source CSV was found but no 0.60 held-out rows were selected.\n")
     return out
 
 
@@ -921,9 +1020,10 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
         print(f"[Warn] matplotlib unavailable; skipping Fig.3 ({exc})")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.0), constrained_layout=True)
+    fig3_methods = _fig3_method_order(table1)
+    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.0), constrained_layout=True)
     ax = axes[0]
-    for method in METHOD_ORDER:
+    for method in fig3_methods:
         pts = [r for r in table1 if r.get("method_key") == method]
         pts = sorted(pts, key=lambda r: _safe_float(r.get("Speed", "")))
         if not pts:
@@ -958,6 +1058,8 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
         "geomw": (8, -5),
         "risk_only": (8, -5),
         "rule_override": (8, -12),
+        "additive_fusion": (8, 12),
+        "velocity_search": (8, 12),
         "learnedw": (12, 10),
     }
     for row in scatter_rows:
@@ -990,18 +1092,19 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
     ax.set_xlabel("Collision rate (lower is better)")
     ax.set_ylabel("Follow MAE [m] (lower is better)")
     ax.set_xlim(-0.03, 0.84)
-    ax.set_ylim(0.50, 1.38)
+    ax.set_ylim(0.25, 1.38)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.42)
     ax.tick_params(labelsize=9)
     ax.text(0.5, 1.02, "(b)", transform=ax.transAxes, fontsize=11, va="bottom", ha="center")
     ax.annotate(
         "Better",
-        xy=(0.08, 0.80),
-        xytext=(0.19, 0.94),
+        xy=(0.10, 0.34),
+        xytext=(0.20, 0.46),
         arrowprops=dict(arrowstyle="->", color="#444444", linewidth=0.9),
         fontsize=8,
         color="#444444",
         ha="center",
+        va="center",
     )
     ax.text(
         0.98,
@@ -1019,7 +1122,7 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
         handles,
         labels,
         loc="upper center",
-        ncol=5,
+        ncol=min(6, max(1, len(fig3_methods))),
         frameon=False,
         fontsize=8,
         bbox_to_anchor=(0.5, 1.10),
@@ -1033,13 +1136,28 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
     plt.close(fig)
 
 
+def _fig3_method_order(table1: Sequence[Dict]) -> List[str]:
+    present = {str(row.get("method_key", "")) for row in table1}
+    preferred = [
+        "yonly",
+        "geomw",
+        "risk_only",
+        "rule_override",
+        "additive_fusion",
+        "velocity_search",
+        "learnedw",
+    ]
+    return [method for method in preferred if method in present]
+
+
 def _fig3b_rows(table1: Sequence[Dict], speed: str = "0.60") -> List[Dict]:
+    method_order = _fig3_method_order(table1)
     rows = {
         str(row.get("method_key", "")): row
         for row in table1
-        if str(row.get("Speed", "")) == speed and str(row.get("method_key", "")) in METHOD_ORDER
+        if str(row.get("Speed", "")) == speed and str(row.get("method_key", "")) in method_order
     }
-    missing = [method for method in METHOD_ORDER if method not in rows]
+    missing = [method for method in method_order if method not in rows]
     if missing:
         raise RuntimeError(
             f"Fig.3(b) candidate data incomplete at {speed} m/s; missing methods: {', '.join(missing)}"
@@ -1072,6 +1190,12 @@ def _fig3b_rows(table1: Sequence[Dict], speed: str = "0.60") -> List[Dict]:
             "Task Success Mean": 0.734,
             "Collision Mean": 0.211,
         },
+        "additive_fusion": {
+            "Task Success Mean": 0.669,
+            "Collision Mean": 0.326,
+            "Follow MAE [m] Mean": 0.334,
+            "Row-progress Mean": 0.874,
+        },
         "risk_only": {
             "Task Success Mean": 0.008,
             "Collision Mean": 0.294,
@@ -1089,6 +1213,8 @@ def _fig3b_rows(table1: Sequence[Dict], speed: str = "0.60") -> List[Dict]:
         },
     }
     for method, expected in anchors.items():
+        if method not in rows:
+            continue
         row = rows[method]
         for metric, target in expected.items():
             value = _safe_float(row.get(metric, ""))
@@ -1098,7 +1224,7 @@ def _fig3b_rows(table1: Sequence[Dict], speed: str = "0.60") -> List[Dict]:
                     f"Fig.3(b) anchor mismatch for {method}/{metric}: "
                     f"got {value:.6f}, expected about {target:.3f}"
                 )
-    return [rows[method] for method in METHOD_ORDER]
+    return [rows[method] for method in method_order]
 
 
 def _marker_fill_area_factor(method: str) -> float:
@@ -1172,6 +1298,8 @@ def _plot_fig3b_scatter_sized(args, table1: Sequence[Dict]) -> None:
         "geomw": (8, -5),
         "risk_only": (8, -5),
         "rule_override": (8, -12),
+        "additive_fusion": (8, 12),
+        "velocity_search": (8, 12),
         "learnedw": (12, 10),
     }
     for row in rows:
@@ -1204,17 +1332,18 @@ def _plot_fig3b_scatter_sized(args, table1: Sequence[Dict]) -> None:
     ax.set_xlabel("Collision rate (lower is better)", fontsize=10)
     ax.set_ylabel("Follow MAE [m] (lower is better)", fontsize=10)
     ax.set_xlim(-0.03, 0.84)
-    ax.set_ylim(0.50, 1.38)
+    ax.set_ylim(0.25, 1.38)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.42)
     ax.tick_params(labelsize=9)
     ax.annotate(
         "Better",
-        xy=(0.08, 0.80),
-        xytext=(0.19, 0.94),
+        xy=(0.10, 0.34),
+        xytext=(0.20, 0.46),
         arrowprops=dict(arrowstyle="->", color="#444444", linewidth=0.9),
         fontsize=9,
         color="#444444",
         ha="center",
+        va="center",
     )
     ax.text(
         0.98,
@@ -1237,7 +1366,7 @@ def _plot_fig3b_scatter_sized(args, table1: Sequence[Dict]) -> None:
             markersize=8 if method == "learnedw" else 6,
             label=SHORT_METHOD_LABELS[method],
         )
-        for method in METHOD_ORDER
+        for method in _fig3_method_order(table1)
     ]
     ax.legend(
         handles=method_handles,
@@ -2679,6 +2808,7 @@ def _write_manifest(
     table2: Sequence[Dict],
     table3: Sequence[Dict],
     table_a5: Sequence[Dict],
+    table_heldout: Sequence[Dict],
 ) -> None:
     path = os.path.join(args.output_dir, "MANIFEST.md")
     risk_rows = _raw_rows_from_all_csv([args.risk_all_csv], methods=["risk_only"])
@@ -2726,6 +2856,10 @@ def _write_manifest(
         "tableA_dwa_velocity_search_diagnostic.md",
         "tableA_dwa_velocity_search_diagnostic.tex",
         "tableA_dwa_velocity_search_diagnostic_notes.md",
+        "tableA_heldout_irregular_rows.csv",
+        "tableA_heldout_irregular_rows.md",
+        "tableA_heldout_irregular_rows.tex",
+        "tableA_heldout_irregular_rows_notes.md",
     ]
     missing_outputs = [
         name
@@ -2749,6 +2883,7 @@ def _write_manifest(
         f.write(f"- Table II rows: {len(table2)}\n")
         f.write(f"- Table III rows: {len(table3)}\n")
         f.write(f"- Table A5 rows: {len(table_a5)}\n")
+        f.write(f"- Held-out irregular-row rows: {len(table_heldout)}\n")
         f.write("\nSource files and paths:\n\n")
         for label, src in [
             ("internal_all_csv", args.internal_all_csv),
@@ -2759,6 +2894,8 @@ def _write_manifest(
             ("rule_aggregate_csv", args.rule_aggregate_csv),
             ("additive_all_csv", getattr(args, "additive_all_csv", "")),
             ("velocity_search_all_csv", getattr(args, "velocity_search_all_csv", "")),
+            ("heldout_layout_root", getattr(args, "heldout_layout_root", "")),
+            ("heldout_layout_all_csv", getattr(args, "heldout_layout_all_csv", "")),
             ("learnedw_diag_all_csv", args.learnedw_diag_all_csv),
             ("learnedw_diag_aggregate_csv", args.learnedw_diag_aggregate_csv),
             ("learnedw_split_all_csv", args.learnedw_split_all_csv),
@@ -2791,13 +2928,21 @@ def _write_manifest(
         if warning:
             f.write(f"- warning: `{warning}`\n")
         f.write("\nValidation checklist:\n\n")
-        f.write("- Table I: expected 15 rows = 3 speeds x 5 methods; Mono-PPO is intentionally excluded.\n")
+        table1_methods = sorted({str(row.get("method_key", "")) for row in table1 if row.get("method_key")})
+        f.write(
+            f"- Table I: expected {len(table1)} rows = 3 speeds x {len(table1_methods)} methods; "
+            "Mono-PPO is intentionally excluded.\n"
+        )
         f.write("- Table I: Risk-only 0.60 success should be about 0.008 +/- 0.008.\n")
-        f.write("- Fig.3(b): the selected scatter uses the five Table I methods at 0.60 m/s; marker-area encoding and the Learned-w star compensation are recorded in fig3b_scatter_sized_notes.md.\n")
+        f.write(
+            f"- Fig.3(b): the selected scatter uses {len(_fig3_method_order(table1))} Table I methods "
+            "at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.\n"
+        )
         f.write("- Table II: speed is fixed by --mechanism_speed, default 0.60.\n")
         f.write("- Table II: Risk-only note must say trained from scratch and no learned-w channel.\n")
         f.write("- Table II: Params should separate Risk-only and Learned-w.\n")
         f.write("- Table A5: contains no N/A values in Delta y_w / Delta y_r / Delta y_total over All, C_unsafe, C_avoid.\n")
+        f.write("- Held-out irregular-row table: eval-only Stage 4 at 0.60 m/s; not used for training or validation tuning.\n")
         f.write("- Fig.4: x-axis label must be Conflict intensity and Delta y must equal y_eff - y_raw.\n")
         f.write("- Fig.6: if requested, 0.60 m/s timeseries must contain robot_x/y, target_x/y, obstacles_json, episode_termination_reason, and trajectory_frame=world_xy_train_play; the audited default candidate requires Learned-w success and prioritizes one row-3 collision, one row-4 collision, one early lost/timeout, and one late lost/timeout trajectory without mixing mirrored layouts.\n")
         f.write("- Table III: fixed 0.35 m/s, stages 2/3/4, seed 1; Collision TTC averages collision episodes only.\n")
@@ -2851,6 +2996,16 @@ def build_argparser() -> argparse.ArgumentParser:
         "--velocity_search_preset_root",
         default="agents/eval_data_velocity_search_dynamic_window_preset_validation",
         help="Dynamic-window bounded validation root for the DWA-style Velocity-Search diagnostic table.",
+    )
+    parser.add_argument(
+        "--heldout_layout_root",
+        default="agents/eval_data_heldout_irregular_rows",
+        help="Eval-only held-out irregular-row root; latest heldout_table all-metrics CSV is used when present.",
+    )
+    parser.add_argument(
+        "--heldout_layout_all_csv",
+        default="",
+        help="Optional all-metrics CSV for the held-out irregular-row eval-only table.",
     )
     parser.add_argument(
         "--learnedw_diag_all_csv",
@@ -2978,7 +3133,8 @@ def main() -> None:
     _build_appendix_a4(args)
     table_a5 = _build_table_a5(args)
     _build_table_dwa_diagnostic(args)
-    _write_manifest(args, table1, table2, table3, table_a5)
+    table_heldout = _build_table_heldout_irregular(args)
+    _write_manifest(args, table1, table2, table3, table_a5, table_heldout)
     print(f"Final paper outputs v3 written to: {args.output_dir}")
 
 

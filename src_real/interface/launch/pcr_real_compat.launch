@@ -99,9 +99,9 @@
                     --device $(arg pcr_device)
                     --rate_hz $(arg rate_hz)
                     --risk_memory
-                    --max_cmd_x 0.06
-                    --max_cmd_y 0.10
-                    --max_cmd_yaw 0.20"/>
+                    --max_cmd_x 0.40
+                    --max_cmd_y 0.80
+                    --max_cmd_yaw 0.375"/>
         <group if="$(arg publish_cmd)">
             <node pkg="interface"
                   type="scripts/pcr_real/pcr_realplay.py"
@@ -115,9 +115,9 @@
                         --device $(arg pcr_device)
                         --rate_hz $(arg rate_hz)
                         --risk_memory
-                        --max_cmd_x 0.06
-                        --max_cmd_y 0.10
-                        --max_cmd_yaw 0.20
+                        --max_cmd_x 0.40
+                        --max_cmd_y 0.80
+                        --max_cmd_yaw 0.375
                         --publish_cmd"/>
         </group>
     </group>

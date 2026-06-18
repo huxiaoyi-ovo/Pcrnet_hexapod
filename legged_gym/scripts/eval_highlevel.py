@@ -84,8 +84,14 @@ def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
         return "[]"
     cap_slots = int(getattr(env_impl, "s_avoid_capsule_slot_count", 0))
     cap_slots = max(0, min(cap_slots, int(active.shape[1])))
+    box_slots = int(getattr(env_impl, "s_avoid_box_slot_count", 0))
+    box_start = cap_slots
+    box_end = max(box_start, min(box_start + box_slots, int(active.shape[1])))
     terrain_cfg = getattr(getattr(env_impl, "cfg", None), "terrain", None)
     radius = float(getattr(terrain_cfg, "avoid_capsule_radius", 0.15))
+    box_x = float(getattr(terrain_cfg, "avoid_box_size_x", 0.4))
+    box_y = float(getattr(terrain_cfg, "avoid_box_size_y", 0.4))
+    quat_world = getattr(env_impl, "s_avoid_quat_world", None)
     out = []
     for slot in range(cap_slots):
         if not bool(active[env_id, slot].item()):
@@ -93,9 +99,29 @@ def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
         out.append(
             {
                 "slot": int(slot),
+                "type": "capsule",
                 "x": _safe_float(pos_world[env_id, slot, 0].item()),
                 "y": _safe_float(pos_world[env_id, slot, 1].item()),
                 "r": radius,
+            }
+        )
+    for slot in range(box_start, box_end):
+        if not bool(active[env_id, slot].item()):
+            continue
+        yaw = 0.0
+        if torch.is_tensor(quat_world):
+            qz = _safe_float(quat_world[env_id, slot, 2].item())
+            qw = _safe_float(quat_world[env_id, slot, 3].item(), 1.0)
+            yaw = 2.0 * math.atan2(qz, qw)
+        out.append(
+            {
+                "slot": int(slot),
+                "type": "box",
+                "x": _safe_float(pos_world[env_id, slot, 0].item()),
+                "y": _safe_float(pos_world[env_id, slot, 1].item()),
+                "sx": box_x,
+                "sy": box_y,
+                "yaw": yaw,
             }
         )
     return _json_dumps_compact(out)
@@ -1545,6 +1571,131 @@ class EvalRunner:
             primary_meta=self.policy_meta if isinstance(self.policy_meta, dict) else self.primary_meta,
             aux_sources=self.aux_checkpoint_meta,
         )
+        self._layout_debug_exported = False
+
+    def _export_eval_layout_debug_once(self) -> None:
+        out_dir = str(getattr(self.args, "export_eval_layout_debug", "") or "").strip()
+        if not out_dir or self._layout_debug_exported:
+            return
+        self._layout_debug_exported = True
+        env_impl = getattr(self.env, "env", None)
+        if (
+            env_impl is None
+            or not hasattr(env_impl, "s_avoid_active")
+            or not hasattr(env_impl, "s_avoid_pos_world")
+        ):
+            print("[Eval] layout export skipped: s_avoid obstacle state unavailable", flush=True)
+            return
+        active = env_impl.s_avoid_active
+        pos_world = env_impl.s_avoid_pos_world
+        quat_world = getattr(env_impl, "s_avoid_quat_world", None)
+        if not torch.is_tensor(active) or not torch.is_tensor(pos_world) or active.shape[0] <= 0:
+            print("[Eval] layout export skipped: invalid s_avoid obstacle tensors", flush=True)
+            return
+        os.makedirs(out_dir, exist_ok=True)
+        env_id = 0
+        origin = torch.zeros(3, device=pos_world.device, dtype=pos_world.dtype)
+        if hasattr(env_impl, "env_origins") and torch.is_tensor(env_impl.env_origins):
+            origin = env_impl.env_origins[env_id, :3]
+        terrain_cfg = getattr(getattr(env_impl, "cfg", None), "terrain", None)
+        cap_slots = int(getattr(env_impl, "s_avoid_capsule_slot_count", 0))
+        box_slots = int(getattr(env_impl, "s_avoid_box_slot_count", 0))
+        slot_count = int(active.shape[1])
+        cap_radius = float(getattr(terrain_cfg, "avoid_capsule_radius", 0.15))
+        box_x = float(getattr(terrain_cfg, "avoid_box_size_x", 0.4))
+        box_y = float(getattr(terrain_cfg, "avoid_box_size_y", 0.4))
+        rows = []
+        for slot in range(slot_count):
+            if not bool(active[env_id, slot].item()):
+                continue
+            p_world = pos_world[env_id, slot, :3]
+            p_local = p_world - origin
+            kind = "capsule" if slot < cap_slots else ("box" if slot < cap_slots + box_slots else "wall")
+            yaw = 0.0
+            if torch.is_tensor(quat_world):
+                qz = _safe_float(quat_world[env_id, slot, 2].item())
+                qw = _safe_float(quat_world[env_id, slot, 3].item(), 1.0)
+                yaw = 2.0 * math.atan2(qz, qw)
+            rows.append(
+                {
+                    "slot": int(slot),
+                    "type": kind,
+                    "x_local": _safe_float(p_local[0].item()),
+                    "y_local": _safe_float(p_local[1].item()),
+                    "z_local": _safe_float(p_local[2].item()),
+                    "x_world": _safe_float(p_world[0].item()),
+                    "y_world": _safe_float(p_world[1].item()),
+                    "z_world": _safe_float(p_world[2].item()),
+                    "radius": cap_radius if kind == "capsule" else "",
+                    "size_x": box_x if kind == "box" else "",
+                    "size_y": box_y if kind == "box" else "",
+                    "yaw_deg": math.degrees(yaw),
+                }
+            )
+        csv_path = os.path.join(out_dir, "heldout_irregular_rows_layout.csv")
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            fieldnames = [
+                "slot", "type", "x_local", "y_local", "z_local",
+                "x_world", "y_world", "z_world", "radius", "size_x", "size_y", "yaw_deg",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        try:
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Circle, Rectangle
+            from matplotlib.transforms import Affine2D
+
+            fig, ax = plt.subplots(figsize=(4.2, 7.0))
+            for row in rows:
+                x = float(row["x_local"])
+                y = float(row["y_local"])
+                if row["type"] == "box":
+                    sx = float(row["size_x"])
+                    sy = float(row["size_y"])
+                    yaw_deg = float(row["yaw_deg"])
+                    rect = Rectangle(
+                        (x - 0.5 * sx, y - 0.5 * sy),
+                        sx,
+                        sy,
+                        facecolor="#bdbdbd",
+                        edgecolor="#6f6f6f",
+                        linewidth=1.0,
+                        alpha=0.85,
+                    )
+                    rect.set_transform(Affine2D().rotate_deg_around(x, y, yaw_deg) + ax.transData)
+                    ax.add_patch(rect)
+                else:
+                    ax.add_patch(
+                        Circle(
+                            (x, y),
+                            float(row["radius"] or cap_radius),
+                            facecolor="#c9c9c9",
+                            edgecolor="#707070",
+                            linewidth=1.0,
+                            alpha=0.9,
+                        )
+                    )
+            row_y = []
+            if hasattr(env_impl, "_get_s_avoid_fixed_stage_row_y"):
+                row_y = list(env_impl._get_s_avoid_fixed_stage_row_y(4))
+            for y in row_y:
+                ax.axhline(float(y), color="#e0e0e0", linewidth=0.8, zorder=0)
+            ax.set_title("held-out irregular rows")
+            ax.set_xlabel("local x / lateral [m]")
+            ax.set_ylabel("local y / forward [m]")
+            ax.set_xlim(-1.5, 1.5)
+            ax.set_ylim(-0.2, 6.3)
+            ax.grid(True, color="#eeeeee", linewidth=0.7)
+            fig.tight_layout()
+            fig.savefig(os.path.join(out_dir, "heldout_irregular_rows_layout.png"), dpi=220)
+            plt.close(fig)
+        except Exception as exc:
+            print(f"[Eval] layout PNG export failed: {exc}", flush=True)
+        print(f"[Eval] layout export: {out_dir}", flush=True)
 
     def _estimate_robot_mass_kg(self) -> float:
         try:
@@ -2055,6 +2206,7 @@ class EvalRunner:
             self.env._apply_scene_difficulty_for_resets(None)
             ph._maybe_apply_s_avoid_stage_override_runtime(self.args, self.env)
             obs = self.env.reset()
+            self._export_eval_layout_debug_once()
             self.aff_stack_buf = None
             self.follow_aff_stack_buf = None
             self.avoid_aff_stack_buf = None
@@ -5559,6 +5711,25 @@ class EvalRunner:
                 "pcr_play_env_alignment": bool(_is_pcr_eval_task(self.args)),
                 "pcr_new_curriculum": self.resolved_protocol.get("pcr_new_curriculum", None),
                 "generalize": bool(getattr(self.args, "generalize", False)),
+                "eval_layout": str(getattr(self.args, "eval_layout", "") or ""),
+                "layout_split": (
+                    "heldout_test"
+                    if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
+                    else "main_test"
+                ),
+                "layout_used_for_training": False if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows" else None,
+                "layout_used_for_validation": False if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows" else None,
+                "layout_family": (
+                    "irregular_nonmirror_mixed_shape_rows"
+                    if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
+                    else ""
+                ),
+                "layout_features": (
+                    "non-mirror; non-strict alternating; consecutive same-side rows; variable row spacing; "
+                    "variable passage width; 11 capsules plus 2 limited-size boxes; no walls; no dead ends; no dynamic obstacles"
+                    if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
+                    else ""
+                ),
                 "avoid_stage_override": None if getattr(self.args, "avoid_stage_override", None) is None else int(self.args.avoid_stage_override),
                 "freeze_avoid_stage": bool(getattr(self.args, "freeze_avoid_stage", False)) or (
                     getattr(self.args, "avoid_stage_override", None) is not None
@@ -6441,6 +6612,19 @@ def parse_args():
         help="s_pcr_new high-difficulty generalization eval: five rows, faster target, compressed row spacing",
     )
     parser.add_argument(
+        "--eval_layout",
+        type=str,
+        default="",
+        choices=["", "heldout_irregular_rows"],
+        help="eval-only layout split; heldout_irregular_rows is never used for training or tuning",
+    )
+    parser.add_argument(
+        "--export_eval_layout_debug",
+        type=str,
+        default="",
+        help="optional directory to export the actual eval obstacle layout CSV/PNG",
+    )
+    parser.add_argument(
         "--avoid_stage_override",
         type=int,
         default=None,
@@ -6603,6 +6787,11 @@ def parse_args():
         parser.error("--generalize 仅支持 --task s_pcr_new")
     if bool(getattr(args, "generalize", False)) and getattr(args, "avoid_stage_override", None) not in (None, 4):
         parser.error("--generalize 固定 5 行障碍，只允许省略 --avoid_stage_override 或显式传 4")
+    if str(getattr(args, "eval_layout", "") or "").strip():
+        if str(getattr(args, "task", "")) != "s_pcr_line_avoid_basic":
+            parser.error("--eval_layout 当前只支持 --task s_pcr_line_avoid_basic")
+        if getattr(args, "avoid_stage_override", None) not in (None, 4):
+            parser.error("--eval_layout heldout_irregular_rows 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
     if getattr(args, "pcr_line_target_speed", None) is not None and getattr(args, "pcr_line_target_speed_scale", None) is not None:
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
     if not getattr(args, "pcr_ckpt", None) and getattr(args, "ckpt", None):

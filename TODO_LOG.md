@@ -2241,3 +2241,20 @@
 ## 2026-06-17 DWA-style 最终诊断表切换到 dynamic-window 版本
 
 - [x] Must: 最终 `tableA_dwa_velocity_search_diagnostic` 不再读取旧 Velocity-Search preset 结果，而是读取启用 dynamic-window candidate filter 的 Safe / Balanced / Tracking × 0.35 / 0.60 结果；若任一行不是 dynamic-window eval，生成表格时直接报错，避免旧结果混入论文最终表。
+
+## 2026-06-17 PCR 实机 CAN 控制层回到原始逻辑
+
+- [x] Must: 按 `/home/hxy/src` 原始正常手柄控制程序恢复 `can_control/scripts/node.py` 的事件触发 CAN 执行逻辑，撤销 peer ready / stale feedback / shared serial fault 等新增锁死条件；PCR 与手柄上层话题拆分保留在 `run_agent2.py`，避免继续干扰原本能跑的电机通信节奏。
+
+## 2026-06-17 PCR 实机手柄发布节奏对齐原版
+
+- [x] Must: `run_agent2.py` 中手柄/manual 与 legacy 命令恢复原始 `/sita_des` 三连发节奏，保留 PCR 50Hz 路径单次发布，避免 PCR 插入改变原手柄连续推杆时的低层命令节奏。
+
+## 2026-06-17 PCR 实机默认速度口径对齐
+
+- [x] Must: 将 PCR 实机默认命令上限调到与 `run_agent2.py` 的速度解释一致，使默认最终低层命令可达约 `x=0.4`、`y=0.8`，同时保留命令行覆盖能力。
+
+## 2026-06-17 Held-out irregular-row eval-only 补救实验
+
+- [x] Must: 增加 `heldout_irregular_rows` eval-only 布局，固定 Stage 4、0.60 m/s、非镜像不规则障碍行，允许有限尺寸的混合障碍形状；只用于最终评测，不进入训练、validation tuning 或主表调参。
+- [x] Must: 输出 held-out 表格与真实仿真布局导出文件，保证表格指标、障碍位置和可视化均来自同一次 eval 环境状态。

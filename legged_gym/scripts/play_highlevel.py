@@ -701,6 +701,7 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
     _maybe_apply_pcr_new_play_overrides(args, env_cfg)
     _maybe_apply_pcr_line_play_overrides(args, env_cfg)
+    _maybe_apply_eval_layout_overrides(args, env_cfg)
     _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
 
     env = th.HierarchicalHexapodEnv(args, device, env_cfg=env_cfg, train_cfg=train_cfg)
@@ -2697,6 +2698,35 @@ def _maybe_apply_pcr_line_play_overrides(args, env_cfg) -> None:
     )
 
 
+def _maybe_apply_eval_layout_overrides(args, env_cfg) -> None:
+    if env_cfg is None:
+        return
+    eval_layout = str(getattr(args, "eval_layout", "") or "").strip().lower()
+    if not eval_layout:
+        return
+    if str(getattr(args, "task", "")) != "s_pcr_line_avoid_basic":
+        raise ValueError("--eval_layout 当前只支持 --task s_pcr_line_avoid_basic")
+    terrain_cfg = getattr(env_cfg, "terrain", None)
+    if terrain_cfg is None:
+        return
+    if eval_layout != "heldout_irregular_rows":
+        raise ValueError(f"Unknown eval_layout: {eval_layout}")
+    terrain_cfg.eval_layout = eval_layout
+    terrain_cfg.avoid_capsule_slots = 11
+    terrain_cfg.avoid_box_slots = 2
+    terrain_cfg.avoid_wall_slots = 0
+    terrain_cfg.avoid_box_size_x = 0.40
+    terrain_cfg.avoid_box_size_y = 0.40
+    terrain_cfg.avoid_box_size_z = 0.50
+    terrain_cfg.avoid_fixed_presets_use_mirror = False
+    terrain_cfg.avoid_fixed_preset_jitter_xy = 0.0
+    terrain_cfg.avoid_fixed_row_y_spacing_scale = 1.0
+    print(
+        "[PlayHigh] eval_layout=heldout_irregular_rows: "
+        "stage4 irregular non-mirror mixed-shape layout, capsules=11, boxes=2"
+    )
+
+
 def _maybe_apply_s_avoid_stage_override_runtime(args, env) -> None:
     if str(getattr(args, "task", "")) not in ("s_avoid_basic", "s_pcr_line_avoid_basic", "s_pcr_new"):
         return
@@ -3481,6 +3511,7 @@ def main():
         _maybe_apply_s_avoid_debug_overrides(args, env_cfg)
         _maybe_apply_pcr_new_play_overrides(args, env_cfg)
         _maybe_apply_pcr_line_play_overrides(args, env_cfg)
+        _maybe_apply_eval_layout_overrides(args, env_cfg)
         _maybe_apply_e_l_conflict_debug_overrides(args, env_cfg)
         if paper_video_debug:
             if hasattr(env_cfg, "sensor") and hasattr(env_cfg.sensor, "depth_camera"):
