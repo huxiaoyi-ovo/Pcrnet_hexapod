@@ -1988,8 +1988,10 @@ class HexGround(LeggedRobot):
     def _get_s_avoid_fixed_stage_row_y(self, stage: int):
         stage = int(stage)
         eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
-        if eval_layout == "heldout_irregular_rows" and stage == 4:
-            return (0.60, 1.93, 3.04, 4.47, 5.56)
+        if eval_layout == "heldout_irregular_rows":
+            row_y = (0.60, 5.60, 10.60, 15.60, 20.60)
+            row_count = max(1, min(5, int(stage) + 1))
+            return row_y[:row_count]
         base_row_y = tuple(
             float(y)
             for y in getattr(
@@ -2018,8 +2020,9 @@ class HexGround(LeggedRobot):
     def _get_s_avoid_fixed_stage_row_counts(self, stage: int):
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
         eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
-        if eval_layout == "heldout_irregular_rows" and int(stage) == 4:
-            return (3, 2, 3, 2, 3)
+        if eval_layout == "heldout_irregular_rows":
+            row_counts = (3, 2, 3, 2, 3)
+            return row_counts[:len(row_y)]
         if int(stage) == 1:
             return tuple(3 for _ in row_y)
         return tuple(3 if (row_idx % 2) == 0 else 2 for row_idx in range(len(row_y)))
@@ -2070,21 +2073,60 @@ class HexGround(LeggedRobot):
     def _get_s_avoid_fixed_stage_layouts(self, stage: int):
         stage = int(stage)
         eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
-        if eval_layout == "heldout_irregular_rows" and stage == 4:
+        if eval_layout == "heldout_irregular_rows":
+            row_y = self._get_s_avoid_fixed_stage_row_y(stage)
+            row_counts = self._get_s_avoid_fixed_stage_row_counts(stage)
+            capsules = []
+            boxes = []
+            seed0 = int(getattr(self.cfg.terrain, "avoid_seed", 7001))
+            rng = np.random.RandomState(seed0 + 910003 + 1009 * int(stage))
+            terrain_half_width = 0.5 * float(getattr(self.cfg.terrain, "terrain_width", 6.0))
+            spawn_margin = max(float(getattr(self.cfg.terrain, "avoid_spawn_extra_margin", 0.2)), 0.05)
+            x_limit = max(1.80, terrain_half_width - spawn_margin - 0.30)
+            gap_x_limit = max(1.55, min(x_limit, 4.20))
+
+            def add_random_obstacle(x: float, y: float, yaw_deg: float) -> None:
+                if rng.rand() < 0.5:
+                    capsules.append((float(x), float(y)))
+                else:
+                    boxes.append((float(x), float(y), float(yaw_deg)))
+
+            for row_idx, (local_y, row_count) in enumerate(zip(row_y, row_counts)):
+                left_wide = row_idx in (0, 1, 4)
+                if int(row_count) == 3:
+                    row_x = (-1.65, -0.70, -0.10) if left_wide else (-1.30, -0.70, 0.60)
+                    if row_idx == 0:
+                        capsules.extend((float(x), float(local_y)) for x in row_x)
+                    else:
+                        boxes.extend(
+                            (float(x), float(local_y), float(((-5.0, 7.0, -6.0)[i])))
+                            for i, x in enumerate(row_x)
+                        )
+                elif int(row_count) == 2:
+                    row_x = (-1.65, -0.70) if left_wide else (-1.30, -0.70)
+                    boxes.extend(
+                        (float(x), float(local_y), float((6.0, -6.0)[i]))
+                        for i, x in enumerate(row_x)
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Unsupported heldout_irregular_rows row count={int(row_count)} at stage={stage}, row={row_idx}"
+                    )
+
+            for gap_idx in range(max(0, len(row_y) - 1)):
+                y0 = float(row_y[gap_idx])
+                y1 = float(row_y[gap_idx + 1])
+                gap_count = int(rng.randint(3, 7))
+                for _ in range(gap_count):
+                    gap_x = float(rng.uniform(-gap_x_limit, gap_x_limit))
+                    gap_y = float(rng.uniform(y0 + 0.75, y1 - 0.75))
+                    gap_yaw = float(rng.uniform(-16.0, 16.0))
+                    add_random_obstacle(gap_x, gap_y, gap_yaw)
             return [
                 {
-                    "name": "heldout_irregular_rows_mixed_shapes",
-                    "capsules": [
-                        (-0.92, 0.60), (-0.30, 0.60), (0.98, 0.60),
-                        (-0.82, 1.93), (-0.22, 1.93),
-                        (-1.03, 3.04), (0.86, 3.04),
-                        (-0.95, 4.47), (-0.38, 4.47),
-                        (-1.08, 5.56), (0.92, 5.56),
-                    ],
-                    "boxes": [
-                        (0.28, 3.04, 8.0),
-                        (0.18, 5.56, -10.0),
-                    ],
+                    "name": "heldout_irregular_rows_same_side_runs_box_dominant",
+                    "capsules": capsules,
+                    "boxes": boxes,
                 }
             ]
         open_right_cfg = getattr(self.cfg.terrain, "avoid_fixed_row_x_open_right", None)

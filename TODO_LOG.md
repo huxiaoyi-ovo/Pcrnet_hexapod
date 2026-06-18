@@ -2258,3 +2258,4 @@
 
 - [x] Must: 增加 `heldout_irregular_rows` eval-only 布局，固定 Stage 4、0.60 m/s、非镜像不规则障碍行，允许有限尺寸的混合障碍形状；只用于最终评测，不进入训练、validation tuning 或主表调参。
 - [x] Must: 输出 held-out 表格与真实仿真布局导出文件，保证表格指标、障碍位置和可视化均来自同一次 eval 环境状态。
+- [x] Must: 将 `heldout_irregular_rows` 从高难 stress test 收口为温和 OOD：保持或略放松 Stage 4 行距，主要改变障碍排布与形状类型，并以 box 为主，避免第一行过窄导致泛化结论被难度混淆。

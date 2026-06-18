@@ -2712,18 +2712,20 @@ def _maybe_apply_eval_layout_overrides(args, env_cfg) -> None:
     if eval_layout != "heldout_irregular_rows":
         raise ValueError(f"Unknown eval_layout: {eval_layout}")
     terrain_cfg.eval_layout = eval_layout
-    terrain_cfg.avoid_capsule_slots = 11
-    terrain_cfg.avoid_box_slots = 2
+    terrain_cfg.terrain_width = max(float(getattr(terrain_cfg, "terrain_width", 6.0)), 12.0)
+    terrain_cfg.terrain_length = max(float(getattr(terrain_cfg, "terrain_length", 12.0)), 28.0)
+    terrain_cfg.avoid_capsule_slots = 64
+    terrain_cfg.avoid_box_slots = 64
     terrain_cfg.avoid_wall_slots = 0
-    terrain_cfg.avoid_box_size_x = 0.40
-    terrain_cfg.avoid_box_size_y = 0.40
+    terrain_cfg.avoid_box_size_x = 0.34
+    terrain_cfg.avoid_box_size_y = 0.34
     terrain_cfg.avoid_box_size_z = 0.50
     terrain_cfg.avoid_fixed_presets_use_mirror = False
     terrain_cfg.avoid_fixed_preset_jitter_xy = 0.0
     terrain_cfg.avoid_fixed_row_y_spacing_scale = 1.0
     print(
         "[PlayHigh] eval_layout=heldout_irregular_rows: "
-        "stage4 irregular non-mirror mixed-shape layout, capsules=11, boxes=2"
+        "stage4 randomized same-row/inner-row mixed-shape layout"
     )
 
 
@@ -3128,6 +3130,11 @@ def parse_args():
         action="store_true",
         help="论文视频显示：高清 viewer、虚拟深度图、actor local map、3D FOV 与实时执行命令箭头",
     )
+    parser.add_argument(
+        "--show_perception_windows",
+        action="store_true",
+        help="Alias of --paper_video_debug: show depth camera and local-map perception windows",
+    )
     parser.add_argument("--paper_video_viewer_width", type=int, default=1920, help="论文视频主 viewer 宽度")
     parser.add_argument("--paper_video_viewer_height", type=int, default=1080, help="论文视频主 viewer 高度")
     parser.add_argument("--paper_video_panel_width", type=int, default=1600, help="论文视频感知窗口宽度")
@@ -3219,6 +3226,13 @@ def parse_args():
         "--generalize",
         action="store_true",
         help="s_pcr_new 高难泛化评测：5 行障碍、目标速度上移、纵向行距压缩",
+    )
+    parser.add_argument(
+        "--eval_layout",
+        type=str,
+        default="",
+        choices=["", "heldout_irregular_rows"],
+        help="eval-only layout split for s_pcr_line_avoid_basic",
     )
     parser.add_argument(
         "--pcr_line_target_speed",
@@ -3382,6 +3396,8 @@ def parse_args():
         args.debug_interval = 1
     if args.debug and "--no_debug_cmd" not in raw_argv:
         args.debug_cmd = True
+    if bool(getattr(args, "show_perception_windows", False)):
+        args.paper_video_debug = True
     if hasattr(th, "normalize_task_name"):
         args.task = th.normalize_task_name(getattr(args, "task", ""))
     if bool(getattr(args, "generalize", False)) and args.task != "s_pcr_new":
