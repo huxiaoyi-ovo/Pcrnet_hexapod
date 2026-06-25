@@ -1483,6 +1483,12 @@ class EpisodeAccumulator:
     avoid_conflict_delta_y_w_used_sum: float = 0.0
     avoid_conflict_delta_y_r_sum: float = 0.0
     avoid_conflict_delta_y_total_sum: float = 0.0
+    avoid_conflict_cmd_y_sum: float = 0.0
+    avoid_conflict_cmd_y_steps: int = 0
+    avoid_conflict_cmd_f_y_sum: float = 0.0
+    avoid_conflict_cmd_f_y_steps: int = 0
+    avoid_conflict_cmd_a_y_sum: float = 0.0
+    avoid_conflict_cmd_a_y_steps: int = 0
     stop_conflict_steps: int = 0
     stop_conflict_y_raw_sum: float = 0.0
     stop_conflict_y_eff_sum: float = 0.0
@@ -2606,6 +2612,9 @@ class EvalRunner:
                         if torch.is_tensor(rotate_only_t):
                             ai.rotate_only_steps += int(bool(rotate_only_t[i].item()))
 
+                        cmd_x_v = float("nan")
+                        cmd_y_v = float("nan")
+                        cmd_yaw_v = float("nan")
                         cmd_final_t = post_info.get("cmd_exec_mean", None)
                         if cmd_final_t is None:
                             cmd_final_t = post_info.get("cmd_override_final", None)
@@ -2791,6 +2800,14 @@ class EvalRunner:
                             cmd_safe_post_t = post_info.get("cmd_post", post_info.get("cmd_slew", None))
                         clearance_pp_t = post_info.get("clearance_pp", None)
                         safe_thr_t = post_info.get("post_safe_distance", None)
+                        cmd_f_y_v = (
+                            _safe_float(cmd_f_t[i, 1].item(), default=float("nan"))
+                            if torch.is_tensor(cmd_f_t) and cmd_f_t.shape[-1] >= 2 else float("nan")
+                        )
+                        cmd_a_y_v = (
+                            _safe_float(cmd_a_t[i, 1].item(), default=float("nan"))
+                            if torch.is_tensor(cmd_a_t) and cmd_a_t.shape[-1] >= 2 else float("nan")
+                        )
 
                         gate_raw_v = _safe_float(gate_raw_t[i].item(), default=0.0) if torch.is_tensor(gate_raw_t) else 0.0
                         y_eff_v = _safe_float(y_eff_t[i].item(), default=gate_raw_v) if torch.is_tensor(y_eff_t) else gate_raw_v
@@ -2981,6 +2998,15 @@ class EvalRunner:
                             ai.avoid_conflict_delta_y_w_used_sum += delta_y_w_used_v
                             ai.avoid_conflict_delta_y_r_sum += delta_y_r_v
                             ai.avoid_conflict_delta_y_total_sum += delta_y_total_v
+                            if math.isfinite(cmd_y_v):
+                                ai.avoid_conflict_cmd_y_sum += cmd_y_v
+                                ai.avoid_conflict_cmd_y_steps += 1
+                            if math.isfinite(cmd_f_y_v):
+                                ai.avoid_conflict_cmd_f_y_sum += cmd_f_y_v
+                                ai.avoid_conflict_cmd_f_y_steps += 1
+                            if math.isfinite(cmd_a_y_v):
+                                ai.avoid_conflict_cmd_a_y_sum += cmd_a_y_v
+                                ai.avoid_conflict_cmd_a_y_steps += 1
                             if math.isfinite(rule_s_v):
                                 ai.rule_avoid_conflict_s_sum += rule_s_v
                             if math.isfinite(rule_follow_scale_v):
@@ -4328,6 +4354,18 @@ class EvalRunner:
                                 ai.avoid_conflict_y_eff_sum / avoid_conflict_denom
                                 if ai.avoid_conflict_steps > 0 else float("nan")
                             ),
+                            "avoid_conflict_cmd_y_mean": (
+                                ai.avoid_conflict_cmd_y_sum / float(ai.avoid_conflict_cmd_y_steps)
+                                if ai.avoid_conflict_cmd_y_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_cmd_f_y_mean": (
+                                ai.avoid_conflict_cmd_f_y_sum / float(ai.avoid_conflict_cmd_f_y_steps)
+                                if ai.avoid_conflict_cmd_f_y_steps > 0 else float("nan")
+                            ),
+                            "avoid_conflict_cmd_a_y_mean": (
+                                ai.avoid_conflict_cmd_a_y_sum / float(ai.avoid_conflict_cmd_a_y_steps)
+                                if ai.avoid_conflict_cmd_a_y_steps > 0 else float("nan")
+                            ),
                             "avoid_conflict_w_mean": (
                                 ai.avoid_conflict_w_sum / avoid_conflict_denom
                                 if ai.avoid_conflict_steps > 0 else float("nan")
@@ -5083,6 +5121,9 @@ class EvalRunner:
         avoid_delta_y_w_used_vals = _clean([r.get("avoid_conflict_delta_y_w_used_mean", float("nan")) for r in rows])
         avoid_delta_y_r_vals = _clean([r.get("avoid_conflict_delta_y_r_mean", float("nan")) for r in rows])
         avoid_delta_y_total_vals = _clean([r.get("avoid_conflict_delta_y_total_mean", float("nan")) for r in rows])
+        avoid_cmd_y_vals = _clean([r.get("avoid_conflict_cmd_y_mean", float("nan")) for r in rows])
+        avoid_cmd_f_y_vals = _clean([r.get("avoid_conflict_cmd_f_y_mean", float("nan")) for r in rows])
+        avoid_cmd_a_y_vals = _clean([r.get("avoid_conflict_cmd_a_y_mean", float("nan")) for r in rows])
         row_not_released_vals = _clean([r.get("row_not_released_rate", float("nan")) for r in rows])
         row_not_released_w_vals = _clean([r.get("row_not_released_w_mean", float("nan")) for r in rows])
         row_released_w_vals = _clean([r.get("row_released_w_mean", float("nan")) for r in rows])
@@ -5391,6 +5432,9 @@ class EvalRunner:
             "avoid_conflict_delta_y_total_mean": (
                 float(np.mean(avoid_delta_y_total_vals)) if avoid_delta_y_total_vals else float("nan")
             ),
+            "avoid_conflict_cmd_y_mean": float(np.mean(avoid_cmd_y_vals)) if avoid_cmd_y_vals else float("nan"),
+            "avoid_conflict_cmd_f_y_mean": float(np.mean(avoid_cmd_f_y_vals)) if avoid_cmd_f_y_vals else float("nan"),
+            "avoid_conflict_cmd_a_y_mean": float(np.mean(avoid_cmd_a_y_vals)) if avoid_cmd_a_y_vals else float("nan"),
             "row_not_released_rate_mean": float(np.mean(row_not_released_vals)) if row_not_released_vals else float("nan"),
             "row_not_released_w_mean": float(np.mean(row_not_released_w_vals)) if row_not_released_w_vals else float("nan"),
             "row_released_w_mean": float(np.mean(row_released_w_vals)) if row_released_w_vals else float("nan"),
@@ -6105,6 +6149,9 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         "avoid_conflict_delta_y_w_used_mean",
         "avoid_conflict_delta_y_r_mean",
         "avoid_conflict_delta_y_total_mean",
+        "avoid_conflict_cmd_y_mean",
+        "avoid_conflict_cmd_f_y_mean",
+        "avoid_conflict_cmd_a_y_mean",
         "row_not_released_rate",
         "row_not_released_w_mean",
         "row_released_w_mean",
@@ -6177,6 +6224,9 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
             "avoid_conflict_step_rate",
             "avoid_conflict_y_raw_mean",
             "avoid_conflict_y_eff_mean",
+            "avoid_conflict_cmd_y_mean",
+            "avoid_conflict_cmd_f_y_mean",
+            "avoid_conflict_cmd_a_y_mean",
             "avoid_conflict_w_mean",
             "avoid_conflict_signed_w_mean",
             "avoid_conflict_delta_y_mean",
