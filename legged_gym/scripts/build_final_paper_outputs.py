@@ -2389,7 +2389,7 @@ def _plot_fig6(args) -> None:
     # Single-column horizontal layout: draw forward world-y on the horizontal axis
     # and lateral world-x on the vertical axis. The underlying trajectory data and
     # selected episodes remain unchanged.
-    fig, ax = plt.subplots(1, 1, figsize=(4.15, 1.65), constrained_layout=True)
+    fig, ax = plt.subplots(1, 1, figsize=(8.0, 1.65), constrained_layout=True)
     plot_xlim = ylim
     plot_ylim = xlim
     for obs in obstacles:
