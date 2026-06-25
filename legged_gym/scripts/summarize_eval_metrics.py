@@ -26,6 +26,7 @@ METHOD_ORDER = [
     "velocity_search",
     "mono_ppo",
     "learnedw",
+    "learnedw_no_delta_y_w",
 ]
 
 
@@ -68,6 +69,8 @@ def _flatten(j: Dict, src_path: str) -> Dict:
         "w_mode": protocol.get("w_mode", ""),
         "w_tau": protocol.get("w_tau", ""),
         "w_blend_mode": protocol.get("w_blend_mode", ""),
+        "disable_delta_y_w": protocol.get("disable_delta_y_w", ""),
+        "delta_y_w_forced_zero": protocol.get("delta_y_w_forced_zero", ""),
         "episodes": overall.get("episodes", ""),
         "success_rate": overall.get("success_rate", ""),
         "l1_safety_success_rate": overall.get("l1_safety_success_rate", ""),
@@ -255,6 +258,8 @@ def _method_from_protocol(protocol: Dict, src_path: str = "") -> str:
         return "rule_override"
     if "mono_ppo" in text or "mono-ppo" in text:
         return "mono_ppo"
+    if "no_delta_y_w" in text or bool(protocol.get("disable_delta_y_w", False)):
+        return "learnedw_no_delta_y_w"
     if "learnedw2" in text or "learnedw" in text or w_mode in ("learned", "learnedw2"):
         return "learnedw"
     if "geomw" in text or w_mode == "geom":

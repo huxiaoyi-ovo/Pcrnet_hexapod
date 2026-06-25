@@ -1,0 +1,2 @@
+Speed,Method,Seed,Task Success,Collision,Follow MAE,Unsafe Rate,C_avoid Rate,CSI@C_avoid,Num Episodes,Checkpoint,Source
+0.60,learnedw_no_delta_y_w,1,0.0,0.125,1.5118579996455022,0.2651195499296765,0.12447257383966245,-0.0,8,/home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym/agents/moe_teacher_best_learnedw.pt,agents/eval_data_no_delta_y_w_smoke/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260625_182231/metrics.json

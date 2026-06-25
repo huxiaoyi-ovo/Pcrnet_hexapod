@@ -604,6 +604,26 @@ def _ensure_delta_y_diag(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.
     return gate_diag
 
 
+def _apply_disable_delta_y_w_ablation(gate_diag: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    gate_y = gate_diag["gate_y"] if "gate_y" in gate_diag else gate_diag["gate_y_raw"]
+    zero = torch.zeros_like(gate_y)
+    delta_y_w_raw = gate_diag.get("delta_y_w_raw", gate_diag.get("w_support_correction", zero))
+    delta_y_r = gate_diag.get("risk_diff_correction", zero)
+
+    y_eff = torch.clamp(gate_y + delta_y_r, 0.0, 1.0)
+    gate_diag["delta_y_w_raw"] = delta_y_w_raw.detach().clone()
+    gate_diag["w_support_correction"] = zero
+    gate_diag["delta_y_w_used"] = zero
+    gate_diag["delta_y_r"] = delta_y_r
+    gate_diag["y_eff"] = y_eff
+    gate_diag["cmd"] = (
+        y_eff.unsqueeze(-1) * gate_diag["cmd_f"]
+        + (1.0 - y_eff.unsqueeze(-1)) * gate_diag["cmd_a"]
+    )
+    gate_diag["delta_y_total"] = y_eff - gate_y
+    return gate_diag
+
+
 def _compute_additive_fusion_diag(
     env,
     args,
@@ -2028,6 +2048,8 @@ class EvalRunner:
                     learned_w=learned_w,
                 )
                 gate_diag = _ensure_delta_y_diag(gate_diag)
+                if bool(getattr(self.args, "disable_delta_y_w", False)):
+                    gate_diag = _apply_disable_delta_y_w_ablation(gate_diag)
                 if bool(getattr(self.args, "rule_override", False)):
                     cmd_rule, rule_info = _compute_rule_override_cmd(
                         self.args,
@@ -5779,6 +5801,8 @@ class EvalRunner:
                     if is_velocity_search
                     else "rule_override"
                     if bool(getattr(self.args, "rule_override", False))
+                    else "learnedw2_no_delta_y_w"
+                    if bool(getattr(self.args, "disable_delta_y_w", False))
                     else {"none": "yonly", "geom": "geomw", "risk_only": "risk_only", "learned": "learnedw", "learnedw2": "learnedw2"}.get(str(self.args.w_mode), str(self.args.w_mode))
                 ),
                 "risk_only": bool(th.is_risk_only_mode(str(self.args.w_mode))),
@@ -5797,6 +5821,7 @@ class EvalRunner:
                 ),
                 "uses_learned_w_for_control": bool(
                     th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                    and not bool(getattr(self.args, "disable_delta_y_w", False))
                 ),
                 "uses_additive_fusion": bool(is_additive_fusion),
                 "uses_velocity_search": bool(is_velocity_search),
@@ -5814,7 +5839,8 @@ class EvalRunner:
                     and not is_additive_fusion
                     and not is_velocity_search
                 ),
-                "delta_y_w_forced_zero": False,
+                "disable_delta_y_w": bool(getattr(self.args, "disable_delta_y_w", False)),
+                "delta_y_w_forced_zero": bool(getattr(self.args, "disable_delta_y_w", False)),
                 "mono_ppo": bool(getattr(self.args, "mono_ppo", False)),
                 "uses_follow_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
                 "uses_avoid_expert": bool(self.args.skill == "moe" and not getattr(self.args, "mono_ppo", False)),
@@ -6668,6 +6694,11 @@ def parse_args():
     parser.add_argument("--w2_lambda", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w2_risk_gamma", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--w_disable_gate_safe_clamp", action="store_true")
+    parser.add_argument(
+        "--disable_delta_y_w",
+        action="store_true",
+        help="Eval-only ablation: keep learned-w raw output/logging but force delta_y_w_used=0 before y_eff.",
+    )
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
     parser.add_argument("--additive_fusion", action="store_true", help="eval-only baseline: cmd_F + lateral-projected cmd_A")
     parser.add_argument("--velocity_search", action="store_true", help="eval-only target-aware velocity-space search baseline")
@@ -6860,6 +6891,11 @@ def parse_args():
         parser.error(
             f"--w_mode={args.w_mode} 与策略模式 --{ {'none': 'yonly', 'geom': 'wgeom', 'risk_only': 'wriskonly', 'learned': 'wlearned', 'learnedw2': 'wlearned2'}[selected_w_mode] } 不一致"
         )
+    if bool(getattr(args, "disable_delta_y_w", False)):
+        if bool(getattr(args, "rule_override", False)):
+            parser.error("--disable_delta_y_w 是 learnedw2 推理消融，不允许同时启用 --rule_override")
+        if selected_w_mode != "learnedw2":
+            parser.error("--disable_delta_y_w 只允许配合 --wlearned2 / --w_mode learnedw2 使用")
     args.w_mode = selected_w_mode
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
