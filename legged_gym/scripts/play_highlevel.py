@@ -3279,6 +3279,35 @@ def parse_args():
     parser.add_argument("--rule_s_min", type=float, default=0.85)
     parser.add_argument("--rule_slow_ratio", type=float, default=0.10)
     parser.add_argument("--rule_yaw_keep_loss", type=float, default=0.30)
+    parser.add_argument("--velocity_search", action="store_true", help="Play DWA-style target-aware velocity-space search baseline")
+    parser.add_argument("--velocity_search_split", type=str, default="validation_layout", choices=("validation_layout", "main_test", "heldout_test"))
+    parser.add_argument("--velocity_search_hparams_json", type=str, default="")
+    parser.add_argument("--velocity_search_vx_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_vy_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_w_samples", type=int, default=None)
+    parser.add_argument("--velocity_search_rollout_horizon_s", type=float, default=None)
+    parser.add_argument("--velocity_search_rollout_dt_s", type=float, default=None)
+    parser.add_argument("--velocity_search_body_radius_m", type=float, default=None)
+    parser.add_argument("--velocity_search_footprint_radius_m", type=float, default=None)
+    parser.add_argument("--velocity_search_min_clearance_margin", type=float, default=None)
+    parser.add_argument("--velocity_search_clear_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_target_dist_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_bearing_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_progress_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_forward_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_forward_min_v", type=float, default=None)
+    parser.add_argument("--velocity_search_smooth_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_target_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_risk_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_speed_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_lateral_weight", type=float, default=None)
+    parser.add_argument("--velocity_search_risk_filter_threshold", type=float, default=None)
+    parser.add_argument("--velocity_search_filter_mode", choices=("scale", "soft", "none"), default=None)
+    parser.add_argument("--velocity_search_fallback", choices=("stop", "safest", "raw"), default=None)
+    parser.add_argument("--velocity_search_use_dynamic_window", action="store_true")
+    parser.add_argument("--velocity_search_acc_lat_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_fwd_max", type=float, default=None)
+    parser.add_argument("--velocity_search_acc_yaw_max", type=float, default=None)
     parser.add_argument(
         "--expert_k_yaw",
         type=float,
@@ -3425,6 +3454,16 @@ def parse_args():
             parser.error("--mono_ppo 不允许同时指定 --yonly/--wgeom/--wriskonly/--wlearned/--wlearned2")
         if str(getattr(args, "w_mode", "none")).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
+    if bool(getattr(args, "velocity_search", False)):
+        if args.skill != "moe":
+            parser.error("--velocity_search 只支持 --skill moe")
+        if bool(getattr(args, "mono_ppo", False)):
+            parser.error("--velocity_search 不允许同时启用 --mono_ppo")
+        if bool(getattr(args, "rule_override", False)):
+            parser.error("--velocity_search 不允许同时启用 --rule_override")
+        if any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--velocity_search 不允许同时指定 --wgeom/--wriskonly/--wlearned/--wlearned2")
+        args.w_mode = "none"
 
     return args
 
@@ -3755,12 +3794,17 @@ def main():
         raise ValueError("--mono_ppo 只支持 --skill moe。")
     if is_mono_ppo and args.mode != "teacher":
         raise ValueError("--mono_ppo 当前只支持 --mode teacher。")
-    is_gate = skill == "moe" and not is_mono_ppo
-    env.disable_pcr_gate_aux = bool(is_mono_ppo)
+    is_velocity_search = bool(getattr(args, "velocity_search", False))
+    if is_velocity_search and skill != "moe":
+        raise ValueError("--velocity_search 只支持 --skill moe。")
+    is_gate = skill == "moe" and not is_mono_ppo and not is_velocity_search
+    env.disable_pcr_gate_aux = bool(is_mono_ppo or is_velocity_search)
     expert_only_mode = use_follow_expert or static_avoid_debug or (force_cmd_tensor is not None)
     policy = None
     avoid_policy = None
     avoid_aff_stack_buf = None
+    velocity_search_hparams = None
+    velocity_search_compute = None
     gate_state_dim = int(obs["state"].shape[1])
     gate_goal_dim = int(obs["goal"].shape[1])
     avoid_state_dim = int(obs["state"].shape[1])
@@ -3773,8 +3817,10 @@ def main():
         print("[PlayHigh] cmd_source=force_cmd (--force_cmd)")
     elif is_mono_ppo:
         print("[PlayHigh] cmd_source=mono_ppo_direct_cmd; cmd=[x_right,y_forward,yaw]")
+    elif is_velocity_search:
+        print("[PlayHigh] cmd_source=velocity_search; no GatePolicy/w channel is used")
     if not expert_only_mode:
-        if not args.teacher_ckpt:
+        if not args.teacher_ckpt and not is_velocity_search:
             raise ValueError("非 expert-only 模式必须提供 --pcr_ckpt")
         if is_gate:
             if not args.avoid_ckpt:
@@ -3852,6 +3898,52 @@ def main():
                 "experiment_meta": ckpt_meta,
             }
             policy.eval()
+        elif is_velocity_search:
+            if not args.avoid_ckpt:
+                raise ValueError("velocity_search 需要 --avoid_ckpt；follow 侧默认使用解析式 expert")
+            from legged_gym.scripts import eval_highlevel as eh
+
+            velocity_search_hparams = eh._resolve_velocity_search_hparams(args)
+            velocity_search_compute = eh._compute_velocity_search_diag
+            ckpt = torch.load(args.avoid_ckpt, map_location=device)
+            ckpt_meta = _ckpt_meta_from_obj(ckpt)
+            avoid_state_dim = th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim
+            avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
+            avoid_policy = th.CmdVelExpert(
+                affordance_channels=avoid_aff_channels,
+                state_dim=avoid_state_dim,
+                goal_dim=obs["goal"].shape[1],
+                cmd_scale=cmd_scale,
+            ).to(device)
+            _validate_expected_ckpt_meta(
+                ckpt_meta,
+                source_name="avoid ckpt",
+                expected_skill="avoid",
+                expected_mode=args.mode,
+            )
+            th.validate_checkpoint_contract_compatibility(
+                th.build_runtime_contract_meta(args, env),
+                ckpt_meta,
+                reference_name="current play runtime",
+                candidate_name="avoid ckpt",
+                strict=True,
+            )
+            state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+            th.load_high_level_state_dict_compat(
+                avoid_policy,
+                state_dict,
+                label=f"play_velocity_search_avoid:{os.path.basename(args.avoid_ckpt)}",
+            )
+            avoid_policy.eval()
+            resolved_protocol_aux["avoid_ckpt"] = {
+                "path": os.path.abspath(args.avoid_ckpt),
+                "experiment_meta": ckpt_meta,
+            }
+            resolved_protocol_aux["velocity_search"] = {
+                "split": str(getattr(args, "velocity_search_split", "")),
+                "hparams_json": str(getattr(args, "velocity_search_hparams_json", "") or ""),
+                "hparams": dict(velocity_search_hparams),
+            }
         else:
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             ckpt_meta = _ckpt_meta_from_obj(ckpt)
@@ -3940,7 +4032,7 @@ def main():
 
     prev_dist = None
     aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
-    if is_gate:
+    if is_gate or is_velocity_search:
         avoid_aff_stack_buf = aff_bundle["avoid_aff"].repeat(1, aff_stack, 1, 1)
     aff_stack_fill = torch.ones(env.num_envs, device=device)
     stack_reset_mask = None
@@ -3985,7 +4077,7 @@ def main():
                 raw_aff_map = aff_bundle["raw_aff"]
                 aff_map = aff_bundle["policy_aff"]
                 aff_stack_buf = aff_map.repeat(1, aff_stack, 1, 1)
-                if is_gate:
+                if is_gate or is_velocity_search:
                     avoid_aff_stack_buf = aff_bundle["avoid_aff"].repeat(1, aff_stack, 1, 1)
                 aff_stack_fill.fill_(1)
                 stack_reset_mask = None
@@ -3999,7 +4091,7 @@ def main():
                 reset_bundle = _get_aff_bundle(obs)
                 reset_aff = reset_bundle["policy_aff"]
                 aff_stack_buf[stack_reset_mask] = reset_aff[stack_reset_mask].repeat(1, aff_stack, 1, 1)
-                if is_gate:
+                if is_gate or is_velocity_search:
                     avoid_aff_stack_buf[stack_reset_mask] = reset_bundle["avoid_aff"][stack_reset_mask].repeat(1, aff_stack, 1, 1)
                 aff_stack_fill[stack_reset_mask] = 1
                 stack_reset_mask = None
@@ -4008,7 +4100,7 @@ def main():
             aff_map = aff_bundle["policy_aff"]
             aff_stack_buf = torch.roll(aff_stack_buf, shifts=-aff_map.shape[1], dims=1)
             aff_stack_buf[:, -aff_map.shape[1]:, :, :] = aff_map
-            if is_gate:
+            if is_gate or is_velocity_search:
                 avoid_aff = aff_bundle["avoid_aff"]
                 avoid_aff_stack_buf = torch.roll(avoid_aff_stack_buf, shifts=-avoid_aff.shape[1], dims=1)
                 avoid_aff_stack_buf[:, -avoid_aff.shape[1]:, :, :] = avoid_aff
@@ -4038,7 +4130,7 @@ def main():
             aff_input = torch.zeros_like(aff_stack_buf) if bool(getattr(args, "zero_local_map", False)) else aff_stack_buf
             avoid_aff_input = (
                 torch.zeros_like(avoid_aff_stack_buf)
-                if is_gate and bool(getattr(args, "zero_local_map", False))
+                if (is_gate or is_velocity_search) and bool(getattr(args, "zero_local_map", False))
                 else avoid_aff_stack_buf
             )
             gate_aff_input = (
@@ -4051,7 +4143,42 @@ def main():
                 paper_video_actor_map = torch.zeros_like(paper_video_actor_map)
             if not expert_only_mode:
                 with torch.no_grad():
-                    if is_gate:
+                    if is_velocity_search:
+                        avoid_difficulty_input = (
+                            torch.zeros_like(aff_bundle["avoid_difficulty"])
+                            if bool(getattr(args, "zero_local_map", False))
+                            else aff_bundle["avoid_difficulty"]
+                        )
+                        expert_state = th.get_moe_expert_state_inputs(
+                            th.match_state_dim(obs["state"], avoid_state_dim, label="play_velocity_search_expert_state")
+                        )
+                        cmd_f = _compute_moe_follow_cmd_from_goal(
+                            expert_state,
+                            goal_input,
+                            reset_mask,
+                            cmd_scale,
+                            env_ref=env,
+                        )
+                        cmd_a, _ = avoid_policy.get_action(
+                            avoid_aff_input,
+                            expert_state,
+                            avoid_goal_input,
+                            avoid_difficulty_input,
+                            deterministic=True,
+                        )
+                        if velocity_search_compute is None or velocity_search_hparams is None:
+                            raise RuntimeError("velocity_search helper is not initialized")
+                        gate_diag = velocity_search_compute(
+                            env,
+                            args,
+                            gate_aff_input,
+                            cmd_f,
+                            cmd_a,
+                            goal_input,
+                            velocity_search_hparams,
+                        )
+                        cmd = gate_diag["cmd"]
+                    elif is_gate:
                         gate_difficulty = aff_bundle["gate_difficulty"] if args.gate_use_difficulty else torch.zeros_like(aff_bundle["gate_difficulty"])
                         if bool(getattr(args, "zero_local_map", False)):
                             gate_difficulty = torch.zeros_like(gate_difficulty)

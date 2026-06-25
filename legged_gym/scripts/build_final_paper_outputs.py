@@ -731,12 +731,12 @@ def _load_velocity_search_diagnostic_overall(preset_dir: str, speed_label: str) 
 def _build_table_dwa_diagnostic(args) -> List[Dict]:
     root = getattr(args, "velocity_search_preset_root", "")
     specs = [
-        ("Conservative", "0.35", os.path.join(root, "velocity_search_safe")),
-        ("Conservative", "0.60", os.path.join(root, "velocity_search_safe")),
+        ("Safety-biased", "0.35", os.path.join(root, "velocity_search_safe")),
+        ("Safety-biased", "0.60", os.path.join(root, "velocity_search_safe")),
         ("Balanced", "0.35", os.path.join(root, "velocity_search_balanced")),
         ("Balanced", "0.60", os.path.join(root, "velocity_search_balanced")),
-        ("Tracking", "0.35", os.path.join(root, "velocity_search_tracking")),
-        ("Tracking", "0.60", os.path.join(root, "velocity_search_tracking")),
+        ("Tracking-biased", "0.35", os.path.join(root, "velocity_search_tracking")),
+        ("Tracking-biased", "0.60", os.path.join(root, "velocity_search_tracking")),
     ]
     out: List[Dict] = []
     for preset_label, speed_label, preset_dir in specs:
@@ -749,7 +749,7 @@ def _build_table_dwa_diagnostic(args) -> List[Dict]:
             )
         out.append(
             {
-                "Preset": preset_label,
+                "Search bias": preset_label,
                 "Speed": speed_label,
                 "Success ↑": _fmt(_safe_float(overall.get("success_rate", ""))),
                 "Collision ↓": _fmt(_safe_float(overall.get("episode_collision_rate", ""))),
@@ -758,7 +758,7 @@ def _build_table_dwa_diagnostic(args) -> List[Dict]:
             }
         )
     fields = [
-        "Preset",
+        "Search bias",
         "Speed",
         "Success ↑",
         "Collision ↓",
@@ -775,11 +775,11 @@ def _build_table_dwa_diagnostic(args) -> List[Dict]:
     ) as f:
         f.write("# DWA-style velocity-search diagnostic notes\n\n")
         f.write(
-            "The table reports bounded validation presets for the dynamic-window Target-aware "
+            "The table reports bounded validation search biases for the dynamic-window Target-aware "
             "Velocity-Space Search baseline. Each row enables the dynamic-window candidate filter "
-            "before short-horizon rollout and footprint checking. The conservative preset suppresses "
-            "row progress without achieving reliable safety, while tracking-oriented costs improve "
-            "progress but still incur frequent collisions. This baseline is therefore treated as a "
+            "before short-horizon rollout and footprint checking. The safety-biased setting suppresses "
+            "row progress without achieving reliable safety, while the tracking-biased setting improves "
+            "progress but still incurs frequent collisions. This baseline is therefore treated as a "
             "diagnostic planner-style external alternative, not as a main-table competitor.\n"
         )
     return out
@@ -2346,15 +2346,21 @@ def _plot_fig6(args) -> None:
     xlim, ylim = _fig6_window_limits(obstacles, selected, args)
 
     speed = FIG6_SPEEDS[0]
-    fig, ax = plt.subplots(1, 1, figsize=(4.3, 7.4), constrained_layout=True)
+    # Single-column horizontal layout: draw forward world-y on the horizontal axis
+    # and lateral world-x on the vertical axis. The underlying trajectory data and
+    # selected episodes remain unchanged.
+    fig, ax = plt.subplots(1, 1, figsize=(3.55, 1.75), constrained_layout=True)
+    plot_xlim = ylim
+    plot_ylim = xlim
     for obs in obstacles:
         oy = _safe_float(obs.get("y"))
+        ox = _safe_float(obs.get("x"))
         radius = _safe_float(obs.get("r"))
         if not math.isfinite(oy) or oy + radius < ylim[0] or oy - radius > ylim[1]:
             continue
         ax.add_patch(
             Circle(
-                (_safe_float(obs.get("x")), _safe_float(obs.get("y"))),
+                (oy, ox),
                 radius,
                 facecolor="#9e9e9e",
                 edgecolor="#666666",
@@ -2369,7 +2375,7 @@ def _plot_fig6(args) -> None:
     raw_ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
     tx, ty, _ = _truncate_fig6_at_reset(raw_tx, raw_ty)
     tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
-    target_line, = ax.plot(tx, ty, linewidth=1.8, color="#009e73", alpha=0.95, label="Target", zorder=2)
+    target_line, = ax.plot(ty, tx, linewidth=1.5, color="#009e73", alpha=0.95, label="Target", zorder=2)
     target_line.set_dashes([5.0, 3.0])
 
     start_marked = False
@@ -2383,11 +2389,11 @@ def _plot_fig6(args) -> None:
         xs, ys = _clip_fig6_xy(trajectory_xs, trajectory_ys, xlim, ylim)
         style = METHOD_STYLE[method]
         alpha = 0.92 if method == "learnedw" else 0.90
-        linewidth = 2.0 if method == "learnedw" else style["linewidth"]
+        linewidth = 1.8 if method == "learnedw" else max(1.25, style["linewidth"] * 0.92)
         z = 5 if method == "learnedw" else 3
         ax.plot(
-            xs,
             ys,
+            xs,
             color=style["color"],
             linewidth=linewidth,
             alpha=alpha,
@@ -2397,10 +2403,10 @@ def _plot_fig6(args) -> None:
             first_pt = _first_visible_fig6_point(xs, ys)
             if first_pt is not None:
                 ax.scatter(
-                    [first_pt[0]],
                     [first_pt[1]],
+                    [first_pt[0]],
                     marker="s",
-                    s=52,
+                    s=36,
                     color="#000000",
                     edgecolor="white",
                     linewidth=0.7,
@@ -2420,8 +2426,8 @@ def _plot_fig6(args) -> None:
             reason = str(meta.get("reason") or rows[-1].get("episode_termination_reason", "")).lower()
             marker_name = _plot_terminal_marker(
                 ax,
-                terminal_pt[0],
                 terminal_pt[1],
+                terminal_pt[0],
                 reason,
                 style["color"],
             )
@@ -2453,14 +2459,14 @@ def _plot_fig6(args) -> None:
                 f"reset_detected={int(reset_detected)}"
             )
 
-    ax.set_title(f"{float(speed):.2f} m/s", fontsize=11)
-    ax.set_xlabel("world x / lateral [m]", fontsize=11)
-    ax.set_ylabel("world y / forward [m]", fontsize=11)
+    ax.set_title(f"{float(speed):.2f} m/s", fontsize=9, pad=2)
+    ax.set_xlabel("world y / forward [m]", fontsize=8)
+    ax.set_ylabel("world x / lateral [m]", fontsize=8)
     ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    ax.set_xlim(*plot_xlim)
+    ax.set_ylim(*plot_ylim)
     ax.set_aspect("equal", adjustable="box")
-    ax.tick_params(labelsize=9)
+    ax.tick_params(labelsize=7)
 
     method_handles = [
         Line2D([0], [0], color=METHOD_STYLE[m]["color"],
@@ -2482,10 +2488,12 @@ def _plot_fig6(args) -> None:
     fig.legend(
         handles=method_handles + event_handles,
         loc="upper center",
-        ncol=3,
+        ncol=5,
         frameon=False,
-        fontsize=8,
-        bbox_to_anchor=(0.5, 1.10),
+        fontsize=6.2,
+        handlelength=1.5,
+        columnspacing=0.8,
+        bbox_to_anchor=(0.5, 1.17),
     )
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(args.output_dir, f"fig6_trajectories_stage4.{ext}"), dpi=300, bbox_inches="tight")

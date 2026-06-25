@@ -2264,3 +2264,7 @@
 - [x] Must: 输出 held-out 表格与真实仿真布局导出文件，保证表格指标、障碍位置和可视化均来自同一次 eval 环境状态。
 - [x] Must: 将 `heldout_irregular_rows` 从高难 stress test 收口为温和 OOD：保持或略放松 Stage 4 行距，主要改变障碍排布与形状类型，并以 box 为主，避免第一行过窄导致泛化结论被难度混淆。
 - [ ] Must: 正文 held-out 小表固定为 `heldout_irregular_rows @ 0.60 m/s`，只比较 PCR-Net / Rule-Override / Additive-Fusion，3 eval seeds、64 episodes/seed；不加入大图，不混入 Risk-only 或 DWA-style 诊断结果。
+
+## 2026-06-23 PCR 实机仲裁时序证据
+
+- [x] Must: 扫描全部同步 ROS bag 的 `/pcr_realplay/debug`，按统一规则自动选择目标有效、深度有效、风险先升后降且横移响应增幅清晰的连续片段，生成风险、仲裁权重与执行命令三联曲线及候选对比图；同时保存多 bag 排名、公式重构误差和源数据，作为论文中的实机在线仲裁证据，不替代人工标注的 trial-level 成功/碰撞统计。

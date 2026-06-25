@@ -1,8 +1,8 @@
-| Preset | Speed | Success ↑ | Collision ↓ | Row-prog. ↑ | Follow MAE ↓ |
+| Search bias | Speed | Success ↑ | Collision ↓ | Row-prog. ↑ | Follow MAE ↓ |
 | --- | --- | --- | --- | --- | --- |
-| Conservative | 0.35 | 0.000 | 0.812 | 0.000 | 0.678 |
-| Conservative | 0.60 | 0.000 | 0.938 | 0.000 | 1.028 |
+| Safety-biased | 0.35 | 0.000 | 0.812 | 0.000 | 0.678 |
+| Safety-biased | 0.60 | 0.000 | 0.938 | 0.000 | 1.028 |
 | Balanced | 0.35 | 0.000 | 1.000 | 0.188 | 0.375 |
 | Balanced | 0.60 | 0.000 | 0.969 | 0.375 | 0.592 |
-| Tracking | 0.35 | 0.000 | 0.844 | 0.344 | 0.528 |
-| Tracking | 0.60 | 0.000 | 0.781 | 0.500 | 0.690 |
+| Tracking-biased | 0.35 | 0.000 | 0.844 | 0.344 | 0.528 |
+| Tracking-biased | 0.60 | 0.000 | 0.781 | 0.500 | 0.690 |

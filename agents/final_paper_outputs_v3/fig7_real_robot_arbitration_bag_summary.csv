@@ -1,0 +1,20 @@
+bag_name,debug_samples,clean_samples,candidate_events,status
+pcr_after_zero_fix.bag,0,0,0,No valid JSON messages were found on the debug topic.
+pcr_after_zero_fix2.bag,0,0,0,No valid JSON messages were found on the debug topic.
+pcr_avoid_intention_debug.bag,1053,423,2,ok
+pcr_avoid_intention_debug2.bag,1474,781,4,ok
+pcr_avoid_intention_debug3.bag,2404,1193,8,ok
+pcr_avoid_intention_debug4.bag,1465,556,4,ok
+pcr_avoid_intention_debug5.bag,1316,888,6,ok
+pcr_avoid_intention_debug6.bag,619,312,6,ok
+pcr_offset_avoid_debug_20260609_174653.bag,2739,1646,0,ok
+pcr_offset_avoid_debug_20260609_180517.bag,843,0,0,ok
+pcr_offset_avoid_debug_20260609_184222.bag,1587,916,0,ok
+pcr_offset_avoid_debug_20260609_190146.bag,749,532,1,ok
+pcr_offset_avoid_debug_20260609_191738.bag,1545,859,0,ok
+pcr_real_20260617_191609.bag,0,0,0,No valid JSON messages were found on the debug topic.
+pcr_real_20260617_194759.bag,0,0,0,No valid JSON messages were found on the debug topic.
+pcr_real_20260618_143745.bag,2305,1483,15,ok
+pcr_real_20260618_152739.bag,1166,186,4,ok
+pcr_real_20260618_153529.bag,3412,1180,2,ok
+pcr_real_20260618_154442.bag,3780,1895,9,ok

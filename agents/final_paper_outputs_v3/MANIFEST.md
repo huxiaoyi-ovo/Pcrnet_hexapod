@@ -2,11 +2,11 @@
 
 Generated files:
 
-- fig3_main_performance.pdf (22574 bytes)
-- fig3_main_performance.png (261934 bytes)
-- fig3b_scatter_sized.pdf (18731 bytes)
-- fig3b_scatter_sized.png (135213 bytes)
-- fig3b_scatter_sized_data_060.csv (474 bytes)
+- fig3_main_performance.pdf (23293 bytes)
+- fig3_main_performance.png (289444 bytes)
+- fig3b_scatter_sized.pdf (18965 bytes)
+- fig3b_scatter_sized.png (146034 bytes)
+- fig3b_scatter_sized_data_060.csv (551 bytes)
 - fig3b_scatter_sized_notes.md (327 bytes)
 - fig4_mechanism.pdf (17010 bytes)
 - fig4_mechanism.png (164362 bytes)
@@ -14,9 +14,9 @@ Generated files:
 - fig6_trajectories_stage4.png (217075 bytes)
 - fig6_trajectories_stage4_sources.csv (1886 bytes)
 - fig6_trajectory_episode_candidates.csv (1238 bytes)
-- table1_main_performance_stage4.csv (1259 bytes)
-- table1_main_performance_stage4.md (1569 bytes)
-- table1_main_performance_stage4.tex (1795 bytes)
+- table1_main_performance_stage4.csv (1514 bytes)
+- table1_main_performance_stage4.md (1866 bytes)
+- table1_main_performance_stage4.tex (2113 bytes)
 - table2_mechanism_ablation.csv (338 bytes)
 - table2_mechanism_ablation.md (446 bytes)
 - table2_mechanism_ablation.tex (496 bytes)
@@ -40,22 +40,22 @@ Generated files:
 - tableA5_delta_y_full.md (1237 bytes)
 - tableA5_delta_y_full.tex (1281 bytes)
 - tableA5_delta_y_full_notes.md (361 bytes)
-- tableA_dwa_velocity_search_diagnostic.csv (304 bytes)
-- tableA_dwa_velocity_search_diagnostic.md (440 bytes)
-- tableA_dwa_velocity_search_diagnostic.tex (495 bytes)
-- tableA_dwa_velocity_search_diagnostic_notes.md (551 bytes)
-- tableA_heldout_irregular_rows.csv (70 bytes)
-- tableA_heldout_irregular_rows.md (114 bytes)
-- tableA_heldout_irregular_rows.tex (180 bytes)
-- tableA_heldout_irregular_rows_notes.md (166 bytes)
+- tableA_dwa_velocity_search_diagnostic.csv (325 bytes)
+- tableA_dwa_velocity_search_diagnostic.md (461 bytes)
+- tableA_dwa_velocity_search_diagnostic.tex (516 bytes)
+- tableA_dwa_velocity_search_diagnostic_notes.md (565 bytes)
+- tableA_heldout_irregular_rows.csv (302 bytes)
+- tableA_heldout_irregular_rows.md (382 bytes)
+- tableA_heldout_irregular_rows.tex (445 bytes)
+- tableA_heldout_irregular_rows_notes.md (424 bytes)
 
 Row counts:
 
-- Table I audit rows: 15
+- Table I audit rows: 18
 - Table II rows: 4
 - Table III rows: 3
 - Table A5 rows: 18
-- Held-out irregular-row rows: 0
+- Held-out irregular-row rows: 3
 
 Source files and paths:
 
@@ -65,9 +65,9 @@ Source files and paths:
 - risk_aggregate_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260610_170313.csv` (mtime=2026-06-10 17:34:20)
 - rule_all_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_all_metrics_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
 - rule_aggregate_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
-- additive_all_csv: `` (mtime=missing)
+- additive_all_csv: `agents/eval_data_additive_fusion_main/pcr_main_table/pcr_main_table_all_metrics_20260617_183936.csv` (mtime=2026-06-17 20:14:58)
 - velocity_search_all_csv: `` (mtime=missing)
-- heldout_layout_root: `agents/eval_data_heldout_irregular_rows` (mtime=missing)
+- heldout_layout_root: `agents/eval_data_heldout_irregular_rows` (mtime=2026-06-18 20:46:37)
 - heldout_layout_all_csv: `` (mtime=missing)
 - learnedw_diag_all_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
 - learnedw_diag_aggregate_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_aggregate_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
@@ -100,9 +100,9 @@ Fig.6 regeneration:
 
 Validation checklist:
 
-- Table I: expected 15 rows = 3 speeds x 5 methods; Mono-PPO is intentionally excluded.
+- Table I: expected 18 rows = 3 speeds x 6 methods; Mono-PPO is intentionally excluded.
 - Table I: Risk-only 0.60 success should be about 0.008 +/- 0.008.
-- Fig.3(b): the selected scatter uses 5 Table I methods at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.
+- Fig.3(b): the selected scatter uses 6 Table I methods at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.
 - Table II: speed is fixed by --mechanism_speed, default 0.60.
 - Table II: Risk-only note must say trained from scratch and no learned-w channel.
 - Table II: Params should separate Risk-only and Learned-w.

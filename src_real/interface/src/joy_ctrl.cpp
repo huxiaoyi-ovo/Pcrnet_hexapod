@@ -178,10 +178,13 @@ void pub_joy_command(const ros::TimerEvent& time_event, ros::Publisher& com_pub)
     //disable torque or stop pump
     if(command_mod == VEL_MODE){
         interface::joy_command joy_setpoint;
-        double cmd_x = abs(axes[0]) <= 0.15 ? 0.0 : -axes[0];
-        double cmd_y = abs(axes[1]) <= 0.15 ? 0.0 : axes[1];
+        const double manual_x_scale = 0.420;
+        const double manual_y_scale = 0.533;
+        const double manual_yaw_scale = 0.233;
+        double cmd_x = abs(axes[0]) <= 0.15 ? 0.0 : -axes[0] * manual_x_scale;
+        double cmd_y = abs(axes[1]) <= 0.15 ? 0.0 : axes[1] * manual_y_scale;
         double cmd_z = 0.0;
-        double cmd_yaw = abs(axes[2]) <= 0.15 ? 0.0 : axes[2];
+        double cmd_yaw = abs(axes[2]) <= 0.15 ? 0.0 : axes[2] * manual_yaw_scale;
         bool vel_axes_active = cmd_x != 0.0 || cmd_y != 0.0 || cmd_yaw != 0.0;
         bool b6_pressed = buttons[6] && !last_buttons[6];
         bool b7_pressed = buttons[7] && !last_buttons[7];
