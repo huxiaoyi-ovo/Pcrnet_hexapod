@@ -2430,7 +2430,7 @@ def _plot_fig6(args) -> None:
         xs, ys = _clip_fig6_xy(trajectory_xs, trajectory_ys, xlim, ylim)
         style = METHOD_STYLE[method]
         alpha = 0.92 if method == "learnedw" else 0.90
-        linewidth = 1.35 if method == "learnedw" else max(0.9, style["linewidth"] * 0.68)
+        linewidth = 1.05 if method == "learnedw" else max(0.65, style["linewidth"] * 0.50)
         z = 5 if method == "learnedw" else 3
         ax.plot(
             ys,
@@ -2514,13 +2514,13 @@ def _plot_fig6(args) -> None:
 
     method_handles = [
         Line2D([0], [0], color=METHOD_STYLE[m]["color"],
-               linewidth=2.0 if m == "learnedw" else METHOD_STYLE[m]["linewidth"],
+               linewidth=1.05 if m == "learnedw" else max(0.65, METHOD_STYLE[m]["linewidth"] * 0.50),
                label=SHORT_METHOD_LABELS[m],
                alpha=0.92 if m == "learnedw" else 0.90)
         for m in METHOD_ORDER
     ]
     event_handles = [
-        Line2D([0], [0], color="#009e73", linestyle=(0, (5.0, 3.0)), linewidth=1.5, label="Target"),
+        Line2D([0], [0], color="#009e73", linestyle=(0, (5.0, 3.0)), linewidth=1.2, label="Target"),
         Line2D([0], [0], marker="s", color="#000000", linestyle="None", markersize=6, label="Start"),
         Line2D([0], [0], marker="*", markerfacecolor="#d62728", markeredgecolor="white",
                color="#d62728", linestyle="None", markersize=10, label="Success"),
