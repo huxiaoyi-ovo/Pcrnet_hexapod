@@ -3,15 +3,15 @@
 Generated files:
 
 - fig3_main_performance.pdf (23293 bytes)
-- fig3_main_performance.png (289444 bytes)
+- fig3_main_performance.png (288557 bytes)
 - fig3b_scatter_sized.pdf (18965 bytes)
-- fig3b_scatter_sized.png (146034 bytes)
+- fig3b_scatter_sized.png (146437 bytes)
 - fig3b_scatter_sized_data_060.csv (551 bytes)
 - fig3b_scatter_sized_notes.md (327 bytes)
 - fig4_mechanism.pdf (17010 bytes)
-- fig4_mechanism.png (164362 bytes)
-- fig6_trajectories_stage4.pdf (211269 bytes)
-- fig6_trajectories_stage4.png (217075 bytes)
+- fig4_mechanism.png (168325 bytes)
+- fig6_trajectories_stage4.pdf (25885 bytes)
+- fig6_trajectories_stage4.png (122434 bytes)
 - fig6_trajectories_stage4_sources.csv (1886 bytes)
 - fig6_trajectory_episode_candidates.csv (1238 bytes)
 - table1_main_performance_stage4.csv (1514 bytes)
@@ -59,27 +59,27 @@ Row counts:
 
 Source files and paths:
 
-- internal_all_csv: `agents/eval_data_seed23/pcr_main_table/pcr_main_table_all_metrics_with_rollout_20260529.csv` (mtime=2026-05-29 15:35:34)
-- internal_aggregate_csv: `agents/eval_data_seed23/pcr_main_table/pcr_main_table_3seed_aggregate_20260529_manual_seed1.csv` (mtime=2026-05-29 15:11:17)
-- risk_all_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_all_metrics_20260610_170313.csv` (mtime=2026-06-10 17:34:20)
-- risk_aggregate_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260610_170313.csv` (mtime=2026-06-10 17:34:20)
-- rule_all_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_all_metrics_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
-- rule_aggregate_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv` (mtime=2026-06-01 20:05:26)
-- additive_all_csv: `agents/eval_data_additive_fusion_main/pcr_main_table/pcr_main_table_all_metrics_20260617_183936.csv` (mtime=2026-06-17 20:14:58)
+- internal_all_csv: `agents/eval_data_seed23/pcr_main_table/pcr_main_table_all_metrics_with_rollout_20260529.csv` (mtime=2026-05-29 15:33:18)
+- internal_aggregate_csv: `agents/eval_data_seed23/pcr_main_table/pcr_main_table_3seed_aggregate_20260529_manual_seed1.csv` (mtime=2026-05-29 15:31:19)
+- risk_all_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_all_metrics_20260610_170313.csv` (mtime=2026-06-10 17:03:18)
+- risk_aggregate_csv: `agents/eval_data_risk_only/pcr_main_table/pcr_main_table_aggregate_20260610_170313.csv` (mtime=2026-06-10 17:03:22)
+- rule_all_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_all_metrics_20260601_190358.csv` (mtime=2026-06-01 19:04:02)
+- rule_aggregate_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv` (mtime=2026-06-01 19:04:06)
+- additive_all_csv: `agents/eval_data_additive_fusion_main/pcr_main_table/pcr_main_table_all_metrics_20260617_183936.csv` (mtime=2026-06-17 18:39:53)
 - velocity_search_all_csv: `` (mtime=missing)
-- heldout_layout_root: `agents/eval_data_heldout_irregular_rows` (mtime=2026-06-18 20:46:37)
+- heldout_layout_root: `agents/eval_data_heldout_irregular_rows` (mtime=2026-06-18 20:23:59)
 - heldout_layout_all_csv: `` (mtime=missing)
-- learnedw_diag_all_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
-- learnedw_diag_aggregate_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_aggregate_20260602_141845.csv` (mtime=2026-06-02 15:52:20)
-- learnedw_split_all_csv: `agents/eval_data_fig6_trajectories_worldxy/pcr_main_table/pcr_main_table_all_metrics_20260612_044839.csv` (mtime=2026-06-12 11:25:44)
-- mono_stage2_path: `agents/eval_data_mono_targetview_stage_probe/stage2_s035` (mtime=2026-06-04 17:54:31)
-- mono_stage3_path: `agents/eval_data_mono_targetview_stage_probe/stage3_s035` (mtime=2026-06-04 17:54:31)
-- mono_stage4_all_csv: `agents/eval_data_mono_targetview/pcr_main_table/pcr_main_table_all_metrics_20260604_160305.csv` (mtime=2026-06-04 16:26:42)
-- mono_stage_snapshot_csv: `agents/eval_data_mono_targetview_stage_probe/table3_stage_probe_snapshot_20260604.csv` (mtime=2026-06-12 23:24:52)
-- learnedw_mechanism_dir: `agents/eval_data/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260526_204857` (mtime=2026-05-27 14:55:20)
-- learnedw_ckpt: `agents/moe_teacher_best_learnedw.pt` (mtime=2026-05-27 15:34:12)
-- risk_only_ckpt: `agents/moe_teacher_best_risk_only.pt` (mtime=2026-06-11 16:51:45)
-- avoid_ckpt: `agents/avoid_best.pt` (mtime=2026-05-07 17:06:24)
+- learnedw_diag_all_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_all_metrics_20260602_141845.csv` (mtime=2026-06-02 14:18:46)
+- learnedw_diag_aggregate_csv: `agents/eval_data_learnedw_diag/pcr_main_table/pcr_main_table_aggregate_20260602_141845.csv` (mtime=2026-06-02 14:18:48)
+- learnedw_split_all_csv: `agents/eval_data_fig6_trajectories_worldxy/pcr_main_table/pcr_main_table_all_metrics_20260612_044839.csv` (mtime=2026-06-12 04:48:53)
+- mono_stage2_path: `agents/eval_data_mono_targetview_stage_probe/stage2_s035` (mtime=2026-06-04 17:27:22)
+- mono_stage3_path: `agents/eval_data_mono_targetview_stage_probe/stage3_s035` (mtime=2026-06-04 17:28:17)
+- mono_stage4_all_csv: `agents/eval_data_mono_targetview/pcr_main_table/pcr_main_table_all_metrics_20260604_160305.csv` (mtime=2026-06-04 16:03:05)
+- mono_stage_snapshot_csv: `agents/eval_data_mono_targetview_stage_probe/table3_stage_probe_snapshot_20260604.csv` (mtime=2026-06-17 15:18:52)
+- learnedw_mechanism_dir: `agents/eval_data/s_0.6/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260526_204857` (mtime=2026-05-27 14:30:15)
+- learnedw_ckpt: `agents/moe_teacher_best_learnedw.pt` (mtime=2026-05-27 15:32:26)
+- risk_only_ckpt: `agents/moe_teacher_best_risk_only.pt` (mtime=2026-06-11 16:50:03)
+- avoid_ckpt: `agents/avoid_best.pt` (mtime=2026-05-07 17:03:26)
 - fig6_timeseries_root: `None` (mtime=missing)
 
 Checkpoint SHA256:
@@ -95,8 +95,7 @@ Risk-only source mode:
 
 Fig.6 regeneration:
 
-- mode: `raster-wrapped PDF; original timeseries unavailable locally`
-- warning: `Fig.6 candidate source is empty or missing: agents/eval_data_fig6_trajectories_worldxy/s_0.6/moe_teacher_s_pcr_line_avoid_basic_yonly_seed1_20260612_014717/timeseries.csv`
+- mode: `vector redraw from timeseries`
 
 Validation checklist:
 
