@@ -2276,6 +2276,45 @@ def _plot_terminal_marker(ax, x: float, y: float, reason: str, method_color: str
     return marker_name
 
 
+def _add_fig6_direction_arrows(ax, xs: Sequence[float], ys: Sequence[float], color: str) -> None:
+    valid = [
+        (float(x), float(y))
+        for x, y in zip(xs, ys)
+        if math.isfinite(float(x)) and math.isfinite(float(y))
+    ]
+    if len(valid) < 6:
+        return
+    arrow_count = min(4, max(2, len(valid) // 45))
+    idxs = [
+        int(round((i + 1) * (len(valid) - 2) / (arrow_count + 1)))
+        for i in range(arrow_count)
+    ]
+    used = set()
+    for idx in idxs:
+        idx = max(0, min(idx, len(valid) - 2))
+        if idx in used:
+            continue
+        used.add(idx)
+        x0, y0 = valid[idx]
+        x1, y1 = valid[idx + 1]
+        if abs(x1 - x0) + abs(y1 - y0) < 1e-5:
+            continue
+        ax.annotate(
+            "",
+            xy=(x1, y1),
+            xytext=(x0, y0),
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": color,
+                "lw": 1.0,
+                "mutation_scale": 7.0,
+                "shrinkA": 0.0,
+                "shrinkB": 0.0,
+            },
+            zorder=4,
+        )
+
+
 def _plot_fig6(args) -> None:
     candidate_csv = str(getattr(args, "fig6_candidate_csv", "") or "").strip()
     datasets = {} if candidate_csv else _load_fig6_datasets(args)
@@ -2286,6 +2325,7 @@ def _plot_fig6(args) -> None:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.ticker import MultipleLocator
         from matplotlib.lines import Line2D
         from matplotlib.patches import Circle
     except Exception as exc:
@@ -2349,7 +2389,7 @@ def _plot_fig6(args) -> None:
     # Single-column horizontal layout: draw forward world-y on the horizontal axis
     # and lateral world-x on the vertical axis. The underlying trajectory data and
     # selected episodes remain unchanged.
-    fig, ax = plt.subplots(1, 1, figsize=(3.55, 1.75), constrained_layout=True)
+    fig, ax = plt.subplots(1, 1, figsize=(4.15, 1.65), constrained_layout=True)
     plot_xlim = ylim
     plot_ylim = xlim
     for obs in obstacles:
@@ -2375,8 +2415,9 @@ def _plot_fig6(args) -> None:
     raw_ty = [_safe_float(r.get("target_y", "")) for r in target_rows]
     tx, ty, _ = _truncate_fig6_at_reset(raw_tx, raw_ty)
     tx, ty = _clip_fig6_xy(tx, ty, xlim, ylim)
-    target_line, = ax.plot(ty, tx, linewidth=1.5, color="#009e73", alpha=0.95, label="Target", zorder=2)
+    target_line, = ax.plot(ty, tx, linewidth=1.2, color="#009e73", alpha=0.95, label="Target", zorder=2)
     target_line.set_dashes([5.0, 3.0])
+    _add_fig6_direction_arrows(ax, ty, tx, "#009e73")
 
     start_marked = False
     terminal_draw_info: Dict[str, Dict[str, str]] = {}
@@ -2389,7 +2430,7 @@ def _plot_fig6(args) -> None:
         xs, ys = _clip_fig6_xy(trajectory_xs, trajectory_ys, xlim, ylim)
         style = METHOD_STYLE[method]
         alpha = 0.92 if method == "learnedw" else 0.90
-        linewidth = 1.8 if method == "learnedw" else max(1.25, style["linewidth"] * 0.92)
+        linewidth = 1.35 if method == "learnedw" else max(0.9, style["linewidth"] * 0.68)
         z = 5 if method == "learnedw" else 3
         ax.plot(
             ys,
@@ -2462,10 +2503,13 @@ def _plot_fig6(args) -> None:
     ax.set_title(f"{float(speed):.2f} m/s", fontsize=9, pad=2)
     ax.set_xlabel("world y / forward [m]", fontsize=8)
     ax.set_ylabel("world x / lateral [m]", fontsize=8)
-    ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.38)
     ax.set_xlim(*plot_xlim)
     ax.set_ylim(*plot_ylim)
     ax.set_aspect("equal", adjustable="box")
+    ax.xaxis.set_major_locator(MultipleLocator(1.0))
+    ax.xaxis.set_minor_locator(MultipleLocator(0.5))
+    ax.grid(True, which="major", linestyle="--", linewidth=0.45, alpha=0.38)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.30, alpha=0.22)
     ax.tick_params(labelsize=7)
 
     method_handles = [
