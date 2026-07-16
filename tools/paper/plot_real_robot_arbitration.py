@@ -42,6 +42,11 @@ def parse_args():
     )
     parser.add_argument("--bag", default=DEFAULT_BAG)
     parser.add_argument(
+        "--data_csv",
+        default="",
+        help="Use a previously exported selected-interval CSV instead of reading a bag.",
+    )
+    parser.add_argument(
         "--bag_glob",
         default="",
         help="Scan matching bags and select the clearest lateral-response event.",
@@ -139,6 +144,35 @@ def load_debug_rows(bag_path, debug_topic):
             )
     if not rows:
         raise SystemExit("No valid JSON messages were found on the debug topic.")
+    return rows
+
+
+def load_selected_csv(csv_path):
+    rows = []
+    with open(csv_path, "r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            row = {}
+            for key, value in raw.items():
+                if key is None:
+                    continue
+                try:
+                    row[key] = float(value)
+                except (TypeError, ValueError):
+                    row[key] = value
+            if "session_relative_s" not in row and "time_s" in row:
+                row["session_relative_s"] = row["time_s"]
+            if "moving" not in row:
+                cmd_norm = np.hypot(
+                    float(row.get("cmd_safe_x", 0.0)),
+                    float(row.get("cmd_safe_y", 0.0)),
+                )
+                row["moving"] = float(
+                    cmd_norm > 1e-3 or abs(float(row.get("cmd_safe_yaw", 0.0))) > 1e-3
+                )
+            rows.append(row)
+    if not rows:
+        raise SystemExit("No rows were found in selected-interval CSV.")
     return rows
 
 
@@ -517,7 +551,7 @@ def plot_candidate_gallery(candidates, output_dir, prefix, count):
         axes[1, column].text(
             0.03,
             0.92,
-            r"$\Delta |v_x|={:+.3f}$".format(candidate["lateral_increase"]),
+            r"$\Delta |u_{\mathrm{exec},x}|=" + "{:+.3f}".format(candidate["lateral_increase"]) + r"$",
             transform=axes[1, column].transAxes,
             ha="left",
             va="top",
@@ -525,7 +559,7 @@ def plot_candidate_gallery(candidates, output_dir, prefix, count):
             color=TOKENS["ink"],
         )
     axes[0, 0].set_ylabel("Risk", fontsize=8)
-    axes[1, 0].set_ylabel(r"Lateral speed $|v_x|$ [m/s]", fontsize=8)
+    axes[1, 0].set_ylabel(r"Lateral command $|u_{\mathrm{exec},x}|$ [m/s]", fontsize=8)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.78, bottom=0.12, wspace=0.25)
     fig.text(
         0.08,
@@ -982,7 +1016,7 @@ def plot_figure(selected, output_dir, prefix):
         lateral_delta,
         color=TOKENS["blue"],
         linewidth=1.45,
-        label=r"Baseline-adjusted $\Delta |v_x|$",
+        label=r"Baseline-adjusted $\Delta |u_{\mathrm{exec},x}|$",
         zorder=3,
     )
     axes[2].axhline(
@@ -1000,14 +1034,14 @@ def plot_figure(selected, output_dir, prefix):
         color=TOKENS["orange"],
         linewidth=1.4,
         linestyle="--",
-        label=r"Forward $v_y$",
+        label=r"Forward $u_{\mathrm{exec},y}$",
         zorder=3,
     )
     forward_axis.spines["top"].set_visible(False)
     forward_axis.spines["right"].set_color(TOKENS["axis"])
     forward_axis.tick_params(colors=TOKENS["orange"], labelsize=8)
     forward_axis.set_ylabel(
-        r"Forward speed $v_y$ [m/s]", color=TOKENS["orange"], fontsize=7.2
+        r"Forward command $u_{\mathrm{exec},y}$ [m/s]", color=TOKENS["orange"], fontsize=7.2
     )
     lateral_low = min(-0.035, float(np.nanmin(lateral_delta)) - 0.01)
     lateral_high = max(0.11, float(np.nanmax(lateral_delta)) + 0.015)
@@ -1020,7 +1054,7 @@ def plot_figure(selected, output_dir, prefix):
         max(0.0, float(np.nanmin(forward_values)) - 0.06),
         float(np.nanmax(forward_values)) + 0.06,
     )
-    axes[2].set_ylabel(r"$\Delta |v_x|$ [m/s]")
+    axes[2].set_ylabel(r"$\Delta |u_{\mathrm{exec},x}|$ [m/s]")
     axes[2].set_xlabel("Time within selected real-robot interval [s]")
     axes[2].text(
         0.0,
@@ -1050,7 +1084,7 @@ def plot_figure(selected, output_dir, prefix):
         borderaxespad=0.0,
     )
     axes[2].annotate(
-        r"$\Delta |v_x|={:+.3f}$ m/s".format(lateral_increase),
+        r"$\Delta |u_{\mathrm{exec},x}|=" + "{:+.3f}".format(lateral_increase) + r"$ m/s",
         xy=(peak_time, peak_lateral - lateral_baseline),
         xytext=(
             max(time_s[0] + 0.15, peak_time - 1.45),
@@ -1290,7 +1324,7 @@ def plot_horizontal_figure(selected, output_dir, prefix):
         lateral_delta,
         color=TOKENS["blue"],
         linewidth=1.45,
-        label=r"Baseline-adjusted $\Delta |v_x|$",
+        label=r"Baseline-adjusted $\Delta |u_{\mathrm{exec},x}|$",
         zorder=3,
     )
     axes[2].axhline(
@@ -1308,14 +1342,14 @@ def plot_horizontal_figure(selected, output_dir, prefix):
         color=TOKENS["orange"],
         linewidth=1.4,
         linestyle="--",
-        label=r"Forward $v_y$",
+        label=r"Forward $u_{\mathrm{exec},y}$",
         zorder=3,
     )
     forward_axis.spines["top"].set_visible(False)
     forward_axis.spines["right"].set_color(TOKENS["axis"])
     forward_axis.tick_params(colors=TOKENS["orange"], labelsize=8)
     forward_axis.set_ylabel(
-        r"Forward speed $v_y$ [m/s]",
+        r"Forward command $u_{\mathrm{exec},y}$ [m/s]",
         color=TOKENS["orange"],
         fontsize=9,
     )
@@ -1328,7 +1362,7 @@ def plot_horizontal_figure(selected, output_dir, prefix):
         max(0.0, float(np.nanmin(forward_values)) - 0.06),
         float(np.nanmax(forward_values)) + 0.06,
     )
-    axes[2].set_ylabel(r"$\Delta |v_x|$ [m/s]")
+    axes[2].set_ylabel(r"$\Delta |u_{\mathrm{exec},x}|$ [m/s]")
     axes[2].set_title(
         "(c) Risk-induced lateral modulation",
         loc="left",
@@ -1349,7 +1383,7 @@ def plot_horizontal_figure(selected, output_dir, prefix):
         borderaxespad=0.0,
     )
     axes[2].annotate(
-        r"$\Delta |v_x|={:+.3f}$ m/s".format(lateral_increase),
+        r"$\Delta |u_{\mathrm{exec},x}|=" + "{:+.3f}".format(lateral_increase) + r"$ m/s",
         xy=(peak_time, peak_lateral - lateral_baseline),
         xytext=(
             max(time_s[0] + 0.15, peak_time - 1.5),
@@ -1532,7 +1566,7 @@ def write_notes(
         "",
         "- Panel (a) omits the constant-zero `risk_A` curve. In all valid samples of the selected interval, `clearance_A = 3.0 m`, `risk_A_raw = 0`, and `risk_A = 0` because the pure-lateral Avoid cone contains no observed blocked cell.",
         "- The analytic correction in this interval is therefore `Delta y_r = -0.15 risk_F`; this is a recorded property of the deployable local-map risk estimate, not a manually imposed plotting assumption.",
-        "- Panel (c) reports `Delta |v_x|(t) = |v_x(t)| - median_pre(|v_x|)`; the pre-conflict window is 2.5--0.35 s before the first high-risk event.",
+        "- Panel (c) reports `Delta |u_exec,x|(t) = |u_exec,x(t)| - median_pre(|u_exec,x|)`; the pre-conflict window is 2.5--0.35 s before the first high-risk event.",
         "- The recorded pre-conflict lateral baseline is `{:.4f} m/s`; the plotted transformation changes only the display origin, while the CSV retains the original signed `cmd_safe_x`.".format(
             lateral_baseline
         ),
@@ -1596,7 +1630,21 @@ def main():
     audit_path = None
     summary_path = None
     gallery_paths = (None, None)
-    if args.bag_glob:
+    if args.data_csv:
+        data_csv = Path(args.data_csv).expanduser().resolve()
+        if not data_csv.is_file():
+            raise SystemExit("Selected-interval CSV not found: {}".format(data_csv))
+        selected = load_selected_csv(data_csv)
+        if "stamp_s" in selected[0] and "session_relative_s" in selected[0]:
+            args.session_start_stamp_s = (
+                selected[0]["stamp_s"] - selected[0]["session_relative_s"]
+            )
+        else:
+            args.session_start_stamp_s = selected[0].get("stamp_s", 0.0)
+        metrics = score_candidate(selected)
+        candidates = []
+        bag_path = data_csv
+    elif args.bag_glob:
         (
             selected,
             metrics,
