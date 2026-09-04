@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="260" viewBox="0 0 920 260">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#111827"/><stop offset="1" stop-color="#312E81"/></linearGradient>
+    <linearGradient id="orb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22D3EE" stop-opacity=".9"/><stop offset="1" stop-color="#A78BFA" stop-opacity=".25"/></linearGradient>
+  </defs>
+  <rect width="920" height="260" rx="28" fill="url(#bg)"/>
+  <circle cx="820" cy="38" r="100" fill="url(#orb)" opacity=".6"/>
+  <circle cx="90" cy="250" r="130" fill="#EC4899" opacity=".12"/>
+  <g font-family="Inter, Segoe UI, sans-serif">
+    <rect x="34" y="34" width="404" height="192" rx="22" fill="#FFFFFF" fill-opacity=".08" stroke="#FFFFFF" stroke-opacity=".16"/>
+    <text x="62" y="78" fill="#E5E7EB" font-size="15">PROJECT</text><text x="62" y="122" fill="#FFFFFF" font-size="38" font-weight="700">PCR-Net</text>
+    <text x="62" y="157" fill="#C7D2FE" font-size="17">Hexapod locomotion research</text>
+    <text x="62" y="190" fill="#94A3B8" font-size="14">RL · Isaac Gym · Sim-to-Real</text>
+    <rect x="462" y="34" width="196" height="88" rx="20" fill="#FFFFFF" fill-opacity=".08" stroke="#FFFFFF" stroke-opacity=".16"/>
+    <text x="488" y="68" fill="#94A3B8" font-size="13">PARALLEL ENVS</text><text x="488" y="102" fill="#FFFFFF" font-size="30" font-weight="700">4096</text>
+    <rect x="682" y="34" width="204" height="88" rx="20" fill="#FFFFFF" fill-opacity=".08" stroke="#FFFFFF" stroke-opacity=".16"/>
+    <text x="708" y="68" fill="#94A3B8" font-size="13">POLICY</text><text x="708" y="102" fill="#FFFFFF" font-size="25" font-weight="700">PPO / EGPO</text>
+    <rect x="462" y="138" width="424" height="88" rx="20" fill="#FFFFFF" fill-opacity=".08" stroke="#FFFFFF" stroke-opacity=".16"/>
+    <text x="488" y="171" fill="#94A3B8" font-size="13">PIPELINE</text><text x="488" y="207" fill="#FFFFFF" font-size="22" font-weight="600">SIMULATION → POLICY → REAL ROBOT</text>
+  </g>
+</svg>
