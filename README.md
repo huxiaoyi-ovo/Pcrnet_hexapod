@@ -476,6 +476,10 @@ init_noise_std = 1.0
 - 添加必要的注释和文档
 - 确保代码通过测试
 
+### Repository Activity
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/9008012405e8fca8ff8779b39fd084c918986d59.svg)
+
 ### Contributors
 
 <a href="https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/graphs/contributors">
