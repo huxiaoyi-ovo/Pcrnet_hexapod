@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="230" viewBox="0 0 920 230">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#050816"/><stop offset="1" stop-color="#17112B"/></linearGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#27E1FF"/><stop offset="0.52" stop-color="#8B5CF6"/><stop offset="1" stop-color="#FF4FD8"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="920" height="230" rx="24" fill="url(#bg)"/>
+  <g stroke="#7C3AED" opacity="0.14"><path d="M0 190H920M0 160H920M0 130H920M0 100H920M0 70H920"/><path d="M80 50L150 230M170 50L220 230M260 50L290 230M350 50L360 230M440 50L430 230M530 50L500 230M620 50L570 230M710 50L640 230M800 50L710 230"/></g>
+  <rect x="38" y="34" width="844" height="154" rx="18" fill="none" stroke="url(#neon)" stroke-width="2" filter="url(#glow)"/>
+  <text x="70" y="92" font-family="ui-monospace, monospace" font-size="17" fill="#7DEBFF">PCR_NET::LIVE</text>
+  <text x="70" y="139" font-family="ui-monospace, monospace" font-size="42" font-weight="700" fill="url(#neon)" filter="url(#glow)">HEXAPOD // RL</text>
+  <text x="70" y="168" font-family="ui-monospace, monospace" font-size="14" fill="#A9B6D8">4096 ENVS  ·  PPO / EGPO  ·  ISAAC GYM  ·  SIM→REAL</text>
+  <circle cx="820" cy="84" r="9" fill="#27E1FF" filter="url(#glow)"/><circle cx="846" cy="84" r="9" fill="#FF4FD8" filter="url(#glow)"/>
+</svg>
