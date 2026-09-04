@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="250" viewBox="0 0 920 250">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A1020"/>
+      <stop offset="1" stop-color="#15172B"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5EE7F7"/>
+      <stop offset="1" stop-color="#A779FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="920" height="250" rx="24" fill="url(#g)"/>
+  <g stroke="#5EE7F7" stroke-width="1" opacity="0.12">
+    <path d="M0 40H920 M0 80H920 M0 120H920 M0 160H920 M0 200H920"/>
+    <path d="M80 0V250 M160 0V250 M240 0V250 M320 0V250 M400 0V250 M480 0V250 M560 0V250 M640 0V250 M720 0V250 M800 0V250"/>
+  </g>
+  <rect x="42" y="36" width="836" height="178" rx="18" fill="none" stroke="url(#line)" stroke-width="2" opacity="0.7"/>
+  <g fill="#5EE7F7">
+    <circle cx="94" cy="83" r="5"/><circle cx="154" cy="132" r="5"/><circle cx="222" cy="92" r="5"/><circle cx="292" cy="153" r="5"/><circle cx="365" cy="106" r="5"/>
+  </g>
+  <g stroke="url(#line)" stroke-width="2" opacity="0.72">
+    <path d="M94 83L154 132L222 92L292 153L365 106"/>
+  </g>
+  <g font-family="'SFMono-Regular', Consolas, monospace">
+    <text x="430" y="91" fill="#DDFBFF" font-size="18">PCR-NET // SYSTEM ONLINE</text>
+    <text x="430" y="126" fill="#9EA7C2" font-size="14">policy: PPO / EGPO</text>
+    <text x="430" y="151" fill="#9EA7C2" font-size="14">parallel envs: 4096</text>
+    <text x="430" y="176" fill="#9EA7C2" font-size="14">mode: SIM → REAL</text>
+  </g>
+  <rect x="430" y="192" width="210" height="5" rx="2" fill="#20263C"/>
+  <rect x="430" y="192" width="164" height="5" rx="2" fill="url(#line)"/>
+</svg>
