@@ -19,65 +19,119 @@
 
 ---
 
-## 🧪 README Widget Lab
+## 🧪 README Widget Lab · Component Museum
 
-> 这是视觉实验区。为了避免第三方渲染服务失效，前 6 个组件全部由本仓库自托管；后面的动态 badge 继续使用 Shields.io。
+> 这个区域故意作为 README 小组件实验场。前三个主要比较视觉语言；后面的组件分别展示结构、方法、训练、部署、实验指标、产物、历史、仓库状态和实时社区数据。自托管 SVG 不依赖第三方渲染服务；动态数据只保留 Shields.io、RepoBeats 和 contrib.rocks。
 
-### 01 · Claude-ish / 暖色手绘
+### A · Visual Style Sampler
+
+#### 01 · Claude-ish / 暖色手绘
 
 <p align="center">
   <img src="./assets/widget-lab/claude-doodle.svg" width="100%" alt="Claude-ish warm doodle widget" />
 </p>
 
-### 02 · Doodle Notes / 手写实验笔记
-
-<p align="center">
-  <img src="./assets/widget-lab/doodle-notes.svg" width="100%" alt="Doodle notes widget" />
-</p>
-
-### 03 · Premium Warm / Editorial 高级感
-
-<p align="center">
-  <img src="./assets/widget-lab/premium-warm.svg" width="100%" alt="Premium warm editorial widget" />
-</p>
-
-### 04 · Cyber HUD / 机器人控制台
+#### 02 · Cyber HUD / 机器人控制台
 
 <p align="center">
   <img src="./assets/widget-lab/cyber-panel.svg" width="100%" alt="Cyber research panel" />
 </p>
 
-### 05 · Neon Grid / 赛博霓虹
-
-<p align="center">
-  <img src="./assets/widget-lab/neon-grid.svg" width="100%" alt="Neon grid widget" />
-</p>
-
-### 06 · Glass Bento / 玻璃拟态数据卡
+#### 03 · Glass Bento / 玻璃拟态
 
 <p align="center">
   <img src="./assets/widget-lab/glass-bento.svg" width="100%" alt="Glass bento widget" />
 </p>
 
-### 07 · Dynamic Industrial Badges / 实时工业铭牌
+### B · Functional Widgets
+
+#### 04 · Repository Structure / 代码结构
+
+展示仓库真实顶层模块，而不是普通语言统计。
+
+<p align="center">
+  <img src="./assets/widget-lab/repo-structure.svg" width="100%" alt="Repository structure map" />
+</p>
+
+#### 05 · PCR-Net Architecture / 方法结构
+
+展示 Follow / Avoid 专家与风险条件化门控之间的功能关系。
+
+<p align="center">
+  <img src="./assets/widget-lab/pcr-architecture.svg" width="100%" alt="PCR-Net architecture" />
+</p>
+
+#### 06 · RL Training Loop / 强化学习闭环
+
+<p align="center">
+  <img src="./assets/widget-lab/training-loop.svg" width="100%" alt="RL training loop" />
+</p>
+
+#### 07 · Sim-to-Real Pipeline / 部署链路
+
+<p align="center">
+  <img src="./assets/widget-lab/sim2real-flow.svg" width="100%" alt="Sim-to-real pipeline" />
+</p>
+
+#### 08 · Experiment KPI Board / 实验参数卡
+
+直接展示当前项目文档中的关键量：4096 并行环境、50 Hz、67D Actor 观测、230D Critic 观测和 18D 动作。
+
+<p align="center">
+  <img src="./assets/widget-lab/experiment-kpis.svg" width="100%" alt="Experiment KPI board" />
+</p>
+
+#### 09 · Artifact Map / 实验产物地图
+
+展示代码、策略模型、评测数据、机器人资源和论文证据在仓库里的角色。
+
+<p align="center">
+  <img src="./assets/widget-lab/artifact-map.svg" width="100%" alt="Experiment artifact map" />
+</p>
+
+#### 10 · Research Commit Timeline / 研究提交时间线
+
+从真实 Git 历史抽取 PCR 实机仲裁证据、Fig.6/7、Learned-w 相关提交。
+
+<p align="center">
+  <img src="./assets/widget-lab/commit-timeline.svg" width="100%" alt="Research commit timeline" />
+</p>
+
+#### 11 · Repository Snapshot / 仓库元数据
+
+<p align="center">
+  <img src="./assets/widget-lab/repo-metadata.svg" width="100%" alt="Repository metadata snapshot" />
+</p>
+
+#### 12 · Live Development Pulse / 实时开发脉冲
 
 <p align="center">
   <img src="https://img.shields.io/github/repo-size/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=REPO%20SIZE" alt="Repo size" />
-  <img src="https://img.shields.io/github/languages/count/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=LANGUAGES" alt="Languages" />
   <img src="https://img.shields.io/github/commit-activity/m/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=COMMITS%20%2F%20MONTH" alt="Commit activity" />
-  <img src="https://img.shields.io/github/contributors/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=CONTRIBUTORS" alt="Contributors count" />
+  <img src="https://img.shields.io/github/issues/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=OPEN%20ISSUES" alt="Open issues" />
+  <img src="https://img.shields.io/github/issues-pr/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=OPEN%20PRS" alt="Open PRs" />
 </p>
 
-### 08 · Minimal Data Strip / 极简数据条
+#### 13 · Repository Activity / RepoBeats
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/9008012405e8fca8ff8779b39fd084c918986d59.svg)
+
+#### 14 · Contributor Wall / 贡献者头像墙
+
+<a href="https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=huxiaoyi-ovo/Pcrnet_hexapod" alt="Contributors" />
+</a>
+
+#### 15 · Minimal Data Strip / 极简实时状态
 
 <p align="center">
   <img src="https://img.shields.io/github/stars/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=stars" alt="Stars" />
   <img src="https://img.shields.io/github/forks/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=forks" alt="Forks" />
-  <img src="https://img.shields.io/github/issues/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=issues" alt="Issues" />
+  <img src="https://img.shields.io/github/languages/count/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=languages" alt="Languages" />
   <img src="https://img.shields.io/github/last-commit/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=last%20commit" alt="Last commit" />
 </p>
 
-> 独立实验页仍保留在 [`WIDGET_LAB.md`](./WIDGET_LAB.md)。
+> 更多纯视觉换皮实验仍保留在 [`WIDGET_LAB.md`](./WIDGET_LAB.md)，主 README 这里优先展示功能差异。
 
 ---
 
@@ -273,10 +327,10 @@ python legged_gym/scripts/play.py \
 ┌─────────────────────────────────────────────────────────────┐
 │                     Isaac Gym 仿真环境                       │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │         4096 个并行六足机器人环境                      │    │
-│  │  • 物理仿真 (GPU)                                      │    │
-│  │  • 地形生成 (平地/斜坡/楼梯/崎岖)                       │    │
-│  │  • 奖励计算 (速度跟踪/稳定性/能效)                      │    │
+│  │         4096 个并行六足机器人环境                      │
+│  │  • 物理仿真 (GPU)                                      │
+│  │  • 地形生成 (平地/斜坡/楼梯/崎岖)                       │
+│  │  • 奖励计算 (速度跟踪/稳定性/能效)                      │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
                             ↓↑
@@ -537,16 +591,6 @@ init_noise_std = 1.0
 - 遵循 PEP 8 Python 代码风格
 - 添加必要的注释和文档
 - 确保代码通过测试
-
-### Repository Activity
-
-![Repobeats analytics image](https://repobeats.axiom.co/api/embed/9008012405e8fca8ff8779b39fd084c918986d59.svg)
-
-### Contributors
-
-<a href="https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=huxiaoyi-ovo/Pcrnet_hexapod" alt="Contributors" />
-</a>
 
 ---
 
