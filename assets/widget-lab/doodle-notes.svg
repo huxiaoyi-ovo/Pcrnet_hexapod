@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="250" viewBox="0 0 920 250">
+  <rect width="920" height="250" rx="26" fill="#FFFDF8"/>
+  <g stroke="#E8DED0" stroke-width="1"><path d="M0 52H920M0 92H920M0 132H920M0 172H920M0 212H920"/></g>
+  <path d="M70 58c74-22 142 12 220-4s144 10 212-2" fill="none" stroke="#D97757" stroke-width="5" stroke-linecap="round" opacity=".85"/>
+  <text x="70" y="110" font-family="Comic Sans MS, cursive" font-size="42" font-weight="700" fill="#2C2925">PCR-Net lab notes ✎</text>
+  <text x="74" y="150" font-family="Comic Sans MS, cursive" font-size="22" fill="#5B554F">walk → fall → learn → recover → repeat</text>
+  <path d="M610 75q28-30 56 0t56 0t56 0" fill="none" stroke="#E59A7F" stroke-width="4" stroke-linecap="round"/>
+  <g transform="translate(700 138)" stroke="#2C2925" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="0,-26 24,-13 24,13 0,26 -24,13 -24,-13" fill="#F4DACF"/>
+    <path d="M-22-8l-30-18M-24 2l-34 0M-18 14l-26 24M22-8l30-18M24 2l34 0M18 14l26 24"/>
+    <circle cx="-7" cy="-2" r="2.5" fill="#2C2925"/><circle cx="7" cy="-2" r="2.5" fill="#2C2925"/>
+  </g>
+  <text x="70" y="202" font-family="Comic Sans MS, cursive" font-size="16" fill="#8C8178">tiny experiments, big robot energy ✦</text>
+</svg>
