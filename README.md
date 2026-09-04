@@ -19,6 +19,68 @@
 
 ---
 
+## 🧪 README Widget Lab
+
+> 这是视觉实验区。为了避免第三方渲染服务失效，前 6 个组件全部由本仓库自托管；后面的动态 badge 继续使用 Shields.io。
+
+### 01 · Claude-ish / 暖色手绘
+
+<p align="center">
+  <img src="./assets/widget-lab/claude-doodle.svg" width="100%" alt="Claude-ish warm doodle widget" />
+</p>
+
+### 02 · Doodle Notes / 手写实验笔记
+
+<p align="center">
+  <img src="./assets/widget-lab/doodle-notes.svg" width="100%" alt="Doodle notes widget" />
+</p>
+
+### 03 · Premium Warm / Editorial 高级感
+
+<p align="center">
+  <img src="./assets/widget-lab/premium-warm.svg" width="100%" alt="Premium warm editorial widget" />
+</p>
+
+### 04 · Cyber HUD / 机器人控制台
+
+<p align="center">
+  <img src="./assets/widget-lab/cyber-panel.svg" width="100%" alt="Cyber research panel" />
+</p>
+
+### 05 · Neon Grid / 赛博霓虹
+
+<p align="center">
+  <img src="./assets/widget-lab/neon-grid.svg" width="100%" alt="Neon grid widget" />
+</p>
+
+### 06 · Glass Bento / 玻璃拟态数据卡
+
+<p align="center">
+  <img src="./assets/widget-lab/glass-bento.svg" width="100%" alt="Glass bento widget" />
+</p>
+
+### 07 · Dynamic Industrial Badges / 实时工业铭牌
+
+<p align="center">
+  <img src="https://img.shields.io/github/repo-size/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=REPO%20SIZE" alt="Repo size" />
+  <img src="https://img.shields.io/github/languages/count/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=LANGUAGES" alt="Languages" />
+  <img src="https://img.shields.io/github/commit-activity/m/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=COMMITS%20%2F%20MONTH" alt="Commit activity" />
+  <img src="https://img.shields.io/github/contributors/huxiaoyi-ovo/Pcrnet_hexapod?style=for-the-badge&label=CONTRIBUTORS" alt="Contributors count" />
+</p>
+
+### 08 · Minimal Data Strip / 极简数据条
+
+<p align="center">
+  <img src="https://img.shields.io/github/stars/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=stars" alt="Stars" />
+  <img src="https://img.shields.io/github/forks/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=forks" alt="Forks" />
+  <img src="https://img.shields.io/github/issues/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=issues" alt="Issues" />
+  <img src="https://img.shields.io/github/last-commit/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&label=last%20commit" alt="Last commit" />
+</p>
+
+> 独立实验页仍保留在 [`WIDGET_LAB.md`](./WIDGET_LAB.md)。
+
+---
+
 ## 📋 项目简介
 
 这是一个基于 **NVIDIA Isaac Gym** 和 **PPO/EGPO** 算法的六足机器人强化学习项目，实现了高效的地形自适应运动控制。通过大规模并行仿真和专家引导学习，该项目能够训练出在复杂地形（平地、斜坡、楼梯、崎岖地形）上稳定行走的控制策略。
