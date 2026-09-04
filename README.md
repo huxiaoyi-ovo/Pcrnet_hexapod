@@ -3,9 +3,13 @@
 <div align="center">
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Isaac Gym](https://img.shields.io/badge/Isaac%20Gym-Preview%204-green. svg)](https://developer.nvidia.com/isaac-gym)
+[![Isaac Gym](https://img.shields.io/badge/Isaac%20Gym-Preview%204-green.svg)](https://developer.nvidia.com/isaac-gym)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.10+-ee4c2c.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/License-BSD--3--Clause-yellow.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&logo=github)](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/stargazers)
+[![Forks](https://img.shields.io/github/forks/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square&logo=github)](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/forks)
+[![Issues](https://img.shields.io/github/issues/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square)](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/issues)
+![Last commit](https://img.shields.io/github/last-commit/huxiaoyi-ovo/Pcrnet_hexapod?style=flat-square)
 
 **基于强化学习的六足机器人地形自适应控制系统**
 
@@ -88,7 +92,7 @@
 
 # 解压并安装
 cd isaacgym/python
-pip install -e . 
+pip install -e .
 
 # 测试安装
 python examples/1080_balls_of_solitude.py
@@ -136,7 +140,7 @@ python quick_check_camera.py
 #### 训练平地环境
 
 ```bash
-python legged_gym/scripts/train. py --task=hex_ground
+python legged_gym/scripts/train.py --task=hex_ground
 ```
 
 #### 训练地形环境
@@ -217,13 +221,13 @@ python legged_gym/scripts/play.py \
 ┌─────────────────────────────────────────────────────────────┐
 │                  强化学习算法 (PPO/EGPO)                     │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │   Actor      │  │   Critic     │  │   Expert     │      │
-│  │   (策略网络)  │  │   (价值网络)  │  │ (运动学控制器) │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-│                                                              │
-│  • 观测编码 (Estimator/LSTM/CNN)                            │
-│  • 策略优化 (PPO clip/GAE)                                  │
-│  • 专家引导 (动作插值/BC loss)                               │
+│  │   Actor      │  │   Critic     │  │   Expert     │
+│  │   (策略网络)  │  │   (价值网络)  │  │ (运动学控制器) │
+│  └──────────────┘  └──────────────┘  └──────────────┘
+│
+│  • 观测编码 (Estimator/LSTM/CNN)
+│  • 策略优化 (PPO clip/GAE)
+│  • 专家引导 (动作插值/BC loss)
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -358,10 +362,10 @@ total_reward = Σ (weight_i × reward_i)
 所有环境配置位于 `legged_gym/envs/hex_v4/`：
 - `hex_ground_config.py` - 平地环境配置
 - `hex_terrain_config.py` - 地形环境配置
-- `expert. py` - 专家控制器实现
+- `expert.py` - 专家控制器实现
 
 ### 训练脚本
-- `legged_gym/scripts/train. py` - 主训练脚本
+- `legged_gym/scripts/train.py` - 主训练脚本
 - `legged_gym/scripts/play.py` - 策略测试脚本
 - `legged_gym/scripts/control_test.py` - 控制器测试
 
@@ -378,7 +382,7 @@ RL_hexapod_gym/
 │   │   │   └── legged_robot_config.py
 │   │   └── hex_v4/                # 六足机器人环境
 │   │       ├── hex_ground.py      # 平地环境
-│   │       ├── hex_terrain. py     # 地形环境
+│   │       ├── hex_terrain.py     # 地形环境
 │   │       ├── expert.py          # 专家控制器
 │   │       └── *_config.py        # 配置文件
 │   ├── scripts/                   # 训练/测试脚本
@@ -386,14 +390,14 @@ RL_hexapod_gym/
 │   │   ├── play.py                # 测试脚本
 │   │   └── control_test.py        # 控制测试
 │   └── utils/                     # 工具函数
-│       ├── terrain. py             # 地形生成
-│       ├── kinematic. py           # 运动学计算
+│       ├── terrain.py             # 地形生成
+│       ├── kinematic.py           # 运动学计算
 │       ├── task_registry.py       # 任务注册
 │       └── helpers.py             # 辅助函数
 │
 ├── rsl_rl/                        # 强化学习库
 │   ├── algorithms/                # RL 算法
-│   │   ├── ppo. py                 # PPO 算法
+│   │   ├── ppo.py                 # PPO 算法
 │   │   └── EGPO.py                # EGPO 算法
 │   ├── modules/                   # 神经网络
 │   │   ├── actor_critic.py
@@ -402,7 +406,7 @@ RL_hexapod_gym/
 │   ├── runners/                   # 训练循环
 │   │   ├── on_policy_runner.py
 │   │   ├── expert_guided_runner.py
-│   │   └── expert_preload_runner. py
+│   │   └── expert_preload_runner.py
 │   └── storage/                   # 数据管理
 │       └── rollout_storage.py
 │
@@ -471,6 +475,12 @@ init_noise_std = 1.0
 - 遵循 PEP 8 Python 代码风格
 - 添加必要的注释和文档
 - 确保代码通过测试
+
+### Contributors
+
+<a href="https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=huxiaoyi-ovo/Pcrnet_hexapod" alt="Contributors" />
+</a>
 
 ---
 
