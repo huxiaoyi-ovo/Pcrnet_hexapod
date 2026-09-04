@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="220" viewBox="0 0 920 220">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FBF7F2"/><stop offset="1" stop-color="#EACFC0"/></linearGradient>
+  </defs>
+  <rect width="920" height="220" rx="28" fill="url(#bg)"/>
+  <rect x="26" y="26" width="868" height="168" rx="22" fill="#FFFDFC" stroke="#C9846A" stroke-width="1.5"/>
+  <circle cx="92" cy="78" r="26" fill="#D97757"/><path d="M78 82l14-22 14 22-14 18z" fill="#FFF7F0"/>
+  <text x="142" y="84" font-family="Georgia, serif" font-size="42" fill="#2F251F" font-weight="700">PCR-Net</text>
+  <text x="144" y="118" font-family="Georgia, serif" font-size="18" fill="#7B6558">Legged robotics · reinforcement learning · sim-to-real</text>
+  <line x1="144" y1="142" x2="770" y2="142" stroke="#D8B4A2"/>
+  <text x="144" y="170" font-family="ui-monospace, monospace" font-size="14" fill="#8A6F61">research system / experimental interface / warm editorial theme</text>
+  <text x="812" y="82" text-anchor="middle" font-family="Georgia, serif" font-size="14" fill="#9B7968">2026</text>
+  <text x="812" y="106" text-anchor="middle" font-family="Georgia, serif" font-size="28" fill="#D97757">△</text>
+</svg>
