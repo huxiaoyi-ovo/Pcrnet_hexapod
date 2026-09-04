@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="360" viewBox="0 0 920 360">
+<rect width="920" height="360" rx="24" fill="#0d1117"/>
+<text x="36" y="48" fill="#f0f6fc" font-family="Inter,Segoe UI,sans-serif" font-size="24" font-weight="700">Repository Structure</text>
+<text x="36" y="72" fill="#8b949e" font-family="Inter,Segoe UI,sans-serif" font-size="13">actual top-level modules · snapshot</text>
+<g font-family="Inter,Segoe UI,sans-serif">
+<rect x="36" y="100" width="300" height="220" rx="16" fill="#161b22" stroke="#30363d"/>
+<text x="56" y="130" fill="#58a6ff" font-size="18" font-weight="700">legged_gym/</text><text x="56" y="154" fill="#8b949e" font-size="13">environments · scripts · terrain</text>
+<rect x="56" y="176" width="118" height="54" rx="10" fill="#21262d"/><text x="70" y="207" fill="#c9d1d9" font-size="13">envs/</text>
+<rect x="184" y="176" width="118" height="54" rx="10" fill="#21262d"/><text x="198" y="207" fill="#c9d1d9" font-size="13">scripts/</text>
+<rect x="56" y="240" width="246" height="54" rx="10" fill="#21262d"/><text x="70" y="271" fill="#c9d1d9" font-size="13">utils/ · terrain · kinematics</text>
+<rect x="356" y="100" width="244" height="104" rx="16" fill="#161b22" stroke="#30363d"/><text x="376" y="132" fill="#a371f7" font-size="18" font-weight="700">rsl_rl/</text><text x="376" y="158" fill="#8b949e" font-size="13">PPO · EGPO · runners · modules</text><text x="376" y="180" fill="#c9d1d9" font-size="12">policy learning stack</text>
+<rect x="620" y="100" width="264" height="104" rx="16" fill="#161b22" stroke="#30363d"/><text x="640" y="132" fill="#3fb950" font-size="18" font-weight="700">agents/</text><text x="640" y="158" fill="#8b949e" font-size="13">checkpoints · eval_data · metrics</text><text x="640" y="180" fill="#c9d1d9" font-size="12">experiment evidence</text>
+<rect x="356" y="224" width="244" height="96" rx="16" fill="#161b22" stroke="#30363d"/><text x="376" y="254" fill="#f2cc60" font-size="17" font-weight="700">resources/</text><text x="376" y="280" fill="#8b949e" font-size="13">URDF · robot assets</text>
+<rect x="620" y="224" width="264" height="96" rx="16" fill="#161b22" stroke="#30363d"/><text x="640" y="254" fill="#ff7b72" font-size="17" font-weight="700">docs + paper artifacts</text><text x="640" y="280" fill="#8b949e" font-size="13">TODO · context · figures · tables</text>
+</g></svg>
