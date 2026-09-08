@@ -6,7 +6,7 @@
 
 ## 2026-09-08 当前确定性修正状态（非实验结果）
 
-- 已修正 Follow body→world 逆变换与 scene raster 完全越界 bbox 的边界压缩；CPU 源码回归通过，旧源码分别在 Follow 往返与 front-outside raster fixture 失败。Isaac 闭环、GitHub 同步、重训、重评测和实机验证均未执行。
+- 已修正 Follow body→world 逆变换与 scene raster 完全越界 bbox 的边界压缩；本地 CPU 源码回归通过，旧源码分别在 Follow 往返与 front-outside raster fixture 失败。代码提交 `781e830` 已推送 GitHub；服务器 HTTPS TLS 与 GitHub SSH 拉取未成功，未创建 geometry worktree，因此 Isaac 闭环、服务器原生 CPU、重训、重评测和实机验证均未执行。
 - 服务器旧 Avoid 运行及其产物保留，但不作为正式返修 checkpoint；本批未修改或冻结 sim-real policy contract。
 
 ## 2026-09-08 最新执行状态（Avoid 首轮已过；非结果）
