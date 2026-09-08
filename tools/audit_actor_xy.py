@@ -214,6 +214,7 @@ def _checkpoint_args(eval_args: Sequence[str]) -> Dict[str, Dict[str, str]]:
         ("--ckpt", "gate_ckpt"),
         ("--pcr_ckpt", "gate_ckpt"),
         ("--avoid_ckpt", "avoid_ckpt"),
+        ("--lowlevel_ckpt", "lowlevel_ckpt"),
         ("--low_level_ckpt", "lowlevel_ckpt"),
     ):
         for idx, token in enumerate(eval_args[:-1]):
