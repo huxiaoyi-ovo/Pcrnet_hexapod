@@ -12,7 +12,7 @@
 
 ## 2026-09-08 当前修正状态（优先于下方历史运行记录）
 
-- [x] ~~[P0] 已仅修正 PCR/real Follow 的 body→world 逆变换，以及 scene affordance 完全越界 bbox 的边界压缩；保持原有在界内格点量化、cone、FOV、奖励、网络、课程与 sim-real contract 不变。代码提交 `781e830` 已推送 GitHub；本地 CPU 语法与两项源码回归通过，修改前 `/tmp/pcrnet_train_highlevel_before_geometry_fix.py` 分别在 Follow 往返和 front-outside raster fixture 失败。服务器 TLS/SSH 拉取未成功，未创建 geometry worktree，故原生 CPU、Isaac、正式重训/评测均未执行。~~
+- [x] ~~[P0] 已仅修正 PCR/real Follow 的 body→world 逆变换，以及 scene affordance 完全越界 bbox 的边界压缩；保持原有在界内格点量化、cone、FOV、奖励、网络、课程与 sim-real contract 不变。代码提交 `781e830` 与记录提交 `eefa8cf` 已推送 GitHub；本地 CPU 语法与两项源码回归通过，修改前 `/tmp/pcrnet_train_highlevel_before_geometry_fix.py` 分别在 Follow 往返和 front-outside raster fixture 失败。通过一次性 SSH 反向代理拉取后，服务器 detached root `/home/dell/RL_hexapod_gym_revision_geometry_20260908` 已在 `eefa8cf` 且八个文件 hash 与本地一致；未作永久代理改动，未运行服务器 CPU、Isaac、训练或评测。~~
 - 服务器旧 Avoid `505b937` 保留运行记录与产物，但本轮不将其认定为正式返修 checkpoint，也不停止或覆盖。
 
 ## 2026-09-08 最新执行状态（Avoid 首轮已过；运行中）
