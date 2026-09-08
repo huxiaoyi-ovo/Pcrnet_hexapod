@@ -2853,13 +2853,13 @@ class HexGround(LeggedRobot):
             speed = float(rng.uniform(0.25, 0.40))
         elif level == 1:
             stage = 1
-            speed = float(rng.uniform(0.35, 0.55))
+            speed = float(rng.uniform(0.35, 0.50))
         elif level == 2:
             stage = 2
-            speed = float(rng.uniform(0.30, 0.55))
+            speed = float(rng.uniform(0.30, 0.50))
         else:
             stage = int(rng.choice([3, 4]))
-            speed = float(rng.uniform(0.35, 0.65))
+            speed = float(rng.uniform(0.35, 0.50))
         if bool(getattr(self.nav_cfg, "pcr_new_generalize_enable", False)):
             stage = 4
             level = 3

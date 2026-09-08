@@ -2812,7 +2812,8 @@ class HierarchicalHexapodEnv:
             map_size,
             device=self.device,
         )
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        # Keep the output [x_right, y_forward] so it merges cell-for-cell with scene maps.
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
         x_body = grid_x.reshape(-1).unsqueeze(0)
         y_body = grid_y.reshape(-1).unsqueeze(0)
 
@@ -3075,7 +3076,8 @@ class HierarchicalHexapodEnv:
             map_size,
             device=self.device,
         )
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="xy")
+        # Keep axis order consistent with scene rasterization: [x_right, y_forward].
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
         return torch.sqrt(grid_x ** 2 + grid_y ** 2)
 
     def _build_affordance_geometry(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -3971,7 +3973,8 @@ class HierarchicalHexapodEnv:
         
         Returns:
             Dict with keys:
-            - state: (N, 9+1) robot state + prev_gate_y
+            - state: (N, 13) robot state + prev_gate_y + last command;
+              Avoid on s_avoid_enabled appends forced-forward speed as column 14
             - goal: (N, 2) relative goal
             - gt_affordance: (N, 3, 16, 16) ground truth affordance
             - local_map_2ch: (N, 2, 16, 16) avoid local map
@@ -4017,6 +4020,11 @@ class HierarchicalHexapodEnv:
         # 1.6 添加上一时刻实际执行命令（解决后处理变化率记忆的非马尔可夫性）
         if hasattr(self, "post_processor") and getattr(self.post_processor, "last_cmd", None) is not None:
             obs_dict['state'] = torch.cat([obs_dict['state'], self.post_processor.last_cmd.detach().clone()], dim=1)
+        # Keep the historical Avoid-only state contract without changing Gate/Mono/Follow inputs.
+        if getattr(self.args, "skill", None) == "avoid" and bool(getattr(self.env, "s_avoid_enabled", False)):
+            obs_dict['state'] = torch.cat(
+                [obs_dict['state'], self.forced_forward_speed.detach().clone().unsqueeze(1)], dim=1
+            )
         # 2. Goal (相对坐标)
         if hasattr(self.env, 'goal_buf'):
             obs_dict['goal'] = self.env.goal_buf.clone()
