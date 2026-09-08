@@ -538,8 +538,8 @@ def get_follow_target_world_xy(
     sin_heading = torch.sin(robot_heading)
     # Project contract: goal_buf = (x_right, y_forward).
     # heading=0 => right=world +X, forward=world +Y.
-    delta_world_x = cos_heading * goal_x + sin_heading * goal_y
-    delta_world_y = -sin_heading * goal_x + cos_heading * goal_y
+    delta_world_x = cos_heading * goal_x - sin_heading * goal_y
+    delta_world_y = sin_heading * goal_x + cos_heading * goal_y
     return robot_pos_world_xy + torch.stack([delta_world_x, delta_world_y], dim=1)
 
 
@@ -2872,6 +2872,8 @@ class HierarchicalHexapodEnv:
 
         x_min = -0.5 * map_extent
         y_min = 0.0
+        x_max = x_min + map_extent
+        y_max = y_min + map_extent
 
         def rasterize(env_id: int, center_x: float, center_y: float, size_x: float, size_y: float) -> None:
             if not (
@@ -2899,6 +2901,14 @@ class HierarchicalHexapodEnv:
             x1 = x_body + 0.5 * size_x
             y0 = y_body - 0.5 * size_y
             y1 = y_body + 0.5 * size_y
+            # Preserve in-map quantization, but never compress a fully external
+            # obstacle into a boundary cell through index clamping.
+            if x1 <= x_min or x0 >= x_max or y1 <= y_min or y0 >= y_max:
+                return
+            x0 = max(x0, x_min)
+            x1 = min(x1, x_max)
+            y0 = max(y0, y_min)
+            y1 = min(y1, y_max)
             ix0 = int(math.floor((x0 - x_min) / cell))
             ix1 = int(math.ceil((x1 - x_min) / cell))
             iy0 = int(math.floor((y0 - y_min) / cell))

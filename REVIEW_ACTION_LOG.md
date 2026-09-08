@@ -2,6 +2,12 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
+## 2026-09-08 当前确定性修正状态（优先于下方历史运行记录）
+
+- 已完成且仅完成两项代码修正：PCR/real Follow 的 body→world 逆变换，以及 scene affordance 对完全越界 bbox 的边界压缩；部分相交按地图物理边界裁剪，原有在界内量化不变。
+- CPU 语法、真实 helper→真实 Follow world→body 往返、static 与 `s_avoid` box 的 camera-mount 栅格回归均通过；旧源码分别在 Follow 往返和 front-outside static bbox 检查失败。Isaac、GitHub 同步、训练、评测和实机均未执行。
+- 服务器 `505b937` Avoid 的既有运行保留，不停止、不覆盖，也不认定为正式返修 checkpoint。sim-real policy contract 本批未修改、未冻结。
+
 ## 2026-09-08 最新执行状态（Avoid 首轮已过；运行中）
 
 - 作者明确批准最小独立 Avoid 训练：训练保留第 14 维 forced-forward speed 用于促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。
@@ -9,6 +15,13 @@
 - 已执行参数：`task=s_avoid_basic --mode teacher --skill avoid --seed 42 --num_envs 512 --num_steps 24 --num_epochs 2 --mini_batch_size 4096 --lr 1e-5 --gamma 0.99 --gae_lambda 0.95 --clip_range 0.05 --value_loss_coef 0.5 --entropy_coef 0.04 --max_grad_norm 0.5 --cmd_slew_lin 0.2 --cmd_slew_ang 0.4 --aff_stack 1 --decimation 5 --num_iterations 1000 --save_interval 50`；`--low_level_ckpt /home/dell/RL_hexapod_gym/logs/hex_ground/Dec31_16-52-59_/model_6000.pt`，不带 `--resume`、`--finetune_from`、`--force_cmd_y` 或 `--generalize`。仅 `1000` 是本轮预算、非历史已确认值；其余由旧 `run_meta` 复原。
 - Avoid 已于 `20:29:34` 在服务器 tmux `pcr_revision_avoid_505b937` 启动：root `/home/dell/RL_hexapod_gym_revision_20260908`，代码 `505b937b7687ba87afd34d5631163b84a139ebdd`，PID `2818920`，输出 `outputs/revision_avoid_505b937/train.log`，GPU1 的 `CUDA_VISIBLE_DEVICES=1` 对应进程可见 `cuda:0`。已进入训练循环并完成首轮 PPO 日志：value/policy/entropy=`0.3073/0.0285/1.0838`，nonfinite skip/sanitize=`0/0`、action=`0/0/0`、stage=1。completed episodes=0，success mean 为 NaN 的空集合，不能称数值故障；checkpoint 保存仍未确认。
 - Mono 的训练设置尚未讨论；用户明确要求不启动、不自动排队。
+
+## 2026-09-08 第一批确定性几何修正（已完成；CPU 验证通过）
+
+- 范围仅为两项已证实的实现修正：Follow 调用链的 body→world 逆旋转，以及 scene affordance 对完全位于 local-map 外 bbox 的边界压缩。
+- Follow expert 内部的 world→body、`atan2(x_right, y_forward)`、`+Y forward`、cone、FOV、风险阈值、奖励、课程、网络与 sim-real 输入口径均不在本批范围。
+- scene raster 保留既有边界内格点量化；只先判 bbox 与 `[-extent/2, extent/2]×[0, extent]` 是否有正面积交集，完全无交集跳过，部分相交按物理边界裁剪。
+- 不启动、停止或改写现有 Avoid 训练；本批完成后由主线程验收，再决定 GitHub 同步、Isaac 验证和重训范围。
 
 ## 2026-09-08 代码同步与原生 CPU 核对（完成；未训练）
 

@@ -122,6 +122,23 @@ def make_env(num_envs, scene_specs=None, height_samples=None):
     return env
 
 
+def make_s_avoid_box_env(num_envs):
+    env = make_env(num_envs)
+    env.cfg.terrain.avoid_capsule_radius = 0.15
+    env.cfg.terrain.avoid_box_size_x = 0.20
+    env.cfg.terrain.avoid_box_size_y = 0.20
+    env.cfg.terrain.avoid_wall_thickness = 0.12
+    env.cfg.terrain.avoid_wall_length = 6.0
+    env.s_avoid_capsule_slot_count = 0
+    env.s_avoid_box_slot_count = 1
+    env.s_avoid_wall_slot_count = 0
+    env.s_avoid_total_slots = 1
+    env.s_avoid_active = torch.ones(num_envs, 1, dtype=torch.bool)
+    env.s_avoid_pos_world = torch.zeros(num_envs, 1, 3)
+    env.s_avoid_quat_world = torch.zeros(num_envs, 1, 4)
+    return env
+
+
 def local_to_world(local_xy, yaw):
     x_local, y_local = local_xy
     return (
@@ -230,6 +247,73 @@ def test_camera_mount_scene_reference(methods):
         raise AssertionError("camera-mount command clearance disagrees with the local cell distance")
 
 
+def test_scene_raster_clipping_camera_mount(methods):
+    camera_offset = (0.0, 0.22)
+    headings = [0.0, -math.pi / 4.0, math.pi / 4.0, math.pi / 2.0]
+    cases = {
+        "inside": ((0.0, 1.0), True),
+        "front_outside": ((0.0, 3.30), False),
+        "behind_outside": ((0.0, -0.30), False),
+        "left_outside": ((-1.80, 1.0), False),
+        "right_outside": ((1.80, 1.0), False),
+        "partial_front": ((0.0, 2.95), True),
+    }
+    partial_scene = None
+    for label, (local_center, should_occupy) in cases.items():
+        specs = []
+        for heading in headings:
+            ref_x, ref_y = local_to_world(camera_offset, heading)
+            offset_x, offset_y = local_to_world(local_center, heading)
+            specs.append(
+                SimpleNamespace(
+                    static_obstacles=[
+                        SimpleNamespace(position=(ref_x + offset_x, ref_y + offset_y), size=(0.20, 0.20))
+                    ]
+                )
+            )
+        harness = Harness(methods, make_env(len(headings), scene_specs=specs), torch.tensor(headings))
+        harness.affordance_origin_mode = "camera_mount"
+        harness.affordance_origin_local_xy = torch.tensor(camera_offset)
+        scene = harness._compute_gt_affordance_from_scene()[:, 0]
+        occupied = scene.flatten(1).sum(dim=1)
+        if should_occupy:
+            if not torch.all(occupied > 0.0):
+                raise AssertionError("{} bbox was not rasterized for every camera yaw".format(label))
+        elif not torch.all(occupied == 0.0):
+            raise AssertionError("{} bbox must be skipped rather than clamped to a map edge".format(label))
+        if label == "partial_front":
+            partial_scene = scene
+
+    if partial_scene is None:
+        raise AssertionError("partial clipping fixture was not built")
+    partial_y = partial_scene.nonzero(as_tuple=False)[:, 2]
+    if int(partial_y.min().item()) < 30 or int(partial_y.max().item()) != 31:
+        raise AssertionError("partial-front bbox must only occupy the clipped final map rows")
+
+
+def test_s_avoid_box_raster_clipping(methods):
+    camera_offset = (0.0, 0.22)
+    headings = [0.0, -math.pi / 4.0, math.pi / 4.0, math.pi / 2.0]
+    cases = {"outside": ((0.0, 3.30), False), "partial": ((0.0, 2.95), True)}
+    for label, (local_center, should_occupy) in cases.items():
+        env = make_s_avoid_box_env(len(headings))
+        for env_id, heading in enumerate(headings):
+            ref_x, ref_y = local_to_world(camera_offset, heading)
+            offset_x, offset_y = local_to_world(local_center, heading)
+            env.s_avoid_pos_world[env_id, 0, :2] = torch.tensor([ref_x + offset_x, ref_y + offset_y])
+            env.s_avoid_quat_world[env_id, 0, 2] = math.sin(heading * 0.5)
+            env.s_avoid_quat_world[env_id, 0, 3] = math.cos(heading * 0.5)
+        harness = Harness(methods, env, torch.tensor(headings))
+        harness.affordance_origin_mode = "camera_mount"
+        harness.affordance_origin_local_xy = torch.tensor(camera_offset)
+        occupied = harness._compute_gt_affordance_from_scene()[:, 0].flatten(1).sum(dim=1)
+        if should_occupy:
+            if not torch.all(occupied > 0.0):
+                raise AssertionError("s_avoid partial box must remain rasterized")
+        elif not torch.all(occupied == 0.0):
+            raise AssertionError("s_avoid outside box must not be clamped to the map edge")
+
+
 def test_empty_and_zero_command_fallback(methods):
     harness = Harness(methods, make_env(2, scene_specs=[SimpleNamespace(static_obstacles=[])] * 2), torch.zeros(2))
     empty = torch.zeros(2, 3, 32, 32)
@@ -257,6 +341,8 @@ def main():
     test_counterexample_and_scene_queries(methods)
     test_heightfield_scene_alignment(methods)
     test_camera_mount_scene_reference(methods)
+    test_scene_raster_clipping_camera_mount(methods)
+    test_s_avoid_box_raster_clipping(methods)
     test_empty_and_zero_command_fallback(methods)
     meshgrid_backend = "native" if supports_meshgrid_indexing() else "compat"
     print("PASS: affordance axis geometry ({}, meshgrid={})".format(args.source, meshgrid_backend))

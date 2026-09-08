@@ -976,8 +976,8 @@ class PcrRealplay:
             cos_h = torch_mod.cos(robot_heading)
             sin_h = torch_mod.sin(robot_heading)
             # goal = (x_right, y_forward), heading=0 => forward is world +Y.
-            delta_world_x = cos_h * goal[:, 0] + sin_h * goal[:, 1]
-            delta_world_y = -sin_h * goal[:, 0] + cos_h * goal[:, 1]
+            delta_world_x = cos_h * goal[:, 0] - sin_h * goal[:, 1]
+            delta_world_y = sin_h * goal[:, 0] + cos_h * goal[:, 1]
             target_world = robot_pos + torch_mod.stack([delta_world_x, delta_world_y], dim=1)
             cmd_f = compute_s0_follow_expert_cmd(
                 robot_pos_world_xy=robot_pos,

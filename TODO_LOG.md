@@ -10,6 +10,11 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-08 当前修正状态（优先于下方历史运行记录）
+
+- [x] ~~[P0] 已仅修正 PCR/real Follow 的 body→world 逆变换，以及 scene affordance 完全越界 bbox 的边界压缩；保持原有在界内格点量化、cone、FOV、奖励、网络、课程与 sim-real contract 不变。CPU 语法与两项源码回归通过；修改前源码分别在 Follow 往返和 front-outside raster fixture 失败。Isaac 验证、GitHub 同步、正式重训/评测尚未执行。~~
+- 服务器旧 Avoid `505b937` 保留运行记录与产物，但本轮不将其认定为正式返修 checkpoint，也不停止或覆盖。
+
 ## 2026-09-08 最新执行状态（Avoid 首轮已过；运行中）
 
 - [ ] [P0，运行中] 独立 Avoid 已于服务器 `20:29:34` 在 tmux `pcr_revision_avoid_505b937` 启动（PID `2818920`，`CUDA_VISIBLE_DEVICES=1` 对应可见 `cuda:0`），已写入 `run_meta` 并完成首轮 PPO 日志：value/policy/entropy=`0.3073/0.0285/1.0838`，nonfinite skip/sanitize=`0/0`、action=`0/0/0`、stage=1。completed episodes=0，故 success mean 为 NaN 的空集合，不作数值故障；checkpoint 尚未确认。
@@ -18,6 +23,7 @@
 
 ## 2026-09-08 审稿重训前最小修正（已批准执行）
 
+- [x] ~~[P0] 仅修正 PCR Follow 的 body→world 逆变换及 scene affordance 完全越界 bbox 的错误边界写入；补源码 CPU 回归，保持现有格点量化、cone、FOV、奖励、网络和训练设置不变，不启动训练或评测。~~
 - [x] ~~[P0] 将 `s_pcr_new` 训练课程的 L1/L2/L3 移动目标速度上限统一收至 `0.50 m/s`；保持课程 seed、权重、stage 分配、`s_avoid_basic` 布局、goal、forced-forward 与 generalize 分支不变。~~
 - [x] ~~[P0] 扩展 CPU 轴序回归以覆盖已核实配置的 `camera_mount=[0.00,0.22,0.08]` 参考原点，并新增最小课程采样测试；不启动训练或评测。~~
 - [x] ~~[P0] 仅对 `skill=avoid` 且 `s_avoid_enabled` 恢复 forced-forward speed 的第 14 个状态列，以保持旧 Avoid 训练输入；不影响 MoE/Gate/Mono/Follow，不启动训练。~~

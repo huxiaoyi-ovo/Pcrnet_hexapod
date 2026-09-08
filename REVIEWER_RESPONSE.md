@@ -4,6 +4,11 @@
 > 范围：AE、R1、R2、R10 的全部可执行意见，以及本轮讨论中出现的证据、回应方向和实验决策。本轮未上传、发送或推送这些材料。
 > **证据边界**：`已讨论`不等于`已验证`，`候选实验`不等于`已批准执行`，`暂缓`不等于`已解决`。没有完成并复核的实验，不能在正式回复或修订稿中写成结果。
 
+## 2026-09-08 当前确定性修正状态（非实验结果）
+
+- 已修正 Follow body→world 逆变换与 scene raster 完全越界 bbox 的边界压缩；CPU 源码回归通过，旧源码分别在 Follow 往返与 front-outside raster fixture 失败。Isaac 闭环、GitHub 同步、重训、重评测和实机验证均未执行。
+- 服务器旧 Avoid 运行及其产物保留，但不作为正式返修 checkpoint；本批未修改或冻结 sim-real policy contract。
+
 ## 2026-09-08 最新执行状态（Avoid 首轮已过；非结果）
 
 - 作者批准最小独立 Avoid 开训：独立训练的第 14 维保留 forced-forward speed 仅作专家促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。
@@ -147,6 +152,8 @@
 | R10-03 | 缺 map encoder 的 CNN kernel/stride/channel、投影维度和与 31 scalar 的拼接细节。 | 从实际模型定义/保存配置补 exact architecture；不要只写 `256-256 ELU + Beta heads`。 | E05 `tableA4_network_structure.md` 是线索；X-01/X-02。 | `待证据核对` |
 
 ## INT-01：内部发现的训练地图轴序不一致（不是审稿人已知结论）
+
+**2026-09-08 已批准的确定性修正（CPU 已验证，Isaac 待验证）。** Follow expert 内部的 world→body 与转向符号保持不变；仅将 PCR/real runner 中 body-relative `goal_buf` 还原到世界坐标的公式改为 `R(+heading)`，使往返恢复原目标。另对 scene raster 增加“完全无正面积地图交集即跳过、部分交集先裁剪”的规则，防止地图外障碍被 index clamp 压到边界格。两项均不改变 cone、FOV、safe/free、奖励、课程、网络或 sim-real 输入口径；不写作已重训、已重评测或实机性能结论。
 
 **已验证的有限事实。** 当前训练代码的 occupied-cell / angle 路径使用 `ij` 语义，而 distance-map 路径使用 `xy` 语义；在独立 CPU AST 抽取测试中，32×32、3 m 地图、局部障碍点 `(0.046875, 0.515625)` 对应格 `[16,5]`：同格几何距离为 `0.517751 m`，distance map 读数为 `1.833526 m`。一个合成小障碍覆盖四格时，cone 查询得到 `1.784947 m`，而选中格的正确几何最近值为 `0.517751 m`；全局 yaw 为 `0°/90°` 均复现，坐标旋转未抵消该差异。
 
