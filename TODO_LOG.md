@@ -10,6 +10,10 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-08 最新作者授权（准备 Avoid 开训；未启动）
+
+- [ ] [P0，已授权待启动] 独立 Avoid 训练保留第 14 维 forced-forward speed 以促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。Avoid14D 诊断不再作为开训前置。
+
 ## 2026-09-08 审稿重训前最小修正（已批准执行）
 
 - [x] ~~[P0] 将 `s_pcr_new` 训练课程的 L1/L2/L3 移动目标速度上限统一收至 `0.50 m/s`；保持课程 seed、权重、stage 分配、`s_avoid_basic` 布局、goal、forced-forward 与 generalize 分支不变。~~
@@ -17,6 +21,7 @@
 - [x] ~~[P0] 仅对 `skill=avoid` 且 `s_avoid_enabled` 恢复 forced-forward speed 的第 14 个状态列，以保持旧 Avoid 训练输入；不影响 MoE/Gate/Mono/Follow，不启动训练。~~
 - [x] ~~[P0] 已生成仅五个代码路径的本地提交 `c4353cc`（`codex/revision-axis-fix-20260908`）；待精确 GitHub 推送授权后同步并在隔离服务器 root 做原生 CPU 检查。训练继续暂停。~~
 - [ ] [P0，用户主动暂停] 在隔离服务器 root 的 `c4353cc` 上启动 Avoid teacher 训练的计划已暂停，待 GPT 审阅代码后由用户重新明确授权；本轮未发送启动命令、未创建训练会话或输出。
+- [ ] [P2，暂缓非必需] Avoid 14D counterfactual 诊断不阻断本轮开训；现有未提交诊断草稿不运行、不测试、不提交，后续仅在作者再次批准时恢复。
 
 ## 2026-09-08 审稿重训前用户冻结决定（文档记录）
 

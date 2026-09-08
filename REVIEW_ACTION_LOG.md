@@ -2,6 +2,12 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
+## 2026-09-08 最新作者授权（Avoid 准备启动；未训练）
+
+- 作者明确批准最小独立 Avoid 训练：训练保留第 14 维 forced-forward speed 用于促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。
+- Avoid14D 反事实诊断撤出开训前置；其本地草稿未运行、未测试、未提交。本条只记录授权，训练尚未启动。
+- 拟执行参数（本轮预算，非历史 `run_meta` 已确定值）：`task=s_avoid_basic --mode teacher --skill avoid --seed 42 --num_envs 512 --num_steps 24 --num_epochs 2 --mini_batch_size 4096 --lr 1e-5 --gamma 0.99 --gae_lambda 0.95 --clip_range 0.05 --value_loss_coef 0.5 --entropy_coef 0.04 --max_grad_norm 0.5 --cmd_slew_lin 0.2 --cmd_slew_ang 0.4 --aff_stack 1 --decimation 5 --num_iterations 1000 --save_interval 50`；`--low_level_ckpt /home/dell/RL_hexapod_gym/logs/hex_ground/Dec31_16-52-59_/model_6000.pt`。不带 `--resume`、`--finetune_from`、`--force_cmd_y` 或 `--generalize`。
+
 ## 2026-09-08 代码同步与原生 CPU 核对（完成；未训练）
 
 - 本地代码提交为 `c4353cc`（`Fix axis semantics and restore Avoid state`），分支 `codex/revision-axis-fix-20260908`，仅含获批的五个代码路径；`.vscode`、`TODO_LOG.md`、`REVIEW_ACTION_LOG.md` 与 `REVIEWER_RESPONSE.md` 未暂存、不会随 code-only 同步。
