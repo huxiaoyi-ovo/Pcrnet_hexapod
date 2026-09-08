@@ -2,6 +2,15 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
+## 2026-09-08 Actor x/y 输入诊断工具（已完成自测；未跑旧 checkpoint）
+
+- 新增 `tools/audit_actor_xy.py`，仅在已有 eval 的 `CmdVelExpert.get_action` 与 `GatePolicy.get_action` 处旁路记录输入；live action 先原样执行并返回，所有额外输出均为 no-grad deterministic 副本，不送入环境、风险更新或下一步控制。
+- 每十次 action batch 最多保存 Avoid/Gate 各 512 帧；只干预 actor state 的 `x/y`（`Δx=±0.25 m`、`Δy=±0.50 m`、absolute `y=0/2/4/6 m`），保存 map/state/goal/difficulty/动作和脚本/Gate/Avoid/low-level checkpoint/eval-source SHA，并写出采样 state x/y 的实际 min/max。已有 critic state 保持不变；未传 critic state 时副本显式固定为原 actor state，输入变异或非有限值会 fail-fast。非 self-test 保证 Isaac Gym 先于 Torch 导入。
+- 本地 `py_compile` 与 Torch self-test 已通过；未加载 checkpoint、未跑 Isaac、未写入旧实验目录或启动训练。绝对 y 扫描只用来发现可能的位置相关性，不得称为背地图证明。
+- 同轮实机历史核对的修正：`pcr_realplay.py` 缺 ROS state 时补足维度的全零 state；`risk_memory_velocity_source=body` 因维度仍至少五而读零前向速度，非自动回退 `cmd_F`。file bridge 也无条件使用全零 state。历史 40 trial 的原始逐次标签/启动命令仍未找到，只能记为待证据核对。
+- Table I 的历史 `.60 m/s` Learned-w 三 seed collision 原始计数为 `3/3/9`，即 `15/384=0.0390625`。历史 `a8429b4` 前已有 strict hull-clearance（margin `.01`）与 `s_avoid_episode_collision` 的 OR；但当前 metrics 未保存精确源码 SHA，不能将其拆成 physical/envelope，也不回填或改旧表名。仿真独立/PCR Avoid 使用 cross-line `goal_raw`，而实机 Avoid 使用 target-relative goal；该输入差异待冻结。
+- 后续 Gate 正式开训只等待已冻结的训练输入、奖励/终止、核心闭环与修正服务器 Isaac smoke；Avoid、Mono、Gate 依赖分别放行，本轮不改算法。
+
 ## 2026-09-08 当前确定性修正状态（优先于下方历史运行记录）
 
 - 已完成且仅完成两项代码修正：PCR/real Follow 的 body→world 逆变换，以及 scene affordance 对完全越界 bbox 的边界压缩；部分相交按地图物理边界裁剪，原有在界内量化不变。

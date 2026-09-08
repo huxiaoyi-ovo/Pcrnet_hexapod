@@ -10,6 +10,14 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-08 Actor x/y 输入诊断（已自测待验收，旧 checkpoint rollout 未批准）
+
+- [x] ~~[P0] 新增仅诊断用 `tools/audit_actor_xy.py`：在冻结旧 checkpoint 的实际 eval rollout 内旁路捕捉 Avoid/Gate `get_action` 输入；原动作原样返回并用于环境，额外 deterministic 副本仅改 actor state 的 `x/y`。固定主干扰 `Δx=±0.25 m`、`Δy=±0.50 m`，并辅助扫 absolute `y=0/2/4/6 m`；不修改 map、goal、difficulty、critic 输入、risk/memory 或环境状态。没有独立 critic state 时，副本显式固定为原 actor state；非 self-test 先加载 Isaac Gym 再加载 Torch。输出独立 npz/json（含脚本/checkpoint/eval-source SHA），最多每个 actor 512 帧；本地 `py_compile` 与 Torch self-test 已通过，旧 checkpoint rollout 尚未运行。~~
+- 实机 memory 证据口径已收紧：ROS 模板不传 `state_topic` 时会补足维度的零 state，`body` source 取 state[4]=0，记忆不会按前进衰减；file bridge 同样无条件构造零 state。不能写成自动回退 Follow 速度，也不能由当前模板反推历史实机运行命令。
+- 历史 Table I 的 Learned-w `.60 m/s` 三 seed、每 seed 128 episode 的 collision 为 `3/3/9`，合计 `15/384=0.0390625`；历史代码显示 strict collision 组合了 hull-clearance 与 `s_avoid_episode_collision`，但 metrics 未绑定精确 Git，不能拆成 physical/envelope 或当作当前修订实现的证明。
+- goal 三链不应混写：仿真独立 Avoid 与 PCR 复用的 `goal_raw` 是 cross-line 任务目标；实机 Avoid 的 `pcr_realplay.py:991-997` 接收 target-relative goal。此 contract 差异待作者冻结，不是用措辞即可抹平。
+- Gate 正式开训前只放行已冻结的训练输入、奖励/终止、核心闭环与修正服务器 Isaac smoke；Avoid、Mono、Gate 按依赖分别放行，不新增算法或审计类别。
+
 ## 2026-09-08 当前修正状态（优先于下方历史运行记录）
 
 - [x] ~~[P0] 已仅修正 PCR/real Follow 的 body→world 逆变换，以及 scene affordance 完全越界 bbox 的边界压缩；保持原有在界内格点量化、cone、FOV、奖励、网络、课程与 sim-real contract 不变。代码提交 `781e830` 与记录提交 `eefa8cf` 已推送 GitHub；本地 CPU 语法与两项源码回归通过，修改前 `/tmp/pcrnet_train_highlevel_before_geometry_fix.py` 分别在 Follow 往返和 front-outside raster fixture 失败。通过一次性 SSH 反向代理拉取后，服务器 detached root `/home/dell/RL_hexapod_gym_revision_geometry_20260908` 已在 `eefa8cf` 且八个文件 hash 与本地一致；未作永久代理改动，未运行服务器 CPU、Isaac、训练或评测。~~

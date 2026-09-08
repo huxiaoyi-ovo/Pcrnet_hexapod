@@ -4,6 +4,14 @@
 > 范围：AE、R1、R2、R10 的全部可执行意见，以及本轮讨论中出现的证据、回应方向和实验决策。本轮未上传、发送或推送这些材料。
 > **证据边界**：`已讨论`不等于`已验证`，`候选实验`不等于`已批准执行`，`暂缓`不等于`已解决`。没有完成并复核的实验，不能在正式回复或修订稿中写成结果。
 
+## 2026-09-08 输入依赖与历史硬件证据补核（诊断工具已自测，非实验结果）
+
+- 已完成诊断工具自测：`tools/audit_actor_xy.py` 将在冻结旧 checkpoint 的真实 eval rollout 中旁路采集 Avoid/Gate actor 输入，并只在 no-grad 副本中替换 state 的 `x/y`；live action、map、goal、difficulty、risk/memory 与环境推进不改。已有 critic state 保持不变，未传时副本显式固定为原 actor state。输出独立 npz/json，记录脚本/checkpoint SHA 与 eval-source Git SHA；非 self-test 保证 Isaac Gym 先于 Torch。当前只通过本地语法/Torch self-test，尚未加载 checkpoint 或产生 rollout 结果。
+- 历史硬件定量证据仍不足：现有 Fig. 7 可追溯到一个 bag 的机制曲线，而非 40 次逐 trial 成功率证据；原始 bag、逐 trial 人工标注和实际启动命令尚未找到。因此正式回复不得写成已审计的“40 trials”事实，除非补回原始记录。
+- 当前 `pcr_realplay.py` 的 ROS 模板没有传 `state_topic`；缺 state 时补足维度的零 state，`risk_memory_velocity_source=body` 将读 state[4]=0，memory 不随前进衰减。file bridge 同样无条件构造零 state。它不是自动回退 `cmd_F`，也不能反推历史实机使用了哪种启动参数；需在修订稿中把部署记录与历史结果分开。
+- 历史 Table I `.60 m/s` Learned-w 的三 seed collision 计数为 `3/3/9`，合计 `15/384=0.0390625`。历史代码线索显示 strict collision 组合 hull-clearance（margin `.01`）和 `s_avoid_episode_collision`，但 metrics 不含准确源码 SHA；回复中不能把旧数值拆为 contact/envelope，也不能以当前实现反推历史逐 episode 原因。
+- 需在方法表中显式区分 Avoid 的 goal：仿真独立训练和 PCR 复用使用 cross-line `goal_raw`，而实机 `pcr_realplay.py:991-997` 将 target-relative goal 输入 Avoid。该差异目前是待冻结的输入 contract，不能声称三处完全同一语义。Gate 开训须等待已冻结的训练输入、奖励/终止、核心闭环与修正服务器 Isaac smoke；Avoid、Mono、Gate 依赖分开放行，不能以本审计改变算法。
+
 ## 2026-09-08 当前确定性修正状态（非实验结果）
 
 - 已修正 Follow body→world 逆变换与 scene raster 完全越界 bbox 的边界压缩；本地 CPU 源码回归通过，旧源码分别在 Follow 往返与 front-outside raster fixture 失败。代码提交 `781e830` 与记录 `eefa8cf` 已推送 GitHub；通过一次性 SSH 反向代理成功拉取至服务器 detached root `/home/dell/RL_hexapod_gym_revision_geometry_20260908`，批准文件 hash 与本地一致，未作永久网络配置改动。因此 Isaac 闭环、服务器原生 CPU、重训、重评测和实机验证仍均未执行。
