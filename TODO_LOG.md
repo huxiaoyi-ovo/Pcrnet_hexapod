@@ -10,9 +10,11 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
-## 2026-09-08 最新作者授权（准备 Avoid 开训；未启动）
+## 2026-09-08 最新执行状态（Avoid 首轮已过；运行中）
 
-- [ ] [P0，已授权待启动] 独立 Avoid 训练保留第 14 维 forced-forward speed 以促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。Avoid14D 诊断不再作为开训前置。
+- [ ] [P0，运行中] 独立 Avoid 已于服务器 `20:29:34` 在 tmux `pcr_revision_avoid_505b937` 启动（PID `2818920`，`CUDA_VISIBLE_DEVICES=1` 对应可见 `cuda:0`），已写入 `run_meta` 并完成首轮 PPO 日志：value/policy/entropy=`0.3073/0.0285/1.0838`，nonfinite skip/sanitize=`0/0`、action=`0/0/0`、stage=1。completed episodes=0，故 success mean 为 NaN 的空集合，不作数值故障；checkpoint 尚未确认。
+- [ ] [P0，未启动未排队] Mono 设置尚未讨论；用户明确要求不启动、不自动排队。
+- 独立 Avoid 训练保留第 14 维 forced-forward speed 以促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。Avoid14D 诊断不再作为开训前置。
 
 ## 2026-09-08 审稿重训前最小修正（已批准执行）
 

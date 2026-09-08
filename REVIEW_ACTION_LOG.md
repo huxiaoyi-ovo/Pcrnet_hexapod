@@ -2,11 +2,13 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
-## 2026-09-08 最新作者授权（Avoid 准备启动；未训练）
+## 2026-09-08 最新执行状态（Avoid 首轮已过；运行中）
 
 - 作者明确批准最小独立 Avoid 训练：训练保留第 14 维 forced-forward speed 用于促学习；融合调用 Avoid 时该第 14 维继续补 `0`，前进与 yaw 仍由 Follow 提供。
-- Avoid14D 反事实诊断撤出开训前置；其本地草稿未运行、未测试、未提交。本条只记录授权，训练尚未启动。
-- 拟执行参数（本轮预算，非历史 `run_meta` 已确定值）：`task=s_avoid_basic --mode teacher --skill avoid --seed 42 --num_envs 512 --num_steps 24 --num_epochs 2 --mini_batch_size 4096 --lr 1e-5 --gamma 0.99 --gae_lambda 0.95 --clip_range 0.05 --value_loss_coef 0.5 --entropy_coef 0.04 --max_grad_norm 0.5 --cmd_slew_lin 0.2 --cmd_slew_ang 0.4 --aff_stack 1 --decimation 5 --num_iterations 1000 --save_interval 50`；`--low_level_ckpt /home/dell/RL_hexapod_gym/logs/hex_ground/Dec31_16-52-59_/model_6000.pt`。不带 `--resume`、`--finetune_from`、`--force_cmd_y` 或 `--generalize`。
+- Avoid14D 反事实诊断撤出开训前置；其本地草稿未运行、未测试、未提交。
+- 已执行参数：`task=s_avoid_basic --mode teacher --skill avoid --seed 42 --num_envs 512 --num_steps 24 --num_epochs 2 --mini_batch_size 4096 --lr 1e-5 --gamma 0.99 --gae_lambda 0.95 --clip_range 0.05 --value_loss_coef 0.5 --entropy_coef 0.04 --max_grad_norm 0.5 --cmd_slew_lin 0.2 --cmd_slew_ang 0.4 --aff_stack 1 --decimation 5 --num_iterations 1000 --save_interval 50`；`--low_level_ckpt /home/dell/RL_hexapod_gym/logs/hex_ground/Dec31_16-52-59_/model_6000.pt`，不带 `--resume`、`--finetune_from`、`--force_cmd_y` 或 `--generalize`。仅 `1000` 是本轮预算、非历史已确认值；其余由旧 `run_meta` 复原。
+- Avoid 已于 `20:29:34` 在服务器 tmux `pcr_revision_avoid_505b937` 启动：root `/home/dell/RL_hexapod_gym_revision_20260908`，代码 `505b937b7687ba87afd34d5631163b84a139ebdd`，PID `2818920`，输出 `outputs/revision_avoid_505b937/train.log`，GPU1 的 `CUDA_VISIBLE_DEVICES=1` 对应进程可见 `cuda:0`。已进入训练循环并完成首轮 PPO 日志：value/policy/entropy=`0.3073/0.0285/1.0838`，nonfinite skip/sanitize=`0/0`、action=`0/0/0`、stage=1。completed episodes=0，success mean 为 NaN 的空集合，不能称数值故障；checkpoint 保存仍未确认。
+- Mono 的训练设置尚未讨论；用户明确要求不启动、不自动排队。
 
 ## 2026-09-08 代码同步与原生 CPU 核对（完成；未训练）
 
