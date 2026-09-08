@@ -1,12 +1,14 @@
 # RA-L 审稿回复总账（内部工作稿，非提交版）
 
 > 最后更新：2026-09-08
-> 范围：AE、R1、R2、R10 的全部可执行意见，以及本轮讨论中出现的证据、回应方向和实验决策。本轮未上传、发送或推送这些材料。
+> 范围：AE、R1、R2、R10 的全部可执行意见，以及本轮讨论中出现的证据、回应方向和实验决策。内部工作稿，尚未提交审稿系统。
 > **证据边界**：`已讨论`不等于`已验证`，`候选实验`不等于`已批准执行`，`暂缓`不等于`已解决`。没有完成并复核的实验，不能在正式回复或修订稿中写成结果。
 
-## 2026-09-08 输入依赖与历史硬件证据补核（诊断工具已自测，非实验结果）
+## 2026-09-08 输入依赖与历史硬件证据补核（含一次旧 checkpoint 诊断；非正式实验结果）
 
-- 已完成诊断工具自测：`tools/audit_actor_xy.py` 将在冻结旧 checkpoint 的真实 eval rollout 中旁路采集 Avoid/Gate actor 输入，并只在 no-grad 副本中替换 state 的 `x/y`；live action、map、goal、difficulty、risk/memory 与环境推进不改。已有 critic state 保持不变，未传时副本显式固定为原 actor state。输出独立 npz/json，记录脚本/checkpoint SHA 与 eval-source Git SHA；非 self-test 保证 Isaac Gym 先于 Torch。当前只通过本地语法/Torch self-test，尚未加载 checkpoint 或产生 rollout 结果。
+- `tools/audit_actor_xy.py` 已通过本地自测，并在冻结旧 checkpoint 的真实 eval rollout 中完成一次旁路采集：仅在 no-grad 副本替换 state `x/y`；live action、map、goal、difficulty、risk/memory 与环境推进不改。已有 critic state 保持不变，未传时副本显式固定为原 actor state。旧 eval `29ee797` 的单次 `s_pcr_line_avoid_basic`（`skill=moe`、seed 1、8 env/8 episodes、difficulty 0、stage-4 freeze、0.35）捕获 Avoid/Gate 各 200 帧，state `x∈[-0.492,0.438]`、`y∈[-1.610,6.751]`；原始 npz/json 在服务器独立目录，含脚本/checkpoint/eval-source SHA。
+- 此单速度/布局诊断中，Avoid `|Δu_x|` 对 `Δx=±.25` 的 mean/P95 为 `.08753/.15720`、`.08684/.16024`，对 `Δy=±.50` 为 `.00838/.02176`、`.00782/.02040`；有效横移 flip 为 `5.67%/7.73%/0/0`（194 帧）。Gate 四项小扰动的 `Δy`/`Δw` 最大 P95 为 `.00837/.00491`。absolute-y=0/2/4/6 的完整 summary 已保存，但只用于发现可能位置相关性，不是背地图证明。动作是后处理前 actor 坐标（Avoid `tanh(cmd_raw)*cmd_scale`、Gate Beta 输出），不能写成 m/s、性能、安全或训练结论，也不足以据此删除 x/y。
+- 该诊断两次启动失败均未进入 rollout（未激活既有 Conda 时缺 Ninja；随后 checkpoint metadata 要求 `skill=moe`）；使用已有 `isaac_gym` 环境并修正该 metadata 参数后 `EXIT_CODE=0`。未安装依赖、未训练、未改旧 root 或 GPU1 Avoid；这不是 corrected-code Isaac smoke，也不放行正式训练。
 - 历史硬件定量证据仍不足：现有 Fig. 7 可追溯到一个 bag 的机制曲线，而非 40 次逐 trial 成功率证据；原始 bag、逐 trial 人工标注和实际启动命令尚未找到。因此正式回复不得写成已审计的“40 trials”事实，除非补回原始记录。
 - 当前 `pcr_realplay.py` 的 ROS 模板没有传 `state_topic`；缺 state 时补足维度的零 state，`risk_memory_velocity_source=body` 将读 state[4]=0，memory 不随前进衰减。file bridge 同样无条件构造零 state。它不是自动回退 `cmd_F`，也不能反推历史实机使用了哪种启动参数；需在修订稿中把部署记录与历史结果分开。
 - 历史 Table I `.60 m/s` Learned-w 的三 seed collision 计数为 `3/3/9`，合计 `15/384=0.0390625`。历史代码线索显示 strict collision 组合 hull-clearance（margin `.01`）和 `s_avoid_episode_collision`，但 metrics 不含准确源码 SHA；回复中不能把旧数值拆为 contact/envelope，也不能以当前实现反推历史逐 episode 原因。

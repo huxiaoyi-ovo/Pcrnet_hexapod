@@ -2,11 +2,14 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
-## 2026-09-08 Actor x/y 输入诊断工具（已完成自测；未跑旧 checkpoint）
+## 2026-09-08 Actor x/y 输入诊断（旧 checkpoint rollout 已完成；非正式实验）
 
 - 新增 `tools/audit_actor_xy.py`，仅在已有 eval 的 `CmdVelExpert.get_action` 与 `GatePolicy.get_action` 处旁路记录输入；live action 先原样执行并返回，所有额外输出均为 no-grad deterministic 副本，不送入环境、风险更新或下一步控制。
 - 每十次 action batch 最多保存 Avoid/Gate 各 512 帧；只干预 actor state 的 `x/y`（`Δx=±0.25 m`、`Δy=±0.50 m`、absolute `y=0/2/4/6 m`），保存 map/state/goal/difficulty/动作和脚本/Gate/Avoid/low-level checkpoint/eval-source SHA，并写出采样 state x/y 的实际 min/max。已有 critic state 保持不变；未传 critic state 时副本显式固定为原 actor state，输入变异或非有限值会 fail-fast。非 self-test 保证 Isaac Gym 先于 Torch 导入。
-- 本地 `py_compile` 与 Torch self-test 已通过；未加载 checkpoint、未跑 Isaac、未写入旧实验目录或启动训练。绝对 y 扫描只用来发现可能的位置相关性，不得称为背地图证明。
+- 本地 `py_compile` 与 Torch self-test 已通过。随后在旧 eval `29ee797` 上完成一次 `s_pcr_line_avoid_basic`、`skill=moe` 的冻结 checkpoint rollout（seed 1、8 env/8 episodes、difficulty 0、stage-4 freeze、0.35、GPU2）；Avoid/Gate 各 200 帧、251 calls，state `x∈[-0.492,0.438]`、`y∈[-1.610,6.751]`。live action 未被诊断副本替换，未写旧实验目录、未启动训练。
+- 四个主干扰结果：Avoid `|Δu_x|` mean/P95 为 `x− .08753/.15720`、`x+ .08684/.16024`、`y− .00838/.02176`、`y+ .00782/.02040`；有效横移符号 flip 为 `5.67%/7.73%/0/0`（194 帧分母）。Gate 的 `Δy`/`Δw` 最大 P95 为 `.00837/.00491`。absolute y=0/2/4/6 的 Avoid mean/P95=`.04210/.13841,.03615/.10814,.03649/.12402,.04865/.15365`，有效 flip=`3.09%,1.03%,1.03%,3.09%`；Gate `Δy`=`.01370/.05655,.01144/.04287,.01183/.03763,.01878/.05963`，`Δw`=`.01576/.03895,.01322/.02984,.01545/.02755,.02560/.04698`。绝对 y 扫描只用来发现可能的位置相关性，不得称为背地图证明。
+- 这些是后处理之前的 actor action 坐标（Avoid 为 `tanh(cmd_raw)*cmd_scale`，Gate 为 Beta 输出），不标作 m/s；仅支持此单速度/布局 rollout 中 Gate 对小 x/y 扰动较弱、Avoid 对 x 明显且对 `±0.5 y` 较弱，不能支持删 x/y、背地图、性能或安全结论。原始 npz/json 位于 `/home/dell/RL_hexapod_gym_revision_geometry_20260908/outputs/actor_xy_old29ee_293c518_retry4/`（eval SHA `29ee797…`、script SHA `4d49fa36…`）。
+- 两次启动失败均未跑 rollout：直接解释器未激活既有 Conda、缺 Ninja；随后 checkpoint metadata 要求 `skill=moe`。改用已有 `isaac_gym` 环境并仅修正该参数后 `EXIT_CODE=0`；未安装依赖，未修改旧 root 或 GPU1 的 `505b937` Avoid。
 - 同轮实机历史核对的修正：`pcr_realplay.py` 缺 ROS state 时补足维度的全零 state；`risk_memory_velocity_source=body` 因维度仍至少五而读零前向速度，非自动回退 `cmd_F`。file bridge 也无条件使用全零 state。历史 40 trial 的原始逐次标签/启动命令仍未找到，只能记为待证据核对。
 - Table I 的历史 `.60 m/s` Learned-w 三 seed collision 原始计数为 `3/3/9`，即 `15/384=0.0390625`。历史 `a8429b4` 前已有 strict hull-clearance（margin `.01`）与 `s_avoid_episode_collision` 的 OR；但当前 metrics 未保存精确源码 SHA，不能将其拆成 physical/envelope，也不回填或改旧表名。仿真独立/PCR Avoid 使用 cross-line `goal_raw`，而实机 Avoid 使用 target-relative goal；该输入差异待冻结。
 - 后续 Gate 正式开训只等待已冻结的训练输入、奖励/终止、核心闭环与修正服务器 Isaac smoke；Avoid、Mono、Gate 依赖分别放行，本轮不改算法。
