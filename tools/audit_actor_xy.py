@@ -287,23 +287,26 @@ def main() -> None:
     import isaacgym  # noqa: F401  # Isaac Gym must initialize before torch.
     import torch as torch_module
     torch = torch_module
-    from legged_gym.scripts import train_highlevel as th
+    # The legacy evaluator creates its runtime policies from these classes.
+    # ``train_highlevel`` intentionally leaves its delayed-import aliases as
+    # None until later, so patching those aliases would miss the live actors.
+    from rsl_rl.algorithms.high_level_planner import CmdVelExpert, GatePolicy
 
     collectors = {
         "avoid": ActorCollector("avoid", args.sample_every, args.max_frames),
         "gate": ActorCollector("gate", args.sample_every, args.max_frames),
     }
-    original_avoid = th.CmdVelExpert.get_action
-    original_gate = th.GatePolicy.get_action
-    th.CmdVelExpert.get_action = _make_class_wrapper(original_avoid, collectors["avoid"])
-    th.GatePolicy.get_action = _make_class_wrapper(original_gate, collectors["gate"])
+    original_avoid = CmdVelExpert.get_action
+    original_gate = GatePolicy.get_action
+    CmdVelExpert.get_action = _make_class_wrapper(original_avoid, collectors["avoid"])
+    GatePolicy.get_action = _make_class_wrapper(original_gate, collectors["gate"])
 
     sys.argv = [str(eval_source)] + list(args.eval_args)
     try:
         runpy.run_path(str(eval_source), run_name="__main__")
     finally:
-        th.CmdVelExpert.get_action = original_avoid
-        th.GatePolicy.get_action = original_gate
+        CmdVelExpert.get_action = original_avoid
+        GatePolicy.get_action = original_gate
 
     output_dir = Path(args.audit_output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
