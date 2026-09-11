@@ -4232,6 +4232,7 @@ class HierarchicalHexapodEnv:
             cmd_vel = cmd_vel.unsqueeze(1)
         if cmd_vel.ndim != 2 or cmd_vel.shape[0] != self.num_envs or cmd_vel.shape[1] not in (1, 3):
             raise ValueError(f"s_avoid_clutter action must have shape (N,1) or (N,3), got {tuple(cmd_vel.shape)}")
+        stage_at_step_start = self.env.s_avoid_stage_per_env.detach().clone()
         raw_cmd = torch.zeros(self.num_envs, 3, device=self.device, dtype=cmd_vel.dtype)
         raw_cmd[:, 0] = cmd_vel[:, 0]
         raw_cmd[:, 1] = self.forced_forward_speed.to(dtype=cmd_vel.dtype)
@@ -4303,6 +4304,7 @@ class HierarchicalHexapodEnv:
             & ((left_clearance - right_clearance).abs() <= 0.10)
             & current_pref_valid
             & (progress_delta > 0.0)
+            & (stage_at_step_start != 1)
         )
         reward_terms = avoid_clutter_reward(
             progress_delta, reward_clearance, raw_cmd[:, 0], executed_cmd[:, 0], previous_exec[:, 0],
@@ -6242,6 +6244,7 @@ def train(args):
                 "drive_semantics": "external_nominal_forward_request",
                 "reward_dt": float(env.high_level_dt),
                 "reward_coefficients": {"failure": -20., "success": 2., "clear": .03, "lateral": .005, "smooth": .01, "preference": .0005},
+                "preference_reward_disabled_stages": [1],
             })
         elif bool(getattr(args, "revision_contract", False)) and (is_gate or is_mono_ppo):
             meta.update({

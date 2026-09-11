@@ -157,6 +157,24 @@ def main():
     assert slow_info["post_info"]["cmd_exec_mean"][0, 1] == 0.1
     assert slow_info["reward_terms"]["smooth"][0] < 0.0
 
+    # Stage-1 must preserve the virtual preference observation while omitting
+    # only its reward contribution.  Stage-2 retains the frozen tie-break.
+    stage1 = Harness()
+    stage1.env.s_avoid_stage_per_env[:] = 1
+    stage1.env.s_avoid_exit_y[:] = 99.0
+    stage1_goal_before = stage1.last_obs["goal"].clone()
+    stage1_next, _, _, stage1_info = stage1._step_avoid_clutter(torch.tensor([[0.2]]))
+    assert stage1_info["reward_terms"]["preference"][0] == 0.0
+    assert torch.equal(stage1_goal_before, stage1_next["goal"])
+
+    stage2 = Harness()
+    stage2.env.s_avoid_stage_per_env[:] = 2
+    stage2.env.s_avoid_exit_y[:] = 99.0
+    stage2_goal_before = stage2.last_obs["goal"].clone()
+    stage2_next, _, _, stage2_info = stage2._step_avoid_clutter(torch.tensor([[0.2]]))
+    assert stage2_info["reward_terms"]["preference"][0] != 0.0
+    assert torch.equal(stage2_goal_before, stage2_next["goal"])
+
     alive = Harness()
     next_obs, _, done, alive_info = alive._step_avoid_clutter(torch.tensor([[0.2]]))
     assert done.item() and alive_info["success_mask"].item() and alive.env.reset_count == 1
