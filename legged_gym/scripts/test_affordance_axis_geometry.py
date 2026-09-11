@@ -8,12 +8,16 @@ are extracted from the source AST so Isaac Gym is neither imported nor initializ
 import argparse
 import ast
 import math
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from legged_gym.pcr_observation import canonical_local_map
 
 
 METHODS = {
@@ -131,6 +135,23 @@ def make_s_avoid_box_env(num_envs):
     env.cfg.terrain.avoid_wall_length = 6.0
     env.s_avoid_capsule_slot_count = 0
     env.s_avoid_box_slot_count = 1
+    env.s_avoid_wall_slot_count = 0
+    env.s_avoid_total_slots = 1
+    env.s_avoid_active = torch.ones(num_envs, 1, dtype=torch.bool)
+    env.s_avoid_pos_world = torch.zeros(num_envs, 1, 3)
+    env.s_avoid_quat_world = torch.zeros(num_envs, 1, 4)
+    return env
+
+
+def make_s_avoid_capsule_env(num_envs):
+    env = make_env(num_envs)
+    env.cfg.terrain.avoid_capsule_radius = 0.15
+    env.cfg.terrain.avoid_box_size_x = 0.20
+    env.cfg.terrain.avoid_box_size_y = 0.20
+    env.cfg.terrain.avoid_wall_thickness = 0.12
+    env.cfg.terrain.avoid_wall_length = 6.0
+    env.s_avoid_capsule_slot_count = 1
+    env.s_avoid_box_slot_count = 0
     env.s_avoid_wall_slot_count = 0
     env.s_avoid_total_slots = 1
     env.s_avoid_active = torch.ones(num_envs, 1, dtype=torch.bool)
@@ -314,6 +335,39 @@ def test_s_avoid_box_raster_clipping(methods):
             raise AssertionError("s_avoid outside box must not be clamped to the map edge")
 
 
+def test_s_avoid_capsule_mirror_and_cell_boundaries(methods):
+    capsule_env = make_s_avoid_capsule_env(2)
+    capsule_env.s_avoid_pos_world[:, 0, :2] = torch.tensor([[-0.60, 1.50], [0.60, 1.50]])
+    capsule_harness = Harness(methods, capsule_env, torch.zeros(2))
+    capsule_scene = capsule_harness._compute_gt_affordance_from_scene()[:, 0]
+    if not torch.equal(capsule_scene[0], torch.flip(capsule_scene[1], dims=[0])):
+        raise AssertionError("s_avoid capsule occupancy must mirror for x=+/-0.60")
+    visible = torch.ones_like(capsule_scene)
+    canonical = canonical_local_map(capsule_scene, visible)
+    if not torch.equal(canonical[0], torch.flip(canonical[1], dims=[1])):
+        raise AssertionError("canonical occupancy and clearance channels must mirror for x=+/-0.60")
+
+    cell = 3.0 / 32.0
+    specs = [
+        SimpleNamespace(
+            static_obstacles=[
+                SimpleNamespace(position=(-1.50 + 11.0 * cell, 16.0 * cell + cell), size=(2.0 * cell, 2.0 * cell))
+            ]
+        ),
+        SimpleNamespace(
+            static_obstacles=[
+                SimpleNamespace(position=(-1.50 + 31.0 * cell, 16.0 * cell + cell), size=(2.0 * cell, 2.0 * cell))
+            ]
+        ),
+    ]
+    boundary_harness = Harness(methods, make_env(2, scene_specs=specs), torch.zeros(2))
+    boundary_scene = boundary_harness._compute_gt_affordance_from_scene()[:, 0]
+    if int(boundary_scene[0].sum().item()) != 4:
+        raise AssertionError("cell-aligned interior bbox must occupy exactly 2x2 cells")
+    if int(boundary_scene[1].sum().item()) != 4 or not torch.all(boundary_scene[1, 30:32, 16:18] == 1.0):
+        raise AssertionError("cell-aligned boundary bbox must retain the final map cell")
+
+
 def test_empty_and_zero_command_fallback(methods):
     harness = Harness(methods, make_env(2, scene_specs=[SimpleNamespace(static_obstacles=[])] * 2), torch.zeros(2))
     empty = torch.zeros(2, 3, 32, 32)
@@ -343,6 +397,7 @@ def main():
     test_camera_mount_scene_reference(methods)
     test_scene_raster_clipping_camera_mount(methods)
     test_s_avoid_box_raster_clipping(methods)
+    test_s_avoid_capsule_mirror_and_cell_boundaries(methods)
     test_empty_and_zero_command_fallback(methods)
     meshgrid_backend = "native" if supports_meshgrid_indexing() else "compat"
     print("PASS: affordance axis geometry ({}, meshgrid={})".format(args.source, meshgrid_backend))

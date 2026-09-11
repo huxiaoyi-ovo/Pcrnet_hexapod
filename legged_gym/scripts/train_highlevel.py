@@ -2992,8 +2992,8 @@ class HierarchicalHexapodEnv:
             x1 = x_body + 0.5 * size_x
             y0 = y_body - 0.5 * size_y
             y1 = y_body + 0.5 * size_y
-            # Preserve in-map quantization, but never compress a fully external
-            # obstacle into a boundary cell through index clamping.
+            # Reject fully external obstacles; cover intersected cells with an
+            # exclusive upper bound after clipping partial boundary overlap.
             if x1 <= x_min or x0 >= x_max or y1 <= y_min or y0 >= y_max:
                 return
             x0 = max(x0, x_min)
@@ -3005,10 +3005,10 @@ class HierarchicalHexapodEnv:
             iy0 = int(math.floor((y0 - y_min) / cell))
             iy1 = int(math.ceil((y1 - y_min) / cell))
             ix0 = max(0, min(map_size - 1, ix0))
-            ix1 = max(0, min(map_size - 1, ix1))
+            ix1 = max(0, min(map_size, ix1))
             iy0 = max(0, min(map_size - 1, iy0))
-            iy1 = max(0, min(map_size - 1, iy1))
-            occ_all[env_id, ix0:ix1 + 1, iy0:iy1 + 1] = 1.0
+            iy1 = max(0, min(map_size, iy1))
+            occ_all[env_id, ix0:ix1, iy0:iy1] = 1.0
 
         def rasterize_actor_bbox(env_id: int, center_x: float, center_y: float, half_x: float, half_y: float, yaw_world: float) -> None:
             if not (math.isfinite(half_x) and math.isfinite(half_y) and math.isfinite(yaw_world)):
