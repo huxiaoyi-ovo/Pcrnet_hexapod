@@ -3142,15 +3142,61 @@ class HierarchicalHexapodEnv:
             box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
             wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
             wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+            capsule_count = min(max(cap_slots, 0), max(total_slots, 0))
+            if capsule_count > 0 and math.isfinite(cap_r) and cap_r > 0.0:
+                active_capsules = self.env.s_avoid_active[:, :capsule_count].to(dtype=torch.bool)
+                centers_world = self.env.s_avoid_pos_world[:, :capsule_count, :2].to(dtype=ref_xy.dtype)
+                dx = centers_world[:, :, 0] - ref_xy[:, 0].unsqueeze(1)
+                dy = centers_world[:, :, 1] - ref_xy[:, 1].unsqueeze(1)
+                cos_h = torch.cos(yaw).unsqueeze(1)
+                sin_h = torch.sin(yaw).unsqueeze(1)
+                center_x_local = cos_h * dx + sin_h * dy
+                center_y_local = -sin_h * dx + cos_h * dy
+
+                # Match the historical scalar rasterizer exactly: the local
+                # transform is evaluated in the source tensor dtype, while
+                # bbox clipping and floor/ceil index arithmetic use Python
+                # float precision.  Axis 2 is x and axis 3 is y.
+                center_x_index = center_x_local.to(dtype=torch.float64)
+                center_y_index = center_y_local.to(dtype=torch.float64)
+                x0 = center_x_index - cap_r
+                x1 = center_x_index + cap_r
+                y0 = center_y_index - cap_r
+                y1 = center_y_index + cap_r
+                intersects = (
+                    (x1 > x_min)
+                    & (x0 < x_max)
+                    & (y1 > y_min)
+                    & (y0 < y_max)
+                    & torch.isfinite(center_x_index)
+                    & torch.isfinite(center_y_index)
+                )
+                x0 = torch.clamp(x0, min=x_min, max=x_max)
+                x1 = torch.clamp(x1, min=x_min, max=x_max)
+                y0 = torch.clamp(y0, min=y_min, max=y_max)
+                y1 = torch.clamp(y1, min=y_min, max=y_max)
+                ix0 = torch.floor((x0 - x_min) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+                ix1 = torch.ceil((x1 - x_min) / cell).to(dtype=torch.long).clamp_(0, map_size)
+                iy0 = torch.floor((y0 - y_min) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+                iy1 = torch.ceil((y1 - y_min) / cell).to(dtype=torch.long).clamp_(0, map_size)
+                x_indices = torch.arange(map_size, device=self.device).view(1, 1, map_size, 1)
+                y_indices = torch.arange(map_size, device=self.device).view(1, 1, 1, map_size)
+                capsule_cells = (
+                    active_capsules.unsqueeze(-1).unsqueeze(-1)
+                    & intersects.unsqueeze(-1).unsqueeze(-1)
+                    & (x_indices >= ix0.unsqueeze(-1).unsqueeze(-1))
+                    & (x_indices < ix1.unsqueeze(-1).unsqueeze(-1))
+                    & (y_indices >= iy0.unsqueeze(-1).unsqueeze(-1))
+                    & (y_indices < iy1.unsqueeze(-1).unsqueeze(-1))
+                )
+                occ_all = torch.maximum(occ_all, capsule_cells.any(dim=1).to(dtype=occ_all.dtype))
+
             for env_id in range(self.num_envs):
-                for slot in range(total_slots):
+                for slot in range(capsule_count, total_slots):
                     if not bool(self.env.s_avoid_active[env_id, slot].item()):
                         continue
                     center_x = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
                     center_y = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
-                    if slot < cap_slots:
-                        rasterize(env_id, center_x, center_y, 2.0 * cap_r, 2.0 * cap_r)
-                        continue
                     quat = self.env.s_avoid_quat_world[env_id, slot]
                     yaw_world = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
                     if slot < cap_slots + box_slots:
