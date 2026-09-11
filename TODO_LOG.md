@@ -10,6 +10,20 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-11 Reviewer-proof Mono-PPO 最终训练/评测证据口径（已完成）
+
+- [x] ~~[P0] 将 Strong Mono 的预算节点改为角色明确的 `gate-stage interaction reference`（12,288,000）、`PCR-total-interaction reference`（24,576,000）和固定最终 `full-training`（36,864,000）；三 seed 均连续完成 3000 iterations，不实行 plateau/early stop 或 validation 选 Full。补齐 reviewer 专用严格 completed-iteration 保存、Avoid 成本来源边界、offline-only validation guard、tanh command-scale Jacobian，以及可恢复的交互/更新/wall-time/动作饱和和后处理 clamp 证据；仅做本地静态/CPU 验证，不启动训练或服务器操作。~~
+
+- [x] ~~[P0] 纠正 Reviewer Mono 的证据边界：正式 profile 禁止 `--resume`（当前不保存 env/curriculum/physics 精确状态），绝对从 completed 0 跑到 3000；wall-time 改为线性累计；固定 offline validation 的资源、episode、difficulty 与 timeseries 配置；控制台明确共同奖励的关闭项。~~
+
+- [x] ~~[P0] 最终 fail-closed：Reviewer Mono 的 seed 与全部 PPO/预算参数不可由 CLI 覆盖；revision PCR/Mono 拒绝 gate difficulty；reward audit 显式记录 legacy/gate/yaw 关闭项。~~
+
+- [x] ~~[P0] 清除 formal 协议冲突：Reviewer Mono 不生成 online-best checkpoint；源码 Git commit 必须已固定且工作树干净，否则拒绝正式训练。~~
+
+## 2026-09-11 Reviewer-proof Mono-PPO 公平基线（已完成）
+
+- [x] ~~[P0] 固化 Mono/PCR 在 `s_pcr_new --revision_contract` 下的共同任务奖励、共同基础观测与 Strong Mono-PPO 训练口径：Mono 使用独立 3-D tanh Gaussian PPO，`gamma=.99`、`GAE=.95`、`clip=.20`、5 epochs、4 minibatches、`lr=3e-4`、adaptive-KL `.01`、entropy `.01`、value coefficient `1.0`、max-grad `1.0`、clipped value loss；两侧禁用 Mono legacy target/approach 项、PCR gate auxiliary 与初轮 yaw suppress。正式每 seed 固定完成 3000 iterations，并保存 gate-stage、PCR-total-interaction 与 full-training 三个角色节点，记录来源、配置哈希、交互/更新/参数量；gate-stage reference=`12,288,000` transitions 不称为 matched PCR budget。训练后只做 offline diagnostic learning curve，不作节点选择；不在本批启动训练或改写历史结果。~~
+
 ## 2026-09-10 PCR revise 长期决策（用户显式冻结；C1/D2 已实现）
 
 - [x] ~~本项目 revise 阶段固定按第一性原理一次选择性能、正确性、sim-real 一致性与返修说服力综合最优的可实施方案；仅对会影响核心架构、训练成立或论文结论的高风险不确定性专门验证。低概率、低影响猜测采用合理工程默认，不为其新增小测试、横向扩审计/消融/场景/参数或拖延开训；P0 想透后尽快 train。该规则不跳过必要实现正确性检查，也不允许编造结果。~~

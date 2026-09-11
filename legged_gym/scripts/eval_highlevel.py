@@ -1581,6 +1581,16 @@ class EvalRunner:
         self.vision_model = runtime.vision_model
         self.primary_meta = runtime.primary_meta
         self.policy_meta = runtime.policy_meta
+        self.mono_reviewer_actor_difficulty_zero = bool(
+            self.is_mono_ppo
+            and (
+                bool(getattr(self.args, "revision_contract", False))
+                or (
+                    isinstance(self.policy_meta, dict)
+                    and self.policy_meta.get("revision_contract") == PCR_CANONICAL_REVISION
+                )
+            )
+        )
         self.aux_checkpoint_meta = runtime.aux_checkpoint_meta
         selected_w_mode = getattr(args, "_eval_selected_w_mode", None)
         if selected_w_mode is not None and str(getattr(self.args, "w_mode", "")) != str(selected_w_mode):
@@ -2046,7 +2056,11 @@ class EvalRunner:
         goal = torch.zeros_like(policy_goal) if bool(getattr(self.args, "zero_goal", False)) else policy_goal
         avoid_goal = torch.zeros_like(obs_dict["goal"]) if bool(getattr(self.args, "zero_goal", False)) else obs_dict["goal"]
         policy_aff_stack = torch.zeros_like(aff_stack) if bool(getattr(self.args, "zero_local_map", False)) else aff_stack
-        difficulty_input = torch.zeros_like(difficulty) if bool(getattr(self.args, "zero_local_map", False)) else difficulty
+        difficulty_input = (
+            torch.zeros_like(difficulty)
+            if bool(getattr(self.args, "zero_local_map", False)) or self.mono_reviewer_actor_difficulty_zero
+            else difficulty
+        )
 
         if self.args.skill == "moe" and not self.is_mono_ppo:
             if avoid_aff_stack is None or avoid_difficulty is None or gate_aff_map is None:

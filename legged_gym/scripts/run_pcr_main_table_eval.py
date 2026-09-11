@@ -223,6 +223,8 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
     if bool(getattr(args, "headless", False)):
         cmd.append("--headless")
     cmd.extend(method_cfg["flags"])
+    if bool(getattr(args, "reviewer_mono_validation", False)):
+        cmd.append("--revision_contract")
     if method == "velocity_search":
         cmd.extend(["--velocity_search_split", str(args.velocity_search_split)])
         if str(getattr(args, "velocity_search_hparams_json", "") or "").strip():
@@ -305,6 +307,11 @@ def parse_args():
     parser.add_argument("--avoid_ckpt", type=str, default="agents/avoid_best.pt")
     parser.add_argument("--lowlevel_ckpt", type=str, default="agents/low_level_best.pt")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--reviewer_mono_validation",
+        action="store_true",
+        help="fixed offline-only diagnostic for Reviewer Mono; never used for checkpoint selection or final test",
+    )
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--summary_only", action="store_true")
     parser.add_argument("--continue_on_error", action="store_true")
@@ -316,6 +323,30 @@ def main():
     seeds = _parse_csv_ints(args.seeds)
     speeds = _parse_csv_floats(args.speeds)
     methods = _parse_csv_methods(args.methods)
+
+    if args.reviewer_mono_validation:
+        expected_seeds = [101, 102]
+        expected_speeds = [0.35, 0.50]
+        expected_difficulty_levels = [0.0, 0.25, 0.5, 0.75, 1.0]
+        if methods != ["mono_ppo"]:
+            raise ValueError("Reviewer Mono validation 只允许 --methods mono_ppo。")
+        if seeds != expected_seeds or speeds != expected_speeds:
+            raise ValueError("Reviewer Mono validation 固定 --seeds 101,102 与 --speeds 0.35,0.50。")
+        if int(args.num_envs) != 64 or int(args.episodes) != 128:
+            raise ValueError("Reviewer Mono validation 固定 --num_envs 64 与 --episodes 128。")
+        if _parse_csv_floats(args.difficulty_levels) != expected_difficulty_levels:
+            raise ValueError("Reviewer Mono validation 固定 --difficulty_levels 0,.25,.5,.75,1。")
+        if int(args.timeseries_episodes) != 64 or int(args.timeseries_stride) != 1:
+            raise ValueError("Reviewer Mono validation 固定 --timeseries_episodes 64 与 --timeseries_stride 1。")
+        if args.eval_layout:
+            raise ValueError("Reviewer Mono validation 使用保留基础 layout；禁止 --eval_layout/heldout。")
+        if args.velocity_search_split != "main_test":
+            raise ValueError("Reviewer Mono validation 不接受 velocity-search split。")
+        print(
+            "[ReviewerMonoValidation] offline diagnostic / learning curve only; "
+            "not for early stop, checkpoint selection, final test, 0.60 m/s, or heldout layouts.",
+            flush=True,
+        )
 
     if not args.summary_only:
         for seed in seeds:

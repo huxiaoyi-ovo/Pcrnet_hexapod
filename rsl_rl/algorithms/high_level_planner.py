@@ -680,7 +680,7 @@ class CmdVelExpert(nn.Module):
         critic_robot_state: Optional[torch.Tensor] = None,
         critic_goal: Optional[torch.Tensor] = None,
         critic_terrain_difficulty: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         out = self.forward(
             affordance_map,
             robot_state,
@@ -703,11 +703,13 @@ class CmdVelExpert(nn.Module):
         cmd_dist = Normal(out.cmd_mean, out.cmd_std)
         log_prob_raw = cmd_dist.log_prob(cmd_raw)
         log_det_jacobian = 2.0 * (np.log(2.0) - cmd_raw - F.softplus(-2.0 * cmd_raw))
+        log_scale_jacobian = torch.log(self.cmd_scale.abs().clamp_min(1e-6)).view(1, -1)
         if zero_scale_mask.any():
             active_dim_mask = (~zero_scale_mask).to(device=cmd_raw.device, dtype=cmd_raw.dtype).view(1, -1)
             log_prob_raw = log_prob_raw * active_dim_mask
             log_det_jacobian = log_det_jacobian * active_dim_mask
-        cmd_log_prob = (log_prob_raw - log_det_jacobian).sum(dim=-1)
+            log_scale_jacobian = log_scale_jacobian * active_dim_mask
+        cmd_log_prob = (log_prob_raw - log_det_jacobian - log_scale_jacobian).sum(dim=-1)
         cmd_entropy_raw = cmd_dist.rsample()
         cmd_entropy_log_prob_raw = cmd_dist.log_prob(cmd_entropy_raw)
         cmd_entropy_log_det = 2.0 * (np.log(2.0) - cmd_entropy_raw - F.softplus(-2.0 * cmd_entropy_raw))
@@ -715,9 +717,9 @@ class CmdVelExpert(nn.Module):
             active_dim_mask = (~zero_scale_mask).to(device=cmd_entropy_raw.device, dtype=cmd_entropy_raw.dtype).view(1, -1)
             cmd_entropy_log_prob_raw = cmd_entropy_log_prob_raw * active_dim_mask
             cmd_entropy_log_det = cmd_entropy_log_det * active_dim_mask
-        cmd_entropy = -(cmd_entropy_log_prob_raw - cmd_entropy_log_det).sum(dim=-1)
+        cmd_entropy = -(cmd_entropy_log_prob_raw - cmd_entropy_log_det - log_scale_jacobian).sum(dim=-1)
 
-        return cmd_log_prob, out.value, cmd_entropy, None
+        return cmd_log_prob, out.value, cmd_entropy, {"cmd_mean": out.cmd_mean, "cmd_std": out.cmd_std}
 
 
 class GateOutput(NamedTuple):

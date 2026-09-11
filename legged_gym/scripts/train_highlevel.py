@@ -28,6 +28,9 @@ import argparse
 import math
 import copy
 import json
+import hashlib
+import subprocess
+import shutil
 import types
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
 import torch
@@ -1392,6 +1395,26 @@ def apply_common_train_defaults(args: argparse.Namespace) -> None:
         _set_arg_if_not_explicit(args, "num_epochs", 5)
         _set_arg_if_not_explicit(args, "mini_batch_size", 12288)
         _set_arg_if_not_explicit(args, "lr", 6e-5)
+    if bool(getattr(args, "mono_ppo", False)) and bool(getattr(args, "revision_contract", False)):
+        if task != "s_pcr_new":
+            raise ValueError("Reviewer-proof Mono-PPO 只允许在 s_pcr_new --revision_contract 下训练。")
+        _set_arg_if_not_explicit(args, "num_envs", 256)
+        _set_arg_if_not_explicit(args, "num_steps", 48)
+        _set_arg_if_not_explicit(args, "num_iterations", 3000)
+        _set_arg_if_not_explicit(args, "save_interval", 100)
+        _set_arg_if_not_explicit(args, "num_epochs", 5)
+        _set_arg_if_not_explicit(args, "mini_batch_size", 3072)
+        _set_arg_if_not_explicit(args, "lr", 3e-4)
+        _set_arg_if_not_explicit(args, "gamma", 0.99)
+        _set_arg_if_not_explicit(args, "gae_lambda", 0.95)
+        _set_arg_if_not_explicit(args, "clip_range", 0.20)
+        _set_arg_if_not_explicit(args, "entropy_coef", 0.01)
+        _set_arg_if_not_explicit(args, "value_loss_coef", 1.0)
+        _set_arg_if_not_explicit(args, "max_grad_norm", 1.0)
+        _set_arg_if_not_explicit(args, "lr_schedule", "adaptive")
+        _set_arg_if_not_explicit(args, "desired_kl", 0.01)
+        _set_arg_if_not_explicit(args, "use_clipped_value_loss", True)
+        _set_arg_if_not_explicit(args, "pcr_avoid_pretrain_interactions", 12_288_000)
 
 
 def _row_finite_mask(t: torch.Tensor) -> torch.Tensor:
@@ -2056,6 +2079,9 @@ class RolloutBuffer:
         self.w_aux_labels = torch.zeros(num_steps, num_envs, device=device)
         self.w_aux_valid = torch.zeros(num_steps, num_envs, device=device, dtype=torch.bool)
         self.row_not_released = torch.zeros(num_steps, num_envs, device=device)
+        # Mono PPO uses these rollout distribution parameters for exact diagonal-Gaussian KL.
+        self.cmd_means = torch.zeros(num_steps, num_envs, action_dim, device=device)
+        self.cmd_stds = torch.ones(num_steps, num_envs, action_dim, device=device)
 
     def add(
         self,
@@ -2076,6 +2102,8 @@ class RolloutBuffer:
         w_aux_label=None,
         w_aux_valid=None,
         row_not_released=None,
+        cmd_mean=None,
+        cmd_std=None,
     ):
         """添加一步数据"""
         self.states[self.step] = state
@@ -2104,6 +2132,10 @@ class RolloutBuffer:
             self.w_aux_valid[self.step] = w_aux_valid.bool()
         if row_not_released is not None:
             self.row_not_released[self.step] = row_not_released
+        if cmd_mean is not None:
+            self.cmd_means[self.step] = cmd_mean
+        if cmd_std is not None:
+            self.cmd_stds[self.step] = cmd_std
         
         self.step += 1
 
@@ -2153,6 +2185,8 @@ class RolloutBuffer:
         self.w_aux_labels.zero_()
         self.w_aux_valid.zero_()
         self.row_not_released.zero_()
+        self.cmd_means.zero_()
+        self.cmd_stds.fill_(1.0)
 
 
 # V5 核心环境包装器 (The Hierarchical Environment Wrapper)
@@ -2339,10 +2373,14 @@ class HierarchicalHexapodEnv:
         self.target_lost_k = int(getattr(nav_cfg, "target_lost_k", 0)) if nav_cfg is not None else 0
         self.target_center_scale = float(getattr(nav_cfg, "target_center_scale", 0.0)) if nav_cfg is not None else 0.0
         self.target_visible_scale = float(getattr(nav_cfg, "target_visible_scale", 0.0)) if nav_cfg is not None else 0.0
-        if bool(getattr(args, "mono_ppo", False)):
+        if bool(getattr(args, "mono_ppo", False)) and not bool(getattr(args, "revision_contract", False)):
             self.target_lost_k = 5
             self.target_center_scale = 0.5
             self.target_visible_scale = 0.2
+        elif bool(getattr(args, "revision_contract", False)) and is_pcr_line_task_name(str(getattr(args, "task", ""))):
+            self.target_lost_k = 0
+            self.target_center_scale = 0.0
+            self.target_visible_scale = 0.0
         (self.affordance_x_map,
          self.affordance_y_map,
          self.affordance_bearing_map,
@@ -4772,12 +4810,19 @@ class HierarchicalHexapodEnv:
                 reward_dict['passable_occ_ratio'] = passable_occ_ratio
             if crossable_width is not None:
                 reward_dict['crossable_width'] = crossable_width
-            if self.is_pcr_line_task and not bool(getattr(self, "mono_ppo_direct_cmd", False)):
+            if self.is_pcr_line_task and (
+                not bool(getattr(self, "mono_ppo_direct_cmd", False))
+                or bool(getattr(self.args, "revision_contract", False))
+            ):
                 legacy_approach = reward_dict.get('approach', torch.zeros(self.num_envs, device=self.device))
                 legacy_follow_outside = reward_dict.get('follow_outside', torch.zeros(self.num_envs, device=self.device))
                 reward_dict['total'] = reward_dict['total'] - legacy_approach - legacy_follow_outside
                 reward_dict['approach'] = torch.zeros_like(legacy_approach)
                 reward_dict['follow_outside'] = torch.zeros_like(legacy_follow_outside)
+            if self.is_pcr_line_task and bool(getattr(self.args, "revision_contract", False)):
+                gate_smooth = reward_dict.get('gate_smooth', torch.zeros(self.num_envs, device=self.device))
+                reward_dict['total'] = reward_dict['total'] - gate_smooth
+                reward_dict['gate_smooth'] = torch.zeros_like(gate_smooth)
             if bool(getattr(self.env, "s_avoid_enabled", False)):
                 stage_ids = getattr(self.env, "s_avoid_stage_per_env", None)
                 if stage_ids is None:
@@ -5081,7 +5126,7 @@ class HierarchicalHexapodEnv:
                     reward_dict['pcr_gate_target'] = pcr_gate_target * current_row_valid.float()
                     reward_dict['pcr_gate_aux'] = pcr_gate_aux
 
-                    pcr_yaw_suppress_scale = float(self.reward_cfg_raw.get("pcr_yaw_suppress_scale", 0.0))
+                    pcr_yaw_suppress_scale = 0.0 if bool(getattr(self.args, "revision_contract", False)) else float(self.reward_cfg_raw.get("pcr_yaw_suppress_scale", 0.0))
                     pcr_yaw_suppress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
                     if pcr_yaw_suppress_scale != 0.0:
                         if self._pcr_obstacle_risk_override is not None:
@@ -5500,6 +5545,9 @@ class HierarchicalHexapodEnv:
         reward_audit_keys = [
             "approach",
             "follow_outside",
+            "gate_smooth",
+            "pcr_gate_aux",
+            "pcr_yaw_suppress",
             "pcr_progress_y",
             "pcr_follow_quality",
             "pcr_follow_err",
@@ -5582,7 +5630,7 @@ class HierarchicalHexapodEnv:
                     f"step={audit_count} "
                     f"mono_ppo_direct_cmd={bool(getattr(self, 'mono_ppo_direct_cmd', False))} "
                     f"is_pcr_line_task={bool(getattr(self, 'is_pcr_line_task', False))} "
-                    f"legacy_follow_removed={bool(self.is_pcr_line_task and not bool(getattr(self, 'mono_ppo_direct_cmd', False)))} "
+                    f"legacy_follow_removed={bool(self.is_pcr_line_task and (not bool(getattr(self, 'mono_ppo_direct_cmd', False)) or bool(getattr(self.args, 'revision_contract', False))))} "
                     f"disable_pcr_gate_aux={bool(getattr(self, 'disable_pcr_gate_aux', False))} "
                     f"done_during={float(done_during.float().mean().item()):.4f} "
                     f"collision_reset={float(collision_reset_mask.float().mean().item()):.4f} "
@@ -5887,6 +5935,47 @@ def train(args):
     if args.mode == "student" and not getattr(args, "teacher_ckpt", None):
         raise ValueError("Student 模式必须提供 --pcr_ckpt，避免把纯视觉从头训练误记为蒸馏实验。")
     is_mono_ppo = bool(getattr(args, "mono_ppo", False))
+    reviewer_mono_actor_difficulty_zero = bool(is_mono_ppo and getattr(args, "revision_contract", False))
+    reviewer_mono_formal = bool(is_mono_ppo and getattr(args, "revision_contract", False))
+    if bool(getattr(args, "revision_contract", False)) and is_pcr_line_task_name(str(args.task)) and bool(getattr(args, "gate_use_difficulty", False)):
+        raise ValueError("revision_contract 的正式 PCR/Mono 禁止 --gate_use_difficulty；actor/critic difficulty 必须为零。")
+    if reviewer_mono_formal:
+        frozen_ints = {
+            "seed": (getattr(args, "seed", None), (1, 2, 3)),
+            "num_envs": (getattr(args, "num_envs", None), 256),
+            "num_steps": (getattr(args, "num_steps", None), 48),
+            "num_iterations": (getattr(args, "num_iterations", None), 3000),
+            "num_epochs": (getattr(args, "num_epochs", None), 5),
+            "mini_batch_size": (getattr(args, "mini_batch_size", None), 3072),
+            "pcr_avoid_pretrain_interactions": (getattr(args, "pcr_avoid_pretrain_interactions", None), 12_288_000),
+        }
+        frozen_floats = {
+            "lr": 3e-4,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.20,
+            "entropy_coef": 0.01,
+            "value_loss_coef": 1.0,
+            "max_grad_norm": 1.0,
+            "desired_kl": 0.01,
+        }
+        violations = []
+        for key, (actual, expected) in frozen_ints.items():
+            if key == "seed":
+                if actual not in expected:
+                    violations.append(f"{key}={actual} (expected one of {expected})")
+            elif int(actual) != int(expected):
+                violations.append(f"{key}={actual} (expected {expected})")
+        for key, expected in frozen_floats.items():
+            actual = float(getattr(args, key))
+            if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12):
+                violations.append(f"{key}={actual} (expected {expected})")
+        if str(getattr(args, "lr_schedule", "")) != "adaptive":
+            violations.append("lr_schedule must be adaptive")
+        if not bool(getattr(args, "use_clipped_value_loss", False)):
+            violations.append("use_clipped_value_loss must be true")
+        if violations:
+            raise ValueError("Reviewer-proof Mono-PPO frozen profile violation: " + "; ".join(violations))
     if is_mono_ppo and skill != "moe":
         raise ValueError("--mono_ppo 只用于 --skill moe 下的 PCR 外部 baseline。")
     if is_mono_ppo and args.mode != "teacher":
@@ -5897,16 +5986,20 @@ def train(args):
 
     env_cfg_override = None
     train_cfg_override = None
-    if task_registry is not None and not bool(getattr(args, "_entropy_coef_explicit", False)):
+    if task_registry is not None:
         env_cfg_override, train_cfg_override = task_registry.get_cfgs(name=args.task)
-        if train_cfg_override is not None:
+        if (
+            train_cfg_override is not None
+            and not bool(getattr(args, "_entropy_coef_explicit", False))
+            and not (is_mono_ppo and bool(getattr(args, "revision_contract", False)))
+        ):
             algo_cfg = getattr(train_cfg_override, "algorithm", None)
             if algo_cfg is not None and hasattr(algo_cfg, "entropy_coef"):
                 args.entropy_coef = float(getattr(algo_cfg, "entropy_coef"))
 
     # 创建环境
     env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
-    env.disable_pcr_gate_aux = bool(is_mono_ppo)
+    env.disable_pcr_gate_aux = bool(is_mono_ppo or getattr(args, "revision_contract", False))
     env.mono_ppo_direct_cmd = bool(is_mono_ppo)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
     is_pcr_output_task = bool(getattr(env, "is_pcr_line_task", False))
@@ -6171,6 +6264,10 @@ def train(args):
             "num_epochs",
             "mini_batch_size",
             "lr",
+            "lr_schedule",
+            "desired_kl",
+            "use_clipped_value_loss",
+            "pcr_avoid_pretrain_interactions",
             "egpo",
             "egpo_lr_guided",
             "egpo_lr_post",
@@ -6263,6 +6360,13 @@ def train(args):
                 "revision_contract": PCR_CANONICAL_REVISION,
                 "actor_state_mask_indices": [0, 1],
                 "map_semantics": "canonical_observed_2ch",
+                "actor_difficulty_semantics": (
+                    "zero" if is_mono_ppo or not gate_use_difficulty else "canonical_map_derived"
+                ),
+                "critic_difficulty_semantics": (
+                    "zero" if is_mono_ppo
+                    else ("canonical_map_derived" if gate_use_difficulty else "zero")
+                ),
             })
         meta["policy_goal_dim"] = int(policy_goal_dim)
         meta["obs_contract_version"] = (
@@ -6304,7 +6408,45 @@ def train(args):
         meta["target_lost_k"] = int(getattr(env, "target_lost_k", 0))
         meta["target_center_scale"] = float(getattr(env, "target_center_scale", 0.0))
         meta["target_visible_scale"] = float(getattr(env, "target_visible_scale", 0.0))
-        meta["mono_ppo_target_view_reward_auto"] = bool(is_mono_ppo)
+        meta["mono_ppo_target_view_reward_auto"] = bool(is_mono_ppo and not getattr(args, "revision_contract", False))
+        meta["reward_contract_version"] = (
+            "pcr_common_task_reward_v1" if bool(getattr(args, "revision_contract", False)) and (is_gate or is_mono_ppo)
+            else "legacy"
+        )
+        meta["reward_contract_exclusions"] = (
+            ["approach", "follow_outside", "target_center", "target_visible", "target_lost", "gate_smooth", "pcr_gate_aux", "pcr_yaw_suppress"]
+            if meta["reward_contract_version"] == "pcr_common_task_reward_v1" else []
+        )
+        meta["pcr_w_aux_is_method_auxiliary_loss"] = True
+        meta["ppo_profile"] = "reviewer_proof_mono_v1" if is_mono_ppo and getattr(args, "revision_contract", False) else "task_default"
+        meta["num_mini_batches"] = int(math.ceil(float(env.num_envs * args.num_steps) / float(args.mini_batch_size)))
+        meta["transitions_per_iteration"] = int(env.num_envs * args.num_steps)
+        meta["planned_total_transitions"] = int(env.num_envs * args.num_steps * args.num_iterations)
+        meta["optimizer_updates_planned"] = int(meta["num_mini_batches"] * args.num_epochs * args.num_iterations)
+        if meta["ppo_profile"] == "reviewer_proof_mono_v1":
+            avoid_pretrain = int(args.pcr_avoid_pretrain_interactions)
+            transitions_per_iteration = int(meta["transitions_per_iteration"])
+            full_transitions = int(meta["planned_total_transitions"])
+            if avoid_pretrain <= 0 or avoid_pretrain % transitions_per_iteration != 0:
+                raise ValueError("pcr_avoid_pretrain_interactions 必须是每 iteration transitions 的正整数倍。")
+            pcr_total_reference = avoid_pretrain + transitions_per_iteration * 1000
+            if pcr_total_reference > full_transitions or pcr_total_reference % transitions_per_iteration != 0:
+                raise ValueError("PCR total interaction reference 必须精确落在 Mono 3BG 预算内。")
+            pcr_total_completed_iteration = pcr_total_reference // transitions_per_iteration
+            if pcr_total_completed_iteration != 2000:
+                raise ValueError("PCR total interaction reference 必须精确对应 completed iteration 2000；不创建近似 checkpoint。")
+            meta["pcr_avoid_pretrain_interactions"] = avoid_pretrain
+            meta["gate_stage_interaction_reference"] = transitions_per_iteration * 1000
+            meta["pcr_total_high_level_learning_cost"] = pcr_total_reference
+            meta["pcr_total_reference_completed_iteration"] = pcr_total_completed_iteration
+            meta["full_training_interactions"] = full_transitions
+            meta["reviewer_checkpoint_roles"] = {
+                "completed_iteration_1000": "gate-stage interaction reference",
+                "completed_iteration_2000": "PCR-total-interaction reference",
+                "completed_iteration_3000": "full-training",
+            }
+        meta["trainable_parameter_count"] = int(sum(p.numel() for p in policy.parameters() if p.requires_grad))
+        meta["total_inference_parameter_count"] = int(sum(p.numel() for p in policy.parameters()))
         meta["run_mode_tag"] = run_mode_tag
         meta["online_best_metric"] = "online_mean_reward_monitor_only"
         meta["paper_eval_entry"] = "legged_gym/scripts/eval_highlevel.py"
@@ -6331,6 +6473,20 @@ def train(args):
                 },
                 "risk_barrier_scale": float(getattr(env.reward_cfg, "risk_barrier_scale", 0.0)),
             }
+        try:
+            meta["source_git_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+            meta["source_git_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())
+        except (OSError, subprocess.CalledProcessError):
+            meta["source_git_commit"] = "unknown"
+            meta["source_git_dirty"] = None
+        if reviewer_mono_formal and (
+            meta["source_git_commit"] == "unknown" or meta["source_git_dirty"] is not False
+        ):
+            raise ValueError(
+                "Reviewer-proof Mono-PPO 需要已固定且干净的 Git 源码树；"
+                "请先提交/固定代码，再启动正式训练。"
+            )
+        meta["config_sha256"] = hashlib.sha256(json.dumps(meta, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return meta
 
     def _check_checkpoint_meta(
@@ -6575,8 +6731,17 @@ def train(args):
     finetune_path = getattr(args, "finetune_from", None)
     if resume_path and finetune_path:
         raise ValueError("不能同时使用 --resume 与 --finetune_from。")
+    reviewer_mono_formal = bool(is_mono_ppo and getattr(args, "revision_contract", False))
+    if reviewer_mono_formal and resume_path:
+        raise ValueError(
+            "Reviewer-proof Mono-PPO 不允许 --resume：checkpoint 未保存 env/curriculum/physics 精确状态；"
+            "请使用同一 seed 从 completed iteration 0 重新连续训练到 3000。"
+        )
 
     start_iteration = 0
+    adaptive_learning_rate = float(args.lr)
+    optimizer_updates_completed = 0
+    elapsed_wall_seconds = 0.0
     best_reward = float("-inf")
     best_success = float("-inf")
     best_progress = float("-inf")
@@ -6613,6 +6778,10 @@ def train(args):
         else:
             raise ValueError("Resume checkpoint 未包含 optimizer_state_dict；请改用 --finetune_from。")
         start_iteration = int(ckpt.get("iteration", 0)) + 1 if isinstance(ckpt, dict) else 0
+        if isinstance(ckpt, dict):
+            adaptive_learning_rate = float(ckpt.get("adaptive_learning_rate", adaptive_learning_rate))
+            optimizer_updates_completed = int(ckpt.get("optimizer_updates_completed", 0))
+            elapsed_wall_seconds = float(ckpt.get("elapsed_wall_seconds", 0.0))
         best_reward = float(
             ckpt.get("best_online_reward", ckpt.get("best_reward", ckpt.get("mean_reward", -float("inf"))))
         ) if isinstance(ckpt, dict) else best_reward
@@ -6708,6 +6877,9 @@ def train(args):
                 bootstrap_aff_map, bootstrap_difficulty = _predict_actor_inputs(bootstrap_obs)
             else:
                 bootstrap_aff_map, bootstrap_difficulty = _get_actor_gt_inputs(bootstrap_obs)
+            if reviewer_mono_actor_difficulty_zero:
+                bootstrap_difficulty = torch.zeros_like(bootstrap_difficulty)
+                bootstrap_critic_difficulty = torch.zeros_like(bootstrap_critic_difficulty)
             bootstrap_aff_stack, bootstrap_critic_stack = _build_next_aff_stacks(
                 current_actor_stack,
                 current_critic_stack,
@@ -6797,7 +6969,12 @@ def train(args):
     # 训练内的 episode 回报统计
     running_returns = torch.zeros(env.num_envs, device=device)
     
-    total_iterations = start_iteration + args.num_iterations
+    if reviewer_mono_formal:
+        if int(args.num_iterations) != 3000 or start_iteration != 0:
+            raise RuntimeError("Reviewer-proof Mono-PPO 必须从 completed iteration 0 绝对连续训练到 3000。")
+        total_iterations = 3000
+    else:
+        total_iterations = start_iteration + args.num_iterations
     args.log_interval = max(1, int(args.num_iterations) // 20)
     expert_interface_iters = max(1, int(math.ceil(float(args.num_iterations) * float(EXPERT_INTERFACE_RATIO))))
     print(f"\n[Main] 开始训练 (iterations={args.num_iterations}, start={start_iteration})...")
@@ -6829,19 +7006,13 @@ def train(args):
             f"goal_dim={policy_goal_dim} aff_channels={aff_channels} "
             "cmd=[x_right,y_forward,yaw]"
         )
-        print(
-            "[Mono-PPO Reward] enabled: legacy follow approach/band, PCR progress/follow quality, "
-            "row avoidance, collision, stability"
-        )
-        print(
-            "[Mono-PPO Reward] disabled: PCR gate aux, learned-w aux, gate policy, expert BC"
-        )
-        print(
-            "[Mono-PPO TargetView] "
-            f"target_center_scale={float(getattr(env, 'target_center_scale', 0.0)):.3f} "
-            f"target_visible_scale={float(getattr(env, 'target_visible_scale', 0.0)):.3f} "
-            f"target_lost_k={int(getattr(env, 'target_lost_k', 0))}"
-        )
+        if reviewer_mono_formal:
+            print(
+                "[Mono-PPO SharedReward] enabled: common PCR core/row/avoid/collision/terminal/time/stability terms; "
+                "disabled: legacy approach/follow_outside/target-view, gate aux, gate smooth, yaw suppress"
+            )
+        else:
+            print("[Mono-PPO Reward] legacy non-reviewer reward path")
     dprint(
         f"  - Non-finite handling: "
         f"{'recovery(skip+sanitize)' if bool(getattr(args, 'allow_nonfinite_recovery', False)) else 'fail-fast'}"
@@ -6861,6 +7032,8 @@ def train(args):
     env.forced_forward_stage_start_iter = 0
     env.forced_forward_current_iter = 0
     env.forced_forward_stage_last = int(getattr(env.env, "s_avoid_stage", 1)) if bool(getattr(env.env, "s_avoid_enabled", False)) else -1
+    wall_time_base_seconds = elapsed_wall_seconds
+    training_wall_start = time.time()
     for iteration in range(start_iteration, total_iterations):
         start_time = time.time()
         local_iteration = max(0, iteration - start_iteration)
@@ -7067,6 +7240,11 @@ def train(args):
         aff_stack_std_sum = torch.zeros((), device=device)
         aff_stack_filled_sum = torch.zeros((), device=device)
         prev_cmd_slew = torch.zeros((env.num_envs, 3), device=device)
+        mono_action_std_sum = torch.zeros((), device=device)
+        mono_action_saturation_count = torch.zeros((), device=device)
+        mono_action_sample_count = torch.zeros((), device=device)
+        mono_post_clamp_count = torch.zeros((), device=device)
+        mono_post_clamp_sample_count = torch.zeros((), device=device)
         reset_mask_prev = torch.ones((env.num_envs,), dtype=torch.bool, device=device)
         cmd_x_switch_threshold = 0.02
         expert_action_diff_sum = torch.zeros((), device=device)
@@ -7189,6 +7367,9 @@ def train(args):
                 aff_map, difficulty = _predict_actor_inputs(obs_dict)
             else:
                 aff_map, difficulty = actor_gt_aff_map, actor_gt_difficulty
+            if reviewer_mono_actor_difficulty_zero:
+                difficulty = torch.zeros_like(difficulty)
+                critic_difficulty = torch.zeros_like(critic_difficulty)
 
             if use_avoid_local_map:
                 env.clearance_affordance_override = aff_map
@@ -7343,6 +7524,8 @@ def train(args):
             w_aux_label_step = None
             w_aux_valid_step = None
             row_not_released_step = None
+            rollout_cmd_mean = None
+            rollout_cmd_std = None
             if is_gate:
                 gate_difficulty = difficulty if gate_use_difficulty else torch.zeros_like(difficulty)
                 gate_critic_difficulty = critic_difficulty if gate_use_difficulty else torch.zeros_like(critic_difficulty)
@@ -7529,7 +7712,7 @@ def train(args):
                 with torch.no_grad():
                     # Mono-PPO and single-expert policies use the same command convention:
                     # action[:, 0] = x_right / lateral, action[:, 1] = y_forward / forward, action[:, 2] = yaw.
-                    cmd, _ = policy.get_action(
+                    cmd, rollout_action_info = policy.get_action(
                         aff_stack_buf,
                         state,
                         goal,
@@ -7540,6 +7723,15 @@ def train(args):
                         critic_goal=goal,
                         critic_terrain_difficulty=critic_difficulty,
                     )
+                    if is_mono_ppo:
+                        rollout_cmd_mean = rollout_action_info["cmd_mean"].detach()
+                        rollout_cmd_std = rollout_action_info["cmd_std"].detach()
+                        if bool(getattr(args, "revision_contract", False)):
+                            action_scale = policy.cmd_scale.detach().abs().clamp_min(1e-6).view(1, -1)
+                            normalized_action = cmd.detach() / action_scale
+                            mono_action_std_sum += rollout_cmd_std.mean(dim=-1).sum()
+                            mono_action_saturation_count += (normalized_action.abs() >= 0.95).any(dim=-1).float().sum()
+                            mono_action_sample_count += float(cmd.shape[0])
                     cmd, cmd_bad = _sanitize_or_fail_action_tensor(
                         "policy_action",
                         cmd.detach(),
@@ -7738,6 +7930,8 @@ def train(args):
                 w_aux_label_step.detach() if w_aux_label_step is not None else None,
                 w_aux_valid_step.detach() if w_aux_valid_step is not None else None,
                 row_not_released_step.detach() if row_not_released_step is not None else None,
+                rollout_cmd_mean,
+                rollout_cmd_std,
             )
 
             # 统计分量与行为
@@ -7857,6 +8051,15 @@ def train(args):
                     prev_y_eff = y_eff.detach().clone()
             cmd_diag_exec = None
             post_info = env_info.get('post_info', None) if env_info is not None else None
+            if is_mono_ppo and bool(getattr(args, "revision_contract", False)) and isinstance(post_info, dict):
+                raw_for_clamp = post_info.get("cmd_raw", None)
+                clamped_for_clamp = post_info.get("cmd_clamped", None)
+                if raw_for_clamp is not None and clamped_for_clamp is not None:
+                    raw_for_clamp = torch.as_tensor(raw_for_clamp, device=device)
+                    clamped_for_clamp = torch.as_tensor(clamped_for_clamp, device=device)
+                    if raw_for_clamp.shape == clamped_for_clamp.shape and raw_for_clamp.ndim == 2:
+                        mono_post_clamp_count += (torch.abs(raw_for_clamp - clamped_for_clamp) > 1e-6).any(dim=-1).float().sum()
+                        mono_post_clamp_sample_count += float(raw_for_clamp.shape[0])
             if post_info is not None and isinstance(post_info, dict):
                 cmd_diag_exec = post_info.get('cmd_exec_mean', None)
                 if cmd_diag_exec is None:
@@ -8387,6 +8590,9 @@ def train(args):
                 aff_map_next, difficulty = _predict_actor_inputs(obs_dict)
             else:
                 aff_map_next, difficulty = _get_actor_gt_inputs(obs_dict)
+            if reviewer_mono_actor_difficulty_zero:
+                difficulty = torch.zeros_like(difficulty)
+                critic_difficulty_next = torch.zeros_like(critic_difficulty_next)
             
             if aff_stack_buf is None:
                 aff_stack_bootstrap = aff_map_next.repeat(1, aff_stack, 1, 1)
@@ -8506,6 +8712,7 @@ def train(args):
         w_aux_valid_ratio_sum = 0
         expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
+        exact_kl_sum = 0
         clip_frac_sum = 0
         num_updates = 0
         expert_alpha_update = (
@@ -8515,7 +8722,7 @@ def train(args):
         if use_egpo:
             current_lr = args.egpo_lr_post if expert_alpha_update <= 0.0 else args.egpo_lr_guided
         else:
-            current_lr = args.lr
+            current_lr = adaptive_learning_rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
         skipped_nonfinite_updates = 0
@@ -8561,6 +8768,9 @@ def train(args):
                 mb_action_valid = buffer.action_valid[step_idx, env_idx].bool()
                 mb_advantages = advantages[step_idx, env_idx]
                 mb_returns = returns[step_idx, env_idx]
+                mb_old_values = buffer.values[step_idx, env_idx]
+                mb_old_cmd_means = buffer.cmd_means[step_idx, env_idx]
+                mb_old_cmd_stds = buffer.cmd_stds[step_idx, env_idx]
                 mb_w_aux_labels = buffer.w_aux_labels[step_idx, env_idx]
                 mb_w_aux_valid = buffer.w_aux_valid[step_idx, env_idx].bool()
                 
@@ -8575,6 +8785,9 @@ def train(args):
                 mb_old_log_probs = torch.nan_to_num(mb_old_log_probs, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_advantages = torch.nan_to_num(mb_advantages, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_returns = torch.nan_to_num(mb_returns, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_old_values = torch.nan_to_num(mb_old_values, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_old_cmd_means = torch.nan_to_num(mb_old_cmd_means, nan=0.0, posinf=0.0, neginf=0.0)
+                mb_old_cmd_stds = torch.nan_to_num(mb_old_cmd_stds, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(1e-6)
                 mb_w_aux_labels = torch.nan_to_num(mb_w_aux_labels, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_states = torch.nan_to_num(mb_states, nan=0.0, posinf=0.0, neginf=0.0)
                 mb_goals = torch.nan_to_num(mb_goals, nan=0.0, posinf=0.0, neginf=0.0)
@@ -8631,6 +8844,35 @@ def train(args):
                         try_sanitize=True,
                     )
                     continue
+
+                if (
+                    is_mono_ppo
+                    and str(getattr(args, "lr_schedule", "fixed")) == "adaptive"
+                    and isinstance(policy_eval_info, dict)
+                    and mb_action_valid.any()
+                ):
+                    new_cmd_mean = policy_eval_info["cmd_mean"][mb_action_valid]
+                    new_cmd_std = policy_eval_info["cmd_std"][mb_action_valid].clamp_min(1e-6)
+                    old_cmd_mean = mb_old_cmd_means[mb_action_valid]
+                    old_cmd_std = mb_old_cmd_stds[mb_action_valid]
+                    exact_kl = torch.sum(
+                        torch.log(new_cmd_std / old_cmd_std)
+                        + (old_cmd_std.square() + (old_cmd_mean - new_cmd_mean).square()) / (2.0 * new_cmd_std.square())
+                        - 0.5,
+                        dim=-1,
+                    ).mean()
+                    if not torch.isfinite(exact_kl):
+                        _handle_nonfinite_event("non-finite exact Gaussian KL", epoch=epoch, try_sanitize=False)
+                        continue
+                    exact_kl_value = float(exact_kl.detach().item())
+                    exact_kl_sum += exact_kl_value
+                    if exact_kl_value > 2.0 * float(args.desired_kl):
+                        adaptive_learning_rate = max(1e-5, adaptive_learning_rate / 1.5)
+                    elif 0.0 < exact_kl_value < 0.5 * float(args.desired_kl):
+                        adaptive_learning_rate = min(1e-2, adaptive_learning_rate * 1.5)
+                    current_lr = adaptive_learning_rate
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = current_lr
                 if (
                     log_memory_this_iter
                     and debug_memory_device_index is not None
@@ -8678,8 +8920,18 @@ def train(args):
                 # Value loss only on true on-policy samples.
                 value_loss = torch.tensor(0.0, device=device)
                 if mb_action_valid.any():
-                    value_err = new_values.squeeze(-1)[mb_action_valid] - mb_returns[mb_action_valid]
-                    value_loss = 0.5 * (value_err ** 2).mean()
+                    new_value_flat = new_values.squeeze(-1)[mb_action_valid]
+                    if bool(getattr(args, "use_clipped_value_loss", False)):
+                        old_value_flat = mb_old_values[mb_action_valid]
+                        value_pred_clipped = old_value_flat + (new_value_flat - old_value_flat).clamp(
+                            -args.clip_range, args.clip_range
+                        )
+                        value_loss = 0.5 * torch.maximum(
+                            (new_value_flat - mb_returns[mb_action_valid]).square(),
+                            (value_pred_clipped - mb_returns[mb_action_valid]).square(),
+                        ).mean()
+                    else:
+                        value_loss = 0.5 * (new_value_flat - mb_returns[mb_action_valid]).square().mean()
                 
                 # Entropy Loss
                 entropy_loss = torch.tensor(0.0, device=device)
@@ -8839,6 +9091,7 @@ def train(args):
                 w_aux_valid_ratio_sum += w_aux_valid_ratio.item()
                 expert_log_prob_mean_sum += expert_log_prob_mean.item()
                 num_updates += 1
+                optimizer_updates_completed += 1
 
                 del (
                     mb_actions,
@@ -9163,6 +9416,15 @@ def train(args):
         writer.add_scalar('Perf/RolloutRewardResidual', resid_rollout, iteration)
         writer.add_scalar('Perf/FPS', fps, iteration)
         writer.add_scalar('Perf/LearningRate', current_lr, iteration)
+        if is_mono_ppo and bool(getattr(args, "revision_contract", False)):
+            completed_iteration = iteration + 1
+            elapsed_wall_seconds = float(wall_time_base_seconds + (time.time() - training_wall_start))
+            writer.add_scalar('ReviewerMono/CumulativeEnvironmentInteractions', completed_iteration * env.num_envs * args.num_steps, iteration)
+            writer.add_scalar('ReviewerMono/CumulativeOptimizerUpdates', optimizer_updates_completed, iteration)
+            writer.add_scalar('ReviewerMono/CumulativeWallTimeHours', elapsed_wall_seconds / 3600.0, iteration)
+            writer.add_scalar('ReviewerMono/LatentGaussianActionStdMean', (mono_action_std_sum / mono_action_sample_count.clamp_min(1.0)).item(), iteration)
+            writer.add_scalar('ReviewerMono/NormalizedActionSaturationRate', (mono_action_saturation_count / mono_action_sample_count.clamp_min(1.0)).item(), iteration)
+            writer.add_scalar('ReviewerMono/PostprocessorRawToClampedRate', (mono_post_clamp_count / mono_post_clamp_sample_count.clamp_min(1.0)).item(), iteration)
         writer.add_scalar('Perf/GoalChangeCount', mean_goal_changes, iteration)
         writer.add_scalar('Perf/FollowDistMean', follow_dist_mean, iteration)
         writer.add_scalar('Perf/FollowDistStd', follow_dist_std, iteration)
@@ -9192,6 +9454,8 @@ def train(args):
         if terrain_level_max is not None:
             writer.add_scalar('Perf/TerrainLevelMax', terrain_level_max, iteration)
         writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
+        if is_mono_ppo and str(getattr(args, "lr_schedule", "fixed")) == "adaptive":
+            writer.add_scalar('Diag/ExactGaussianKL', exact_kl_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)
@@ -9599,19 +9863,36 @@ def train(args):
         
         # Save checkpoint
         fixed_checkpoint_interval = 100
+        completed_iteration = iteration + 1
+        reviewer_mono = is_mono_ppo and bool(getattr(args, "revision_contract", False))
+        reviewer_budget_marker = (
+            is_mono_ppo
+            and bool(getattr(args, "revision_contract", False))
+            and completed_iteration in (1000, 2000, 3000)
+        )
         should_save_checkpoint = (
             iteration == total_iterations - 1
+            or reviewer_budget_marker
             or (
-                iteration > 0 and (
+                reviewer_mono and completed_iteration % 100 == 0
+            )
+            or (
+                not reviewer_mono and iteration > 0 and (
                     iteration % args.save_interval == 0
                     or iteration % fixed_checkpoint_interval == 0
                 )
             )
         )
         if should_save_checkpoint:
-            ckpt_path = os.path.join(log_dir, f'model_{iteration}.pt')
+            ckpt_name = f'model_completed_iter_{completed_iteration}.pt' if reviewer_mono else f'model_{iteration}.pt'
+            ckpt_path = os.path.join(log_dir, ckpt_name)
             torch.save({
                 'iteration': iteration,
+                'completed_iterations': completed_iteration,
+                'completed_transitions': int(completed_iteration * env.num_envs * args.num_steps),
+                'adaptive_learning_rate': adaptive_learning_rate,
+                'optimizer_updates_completed': optimizer_updates_completed,
+                'elapsed_wall_seconds': elapsed_wall_seconds,
                 'model_state_dict': policy.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'mean_reward': mean_reward,
@@ -9632,6 +9913,19 @@ def train(args):
                 'numpy_rng_state': np.random.get_state(),
                 'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }, ckpt_path)
+            if reviewer_budget_marker:
+                checkpoint_role = {
+                    1000: "gate_stage_interaction_reference",
+                    2000: "pcr_total_interaction_reference",
+                    3000: "full_training",
+                }[completed_iteration]
+                marker_path = os.path.join(log_dir, f"{checkpoint_role}_completed_iter_{completed_iteration}_transitions_{completed_iteration * env.num_envs * args.num_steps}.pt")
+                if os.path.exists(marker_path):
+                    os.unlink(marker_path)
+                try:
+                    os.link(ckpt_path, marker_path)
+                except OSError:
+                    shutil.copy2(ckpt_path, marker_path)
             dprint(f"  Saved: {ckpt_path}")
         
         # Save best online-monitor checkpoint.
@@ -9648,7 +9942,7 @@ def train(args):
             )
         else:
             current_best_tuple = (best_reward,)
-        if online_selection_metric > current_best_tuple and len(episode_rewards) >= 10:
+        if (not reviewer_mono_formal) and online_selection_metric > current_best_tuple and len(episode_rewards) >= 10:
             if is_avoid_output_task:
                 best_success, best_progress, best_reward = online_selection_metric
             elif is_pcr_output_task:
@@ -9668,6 +9962,10 @@ def train(args):
             best_path = os.path.join(log_dir, 'best_online_reward.pt')
             torch.save({
                 'iteration': iteration,
+                'completed_iterations': iteration + 1,
+                'adaptive_learning_rate': adaptive_learning_rate,
+                'optimizer_updates_completed': optimizer_updates_completed,
+                'elapsed_wall_seconds': elapsed_wall_seconds,
                 'model_state_dict': policy.state_dict(),
                 'mean_reward': mean_reward,
                 'best_reward': best_reward,
@@ -9788,6 +10086,10 @@ if __name__ == "__main__":
                         help='Mini-batch 大小')
     parser.add_argument('--lr', type=float, default=1.5e-5,
                         help='学习率')
+    parser.add_argument('--lr_schedule', choices=['fixed', 'adaptive'], default='fixed',
+                        help='PPO learning-rate schedule')
+    parser.add_argument('--desired_kl', type=float, default=0.01,
+                        help='adaptive PPO target KL')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='折扣因子')
     parser.add_argument('--gae_lambda', type=float, default=0.95,
@@ -9802,6 +10104,10 @@ if __name__ == "__main__":
                         help='蒸馏 loss 系数 (Student 模式)')
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help='梯度裁剪')
+    parser.add_argument('--use_clipped_value_loss', action='store_true',
+                        help='use PPO clipped value loss')
+    parser.add_argument('--pcr_avoid_pretrain_interactions', type=int, default=12_288_000,
+                        help='Reviewer Mono only: official Avoid pretraining interaction cost used for PCR-total reference')
     parser.add_argument('--cmd_slew_lin', type=float, default=0.2,
                         help='命令线速度变化率限制')
     parser.add_argument('--cmd_slew_ang', type=float, default=0.4,
