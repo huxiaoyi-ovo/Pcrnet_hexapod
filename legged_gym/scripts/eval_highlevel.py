@@ -11,6 +11,7 @@ Design principles:
 import os
 import sys
 import csv
+import hashlib
 import json
 import math
 import time
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import isaacgym  # noqa: F401  # ensure isaacgym is imported before torch
-from isaacgym import gymapi
+from isaacgym import gymapi, gymtorch
 import numpy as np
 import torch
 
@@ -30,6 +31,186 @@ sys.path.insert(0, PROJECT_ROOT)
 from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
 from legged_gym.scripts import play_highlevel as ph
 from legged_gym.scripts import train_highlevel as th
+
+
+_TRACK_B_ORIGINAL_EFFECTIVE_SAFE_FREE = th._get_effective_safe_free_dist
+_TRACK_B_V1_DIFFICULTIES = (0.0, 0.25, 0.50, 0.75, 1.0)
+_TRACK_B_LAYOUT_FLOAT_QUANTUM = 1.0e-5
+_TRACK_B_RESTORE_FLOAT_ATOL = 2.0e-5
+_TRACK_B_LAYOUT_PROVENANCE_KEYS = {
+    "layout_id", "manifest_entry_id", "canonical_episode_id", "source_env_id",
+    "source_env_seed", "env_seed", "env_id", "local_episode_slot",
+    "s_avoid_episode_counter",
+}
+_TRACK_B_RESTORE_DISCRETE_KEYS = {
+    "env_id", "local_episode_slot", "s_avoid_stage",
+    "s_avoid_episode_counter", "target_line_finished",
+}
+
+
+def _track_b_difficulty_counts(episodes: int, difficulties: List[float]) -> List[int]:
+    if episodes <= 0 or not difficulties:
+        raise ValueError("Track-B requires positive episodes and at least one difficulty")
+    per_level = int(math.ceil(float(episodes) / float(len(difficulties))))
+    remaining = int(episodes)
+    counts = []
+    for _ in difficulties:
+        count = min(per_level, remaining)
+        counts.append(count)
+        remaining -= count
+    if remaining != 0:
+        raise RuntimeError("Track-B difficulty allocation did not consume all episodes")
+    return counts
+
+
+def _track_b_normalize_layout_value(value):
+    """Normalize float32 local-coordinate roundoff, never the stored replay state."""
+    if isinstance(value, dict):
+        return {
+            key: _track_b_normalize_layout_value(item)
+            for key, item in value.items()
+            if key not in _TRACK_B_LAYOUT_PROVENANCE_KEYS
+        }
+    if isinstance(value, list):
+        return [_track_b_normalize_layout_value(item) for item in value]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return value
+        return round(float(value) / _TRACK_B_LAYOUT_FLOAT_QUANTUM) * _TRACK_B_LAYOUT_FLOAT_QUANTUM
+    return value
+
+
+def _track_b_layout_id(payload: Dict) -> str:
+    """ID the normalized physical task state; raw float32 values stay in the manifest."""
+    layout_payload = _track_b_normalize_layout_value(payload)
+    return hashlib.sha256(_json_dumps_compact(layout_payload).encode("utf-8")).hexdigest()
+
+
+def _track_b_raw_values_match(expected, observed) -> bool:
+    if isinstance(expected, dict):
+        return (
+            isinstance(observed, dict)
+            and set(expected) == set(observed)
+            and all(_track_b_raw_values_match(expected[key], observed[key]) for key in expected)
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(observed, list)
+            and len(expected) == len(observed)
+            and all(_track_b_raw_values_match(left, right) for left, right in zip(expected, observed))
+        )
+    if isinstance(expected, bool):
+        return isinstance(observed, bool) and expected == observed
+    if isinstance(expected, int) and not isinstance(expected, bool):
+        return isinstance(observed, int) and expected == observed
+    if isinstance(expected, (float, int)) and isinstance(observed, (float, int)):
+        expected, observed = float(expected), float(observed)
+        return (
+            (math.isnan(expected) and math.isnan(observed))
+            or abs(expected - observed) <= _TRACK_B_RESTORE_FLOAT_ATOL
+        )
+    return expected == observed
+
+
+def _track_b_assert_restore_matches(entry: Dict, restored: Dict) -> None:
+    for key in _TRACK_B_RESTORE_DISCRETE_KEYS:
+        if entry.get(key) != restored.get(key):
+            raise RuntimeError(f"Track-B manifest restoration changed discrete field: {key}")
+    expected_raw = {
+        key: value for key, value in entry.items()
+        if key not in _TRACK_B_LAYOUT_PROVENANCE_KEYS
+    }
+    observed_raw = {
+        key: value for key, value in restored.items()
+        if key not in _TRACK_B_LAYOUT_PROVENANCE_KEYS
+    }
+    if not _track_b_raw_values_match(expected_raw, observed_raw):
+        raise RuntimeError(
+            "Track-B manifest restoration exceeded "
+            f"float32 local-origin tolerance ({_TRACK_B_RESTORE_FLOAT_ATOL:g})"
+        )
+    if restored["layout_id"] != entry["layout_id"]:
+        raise RuntimeError("Track-B manifest restoration changed normalized layout_id")
+
+
+def _track_b_effective_safe_free_dist(env, beta, *, device, dtype) -> Tuple[float, float]:
+    """Apply Track-B sensitivity only to learned-w risk construction."""
+    override = getattr(env, "_track_b_risk_mapping_override", None)
+    if override is not None:
+        safe_d, free_d = (float(override[0]), float(override[1]))
+        if not (math.isfinite(safe_d) and math.isfinite(free_d) and free_d > safe_d):
+            raise RuntimeError("invalid Track-B risk mapping override")
+        return safe_d, free_d
+    return _TRACK_B_ORIGINAL_EFFECTIVE_SAFE_FREE(env, beta, device=device, dtype=dtype)
+
+
+def _install_track_b_risk_mapping_override() -> None:
+    if th._get_effective_safe_free_dist is not _track_b_effective_safe_free_dist:
+        th._get_effective_safe_free_dist = _track_b_effective_safe_free_dist
+
+
+def _project_avoid_for_pcr(cmd_a: torch.Tensor) -> torch.Tensor:
+    """Historical PCR's lateral-only Avoid proposal."""
+    if cmd_a.ndim != 2 or cmd_a.shape[1] < 3:
+        raise ValueError(f"invalid Avoid command shape for PCR projection: {tuple(cmd_a.shape)}")
+    cmd_a_eff = cmd_a.clone()
+    cmd_a_eff[:, 1] = 0.0
+    cmd_a_eff[:, 2] = 0.0
+    return cmd_a_eff
+
+
+def _compute_fixed_authority_diag(cmd_f: torch.Tensor, cmd_a: torch.Tensor, y_const: float) -> Dict[str, torch.Tensor]:
+    """Frozen Track-B Fixed-Authority fusion without any Gate/dynamic input."""
+    if not (math.isfinite(float(y_const)) and 0.0 <= float(y_const) <= 1.0):
+        raise ValueError("fixed authority y must be finite and in [0, 1]")
+    cmd_a_eff = _project_avoid_for_pcr(cmd_a)
+    y_eff = torch.full_like(cmd_f[:, 0], float(y_const))
+    zero = torch.zeros_like(y_eff)
+    nan = torch.full_like(y_eff, float("nan"))
+    cmd = y_eff.unsqueeze(1) * cmd_f + (1.0 - y_eff.unsqueeze(1)) * cmd_a_eff
+    return {
+        "cmd": cmd,
+        "cmd_f": cmd_f,
+        "cmd_a": cmd_a_eff,
+        "gate_y_raw": nan,
+        "gate_y": nan,
+        "gate_y_safe": nan,
+        "y_eff": y_eff,
+        "w": nan,
+        "signed_w": nan,
+        "signed_w_active": zero,
+        "w_support_correction": zero,
+        "risk_diff_correction": zero,
+        "delta_y_w_raw": zero,
+        "delta_y_w_used": zero,
+        "delta_y_r": zero,
+        "delta_y_total": zero,
+        "risk_memory": zero,
+        "clearance_F": nan,
+        "clearance_A": nan,
+        "risk_F": nan,
+        "risk_A": nan,
+        "row_current_valid": zero,
+        "row_not_released": zero,
+        "current_row_front_edge": zero,
+        "current_row_back_edge": zero,
+        "robot_front_y": zero,
+        "robot_rear_y": zero,
+        "cmd_cos": nan,
+        "conflict_score": nan,
+        "post_safe_distance": nan,
+        "post_free_distance": nan,
+        "gate_safe_clamp_mask": torch.zeros_like(y_eff, dtype=torch.bool),
+        "fixed_authority_const": y_eff,
+    }
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _to_state_dict(ckpt_obj):
@@ -1542,6 +1723,10 @@ class EpisodeAccumulator:
     prev_progress_val: float = float("nan")
     prev_y_eff: Optional[float] = None
     prev_cmd_final: Optional[list] = None
+    canonical_episode_id: Optional[int] = None
+    manifest_entry_id: str = ""
+    layout_id: str = ""
+    difficulty: Optional[float] = None
     timeseries: list = field(default_factory=list)
     cmd_f_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
     cmd_a_sum: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -1558,6 +1743,43 @@ class EvalRunner:
         runtime = ph.build_play_runtime_for_eval(self.args, self.device)
         self.args = runtime.args
         self.env = runtime.env
+        self.is_fixed_authority = bool(getattr(self.args, "fixed_authority", False))
+        self.gate_policy_call_count = 0
+        self.fixed_dynamic_fields_consumed = False
+        self.risk_mapping_safe_distance = None
+        self.risk_mapping_free_distance = None
+        self.postprocess_safe_distance = float(getattr(self.env.post_processor, "safe_distance", float("nan")))
+        self.postprocess_free_distance = float(getattr(self.env.post_processor, "free_distance", float("nan")))
+        risk_safe = getattr(self.args, "risk_mapping_safe_dist", None)
+        risk_free = getattr(self.args, "risk_mapping_free_dist", None)
+        if (risk_safe is None) != (risk_free is None):
+            raise ValueError("Track-B risk override requires both d_safe and d_free")
+        if self.is_fixed_authority and risk_safe is not None:
+            raise ValueError("Fixed-Authority must not receive a risk override")
+        if risk_safe is not None:
+            if self.args.cmd_safe_dist is not None or self.args.cmd_free_dist is not None:
+                raise ValueError("Track-B risk override must not alter postprocessor distances")
+            if str(getattr(self.args, "w_mode", "")) != "learnedw2":
+                raise ValueError("Track-B risk override requires frozen learnedw2 PCR")
+            safe_d, free_d = float(risk_safe), float(risk_free)
+            if not (math.isfinite(safe_d) and math.isfinite(free_d) and free_d > safe_d):
+                raise ValueError("Track-B risk override requires finite d_free > d_safe")
+            if not (
+                math.isclose(self.postprocess_safe_distance, 0.27, rel_tol=0.0, abs_tol=1e-8)
+                and math.isclose(self.postprocess_free_distance, 0.57, rel_tol=0.0, abs_tol=1e-8)
+            ):
+                raise RuntimeError("Track-B requires nominal postprocessor d_safe/d_free = 0.27/0.57")
+            self.env._track_b_risk_mapping_override = (safe_d, free_d)
+            _install_track_b_risk_mapping_override()
+            self.risk_mapping_safe_distance = safe_d
+            self.risk_mapping_free_distance = free_d
+        self._track_b_manifest = None
+        self._track_b_entries = {}
+        self._track_b_slots_per_env = 0
+        self._track_b_next_slot = []
+        self._track_b_active_entry = []
+        self._track_b_completed = set()
+        self._track_b_reset_installed = False
 
         self.aff_stack = max(int(getattr(self.args, "aff_stack", 1)), 1)
         self.is_mono_ppo = bool(getattr(self.args, "mono_ppo", False))
@@ -1597,6 +1819,20 @@ class EvalRunner:
             primary_meta=self.policy_meta if isinstance(self.policy_meta, dict) else self.primary_meta,
             aux_sources=self.aux_checkpoint_meta,
         )
+        self.resolved_protocol["track_b_risk_mapping"] = {
+            "enabled": self.risk_mapping_safe_distance is not None,
+            "safe_distance": self.risk_mapping_safe_distance,
+            "free_distance": self.risk_mapping_free_distance,
+            "postprocess_safe_distance": self.postprocess_safe_distance,
+            "postprocess_free_distance": self.postprocess_free_distance,
+            "postprocessor_unchanged": True,
+        }
+        self.resolved_protocol["track_b_fixed_authority"] = {
+            "enabled": self.is_fixed_authority,
+            "y_const": float(self.args.fixed_y_const) if self.is_fixed_authority else None,
+            "gate_policy_call_count": 0,
+            "dynamic_fields_consumed": False,
+        }
         self._layout_debug_exported = False
 
     def _export_eval_layout_debug_once(self) -> None:
@@ -1722,6 +1958,284 @@ class EvalRunner:
         except Exception as exc:
             print(f"[Eval] layout PNG export failed: {exc}", flush=True)
         print(f"[Eval] layout export: {out_dir}", flush=True)
+
+    def _track_b_capture_entry(self, env_id: int, slot: int, difficulty: float) -> Dict:
+        """Capture the complete reset-varying legacy PCR task instance in local coordinates."""
+        base = self.env.env
+        origin = base.env_origins[env_id, :3]
+        root = base.root_states[env_id].detach().clone()
+        root[:3] -= origin
+        obstacle_pos = base.s_avoid_pos_world[env_id].detach().clone() - origin.view(1, 3)
+        episode_counter = int(base.s_avoid_env_episode_count[env_id].item())
+        source_episode_idx = max(0, episode_counter - 1)
+        payload = {
+            "manifest_entry_id": f"env_{env_id:03d}_slot_{slot}",
+            "env_id": int(env_id),
+            "local_episode_slot": int(slot),
+            "difficulty": float(difficulty),
+            "speed_mps": float(getattr(base.nav_cfg, "moving_target_pcr_line_speed", float("nan"))),
+            "env_seed": int(getattr(base.cfg.terrain, "avoid_seed", 7001)) + env_id * 10007 + source_episode_idx * 131,
+            "robot_root_local": root.detach().cpu().tolist(),
+            "dof_pos": base.dof_pos[env_id].detach().cpu().tolist(),
+            "dof_vel": base.dof_vel[env_id].detach().cpu().tolist(),
+            "s_avoid_active": base.s_avoid_active[env_id].detach().cpu().tolist(),
+            "s_avoid_pos_local": obstacle_pos.detach().cpu().tolist(),
+            "s_avoid_quat": base.s_avoid_quat_world[env_id].detach().cpu().tolist(),
+            "s_avoid_stage": int(base.s_avoid_stage_per_env[env_id].item()),
+            "s_avoid_episode_counter": int(base.s_avoid_env_episode_count[env_id].item()),
+            "s_avoid_band_local": [
+                float(base.s_avoid_band_x_min[env_id].item() - origin[0].item()),
+                float(base.s_avoid_band_x_max[env_id].item() - origin[0].item()),
+                float(base.s_avoid_band_y_min[env_id].item() - origin[1].item()),
+                float(base.s_avoid_band_y_max[env_id].item() - origin[1].item()),
+            ],
+            "target_world_local": (base.target_world[env_id] - origin[:2]).detach().cpu().tolist(),
+            "target_vel_world": base.target_vel_world[env_id].detach().cpu().tolist(),
+            "target_heading": float(base.target_heading[env_id].item()),
+            "target_heading_des": float(base.target_heading_des[env_id].item()),
+            "target_speed": float(base.target_speed[env_id].item()),
+            "target_speed_des": float(base.target_speed_des[env_id].item()),
+            "target_line_finished": bool(base.target_line_finished[env_id].item()),
+            "target_cmd_timer": float(base.target_cmd_timer[env_id].item()),
+            "target_freeze_timer": float(base.target_freeze_timer[env_id].item()),
+            "target_speed_phase": float(base.target_speed_phase[env_id].item()),
+            "goal_world_local": (base.goal_world[env_id] - origin[:2]).detach().cpu().tolist(),
+        }
+        payload["layout_id"] = _track_b_layout_id(payload)
+        return payload
+
+    def _track_b_apply_entry_difficulty(self, env_id: int, entry: Dict) -> None:
+        """Make the restored entry's V1 difficulty authoritative for observations/resets."""
+        difficulty = float(entry["difficulty"])
+        if not (math.isfinite(difficulty) and difficulty in _TRACK_B_V1_DIFFICULTIES):
+            raise RuntimeError("Track-B manifest has an invalid per-entry difficulty")
+        base = self.env.env
+        override = getattr(self.env, "scene_difficulty_override", None)
+        if torch.is_tensor(override) and override.numel() == self.env.num_envs:
+            override[env_id] = difficulty
+            self.env.scene_difficulty_override = override
+        base_override = getattr(base, "scene_difficulty_override", None)
+        if torch.is_tensor(base_override) and base_override.numel() == self.env.num_envs:
+            base_override[env_id] = difficulty
+        else:
+            base.scene_difficulty_override = torch.full(
+                (self.env.num_envs,), difficulty, device=base.device, dtype=torch.float32
+            )
+
+    def _track_b_restore_entry(self, env_id: int, entry: Dict) -> None:
+        base = self.env.env
+        if int(entry["env_id"]) != env_id:
+            raise RuntimeError("Track-B manifest entry/environment mismatch")
+        origin = base.env_origins[env_id, :3]
+        root = torch.tensor(entry["robot_root_local"], device=base.device, dtype=base.root_states.dtype)
+        root[:3] += origin
+        base.root_states[env_id] = root
+        base.dof_pos[env_id] = torch.tensor(entry["dof_pos"], device=base.device, dtype=base.dof_pos.dtype)
+        base.dof_vel[env_id] = torch.tensor(entry["dof_vel"], device=base.device, dtype=base.dof_vel.dtype)
+        base.s_avoid_active[env_id] = torch.tensor(entry["s_avoid_active"], device=base.device, dtype=torch.bool)
+        base.s_avoid_pos_world[env_id] = torch.tensor(entry["s_avoid_pos_local"], device=base.device, dtype=base.s_avoid_pos_world.dtype) + origin.view(1, 3)
+        base.s_avoid_quat_world[env_id] = torch.tensor(entry["s_avoid_quat"], device=base.device, dtype=base.s_avoid_quat_world.dtype)
+        base.s_avoid_stage_per_env[env_id] = int(entry["s_avoid_stage"])
+        base.s_avoid_env_episode_count[env_id] = int(entry["s_avoid_episode_counter"])
+        band = entry["s_avoid_band_local"]
+        base.s_avoid_band_x_min[env_id] = float(band[0]) + origin[0]
+        base.s_avoid_band_x_max[env_id] = float(band[1]) + origin[0]
+        base.s_avoid_band_y_min[env_id] = float(band[2]) + origin[1]
+        base.s_avoid_band_y_max[env_id] = float(band[3]) + origin[1]
+        base.target_world[env_id] = torch.tensor(entry["target_world_local"], device=base.device, dtype=base.target_world.dtype) + origin[:2]
+        base.target_vel_world[env_id] = torch.tensor(entry["target_vel_world"], device=base.device, dtype=base.target_vel_world.dtype)
+        base.target_heading[env_id] = float(entry["target_heading"])
+        base.target_heading_des[env_id] = float(entry["target_heading_des"])
+        base.target_speed[env_id] = float(entry["target_speed"])
+        base.target_speed_des[env_id] = float(entry["target_speed_des"])
+        base.target_line_finished[env_id] = bool(entry["target_line_finished"])
+        base.target_cmd_timer[env_id] = float(entry["target_cmd_timer"])
+        base.target_freeze_timer[env_id] = float(entry["target_freeze_timer"])
+        base.target_speed_phase[env_id] = float(entry["target_speed_phase"])
+        base.goal_world[env_id] = torch.tensor(entry["goal_world_local"], device=base.device, dtype=base.goal_world.dtype) + origin[:2]
+        self._track_b_apply_entry_difficulty(env_id, entry)
+        ids = torch.tensor([env_id], device=base.device, dtype=torch.long)
+        base._sync_robot_root_states(ids)
+        actor_ids = base.robot_actor_indices_int32[ids] if base.robot_actor_indices_int32 is not None else ids.to(dtype=torch.int32)
+        base.gym.set_dof_state_tensor_indexed(base.sim, gymtorch.unwrap_tensor(base.dof_state), gymtorch.unwrap_tensor(actor_ids), int(actor_ids.numel()))
+        base._sync_s_avoid_obstacles(ids)
+        restored = self._track_b_capture_entry(env_id, int(entry["local_episode_slot"]), float(entry["difficulty"]))
+        _track_b_assert_restore_matches(entry, restored)
+
+    def generate_track_b_manifest(self, path: str) -> Dict:
+        """Create the policy-free V1 mixed-difficulty reset manifest before comparison."""
+        if os.path.exists(path):
+            raise RuntimeError("Track-B manifest exists; generation never overwrites")
+        levels = _difficulty_list(self.args.difficulty_levels)
+        if self.args.task != "s_pcr_line_avoid_basic" or int(getattr(self.args, "avoid_stage_override", 0) or 0) != 4:
+            raise RuntimeError("Track-B manifest requires historical s_pcr_line_avoid_basic Stage 4")
+        if tuple(levels) != _TRACK_B_V1_DIFFICULTIES or int(self.args.episodes) <= 0 or int(self.args.episodes) % int(self.args.num_envs) != 0:
+            raise RuntimeError("Track-B manifest requires the exact historical V1 difficulty list and per-env quota")
+        slots = int(self.args.episodes) // int(self.args.num_envs)
+        ph._maybe_apply_s_avoid_stage_override_runtime(self.args, self.env)
+        base = self.env.env
+        per_level = int(math.ceil(float(self.args.episodes) / float(len(levels))))
+        expected_counts = _track_b_difficulty_counts(int(self.args.episodes), levels)
+        if per_level > self.env.num_envs:
+            raise RuntimeError("Track-B synchronous V1 manifest generation needs at least per-level quota envs")
+        canonical_schedule = []
+        for difficulty, count in zip(levels, expected_counts):
+            canonical_schedule.extend([float(difficulty)] * int(count))
+        if len(canonical_schedule) != int(self.args.episodes):
+            raise RuntimeError("Track-B manifest schedule does not contain exactly all episodes")
+        planned_entries = [
+            {
+                "canonical_episode_id": canonical_episode_id,
+                "env_id": canonical_episode_id % int(self.env.num_envs),
+                "local_episode_slot": canonical_episode_id // int(self.env.num_envs),
+                "difficulty": difficulty,
+            }
+            for canonical_episode_id, difficulty in enumerate(canonical_schedule)
+        ]
+        entries = []
+        for level_idx, difficulty in enumerate(levels):
+            _setup_seed(int(self.args.seed) + level_idx)
+            base.scene_difficulty_override = torch.full(
+                (self.env.num_envs,), float(difficulty), device=base.device, dtype=torch.float32
+            )
+            level_plan = [entry for entry in planned_entries if entry["difficulty"] == float(difficulty)]
+            target_env_ids = torch.tensor(
+                [entry["env_id"] for entry in level_plan], device=base.device, dtype=torch.long
+            )
+            if len(set(target_env_ids.detach().cpu().tolist())) != len(level_plan):
+                raise RuntimeError("Track-B V1 schedule assigned an env twice within one reset group")
+            base.reset_idx(target_env_ids)
+            for plan in level_plan:
+                entry = self._track_b_capture_entry(
+                    int(plan["env_id"]), int(plan["local_episode_slot"]), float(difficulty)
+                )
+                entry["canonical_episode_id"] = int(plan["canonical_episode_id"])
+                entry["manifest_entry_id"] = (
+                    f"env_{int(plan['env_id']):03d}_slot_{int(plan['local_episode_slot'])}"
+                )
+                entry["layout_id"] = _track_b_layout_id(entry)
+                entries.append(entry)
+        actual_counts = [sum(float(entry["difficulty"]) == float(d) for entry in entries) for d in levels]
+        if actual_counts != expected_counts:
+            raise RuntimeError("Track-B manifest did not retain the historical V1 difficulty allocation")
+        entries.sort(key=lambda entry: int(entry["canonical_episode_id"]))
+        manifest = {
+            "schema": "track_b_manifest_v3", "task": self.args.task, "stage": 4,
+            "difficulty_levels": [float(d) for d in levels],
+            "difficulty_counts": {f"{d:.2f}": int(count) for d, count in zip(levels, expected_counts)},
+            "historical_per_level_target": per_level,
+            "speed_mps": float(getattr(base.nav_cfg, "moving_target_pcr_line_speed", float("nan"))),
+            "seed": int(self.args.seed), "num_envs": int(self.env.num_envs), "slots_per_env": slots, "entries": entries,
+            "layout_identity": {
+                "normalized_physical_payload": True,
+                "float_quantum": _TRACK_B_LAYOUT_FLOAT_QUANTUM,
+                "restore_atol": _TRACK_B_RESTORE_FLOAT_ATOL,
+                "origin_roundtrip": "same_target_env_generation_and_replay",
+            },
+            "generation": {"base_task_only": True, "policy_actions": 0, "policy_checkpoints_loaded": False},
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "x", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(path, 0o444)
+        manifest["sha256"] = _sha256_file(path)
+        return manifest
+
+    def _track_b_install_manifest_replay(self, path: str, expected_sha256: str) -> None:
+        if self._track_b_reset_installed:
+            return
+        if os.stat(path).st_mode & 0o222:
+            raise RuntimeError("Track-B manifest must be read-only")
+        actual_sha256 = _sha256_file(path)
+        if not expected_sha256 or actual_sha256 != expected_sha256:
+            raise RuntimeError("Track-B manifest SHA256 mismatch")
+        with open(path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        slots = int(manifest.get("slots_per_env", 0))
+        entries = manifest.get("entries", [])
+        levels = [float(value) for value in manifest.get("difficulty_levels", [])]
+        expected_counts = _track_b_difficulty_counts(int(self.args.episodes), list(_TRACK_B_V1_DIFFICULTIES))
+        actual_counts = [sum(float(entry.get("difficulty", float("nan"))) == difficulty for entry in entries) for difficulty in _TRACK_B_V1_DIFFICULTIES]
+        expected_count_map = {f"{difficulty:.2f}": int(count) for difficulty, count in zip(_TRACK_B_V1_DIFFICULTIES, expected_counts)}
+        if (manifest.get("schema") != "track_b_manifest_v3" or manifest.get("task") != self.args.task
+                or int(manifest.get("num_envs", -1)) != int(self.env.num_envs)
+                or slots < 1 or int(self.args.episodes) != int(self.env.num_envs) * slots
+                or len(entries) != int(self.env.num_envs) * slots
+                or tuple(levels) != _TRACK_B_V1_DIFFICULTIES
+                or actual_counts != expected_counts
+                or manifest.get("difficulty_counts") != expected_count_map
+                or manifest.get("layout_identity") != {
+                    "normalized_physical_payload": True,
+                    "float_quantum": _TRACK_B_LAYOUT_FLOAT_QUANTUM,
+                    "restore_atol": _TRACK_B_RESTORE_FLOAT_ATOL,
+                    "origin_roundtrip": "same_target_env_generation_and_replay",
+                }):
+            raise RuntimeError("Track-B manifest contract mismatch")
+        indexed = {(int(e["env_id"]), int(e["local_episode_slot"])): e for e in entries}
+        expected_keys = {(env_id, slot) for env_id in range(int(self.env.num_envs)) for slot in range(slots)}
+        entry_ids = [str(e.get("manifest_entry_id", "")) for e in entries]
+        canonical_ids = [int(e.get("canonical_episode_id", -1)) for e in entries]
+        expected_ids = {f"env_{env_id:03d}_slot_{slot}" for env_id, slot in expected_keys}
+        if (
+            len(indexed) != len(entries)
+            or set(indexed) != expected_keys
+            or len(set(entry_ids)) != len(entries)
+            or set(entry_ids) != expected_ids
+            or set(canonical_ids) != set(range(len(entries)))
+            or not all(entry_ids)
+            or not all(str(e.get("layout_id", "")) for e in entries)
+        ):
+            raise RuntimeError("Track-B manifest does not exactly bind every env/slot entry")
+        self._track_b_manifest, self._track_b_entries = manifest, indexed
+        self._track_b_slots_per_env = slots
+        self._track_b_next_slot = [0] * self.env.num_envs
+        self._track_b_active_entry = [None] * self.env.num_envs
+        base, original_reset_idx = self.env.env, self.env.env.reset_idx
+
+        def replay_reset_idx(env_ids):
+            result = original_reset_idx(env_ids)
+            for env_id in env_ids.detach().cpu().tolist():
+                slot = self._track_b_next_slot[env_id]
+                if slot >= self._track_b_slots_per_env:
+                    self._track_b_active_entry[env_id] = None
+                    continue
+                entry = self._track_b_entries[(env_id, slot)]
+                self._track_b_restore_entry(env_id, entry)
+                self._track_b_active_entry[env_id] = entry
+                self._track_b_next_slot[env_id] = slot + 1
+            return result
+
+        def replay_apply_difficulty(reset_mask):
+            if reset_mask is None:
+                env_ids = range(self.env.num_envs)
+            else:
+                env_ids = reset_mask.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
+            for env_id in env_ids:
+                entry = self._track_b_active_entry[int(env_id)]
+                if entry is not None:
+                    self._track_b_apply_entry_difficulty(int(env_id), entry)
+            return None
+
+        base.reset_idx = replay_reset_idx
+        self.env._apply_scene_difficulty_for_resets = replay_apply_difficulty
+        self._track_b_reset_installed = True
+        self.resolved_protocol["track_b_manifest"] = {
+            "path": os.path.abspath(path), "sha256": actual_sha256, "slots_per_env": slots,
+            "immutable": True, "pairing_key": "manifest_entry_id", "canonical_episode_key": "canonical_episode_id",
+            "difficulty_counts": expected_count_map,
+            "layout_float_quantum": _TRACK_B_LAYOUT_FLOAT_QUANTUM,
+            "restore_float_atol": _TRACK_B_RESTORE_FLOAT_ATOL,
+        }
+
+    def _track_b_new_accumulator(self, env_id: int) -> EpisodeAccumulator:
+        entry = self._track_b_active_entry[env_id] if self._track_b_manifest is not None else None
+        return EpisodeAccumulator() if entry is None else EpisodeAccumulator(
+            canonical_episode_id=int(entry["canonical_episode_id"]),
+            manifest_entry_id=str(entry["manifest_entry_id"]),
+            layout_id=str(entry["layout_id"]),
+            difficulty=float(entry["difficulty"]),
+        )
 
     def _estimate_robot_mass_kg(self) -> float:
         try:
@@ -1990,6 +2504,9 @@ class EvalRunner:
                     avoid_difficulty_input,
                     deterministic=True,
                 )
+                if self.is_fixed_authority:
+                    gate_diag = _compute_fixed_authority_diag(cmd_f, cmd_a, float(self.args.fixed_y_const))
+                    return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
                 if bool(getattr(self.args, "velocity_search", False)):
                     gate_diag = _compute_velocity_search_diag(
                         self.env,
@@ -2031,6 +2548,7 @@ class EvalRunner:
                         int(self.gate_goal_dim),
                         label="eval_gate_goal",
                     )
+                self.gate_policy_call_count += 1
                 gate_action, _ = self.policy.get_action(
                     policy_aff_stack,
                     gate_state,
@@ -2200,6 +2718,19 @@ class EvalRunner:
         difficulty_levels = _difficulty_list(self.args.difficulty_levels)
         episodes_total = int(self.args.episodes)
         per_level_target = int(math.ceil(episodes_total / max(1, len(difficulty_levels))))
+        manifest_path = str(getattr(self.args, "track_b_manifest", "") or "").strip()
+        manifest_mode = bool(manifest_path)
+        if manifest_path:
+            if tuple(difficulty_levels) != _TRACK_B_V1_DIFFICULTIES:
+                raise RuntimeError("Track-B manifest evaluation requires the exact historical V1 difficulty list")
+            self._track_b_install_manifest_replay(
+                manifest_path,
+                str(getattr(self.args, "track_b_manifest_sha256", "") or ""),
+            )
+            per_level_target = episodes_total
+            collector_levels = [None]
+        else:
+            collector_levels = difficulty_levels
 
         latency_ms_samples: List[float] = []
         episode_rows: List[Dict] = []
@@ -2221,17 +2752,19 @@ class EvalRunner:
         eval_start_t = time.perf_counter()
         last_progress_t = eval_start_t
 
-        for level_idx, d in enumerate(difficulty_levels):
-            seed_level = int(self.args.seed + level_idx)
-            _setup_seed(seed_level)
-            print(
-                f"[Eval] level {level_idx + 1}/{len(difficulty_levels)} "
-                f"difficulty={float(d):.3f} target_episodes={per_level_target}",
-                flush=True,
-            )
-
-            self.env.set_scene_difficulty_target(float(d))
-            self.env._apply_scene_difficulty_for_resets(None)
+        for level_idx, d in enumerate(collector_levels):
+            if manifest_mode:
+                print(f"[Eval] immutable Track-B manifest collector target_episodes={per_level_target}", flush=True)
+            else:
+                seed_level = int(self.args.seed + level_idx)
+                _setup_seed(seed_level)
+                print(
+                    f"[Eval] level {level_idx + 1}/{len(difficulty_levels)} "
+                    f"difficulty={float(d):.3f} target_episodes={per_level_target}",
+                    flush=True,
+                )
+                self.env.set_scene_difficulty_target(float(d))
+                self.env._apply_scene_difficulty_for_resets(None)
             ph._maybe_apply_s_avoid_stage_override_runtime(self.args, self.env)
             obs = self.env.reset()
             self._export_eval_layout_debug_once()
@@ -2241,7 +2774,7 @@ class EvalRunner:
             self.done_prev = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
             unsafe_conflict_streak = torch.zeros(self.env.num_envs, dtype=torch.long, device=self.device)
 
-            acc = [EpisodeAccumulator() for _ in range(self.env.num_envs)]
+            acc = [self._track_b_new_accumulator(env_id) for env_id in range(self.env.num_envs)]
             done_episodes = 0
 
             while done_episodes < per_level_target:
@@ -2331,7 +2864,7 @@ class EvalRunner:
                 )
                 pcr_risk_override = (
                     gate_diag.get("risk_F", None)
-                    if isinstance(gate_diag, dict) and not self.is_mono_ppo
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo and not self.is_fixed_authority
                     else None
                 )
                 next_obs, rewards, dones, info = self.env.step(
@@ -3608,10 +4141,15 @@ class EvalRunner:
 
                 done_ids = dones.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
                 for i in done_ids:
-                    if done_episodes >= per_level_target:
-                        break
-
                     ai = acc[i]
+                    if self._track_b_manifest is not None:
+                        if not ai.manifest_entry_id:
+                            acc[i] = self._track_b_new_accumulator(i)
+                            continue
+                        if ai.manifest_entry_id in self._track_b_completed:
+                            raise RuntimeError("Track-B manifest entry completed more than once")
+                    elif done_episodes >= per_level_target:
+                        break
                     follow_mae = float("nan")
                     follow_rmse = float("nan")
                     if ai.follow_err_count > 0:
@@ -4024,8 +4562,10 @@ class EvalRunner:
                     )
                     episode_rows.append(
                         {
-                            "episode_id": global_episode_idx,
-                            "difficulty": float(d),
+                            "episode_id": ai.canonical_episode_id if manifest_mode else global_episode_idx,
+                            "manifest_entry_id": ai.manifest_entry_id,
+                            "layout_id": ai.layout_id,
+                            "difficulty": float(ai.difficulty) if ai.difficulty is not None else float(d),
                             "success": int(task_success),
                             "task_success": int(task_success),
                             "l1_safety_success": l1_safety_success,
@@ -4536,8 +5076,10 @@ class EvalRunner:
                         if global_episode_idx < timeseries_limit:
                             for ts_row in ai.timeseries:
                                 ts_row = dict(ts_row)
-                                ts_row["episode_id"] = global_episode_idx
-                                ts_row["difficulty"] = float(d)
+                                ts_row["episode_id"] = ai.canonical_episode_id if manifest_mode else global_episode_idx
+                                ts_row["manifest_entry_id"] = ai.manifest_entry_id
+                                ts_row["layout_id"] = ai.layout_id
+                                ts_row["difficulty"] = float(ai.difficulty) if ai.difficulty is not None else float(d)
                                 ts_row["episode_termination_reason"] = termination_reason
                                 ts_row["episode_task_success"] = int(task_success)
                                 ts_row["episode_full_task_success"] = int(full_task_success)
@@ -4546,9 +5088,13 @@ class EvalRunner:
                                 ts_row["episode_row_progress"] = row_progress_success
                                 timeseries_rows.append(ts_row)
                     global_episode_idx += 1
-                    done_episodes += 1
-
-                    acc[i] = EpisodeAccumulator()
+                    if self._track_b_manifest is not None:
+                        self._track_b_completed.add(ai.manifest_entry_id)
+                        done_episodes = len(self._track_b_completed)
+                        acc[i] = self._track_b_new_accumulator(i)
+                    else:
+                        done_episodes += 1
+                        acc[i] = EpisodeAccumulator()
 
                 now_t = time.perf_counter()
                 if progress_interval_s > 0.0 and (now_t - last_progress_t) >= progress_interval_s:
@@ -4556,7 +5102,7 @@ class EvalRunner:
                     overall_done = min(global_episode_idx, episodes_total)
                     print(
                         f"[Eval] progress level={level_idx + 1}/{len(difficulty_levels)} "
-                        f"difficulty={float(d):.3f} "
+                        f"difficulty={'manifest' if manifest_mode else f'{float(d):.3f}'} "
                         f"level_eps={done_episodes}/{per_level_target} "
                         f"total_eps={overall_done}/{episodes_total} "
                         f"elapsed={elapsed:.1f}s",
@@ -4567,8 +5113,30 @@ class EvalRunner:
                 self.done_prev = dones.clone()
                 obs = next_obs
 
-        # Trim overshoot to exact requested episode count.
-        episode_rows = episode_rows[:episodes_total]
+        if self._track_b_manifest is not None:
+            expected_ids = {str(entry["manifest_entry_id"]) for entry in self._track_b_manifest["entries"]}
+            if self._track_b_completed != expected_ids or len(episode_rows) != episodes_total:
+                raise RuntimeError("Track-B did not complete exactly the bound per-env manifest quota")
+            by_id = {str(row.get("manifest_entry_id", "")): row for row in episode_rows}
+            if len(by_id) != len(episode_rows) or set(by_id) != expected_ids:
+                raise RuntimeError("Track-B output manifest_entry_id set mismatch")
+            for entry in self._track_b_entries.values():
+                row = by_id[str(entry["manifest_entry_id"])]
+                if row.get("layout_id") != entry.get("layout_id"):
+                    raise RuntimeError("Track-B final layout_id assertion failed")
+                if row.get("episode_id") != int(entry["canonical_episode_id"]):
+                    raise RuntimeError("Track-B output canonical episode_id assertion failed")
+                if float(row.get("difficulty", float("nan"))) != float(entry["difficulty"]):
+                    raise RuntimeError("Track-B output difficulty assertion failed")
+            ordered_entries = sorted(self._track_b_manifest["entries"], key=lambda x: int(x["canonical_episode_id"]))
+            episode_rows = [by_id[entry["manifest_entry_id"]] for entry in ordered_entries]
+            expected_counts = _track_b_difficulty_counts(episodes_total, list(_TRACK_B_V1_DIFFICULTIES))
+            actual_counts = [sum(float(row["difficulty"]) == difficulty for row in episode_rows) for difficulty in _TRACK_B_V1_DIFFICULTIES]
+            if actual_counts != expected_counts:
+                raise RuntimeError("Track-B output did not retain the historical V1 difficulty counts")
+        else:
+            # Historical non-Track-B behavior retains the previous bounded collector.
+            episode_rows = episode_rows[:episodes_total]
 
         metrics = self._aggregate_metrics(episode_rows, latency_ms_samples)
         if dump_timeseries:
@@ -5763,6 +6331,17 @@ class EvalRunner:
                 "rotate_only_rate_mean": float(np.mean(rotate_only_d)) if rotate_only_d else float("nan"),
             }
 
+        if self.is_fixed_authority:
+            if self.gate_policy_call_count != 0 or self.fixed_dynamic_fields_consumed:
+                raise RuntimeError("Fixed-Authority consumed forbidden Gate/dynamic fields")
+            self.resolved_protocol["track_b_fixed_authority"]["gate_policy_call_count"] = 0
+            self.resolved_protocol["track_b_fixed_authority"]["dynamic_fields_consumed"] = False
+        if self.risk_mapping_safe_distance is not None and not (
+            math.isclose(float(self.env.post_processor.safe_distance), self.postprocess_safe_distance, rel_tol=0.0, abs_tol=1e-8)
+            and math.isclose(float(self.env.post_processor.free_distance), self.postprocess_free_distance, rel_tol=0.0, abs_tol=1e-8)
+        ):
+            raise RuntimeError("Track-B risk override changed postprocessor distances")
+
         is_additive_fusion = bool(getattr(self.args, "additive_fusion", False))
         is_velocity_search = bool(getattr(self.args, "velocity_search", False))
         result = {
@@ -5841,6 +6420,8 @@ class EvalRunner:
                     if bool(getattr(self.args, "mono_ppo", False))
                     else "additive_fusion"
                     if is_additive_fusion
+                    else "fixed_authority"
+                    if self.is_fixed_authority
                     else "velocity_search"
                     if is_velocity_search
                     else "rule_override"
@@ -5858,16 +6439,24 @@ class EvalRunner:
                     self.args.skill == "moe"
                     and not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "uses_learned_w_output": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not self.is_fixed_authority and not is_velocity_search
                 ),
                 "uses_learned_w_for_control": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not self.is_fixed_authority and not is_velocity_search
                     and not bool(getattr(self.args, "disable_delta_y_w", False))
                 ),
                 "uses_additive_fusion": bool(is_additive_fusion),
+                "uses_fixed_authority": bool(self.is_fixed_authority),
+                "fixed_authority_y_const": float(self.args.fixed_y_const) if self.is_fixed_authority else None,
+                "fixed_authority_gate_policy_call_count": int(self.gate_policy_call_count),
+                "risk_mapping_safe_distance": self.risk_mapping_safe_distance,
+                "risk_mapping_free_distance": self.risk_mapping_free_distance,
+                "postprocess_safe_distance": self.postprocess_safe_distance,
+                "postprocess_free_distance": self.postprocess_free_distance,
                 "uses_velocity_search": bool(is_velocity_search),
                 "uses_target_aware_velocity_search": bool(is_velocity_search),
                 "velocity_search_definition": (
@@ -5876,11 +6465,12 @@ class EvalRunner:
                     "rejects footprint collisions as infeasible, then selects by tracking-clearance cost."
                     if is_velocity_search else ""
                 ),
-                "uses_lateral_projection": bool(is_additive_fusion),
+                "uses_lateral_projection": bool(is_additive_fusion or self.is_fixed_authority),
                 "shared_postprocess": True,
                 "uses_risk_diff_correction": bool(
                     (th.is_learnedw2_mode(str(self.args.w_mode)) or th.is_risk_only_mode(str(self.args.w_mode)))
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "disable_delta_y_w": bool(getattr(self.args, "disable_delta_y_w", False)),
@@ -5892,6 +6482,7 @@ class EvalRunner:
                     self.args.skill == "moe"
                     and not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "uses_follow_expert_for_metrics": bool(self.args.skill == "moe"),
@@ -5903,6 +6494,7 @@ class EvalRunner:
                 "mechanism_metrics_available": bool(
                     not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "velocity_search_split": str(getattr(self.args, "velocity_search_split", "")),
@@ -6078,6 +6670,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
     rows = metrics.get("per_episode", [])
     fieldnames = [
         "episode_id",
+        "manifest_entry_id",
+        "layout_id",
         "difficulty",
         "success",
         "task_success",
@@ -6370,6 +6964,7 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
         row_out.pop("conflict_bin_stats", None)
         row_out.pop("priv_conflict_bin_stats", None)
         csv_rows.append(row_out)
+    fieldnames.extend(sorted({key for row in csv_rows for key in row}.difference(fieldnames)))
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -6380,6 +6975,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
     if timeseries_rows:
         ts_fieldnames = [
             "episode_id",
+            "manifest_entry_id",
+            "layout_id",
             "difficulty",
             "episode_termination_reason",
             "episode_task_success",
@@ -6751,6 +7348,13 @@ def parse_args():
     )
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
     parser.add_argument("--additive_fusion", action="store_true", help="eval-only baseline: cmd_F + lateral-projected cmd_A")
+    parser.add_argument("--fixed_authority", action="store_true", help="Track-B eval-only fixed Follow authority; bypass Gate")
+    parser.add_argument("--fixed_y_const", type=float, default=None, help="Track-B fixed Follow weight in [0,1]")
+    parser.add_argument("--risk_mapping_safe_dist", type=float, default=None, help="Track-B learned-w risk-only d_safe override")
+    parser.add_argument("--risk_mapping_free_dist", type=float, default=None, help="Track-B learned-w risk-only d_free override")
+    parser.add_argument("--track_b_manifest", type=str, default="", help="read-only Track-B per-env reset manifest")
+    parser.add_argument("--track_b_manifest_sha256", type=str, default="", help="required SHA256 for --track_b_manifest")
+    parser.add_argument("--track_b_manifest_generate", type=str, default="", help="create an immutable Track-B manifest and exit")
     parser.add_argument("--velocity_search", action="store_true", help="eval-only target-aware velocity-space search baseline")
     parser.add_argument(
         "--velocity_search_split",
@@ -6875,6 +7479,53 @@ def parse_args():
             parser.error("--eval_layout heldout_irregular_rows 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
     if getattr(args, "pcr_line_target_speed", None) is not None and getattr(args, "pcr_line_target_speed_scale", None) is not None:
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
+    if args.track_b_manifest_generate:
+        if args.track_b_manifest or args.track_b_manifest_sha256:
+            parser.error("Track-B manifest generation 不接受已有 manifest")
+        if args.task != "s_pcr_line_avoid_basic" or int(getattr(args, "avoid_stage_override", 0) or 0) != 4:
+            parser.error("Track-B manifest generation 只允许历史 s_pcr_line_avoid_basic Stage 4")
+        if int(args.episodes) <= 0 or int(args.episodes) % int(args.num_envs) != 0:
+            parser.error("Track-B manifest generation 需要精确的每 env episode 配额")
+        if tuple(_difficulty_list(args.difficulty_levels)) != _TRACK_B_V1_DIFFICULTIES:
+            parser.error("Track-B manifest generation 固定历史 V1 difficulty=0.0,0.25,0.5,0.75,1.0")
+        # Manifest construction creates only the base task state.  It does not
+        # inspect or load Gate/Avoid/PCR checkpoints and takes no policy action.
+        args.pcr_ckpt = None
+        args.teacher_ckpt = None
+        args.ckpt = None
+        args.w_mode = "none"
+        args._eval_selected_w_mode = "none"
+        args._runtime_ablation_cli_overrides = {"w_mode": "none"}
+        if args.camera_interval is not None and args.camera_interval < 1:
+            args.camera_interval = 1
+        if bool(getattr(args, "viewer", False)):
+            args.headless = False
+        th.capture_cli_explicit_arg_values(args, parser)
+        if not hasattr(args, "physics_engine"):
+            args.physics_engine = gymapi.SIM_PHYSX
+        if not hasattr(args, "sim_device_type"):
+            args.sim_device_type = "cuda"
+        if not hasattr(args, "compute_device_id"):
+            args.compute_device_id = 0
+        if not hasattr(args, "sim_device_id"):
+            args.sim_device_id = args.compute_device_id
+        if not hasattr(args, "sim_device"):
+            args.sim_device = f"cuda:{args.sim_device_id}" if args.sim_device_type == "cuda" else "cpu"
+        if not hasattr(args, "use_gpu"):
+            args.use_gpu = args.sim_device_type == "cuda"
+        if not hasattr(args, "use_gpu_pipeline"):
+            args.use_gpu_pipeline = args.sim_device_type == "cuda"
+        if not hasattr(args, "subscenes"):
+            args.subscenes = 0
+        if not hasattr(args, "num_threads"):
+            args.num_threads = 0
+        if not hasattr(args, "rl_device"):
+            args.rl_device = args.sim_device
+        if hasattr(th, "normalize_task_name"):
+            args.task = th.normalize_task_name(getattr(args, "task", ""))
+        args._unknown_cli = list(unknown)
+        sys.argv = [sys.argv[0]] + unknown
+        return args
     if not getattr(args, "pcr_ckpt", None) and getattr(args, "ckpt", None):
         args.pcr_ckpt = args.ckpt
     if not str(getattr(args, "pcr_ckpt", "") or "").strip():
@@ -6894,18 +7545,20 @@ def parse_args():
         if args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
         selected_w_mode = "none"
-    elif args.additive_fusion:
+    elif args.additive_fusion or args.fixed_authority:
         if args.skill != "moe":
-            parser.error("--additive_fusion 只支持 --skill moe")
+            parser.error("Track-B additive/fixed 只支持 --skill moe")
         if args.rule_override:
-            parser.error("--additive_fusion 不允许同时启用 --rule_override")
+            parser.error("Track-B additive/fixed 不允许同时启用 --rule_override")
         if args.velocity_search:
-            parser.error("--additive_fusion 不允许同时启用 --velocity_search")
-        if any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
-            parser.error("--additive_fusion 不允许同时指定 --wgeom/--wriskonly/--wlearned/--wlearned2")
-        if args.w_mode is not None and str(args.w_mode).lower() != "none":
-            parser.error("--additive_fusion 不使用 GatePolicy/w，--w_mode 必须为 none")
-        selected_w_mode = "none"
+            parser.error("Track-B additive/fixed 不允许同时启用 --velocity_search")
+        if args.additive_fusion and args.fixed_authority:
+            parser.error("--additive_fusion 与 --fixed_authority 只能二选一")
+        if args.fixed_authority and (args.fixed_y_const is None or not math.isfinite(float(args.fixed_y_const)) or not 0.0 <= float(args.fixed_y_const) <= 1.0):
+            parser.error("--fixed_authority 需要有限的 --fixed_y_const [0,1]")
+        if args.risk_mapping_safe_dist is not None or args.risk_mapping_free_dist is not None:
+            parser.error("Track-B risk mapping 只允许名义 PCR，不允许 additive/fixed")
+        selected_w_mode = "learnedw2" if (args.wlearned2 or str(args.w_mode or "") == "learnedw2") else "none"
     elif args.velocity_search:
         if args.skill != "moe":
             parser.error("--velocity_search 只支持 --skill moe")
@@ -6946,6 +7599,17 @@ def parse_args():
             parser.error("--disable_delta_y_w 是 learnedw2 推理消融，不允许同时启用 --rule_override")
         if selected_w_mode != "learnedw2":
             parser.error("--disable_delta_y_w 只允许配合 --wlearned2 / --w_mode learnedw2 使用")
+    if (args.risk_mapping_safe_dist is None) != (args.risk_mapping_free_dist is None):
+        parser.error("Track-B risk mapping 必须同时指定 d_safe 与 d_free")
+    if args.risk_mapping_safe_dist is not None:
+        if args.additive_fusion or args.fixed_authority or selected_w_mode != "learnedw2":
+            parser.error("Track-B risk mapping 只允许 learnedw2 PCR")
+        if args.cmd_safe_dist is not None or args.cmd_free_dist is not None:
+            parser.error("Track-B risk mapping 不能修改后处理距离")
+    if bool(args.track_b_manifest) != bool(args.track_b_manifest_sha256):
+        parser.error("Track-B replay 必须同时给出 manifest 与 SHA256")
+    if args.track_b_manifest_generate and (args.track_b_manifest or args.track_b_manifest_sha256):
+        parser.error("Track-B manifest generation 不接受已有 manifest")
     args.w_mode = selected_w_mode
     args._eval_selected_w_mode = selected_w_mode
     args._runtime_ablation_cli_overrides = {"w_mode": selected_w_mode}
@@ -6989,8 +7653,55 @@ def parse_args():
     return args
 
 
+def _build_track_b_manifest_runtime(args):
+    """Build only the historical base task required to capture reset states.
+
+    This intentionally avoids ``HierarchicalHexapodEnv``: that wrapper loads
+    the frozen low-level controller even though manifest generation takes no
+    action.  The manifest is therefore independent of every policy and every
+    checkpoint, while retaining the same 29ee task/reset implementation.
+    """
+    if args.task != "s_pcr_line_avoid_basic":
+        raise RuntimeError("Track-B manifest builder requires s_pcr_line_avoid_basic")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    th.import_modules()
+    env_cfg, _ = th.task_registry.get_cfgs(name=args.task)
+    if getattr(args, "seed", None) is not None:
+        env_cfg.seed = int(args.seed)
+    ph._maybe_apply_pcr_line_play_overrides(args, env_cfg)
+    base, _ = th.task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    if hasattr(base, "cfg") and hasattr(base.cfg, "terrain"):
+        base.cfg.terrain.curriculum = False
+    if hasattr(base, "_update_terrain_curriculum"):
+        def _no_update(self, env_ids):
+            return
+        base._update_terrain_curriculum = types.MethodType(_no_update, base)
+    if hasattr(base, "terrain_levels"):
+        base.terrain_levels.fill_(0)
+        if hasattr(base, "terrain_origins") and hasattr(base, "terrain_types") and hasattr(base, "env_origins"):
+            base.env_origins[:] = base.terrain_origins[base.terrain_levels, base.terrain_types]
+    runtime = types.SimpleNamespace(env=base, num_envs=base.num_envs, reset=base.reset)
+    ph._maybe_apply_s_avoid_stage_override_runtime(args, runtime)
+    return runtime
+
+
+def _generate_track_b_manifest_without_policy(args, path: str) -> Dict:
+    runtime = _build_track_b_manifest_runtime(args)
+    # Reuse only the state serialization methods; this synthetic holder has no
+    # evaluator, Gate, Avoid model, or high-level checkpoint.
+    holder = object.__new__(EvalRunner)
+    holder.args = args
+    holder.env = runtime
+    return EvalRunner.generate_track_b_manifest(holder, path)
+
+
 def main():
     args = parse_args()
+    manifest_path = str(getattr(args, "track_b_manifest_generate", "") or "").strip()
+    if manifest_path:
+        manifest = _generate_track_b_manifest_without_policy(args, manifest_path)
+        print(json.dumps({"track_b_manifest": os.path.abspath(manifest_path), "sha256": manifest["sha256"], "entries": len(manifest["entries"])}, sort_keys=True))
+        return
     runner = EvalRunner(args)
     metrics = runner.evaluate()
 
@@ -7009,7 +7720,12 @@ def main():
         )
     else:
         variant_tag = th.format_pcr_variant_tag(args)
-    out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")
+    if str(getattr(args, "track_b_manifest", "") or "").strip():
+        out_dir = os.path.abspath(args.output_dir)
+        if os.path.exists(out_dir) and os.listdir(out_dir):
+            raise RuntimeError("Track-B output path already exists and is not empty")
+    else:
+        out_dir = os.path.join(args.output_dir, f"{args.skill}_{args.mode}_{args.task}_{variant_tag}_seed{int(args.seed)}_{ts}")
     _write_outputs(metrics, out_dir)
 
     overall = metrics["overall"]

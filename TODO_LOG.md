@@ -60,6 +60,11 @@
 
 ## 短期 TODO（动态滚动：下面按日期维护）
 
+## 2026-09-12 Track-B 冻结补充实验（29ee 历史口径）
+
+- [ ] [P0] 在独立 `29ee797` 分支完成 eval-only Fixed-Authority 与 learned-w 风险阈值敏感性：每个比较条件必须重放同一只读 episode manifest（布局、目标、初态、seed、difficulty、speed），Fixed 完全绕过 Gate，risk override 仅作用于 learned-w 风险特征与 `delta_y_r`；不得训练或改变历史任务/奖励/后处理语义。
+- [ ] [P0] 仅将 `951cfbb` 的胶囊 actor 栅格循环改为与 29ee 标量参考逐位一致的张量计算；验证后完成四个 2-episode GPU0 smoke、提交并同步相同 SHA 到服务器隔离目录。
+
 ## 2026-06-15 RA-L 投稿前补救实验代码
 
 - [x] ~~[P0] 完成 Additive-Fusion eval-only 对照：直接相加 `u_F` 与 lateral-projected `u_A`，共用 post-processing 和诊断汇总；必须记录 command 被 clamp 的比例，用于回应“正交命令为何不用直接相加”的质疑；若时间允许，额外支持 `normalized_additive_fusion` 作为 appendix 备选，但主表先只放 `additive_fusion`。~~

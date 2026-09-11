@@ -49,6 +49,62 @@ def _debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def _vectorized_legacy_capsule_raster(
+    occ_all: torch.Tensor,
+    active_capsules: torch.Tensor,
+    centers_world: torch.Tensor,
+    ref_xy: torch.Tensor,
+    yaw: torch.Tensor,
+    capsule_radius: float,
+    map_extent: float,
+) -> torch.Tensor:
+    """Tensorized capsule loop with the exact 29ee scalar raster semantics."""
+    if occ_all.ndim != 3:
+        raise ValueError("occ_all must be [env, x, y]")
+    map_size = int(occ_all.shape[1])
+    if map_size <= 0 or int(occ_all.shape[2]) != map_size:
+        raise ValueError("occ_all must use a non-empty square map")
+    if not (math.isfinite(float(capsule_radius)) and float(capsule_radius) > 0.0):
+        return occ_all
+    if not (math.isfinite(float(map_extent)) and float(map_extent) > 0.0):
+        raise ValueError("map_extent must be finite and positive")
+    if active_capsules.shape[:2] != centers_world.shape[:2]:
+        raise ValueError("capsule active/center shapes differ")
+    if ref_xy.shape != (occ_all.shape[0], 2) or yaw.shape != (occ_all.shape[0],):
+        raise ValueError("reference pose shape differs from occupancy batch")
+    if int(active_capsules.shape[1]) == 0:
+        return occ_all
+
+    centers = centers_world.to(device=ref_xy.device, dtype=ref_xy.dtype)
+    dx = centers[:, :, 0] - ref_xy[:, 0].unsqueeze(1)
+    dy = centers[:, :, 1] - ref_xy[:, 1].unsqueeze(1)
+    cos_h = torch.cos(yaw).unsqueeze(1)
+    sin_h = torch.sin(yaw).unsqueeze(1)
+    # The scalar path completes this transform in ref_xy.dtype, then moves the
+    # returned scalar to Python float for index arithmetic.
+    x_local = (cos_h * dx + sin_h * dy).to(dtype=torch.float64)
+    y_local = (-sin_h * dx + cos_h * dy).to(dtype=torch.float64)
+    x_min = -0.5 * float(map_extent)
+    cell = float(map_extent) / float(map_size)
+    radius = float(capsule_radius)
+    ix0 = torch.floor((x_local - radius - x_min) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+    ix1 = torch.ceil((x_local + radius - x_min) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+    iy0 = torch.floor((y_local - radius) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+    iy1 = torch.ceil((y_local + radius) / cell).to(dtype=torch.long).clamp_(0, map_size - 1)
+    finite = torch.isfinite(x_local) & torch.isfinite(y_local)
+    x_indices = torch.arange(map_size, device=occ_all.device).view(1, 1, map_size, 1)
+    y_indices = torch.arange(map_size, device=occ_all.device).view(1, 1, 1, map_size)
+    cells = (
+        active_capsules.to(device=occ_all.device, dtype=torch.bool).unsqueeze(-1).unsqueeze(-1)
+        & finite.unsqueeze(-1).unsqueeze(-1)
+        & (x_indices >= ix0.unsqueeze(-1).unsqueeze(-1))
+        & (x_indices <= ix1.unsqueeze(-1).unsqueeze(-1))
+        & (y_indices >= iy0.unsqueeze(-1).unsqueeze(-1))
+        & (y_indices <= iy1.unsqueeze(-1).unsqueeze(-1))
+    )
+    return torch.maximum(occ_all, cells.any(dim=1).to(dtype=occ_all.dtype))
+
+
 class EpisodeMetricsTracker:
     TARGET_FOV_HALF_ANGLE_RAD = 0.759
 
@@ -2987,15 +3043,23 @@ class HierarchicalHexapodEnv:
             box_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_box_size_y", 0.4))
             wall_hx = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_thickness", 0.12))
             wall_hy = 0.5 * float(getattr(self.env.cfg.terrain, "avoid_wall_length", 6.0))
+            capsule_count = min(max(cap_slots, 0), max(total_slots, 0))
+            if capsule_count > 0:
+                occ_all = _vectorized_legacy_capsule_raster(
+                    occ_all,
+                    self.env.s_avoid_active[:, :capsule_count],
+                    self.env.s_avoid_pos_world[:, :capsule_count, :2],
+                    ref_xy,
+                    yaw,
+                    cap_r,
+                    map_extent,
+                )
             for env_id in range(self.num_envs):
-                for slot in range(total_slots):
+                for slot in range(capsule_count, total_slots):
                     if not bool(self.env.s_avoid_active[env_id, slot].item()):
                         continue
                     center_x = float(self.env.s_avoid_pos_world[env_id, slot, 0].item())
                     center_y = float(self.env.s_avoid_pos_world[env_id, slot, 1].item())
-                    if slot < cap_slots:
-                        rasterize(env_id, center_x, center_y, 2.0 * cap_r, 2.0 * cap_r)
-                        continue
                     quat = self.env.s_avoid_quat_world[env_id, slot]
                     yaw_world = self._quat_to_yaw(quat.unsqueeze(0))[0].item()
                     if slot < cap_slots + box_slots:
