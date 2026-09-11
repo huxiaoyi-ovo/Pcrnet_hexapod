@@ -2381,3 +2381,9 @@
 ## 2026-07-16 GitHub 仓库迁移
 
 - [x] Must: 将项目远程仓库迁移到 `huxiaoyi-ovo/Pcrnet_hexapod`，当前仓库后续提交统一使用 `huxiaoyi <huxiaoyi_0106@163.com>`；保留既有提交历史身份不变。
+
+## 2026-09-11 Reviewer Mono capsule 地图等价加速
+
+- [x] [P0] `execution_owner: Sol`：仅将历史 capsule axis-aligned bbox 栅格算法向量化，保持 fully-outside reject、partial clip、`floor/ceil`、upper-exclusive 与 `x/y` 张量轴语义逐位一致；独立 QA 覆盖边界、reset 后真实状态与 reward audit，正式训练关闭旧实现双算。
+- [x] [P0] 同 GPU2、256 environments、48 steps 条件下，稳定吞吐由约 `183.72 FPS` 提升到约 `443.16 FPS`（约 `2.41x`），显存约 `5616 MiB`；因无额外收益且曾出现异常 KL，未采用同一步地图缓存。
+- [x] [P0] 正式 Mono 三 seed 必须从同一干净优化提交的 iteration 0 依次启动，禁止续接优化前的 Seed 1。

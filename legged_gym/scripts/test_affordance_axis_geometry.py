@@ -143,20 +143,20 @@ def make_s_avoid_box_env(num_envs):
     return env
 
 
-def make_s_avoid_capsule_env(num_envs):
+def make_s_avoid_capsule_env(num_envs, num_slots=1, radius=0.15):
     env = make_env(num_envs)
-    env.cfg.terrain.avoid_capsule_radius = 0.15
+    env.cfg.terrain.avoid_capsule_radius = radius
     env.cfg.terrain.avoid_box_size_x = 0.20
     env.cfg.terrain.avoid_box_size_y = 0.20
     env.cfg.terrain.avoid_wall_thickness = 0.12
     env.cfg.terrain.avoid_wall_length = 6.0
-    env.s_avoid_capsule_slot_count = 1
+    env.s_avoid_capsule_slot_count = num_slots
     env.s_avoid_box_slot_count = 0
     env.s_avoid_wall_slot_count = 0
-    env.s_avoid_total_slots = 1
-    env.s_avoid_active = torch.ones(num_envs, 1, dtype=torch.bool)
-    env.s_avoid_pos_world = torch.zeros(num_envs, 1, 3)
-    env.s_avoid_quat_world = torch.zeros(num_envs, 1, 4)
+    env.s_avoid_total_slots = num_slots
+    env.s_avoid_active = torch.ones(num_envs, num_slots, dtype=torch.bool)
+    env.s_avoid_pos_world = torch.zeros(num_envs, num_slots, 3)
+    env.s_avoid_quat_world = torch.zeros(num_envs, num_slots, 4)
     return env
 
 
@@ -368,6 +368,89 @@ def test_s_avoid_capsule_mirror_and_cell_boundaries(methods):
         raise AssertionError("cell-aligned boundary bbox must retain the final map cell")
 
 
+def build_capsule_equivalence_fixture(radius):
+    num_envs = 12
+    num_slots = 13
+    cell = 3.0 / 32.0
+    exact_x = -1.5 + 11.0 * cell
+    exact_y = 17.0 * cell
+    local_centers = [
+        (-0.60, 1.50),
+        (0.60, 1.50),
+        (0.00, 2.95),
+        (0.00, 3.30),
+        (0.00, -0.30),
+        (-1.80, 1.00),
+        (1.80, 1.00),
+        (exact_x, exact_y),
+        (-1.50, 0.00),
+        (1.50, 3.00),
+        (-0.01, 0.01),
+        (0.91, 2.37),
+        (-1.37, 2.81),
+    ]
+    headings = torch.tensor([
+        0.0,
+        math.pi / 2.0,
+        -math.pi / 2.0,
+        math.pi / 4.0,
+        -math.pi / 4.0,
+        0.31,
+        -0.77,
+        1.19,
+        -1.43,
+        2.17,
+        -2.41,
+        0.0,
+    ])
+    env = make_s_avoid_capsule_env(num_envs, num_slots=num_slots, radius=radius)
+    env.root_states[:, 0] = torch.linspace(-0.55, 0.55, num_envs)
+    env.root_states[:, 1] = torch.linspace(0.35, -0.35, num_envs)
+    for env_id in range(num_envs):
+        heading = float(headings[env_id].item())
+        ref_x = float(env.root_states[env_id, 0].item())
+        ref_y = float(env.root_states[env_id, 1].item())
+        for slot in range(num_slots):
+            local_x, local_y = local_centers[(env_id * 5 + slot * 3) % len(local_centers)]
+            world_x, world_y = local_to_world((local_x, local_y), heading)
+            env.s_avoid_pos_world[env_id, slot, 0] = ref_x + world_x
+            env.s_avoid_pos_world[env_id, slot, 1] = ref_y + world_y
+            env.s_avoid_active[env_id, slot] = ((env_id + 2 * slot) % 5) != 0
+    return env, headings
+
+
+def compute_capsule_fixture(methods, radius, camera_mount):
+    env, headings = build_capsule_equivalence_fixture(radius)
+    harness = Harness(methods, env, headings)
+    if camera_mount:
+        harness.affordance_origin_mode = "camera_mount"
+        harness.affordance_origin_local_xy = torch.tensor([0.0, 0.22])
+    scene = harness._compute_gt_affordance_from_scene()
+    visible = torch.ones_like(scene[:, 0])
+    return scene, canonical_local_map(scene[:, 0], visible)
+
+
+def test_vectorized_capsule_reference_equivalence(methods, reference_methods):
+    for radius in (0.15, 3.0 / 32.0):
+        for camera_mount in (False, True):
+            reference_scene, reference_canonical = compute_capsule_fixture(
+                reference_methods, radius, camera_mount
+            )
+            observed_scene, observed_canonical = compute_capsule_fixture(
+                methods, radius, camera_mount
+            )
+            label = "radius={} camera_mount={}".format(radius, camera_mount)
+            if not torch.equal(observed_scene, reference_scene):
+                mismatch = (observed_scene != reference_scene).nonzero(as_tuple=False)
+                raise AssertionError(
+                    "vectorized capsule scene differs from scalar reference for {} at {} cells; first={}".format(
+                        label, mismatch.shape[0], mismatch[0].tolist()
+                    )
+                )
+            if not torch.equal(observed_canonical, reference_canonical):
+                raise AssertionError("vectorized canonical map differs from scalar reference for {}".format(label))
+
+
 def test_empty_and_zero_command_fallback(methods):
     harness = Harness(methods, make_env(2, scene_specs=[SimpleNamespace(static_obstacles=[])] * 2), torch.zeros(2))
     empty = torch.zeros(2, 3, 32, 32)
@@ -390,6 +473,7 @@ def test_empty_and_zero_command_fallback(methods):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, default=Path(__file__).with_name("train_highlevel.py"))
+    parser.add_argument("--reference-source", type=Path, default=None)
     args = parser.parse_args()
     methods = load_methods(args.source)
     test_counterexample_and_scene_queries(methods)
@@ -398,6 +482,9 @@ def main():
     test_scene_raster_clipping_camera_mount(methods)
     test_s_avoid_box_raster_clipping(methods)
     test_s_avoid_capsule_mirror_and_cell_boundaries(methods)
+    if args.reference_source is not None:
+        reference_methods = load_methods(args.reference_source)
+        test_vectorized_capsule_reference_equivalence(methods, reference_methods)
     test_empty_and_zero_command_fallback(methods)
     meshgrid_backend = "native" if supports_meshgrid_indexing() else "compat"
     print("PASS: affordance axis geometry ({}, meshgrid={})".format(args.source, meshgrid_backend))
