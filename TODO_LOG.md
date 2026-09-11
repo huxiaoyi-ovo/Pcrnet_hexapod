@@ -10,9 +10,11 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
-## 2026-09-11 Avoid clutter 取消地图规则减速（代码完成，待重训）
+## 2026-09-11 Avoid clutter 取消地图规则减速（重训进行中）
 
 - [x] ~~[P0] `s_avoid_clutter` 的 Avoid 训练、play 与 eval 固定关闭 CommandPostProcessor 的 clearance 风险缩放：保持 1-D 横移决策、名义前进、命令限幅与 slew 不变；不改历史 `s_avoid_basic`、PCR、Mono、奖励、几何或 PPO。旧 checkpoint 若回放为启用缩放，必须显式报告覆盖，保存的运行元数据必须为 `disable_risk_scale=true`。补充 CPU 行为检查，验证近障碍不会因该规则将命令置零。~~
+
+- [ ] [P0，进行中] GPU1 已从同一 Sanity `model_200.pt`（fresh optimizer）启动新的 1000-iteration Avoid 训练；仅新增 `--disable_risk_scale`，运行快照为 `2f30f0f`，旧带风险缩放训练已标记为 superseded 并保留全部日志与 checkpoint。最终验收固定检查 `model_999.pt`、finite、`disable_risk_scale=true`、1000 iteration 与来源记录。
 
 ## 2026-09-11 Reviewer-proof Mono-PPO 最终训练/评测证据口径（已完成）
 
