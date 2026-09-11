@@ -91,7 +91,7 @@ class MockEnv:
 
 
 class Harness:
-    def __init__(self, mode="alive", slow_forward=False):
+    def __init__(self, mode="alive", slow_forward=False, clearance_side=0.0):
         self.device = torch.device("cpu")
         self.num_envs = 1
         self.beta_override = None
@@ -114,12 +114,18 @@ class Harness:
         self.avoid_context_target_speed = torch.tensor([0.15])
         self.avoid_context_start_bearing = torch.zeros(1)
         self.avoid_context_target_bearing = torch.zeros(1)
+        self.clearance_side = float(clearance_side)
         self.last_obs = self._get_high_level_obs()
 
     def _compute_clearance_along_cmd(self, visible_map, cmd):
         side = cmd[:, 0].abs() > 0.01
         forward = (cmd[:, 0].abs() <= 0.01) & (cmd[:, 1] > 0.01)
-        return torch.where(side, torch.full_like(cmd[:, 0], 0.65), torch.where(forward, torch.full_like(cmd[:, 0], 0.5), torch.ones_like(cmd[:, 0])))
+        side_clearance = torch.where(
+            (cmd[:, 0] * self.clearance_side > 0.0) | (self.clearance_side == 0.0),
+            torch.full_like(cmd[:, 0], 0.65),
+            torch.full_like(cmd[:, 0], 0.3),
+        )
+        return torch.where(side, side_clearance, torch.where(forward, torch.full_like(cmd[:, 0], 0.5), torch.ones_like(cmd[:, 0])))
 
     def _get_high_level_obs(self):
         return {
@@ -149,6 +155,22 @@ def main():
     assert action.shape == (4, 1) and torch.isfinite(action).all()
     assert all(torch.isfinite(param.grad).all() for param in policy.parameters() if param.grad is not None)
 
+    def reward_clearance(current, straight, *, failure=False, success=False):
+        return avoid_clutter_reward(
+            torch.zeros(1), torch.tensor([current]), torch.tensor([straight]), torch.zeros(1), torch.zeros(1), torch.zeros(1),
+            torch.zeros(1), torch.zeros(1, dtype=torch.bool), torch.zeros(1, dtype=torch.bool),
+            torch.tensor([failure]), torch.tensor([success]),
+        )["clearance"].item()
+
+    assert reward_clearance(.8, .8) == 0.0
+    assert reward_clearance(.285, .57) == 0.0
+    assert reward_clearance(.2, .8) == 0.0
+    assert abs(reward_clearance(.57, .285) - .0075) < 1e-8
+    assert abs(reward_clearance(.1425, .285) + .00375) < 1e-8
+    assert reward_clearance(.285, .285) == 0.0
+    assert reward_clearance(.8, .3, success=True) == 0.0
+    assert reward_clearance(.1, .3, failure=True) == 0.0
+
     for name, method in _extract_runtime_methods().items():
         setattr(Harness, name, method)
     slow = Harness(slow_forward=True)
@@ -174,6 +196,21 @@ def main():
     stage2_next, _, _, stage2_info = stage2._step_avoid_clutter(torch.tensor([[0.2]]))
     assert stage2_info["reward_terms"]["preference"][0] != 0.0
     assert torch.equal(stage2_goal_before, stage2_next["goal"])
+
+    left = Harness(clearance_side=-1.0)
+    right = Harness(clearance_side=1.0)
+    left.env.s_avoid_exit_y[:] = right.env.s_avoid_exit_y[:] = 99.0
+    _, _, _, left_info = left._step_avoid_clutter(torch.tensor([[-0.2]]))
+    _, _, _, right_info = right._step_avoid_clutter(torch.tensor([[0.2]]))
+    left_wrong = Harness(clearance_side=-1.0)
+    right_wrong = Harness(clearance_side=1.0)
+    left_wrong.env.s_avoid_exit_y[:] = right_wrong.env.s_avoid_exit_y[:] = 99.0
+    _, _, _, left_wrong_info = left_wrong._step_avoid_clutter(torch.tensor([[0.2]]))
+    _, _, _, right_wrong_info = right_wrong._step_avoid_clutter(torch.tensor([[-0.2]]))
+    assert left_info["reward_terms"]["clearance"][0] > 0.0
+    assert right_info["reward_terms"]["clearance"][0] > 0.0
+    assert left_wrong_info["reward_terms"]["clearance"][0] < 0.0
+    assert right_wrong_info["reward_terms"]["clearance"][0] < 0.0
 
     alive = Harness()
     next_obs, _, done, alive_info = alive._step_avoid_clutter(torch.tensor([[0.2]]))

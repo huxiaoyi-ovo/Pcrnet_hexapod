@@ -74,7 +74,7 @@ Avoid actor 另接收：canonical 2-channel local map、`[side_preference, 0]`�
 
 ### 2026-09-11 Sanity clarification and Central counterfactual
 
-下一次 Sanity 仅在**步骤起始时**为 Stage-1 环境关闭 preference tie-break reward；`goal` observation、虚拟 preference 采样、动作与全局 preference coefficient `.0005` 不变，Stage-2 及以后继续保留该项。该 gate 读取低层推进/reset 前的 stage snapshot，不能使用 reset 后的新回合 stage。
+下一次 Sanity 相对最初 Sanity 有两项已批准变化：relative forward-clearance reward 与仅在**步骤起始时**为 Stage-1 环境关闭 preference tie-break reward。后者不改变 `goal` observation、虚拟 preference 采样、动作与全局 preference coefficient `.0005`，Stage-2 及以后继续保留该项。该 gate 读取低层推进/reset 前的 stage snapshot，不能使用 reset 后的新回合 stage；因此本次不能表述为严格单因素对照。
 
 独立资格的 45 条 Central layout 将只进行一次 `u_x=0` 反事实：以原 layout、原 reset、nominal forward request、post-processor 和低层权重运行，记录 policy raw、forced/raw/executed `u_x`，以及首次 terminal 前 root/dof/contact-force/link position 证据。原始资格行未保存完整 root/dof/RNG/低层内部状态，因此该运行不宣称逐位复现历史状态；它不改 PPO、entropy、安全缩放、几何或课程，也不新增 policy 组。
 
@@ -83,21 +83,21 @@ Avoid actor 另接收：canonical 2-channel local map、`[side_preference, 0]`�
 ```text
 r_t = -R_fail,                                                     safety failure
     = +R_succ,                                                     success
-    = k_p Δp - c_clear - c_lat - c_smooth + r_pref,               otherwise
+    = k_p Δp + r_clear - c_lat - c_smooth + r_pref,               otherwise
 ```
 
 failure 优先。failure 与 success 都是终止步 outcome，覆盖该步 dense 项：不再叠加 progress、clearance、lateral、smoothness 或 preference；success bonus 只给一次。总共只保留以下六组，不新增其他项：
 
 1. terminal outcome：`-R_fail` 用于碰撞或已冻结安全包络违规；`+R_succ` 用于 success；
 2. progress：`k_p Δp`，前进为正、后退为负；
-3. clearance：`c_clear` 是当前 visible map、pre-post-processor request direction 上的有界 soft-threshold penalty；安全阈值外为零，不称 swept-body clearance 或安全保证；
+3. clearance：`r_clear=.03*(dt/.1)*rho_0*clamp(rho_0-rho_u,-1,1)`，其中 `rho(c)=clip((.57-c)/.57,0,1)`；`rho_0` 来自步骤前同一 visible map 上的 nominal forward request，`rho_u` 来自同一 map 上的 raw request。直行安全时该项严格为零；直行危险时，横移改善为正、等风险为零、恶化为负。不使用 post-processor preview/executed direction 或 GT gap；
 4. lateral magnitude：`c_lat = k_l |raw u_A,x| >= 0`；
 5. executed smoothness：`c_smooth = k_Δ |exec u_x(t)-exec u_x(t-1)| >= 0`；
 6. preference tie-break：`r_pref` 仍仅在确需绕障、两侧安全且相近、preference 有效且有正向进度时，以 post-processor 后的 `u_exec,x` 计。
 
 timeout 与 escape 是独立事件，不等同 collision 或 success；本轮不为 escape 增加额外罚分，也不把它们写作已实现的 `terminated/truncated`。后续 bootstrap 必须按任务终止与时间截断分别冻结，不能用单一 `done` 处理替代。
 
-当前计划默认值为高层 `dt=.1`：failure `-20`、success `+2`、progress `Δp`、clear `.03*clip((.57-c)/.57,0,1)^2`、lateral `.005|u_x|`、smooth `.01|Δu_exec,x|`、preference `.0005*g*s*u_exec,x/.6`；除 smooth 外按 `dt/.1` 缩放。以 `gamma=.99,T=500`，折扣和约 `99.343`，最大前进 dense 项约 `4.967`，clear/lateral/preference 的量级分别约 `2.980/.298/.050`。这是设计核算，不是经验回报；失败项同样折扣，有限 `-20` 不能声称保证安全。
+当前计划默认值为高层 `dt=.1`：failure `-20`、success `+2`、progress `Δp`、relative clear `.03*rho_0*clip(rho_0-rho_u,-1,1)`、lateral `.005|u_x|`、smooth `.01|Δu_exec,x|`、preference `.0005*g*s*u_exec,x/.6`；除 smooth 外按 `dt/.1` 缩放。以 `gamma=.99,T=500`，折扣和约 `99.343`，最大前进 dense 项约 `4.967`，clear/lateral/preference 的量级上界分别约 `2.980/.298/.050`。这是设计核算，不是经验回报；失败项同样折扣，有限 `-20` 不能声称保证安全。
 
 `cross_line_distance` 只可留在环境内部，不进 actor。旧 `row_lat/row_gap/row_cmdx/early_next_gap/...` 退出新 Avoid 总 reward；PCR/Gate reward 不随本基线改动。
 

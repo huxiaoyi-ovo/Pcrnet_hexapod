@@ -4307,7 +4307,7 @@ class HierarchicalHexapodEnv:
             & (stage_at_step_start != 1)
         )
         reward_terms = avoid_clutter_reward(
-            progress_delta, reward_clearance, raw_cmd[:, 0], executed_cmd[:, 0], previous_exec[:, 0],
+            progress_delta, reward_clearance, forward_clearance, raw_cmd[:, 0], executed_cmd[:, 0], previous_exec[:, 0],
             current_pref, current_pref_valid, preference_gate, failure, success, dt=self.high_level_dt,
             max_lateral=max_lateral,
         )
@@ -6244,7 +6244,16 @@ def train(args):
                 "drive_semantics": "external_nominal_forward_request",
                 "reward_dt": float(env.high_level_dt),
                 "reward_coefficients": {"failure": -20., "success": 2., "clear": .03, "lateral": .005, "smooth": .01, "preference": .0005},
+                "clearance_reward_variant": "relative_forward_risk_improvement_v1",
+                "clearance_risk_formula": "rho(c)=clamp((0.57-c)/0.57,0,1)",
+                "clearance_reward_formula": "0.03*(dt/0.1)*rho_forward*clamp(rho_forward-rho_request,-1,1)",
+                "clearance_baseline": "pre_action_visible_map_nominal_forward_request",
+                "clearance_current": "pre_action_visible_map_raw_request",
                 "preference_reward_disabled_stages": [1],
+                "sanity_approved_changes_relative_to_initial": [
+                    "relative_forward_clearance_improvement",
+                    "stage1_preference_reward_disabled",
+                ],
             })
         elif bool(getattr(args, "revision_contract", False)) and (is_gate or is_mono_ppo):
             meta.update({
@@ -6934,6 +6943,16 @@ def train(args):
             'terminal_penalty',
             'total',
         ]
+        if clutter_avoid:
+            reward_term_keys.extend([
+                'failure',
+                'success',
+                'progress',
+                'clearance',
+                'lateral',
+                'smooth',
+                'preference',
+            ])
         reward_term_sums = {k: torch.zeros((), device=device) for k in reward_term_keys}
         gate_y_sum = torch.zeros((), device=device)
         gate_y_raw_sum = torch.zeros((), device=device)
@@ -9416,6 +9435,9 @@ def train(args):
             reward_log_keys = []
         for key in reward_log_keys:
             writer.add_scalar(f'Reward/{key}', reward_term_means[key], iteration)
+        if clutter_avoid:
+            for key in ('total', 'failure', 'success', 'progress', 'clearance', 'lateral', 'smooth', 'preference'):
+                writer.add_scalar(f'AvoidClutter/Reward/{key}', reward_term_means[key], iteration)
         
         # Console
         if (
