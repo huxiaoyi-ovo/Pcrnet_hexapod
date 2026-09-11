@@ -36,9 +36,17 @@ import torch.optim as optim
 import numpy as np
 import torch.nn.functional as F
 from datetime import datetime
-from torch.utils.tensorboard import SummaryWriter
 from typing import Tuple, Dict, Optional, Any, List
 from collections import deque
+from legged_gym.pcr_observation import (
+    AVOID_ACTOR_MASK_INDICES,
+    build_avoid_actor_state,
+    canonical_difficulty,
+    canonical_local_map,
+    side_preference,
+)
+from legged_gym.avoid_reward import avoid_clutter_reward
+from legged_gym.pcr_policy_contract import checkpoint_cmd_policy_kwargs, get_avoid_command, validate_frozen_avoid_revision, AVOID_1D_REVISION, PCR_CANONICAL_REVISION
 
 # Use CLI flag to gate debug output before args are parsed.
 DEBUG_MODE = "--debug" in sys.argv
@@ -487,6 +495,10 @@ def is_s0_follow_task_name(task_name: str) -> bool:
 
 def is_pcr_line_task_name(task_name: str) -> bool:
     return normalize_task_name(task_name) in PCR_TASK_NAMES
+
+
+def is_avoid_clutter_task_name(task_name: str) -> bool:
+    return normalize_task_name(task_name) == "s_avoid_clutter"
 
 
 def validate_pcr_reward_config(nav_cfg: Any, reward_cfg_dict: Dict[str, Any]) -> None:
@@ -1710,6 +1722,7 @@ def collect_runtime_observation_contract(
     risk_only_enabled = bool(is_risk_only_mode(w_mode) and getattr(args, "skill", "follow") == "moe")
     return {
         "use_avoid_local_map": bool(getattr(args, "skill", "follow") in ("avoid", "moe")),
+        "canonical_map_contract_version": "canonical_observed_2ch_v1" if bool(getattr(args, "revision_contract", False)) else "legacy",
         "gate_learned_w_feature_dim": LEARNED_W_FEATURE_DIM if learned_w_enabled else 0,
         "gate_learned_w_contract_version": LEARNED_W_OBS_CONTRACT_VERSION if learned_w_enabled else "none",
         "gate_uses_cmd_features": learned_w_enabled,
@@ -2185,6 +2198,11 @@ class HierarchicalHexapodEnv:
         # Isolate mutable runtime overrides to avoid cross-task config contamination.
         env_cfg = copy.deepcopy(env_cfg)
         train_cfg = copy.deepcopy(train_cfg) if train_cfg is not None else None
+        clutter_avoid_task = is_avoid_clutter_task_name(getattr(args, "task", ""))
+        if clutter_avoid_task:
+            # The wrapper owns the 50 s high-level timeout so a low-level timeout
+            # cannot reset between terminal latching and reward calculation.
+            env_cfg.env.no_episode_timeout = True
         if getattr(args, "seed", None) is not None:
             env_cfg.seed = int(args.seed)
         if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
@@ -2333,7 +2351,7 @@ class HierarchicalHexapodEnv:
         terrain_cfg = getattr(env_cfg, "terrain", None)
         self.use_actor_only_gt_affordance = bool(getattr(terrain_cfg, "avoid_gt_actor_only", False))
         self.require_actor_only_gt_affordance = bool(getattr(terrain_cfg, "avoid_gt_require_scene", False))
-        if terrain_type == "s_avoid_basic":
+        if terrain_type in ("s_avoid_basic", "s_avoid_clutter"):
             self.use_actor_only_gt_affordance = True
             self.require_actor_only_gt_affordance = True
         if self.use_actor_only_gt_affordance:
@@ -2492,6 +2510,15 @@ class HierarchicalHexapodEnv:
         self.reward_affordance_override = None
         self.last_obs = None
         self.forced_forward_speed = torch.zeros(self.num_envs, device=device)
+        self.avoid_virtual_bearing = torch.zeros(self.num_envs, device=device)
+        self.avoid_virtual_goal_valid = torch.zeros(self.num_envs, device=device, dtype=torch.bool)
+        self.avoid_context_elapsed = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.avoid_context_hold_steps = torch.ones(self.num_envs, device=device, dtype=torch.long)
+        self.avoid_context_ramp_steps = torch.ones(self.num_envs, device=device, dtype=torch.long)
+        self.avoid_context_start_speed = torch.zeros(self.num_envs, device=device)
+        self.avoid_context_target_speed = torch.zeros(self.num_envs, device=device)
+        self.avoid_context_start_bearing = torch.zeros(self.num_envs, device=device)
+        self.avoid_context_target_bearing = torch.zeros(self.num_envs, device=device)
         self.prev_nearest_obs_dist = torch.zeros(self.num_envs, device=device)
         self.prev_nearest_obs_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.prev_forward_clearance = torch.zeros(self.num_envs, device=device)
@@ -2507,7 +2534,7 @@ class HierarchicalHexapodEnv:
         self.high_level_dt = float(self.env.dt) * float(self.decimation)
         self.max_episode_length = max(1, int(np.ceil(self.max_episode_length_low / float(self.decimation))))
         self.max_episode_length_s = float(self.max_episode_length * self.high_level_dt)
-        self.no_episode_timeout = bool(getattr(env_cfg.env, "no_episode_timeout", False))
+        self.no_episode_timeout = False if clutter_avoid_task else bool(getattr(env_cfg.env, "no_episode_timeout", False))
         self.s0_follow_steps_success = max(
             1, int(self.s0_follow_success_time_s / max(1e-6, self.high_level_dt))
         )
@@ -2619,7 +2646,12 @@ class HierarchicalHexapodEnv:
         self._apply_scene_difficulty_for_resets(None)
         self.reward_affordance_override = None
         self.post_processor.reset(self.num_envs, self.device)
-        self._resample_forced_forward_speed(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
+        reset_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        if is_avoid_clutter_task_name(getattr(self.args, "task", "")):
+            self.forced_forward_speed.zero_()
+            self._resample_avoid_clutter_context(reset_ids)
+        else:
+            self._resample_forced_forward_speed(reset_ids)
 
         self._refresh_depth_images(force=True)
         obs_dict = self._get_high_level_obs()
@@ -2668,6 +2700,65 @@ class HierarchicalHexapodEnv:
         self.forced_forward_speed[env_ids] = (
             torch.rand(len(env_ids), device=self.device) * max(v_max - v_min_base, 0.0) + v_min_base
         )
+
+    def _resample_avoid_clutter_context(self, env_ids, episode_reset=True):
+        """Sample the externally driven forward request and virtual side context."""
+        if env_ids is None or env_ids.numel() == 0:
+            return
+        nominal = getattr(self.env, "s_avoid_v_drive_nom", None)
+        if nominal is None:
+            nominal = torch.full((self.num_envs,), 0.2, device=self.device)
+        nominal = nominal[env_ids].to(device=self.device, dtype=self.forced_forward_speed.dtype)
+        stage = getattr(self.env, "s_avoid_stage_per_env", None)
+        if stage is None:
+            stage = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
+        stage = stage[env_ids]
+        previous_speed = self.forced_forward_speed[env_ids]
+        previous_bearing = self.avoid_virtual_bearing[env_ids]
+        start = nominal.clone() if episode_reset else previous_speed
+        target = nominal.clone()
+        stage4 = stage >= 4
+        if bool(stage4.any().item()):
+            upper = torch.clamp(nominal[stage4], min=0.15)
+            target[stage4] = 0.15 + torch.rand_like(upper) * (upper - 0.15)
+        valid = torch.rand(len(env_ids), device=self.device) < 0.8
+        target_bearing = (torch.rand(len(env_ids), device=self.device) * 80.0 - 40.0) * (math.pi / 180.0)
+        target_bearing = torch.where(valid, target_bearing, torch.zeros_like(target_bearing))
+        start_bearing = target_bearing if episode_reset else torch.where(valid, previous_bearing, torch.zeros_like(target_bearing))
+        self.avoid_virtual_goal_valid[env_ids] = valid
+        self.avoid_virtual_bearing[env_ids] = start_bearing
+        self.avoid_context_elapsed[env_ids] = 0
+        self.avoid_context_hold_steps[env_ids] = torch.ceil(
+            (2.0 + 2.0 * torch.rand(len(env_ids), device=self.device)) / self.high_level_dt
+        ).to(torch.long)
+        self.avoid_context_ramp_steps[env_ids] = max(1, int(math.ceil(0.75 / self.high_level_dt)))
+        self.avoid_context_start_speed[env_ids] = start
+        self.avoid_context_target_speed[env_ids] = target
+        self.avoid_context_start_bearing[env_ids] = start_bearing
+        self.avoid_context_target_bearing[env_ids] = target_bearing
+        self.forced_forward_speed[env_ids] = start
+
+    def _advance_avoid_clutter_context(self, active):
+        """Advance the held virtual target only after its action interval."""
+        if active is None or not bool(active.any().item()):
+            return
+        self.avoid_context_elapsed[active] += 1
+        alpha = torch.clamp(
+            self.avoid_context_elapsed.float() / self.avoid_context_ramp_steps.clamp_min(1).float(),
+            min=0.0,
+            max=1.0,
+        )
+        self.forced_forward_speed[active] = (
+            self.avoid_context_start_speed[active]
+            + alpha[active] * (self.avoid_context_target_speed[active] - self.avoid_context_start_speed[active])
+        )
+        self.avoid_virtual_bearing[active] = (
+            self.avoid_context_start_bearing[active]
+            + alpha[active] * (self.avoid_context_target_bearing[active] - self.avoid_context_start_bearing[active])
+        )
+        renew = active & (self.avoid_context_elapsed >= self.avoid_context_hold_steps)
+        if bool(renew.any().item()):
+            self._resample_avoid_clutter_context(renew.nonzero(as_tuple=False).flatten(), episode_reset=False)
 
     def set_scene_difficulty_target(self, difficulty: float) -> None:
         """Set curriculum target; it becomes active only for envs after reset."""
@@ -2813,7 +2904,7 @@ class HierarchicalHexapodEnv:
             device=self.device,
         )
         # Keep the output [x_right, y_forward] so it merges cell-for-cell with scene maps.
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers)
         x_body = grid_x.reshape(-1).unsqueeze(0)
         y_body = grid_y.reshape(-1).unsqueeze(0)
 
@@ -3087,7 +3178,7 @@ class HierarchicalHexapodEnv:
             device=self.device,
         )
         # Keep axis order consistent with scene rasterization: [x_right, y_forward].
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers)
         return torch.sqrt(grid_x ** 2 + grid_y ** 2)
 
     def _build_affordance_geometry(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -3107,7 +3198,7 @@ class HierarchicalHexapodEnv:
             device=self.device,
         )
         # Keep axis order consistent with scene rasterization: [x_right, y_forward].
-        grid_x, grid_y = torch.meshgrid(x_centers, y_centers, indexing="ij")
+        grid_x, grid_y = torch.meshgrid(x_centers, y_centers)
         bearing_y = torch.atan2(grid_x, grid_y)
         dist = torch.sqrt(grid_x ** 2 + grid_y ** 2)
         visible = torch.ones_like(dist, dtype=torch.bool)
@@ -4030,6 +4121,7 @@ class HierarchicalHexapodEnv:
         # 1.6 添加上一时刻实际执行命令（解决后处理变化率记忆的非马尔可夫性）
         if hasattr(self, "post_processor") and getattr(self.post_processor, "last_cmd", None) is not None:
             obs_dict['state'] = torch.cat([obs_dict['state'], self.post_processor.last_cmd.detach().clone()], dim=1)
+        clutter_avoid = is_avoid_clutter_task_name(getattr(self.args, "task", "")) and getattr(self.args, "skill", None) == "avoid"
         # Keep the historical Avoid-only state contract without changing Gate/Mono/Follow inputs.
         if getattr(self.args, "skill", None) == "avoid" and bool(getattr(self.env, "s_avoid_enabled", False)):
             obs_dict['state'] = torch.cat(
@@ -4107,6 +4199,20 @@ class HierarchicalHexapodEnv:
         obs_dict['gt_difficulty'] = difficulty_from_gap(obs_dict['gt_affordance'])
         obs_dict['actor_difficulty'] = actor_difficulty
         obs_dict['critic_difficulty'] = critic_difficulty
+        if clutter_avoid or bool(getattr(self.args, "revision_contract", False)):
+            occupancy = obs_dict["gt_affordance"][:, 0]
+            visible = self.affordance_visible_mask
+            if visible.ndim == 2:
+                visible = visible.unsqueeze(0).expand(self.num_envs, -1, -1)
+            obs_dict["local_map_2ch"] = canonical_local_map(occupancy, visible)
+            obs_dict["critic_local_map_2ch"] = canonical_local_map(occupancy, torch.ones_like(visible))
+            obs_dict["actor_difficulty"] = canonical_difficulty(obs_dict["local_map_2ch"])
+            obs_dict["critic_difficulty"] = canonical_difficulty(obs_dict["critic_local_map_2ch"])
+            if clutter_avoid:
+                bearing_goal = torch.stack([
+                    torch.sin(self.avoid_virtual_bearing), torch.cos(self.avoid_virtual_bearing)
+                ], dim=1)
+                obs_dict["goal"] = side_preference(bearing_goal, self.avoid_virtual_goal_valid)
         
         # 4. Depth Image
         if hasattr(self.env, 'depth_images'):
@@ -4117,6 +4223,150 @@ class HierarchicalHexapodEnv:
             obs_dict['depth'] = torch.zeros(self.num_envs, 1, 128, 128, device=self.device)
         
         return obs_dict
+
+    def _step_avoid_clutter(self, cmd_vel: torch.Tensor):
+        """Standalone clutter step: 1-D action expansion with first-terminal latching."""
+        if cmd_vel is None:
+            raise ValueError("s_avoid_clutter requires a lateral action")
+        if cmd_vel.ndim == 1:
+            cmd_vel = cmd_vel.unsqueeze(1)
+        if cmd_vel.ndim != 2 or cmd_vel.shape[0] != self.num_envs or cmd_vel.shape[1] not in (1, 3):
+            raise ValueError(f"s_avoid_clutter action must have shape (N,1) or (N,3), got {tuple(cmd_vel.shape)}")
+        raw_cmd = torch.zeros(self.num_envs, 3, device=self.device, dtype=cmd_vel.dtype)
+        raw_cmd[:, 0] = cmd_vel[:, 0]
+        raw_cmd[:, 1] = self.forced_forward_speed.to(dtype=cmd_vel.dtype)
+        visible_map = self.last_obs["local_map_2ch"][:, :1]
+        previous_exec = self.post_processor.last_cmd.detach().clone()
+        start_root_y = self.env.root_states[:, 1].detach().clone()
+        current_pref = self.last_obs["goal"][:, 0].detach().clone()
+        current_pref_valid = self.avoid_virtual_goal_valid.detach().clone()
+        max_lateral = float(self.post_processor.max_cmd[0].item())
+        forward = torch.stack([torch.zeros_like(raw_cmd[:, 1]), raw_cmd[:, 1]], dim=1)
+        left = forward.clone()
+        right = forward.clone()
+        left[:, 0] = -max_lateral
+        right[:, 0] = max_lateral
+        forward_clearance = self._compute_clearance_along_cmd(visible_map, forward)
+        left_clearance = self._compute_clearance_along_cmd(visible_map, left)
+        right_clearance = self._compute_clearance_along_cmd(visible_map, right)
+        reward_clearance = self._compute_clearance_along_cmd(visible_map, raw_cmd[:, :2])
+        preview = self.post_processor.preview_cmd_before_risk(raw_cmd, beta=self.beta_override)
+        clearance_pp = self._compute_clearance_along_cmd(visible_map, preview[:, :2])
+        executed_cmd, post_info = self.post_processor.process(raw_cmd, clearance_pp, beta=self.beta_override)
+        active = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+        done_during = torch.zeros_like(active)
+        terminal_physical = torch.zeros_like(active)
+        terminal_envelope = torch.zeros_like(active)
+        terminal_fall = torch.zeros_like(active)
+        terminal_success = torch.zeros_like(active)
+        terminal_center_y = torch.zeros(self.num_envs, device=self.device, dtype=start_root_y.dtype)
+        for _ in range(self.decimation):
+            if not bool(active.any().item()):
+                break
+            command_step = torch.where(active.unsqueeze(1), executed_cmd, torch.zeros_like(executed_cmd))
+            self.env.commands[:, :3] = command_step
+            if hasattr(self.env, "commands_scale") and hasattr(self.env, "obs_buf") and self.env.obs_buf.shape[1] >= 3:
+                self.env.obs_buf[:, -3:] = command_step * self.env.commands_scale
+            with torch.no_grad():
+                low_action = self.low_level_policy.act_inference(self.env.obs_buf)
+            if bool((~active).any().item()):
+                low_action = low_action.clone()
+                low_action[~active] = 0.0
+            _, _, _, low_done, _ = self.env.step(low_action)
+            low_done = low_done.to(dtype=torch.bool)
+            physical = getattr(self.env, "s_avoid_terminal_physical", torch.zeros_like(active))
+            envelope = getattr(self.env, "s_avoid_terminal_envelope", torch.zeros_like(active))
+            fall = getattr(self.env, "s_avoid_terminal_fall", torch.zeros_like(active))
+            success = getattr(self.env, "s_avoid_terminal_success", torch.zeros_like(active))
+            first = active & low_done
+            terminal_physical |= first & physical
+            terminal_envelope |= first & envelope
+            terminal_fall |= first & fall
+            terminal_success |= first & success
+            center_now = getattr(self.env, "s_avoid_terminal_center_y", self.env.root_states[:, 1])
+            terminal_center_y = torch.where(first, center_now.to(dtype=terminal_center_y.dtype), terminal_center_y)
+            done_during |= first
+            active &= ~first
+        self.episode_length_buf += 1
+        current_center_y = self.env.root_states[:, 1].detach().clone()
+        if hasattr(self.env, "env_origins"):
+            current_center_y -= self.env.env_origins[:, 1]
+        exit_y = getattr(self.env, "s_avoid_exit_y", torch.full_like(current_center_y, float("inf")))
+        failure = terminal_physical | terminal_envelope | terminal_fall
+        success_alive = active & (current_center_y >= exit_y)
+        success = (terminal_success | success_alive) & ~failure
+        progress_delta = self.env.root_states[:, 1].detach().clone() - start_root_y
+        preference_gate = (
+            (forward_clearance < 0.57)
+            & (left_clearance >= 0.57)
+            & (right_clearance >= 0.57)
+            & ((left_clearance - right_clearance).abs() <= 0.10)
+            & current_pref_valid
+            & (progress_delta > 0.0)
+        )
+        reward_terms = avoid_clutter_reward(
+            progress_delta, reward_clearance, raw_cmd[:, 0], executed_cmd[:, 0], previous_exec[:, 0],
+            current_pref, current_pref_valid, preference_gate, failure, success, dt=self.high_level_dt,
+            max_lateral=max_lateral,
+        )
+        self.episode_return_buf += reward_terms["total"]
+        self.episode_len_buf += 1
+        self._advance_avoid_clutter_context(active & ~success_alive)
+        reward_obs = self._get_high_level_obs()
+        timeout = (self.episode_length_buf >= self.max_episode_length) & ~done_during & ~success_alive
+        timeout_bootstrap_obs = None
+        if bool(timeout.any().item()):
+            timeout_bootstrap_obs = {
+                key: value.detach().clone() if torch.is_tensor(value) else value
+                for key, value in reward_obs.items()
+            }
+        manual_reset = success_alive | timeout
+        done = done_during | manual_reset
+        length_snapshot = self.episode_length_buf.clone()
+        episode_info = None
+        if bool(done.any().item()):
+            episode_info = {"r": self.episode_return_buf.clone(), "l": self.episode_len_buf.clone()}
+        if bool(manual_reset.any().item()):
+            reset_ids = manual_reset.nonzero(as_tuple=False).flatten()
+            self._reset_idx(reset_ids)
+            if hasattr(self.env, "compute_observations"):
+                self.env.compute_observations()
+            self._refresh_depth_images(force=True)
+        if bool(done.any().item()):
+            self.post_processor.last_cmd[done] = 0.0
+            self.episode_length_buf[done] = 0
+            self.episode_return_buf[done] = 0.0
+            self.episode_len_buf[done] = 0
+            self._resample_avoid_clutter_context(done.nonzero(as_tuple=False).flatten())
+        next_obs = self._get_high_level_obs()
+        self.last_obs = next_obs
+        post_payload = dict(post_info) if isinstance(post_info, dict) else {}
+        post_payload.update({
+            "cmd_raw": raw_cmd.detach().clone(),
+            "cmd_exec_mean": executed_cmd.detach().clone(),
+            "cmd_override_final": executed_cmd.detach().clone(),
+            "cmd_preview_for_clearance": preview.detach().clone(),
+            "clearance_pp": clearance_pp.detach().clone(),
+        })
+        info = {
+            "post_info": post_payload,
+            "reward_terms": reward_terms,
+            "episode_length": length_snapshot,
+            "episode": episode_info,
+            "collision_mask": terminal_physical | terminal_envelope,
+            "s_avoid_episode_collision": terminal_physical | terminal_envelope,
+            "success_mask": success,
+            "timeout": timeout,
+            "timeout_bootstrap_obs": timeout_bootstrap_obs,
+            "terminal_physical": terminal_physical,
+            "terminal_envelope": terminal_envelope,
+            "terminal_fall": terminal_fall,
+            "terminal_success": terminal_success,
+            "terminal_center_y": terminal_center_y,
+            "manual_reset_mask": manual_reset,
+            "done_during": done_during,
+        }
+        return next_obs, reward_terms["total"], done, info
 
     def step(
         self,
@@ -4137,6 +4387,8 @@ class HierarchicalHexapodEnv:
         Returns:
             obs_dict, rewards, dones, info
         """
+        if is_avoid_clutter_task_name(getattr(self.args, "task", "")):
+            return self._step_avoid_clutter(cmd_vel)
         # Debug: force a constant forward command along +Y to validate command direction/axis.
         if bool(getattr(self.args, "force_cmd_y", False)):
             v = 0.3
@@ -5576,6 +5828,11 @@ def train(args):
         if debug:
             print(*vals, **kwargs)
     args.task = normalize_task_name(getattr(args, "task", ""))
+    args.revision_contract = bool(getattr(args, "revision_contract", False) or is_avoid_clutter_task_name(args.task))
+    if is_avoid_clutter_task_name(args.task) and getattr(args, "skill", None) != "avoid":
+        raise ValueError("s_avoid_clutter currently supports only --skill avoid")
+    if is_avoid_clutter_task_name(args.task) and getattr(args, "mode", "teacher") != "teacher":
+        raise ValueError("s_avoid_clutter rejects student mode until its observed-map path is implemented")
     skill_name = getattr(args, "skill", "follow")
     if args.task == "hex_terrain":
         raise RuntimeError("hex_terrain 已移除，请改用 hex_ground / s_avoid_basic / s_cylinder / s_calib")
@@ -5587,7 +5844,7 @@ def train(args):
         )
     recommended_by_skill = {
         "follow": ("s_follow_basic",),
-        "avoid": ("s_avoid_basic", "s_cylinder", "s_narrow_passage", "s_step_field", "s_dense_obstacles"),
+        "avoid": ("s_avoid_basic", "s_avoid_clutter", "s_cylinder", "s_narrow_passage", "s_step_field", "s_dense_obstacles"),
         "moe": ("s_avoid_basic", "s_pcr_line_avoid_basic", "s_pcr_new"),
     }
     eval_only_by_skill = {
@@ -5823,10 +6080,12 @@ def train(args):
 
     # 创建 Policy (V5)
     is_gate = (skill == "moe") and (not is_mono_ppo)
+    clutter_avoid = is_avoid_clutter_task_name(args.task) and skill == "avoid"
     cmd_scale = tuple(float(v) for v in env.post_processor.max_cmd.detach().cpu().tolist())
+    policy_cmd_scale = (cmd_scale[0],) if clutter_avoid else cmd_scale
     gate_learned_w_enabled = bool(is_gate and is_learned_w_mode(getattr(args, "w_mode", "none")))
     gate_risk_only_enabled = bool(is_gate and is_risk_only_mode(getattr(args, "w_mode", "none")))
-    action_dim = (2 if gate_learned_w_enabled else 1) if is_gate else 3
+    action_dim = 1 if clutter_avoid else ((2 if gate_learned_w_enabled else 1) if is_gate else 3)
     policy_goal_dim = goal_dim + (LEARNED_W_FEATURE_DIM if gate_learned_w_enabled else 0)
     gate_use_difficulty = bool(getattr(args, "gate_use_difficulty", False))
     moe_use_student_aff = bool(getattr(args, "moe_use_student_aff", False))
@@ -5885,7 +6144,7 @@ def train(args):
             target_world_xy=target_world_xy,
             target_vel_world_xy=None,
             target_heading=None,
-            cmd_scale=cmd_scale,
+            cmd_scale=policy_cmd_scale,
             reset_mask=reset_mask,
         )
 
@@ -5969,9 +6228,27 @@ def train(args):
         meta["uses_avoid_expert"] = bool(is_gate)
         meta["uses_pcr_gate"] = bool(is_gate)
         meta["network_class"] = "CmdVelExpert" if is_mono_ppo else ("GatePolicy" if is_gate else "CmdVelExpert")
-        meta["cmd_output_convention"] = "[x_right, y_forward, yaw]"
+        meta["cmd_output_convention"] = "[x_right]" if clutter_avoid else "[x_right, y_forward, yaw]"
         meta["trained_w_mode"] = "none" if is_mono_ppo else str(getattr(args, "w_mode", "none")).lower()
         meta["actor_output_dim"] = int(action_dim)
+        meta["state_dim"] = int(state_dim)
+        meta["goal_dim"] = int(goal_dim)
+        if clutter_avoid:
+            meta.update({
+                "revision_contract": "avoid_1d_canonical_v1",
+                "actor_state_mask_indices": list(AVOID_ACTOR_MASK_INDICES),
+                "map_semantics": "canonical_observed_2ch",
+                "goal_semantics": "virtual_side_preference",
+                "drive_semantics": "external_nominal_forward_request",
+                "reward_dt": float(env.high_level_dt),
+                "reward_coefficients": {"failure": -20., "success": 2., "clear": .03, "lateral": .005, "smooth": .01, "preference": .0005},
+            })
+        elif bool(getattr(args, "revision_contract", False)) and (is_gate or is_mono_ppo):
+            meta.update({
+                "revision_contract": PCR_CANONICAL_REVISION,
+                "actor_state_mask_indices": [0, 1],
+                "map_semantics": "canonical_observed_2ch",
+            })
         meta["policy_goal_dim"] = int(policy_goal_dim)
         meta["obs_contract_version"] = (
             "mono_ppo_cmd_v1" if is_mono_ppo else
@@ -6113,14 +6390,20 @@ def train(args):
             state_dim=state_dim,
             goal_dim=policy_goal_dim,
             learned_w=gate_learned_w_enabled,
+            actor_mask_xy=bool(getattr(args, "revision_contract", False)),
         ).to(device)
     else:
-        policy = CmdVelExpert(
+        policy_kwargs = dict(
             affordance_channels=aff_channels,
             state_dim=state_dim,
             goal_dim=goal_dim,
-            cmd_scale=cmd_scale,
-        ).to(device)
+            cmd_scale=policy_cmd_scale,
+        )
+        if clutter_avoid:
+            policy_kwargs.update(action_dim=1, actor_state_mask_indices=AVOID_ACTOR_MASK_INDICES)
+        elif is_mono_ppo and bool(getattr(args, "revision_contract", False)):
+            policy_kwargs.update(actor_state_mask_indices=(0, 1))
+        policy = CmdVelExpert(**policy_kwargs).to(device)
 
     optimizer = optim.Adam(policy.parameters(), lr=args.lr)
 
@@ -6232,14 +6515,16 @@ def train(args):
         follow_model = None
         ckpt = torch.load(args.avoid_ckpt, map_location=device)
         avoid_aff_channels = AVOID_LOCAL_MAP_CHANNELS * aff_stack
-        avoid_expert_state_dim = infer_checkpoint_state_dim(ckpt) or state_dim
+        avoid_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
+        avoid_expert_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (infer_checkpoint_state_dim(ckpt) or state_dim)
         avoid_model = CmdVelExpert(
             affordance_channels=avoid_aff_channels,
             state_dim=avoid_expert_state_dim,
-            goal_dim=goal_dim,
-            cmd_scale=cmd_scale,
+            goal_dim=2 if avoid_kwargs["action_dim"] == 1 else goal_dim,
+            **avoid_kwargs,
         ).to(device)
         ckpt_meta = ckpt.get("experiment_meta", None) if isinstance(ckpt, dict) else None
+        validate_frozen_avoid_revision(_build_experiment_meta(), ckpt_meta)
         _check_aux_model_meta(
             ckpt_meta,
             source_name="Expert checkpoint (avoid)",
@@ -6362,6 +6647,7 @@ def train(args):
         run_prefix = run_name if run_name else f"{skill}_{run_mode_tag}_{variant_tag}"
         log_dir = os.path.join(args.output_dir, f"{run_prefix}_{timestamp}")
         os.makedirs(log_dir, exist_ok=True)
+    from torch.utils.tensorboard import SummaryWriter
     writer = SummaryWriter(log_dir)
     print(f"[Main] 日志目录: {log_dir}")
     run_meta = _build_experiment_meta()
@@ -6435,12 +6721,10 @@ def train(args):
                         bootstrap_goal,
                         None,
                     )
-                    bootstrap_cmd_a, _ = avoid_model.get_action(
-                        bootstrap_aff_stack,
-                        bootstrap_avoid_state,
-                        bootstrap_obs['goal'],
-                        bootstrap_difficulty,
-                        deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                    bootstrap_cmd_a, _ = get_avoid_command(
+                        avoid_model, bootstrap_aff_stack, bootstrap_expert_state, bootstrap_cmd_f, bootstrap_goal,
+                        bootstrap_difficulty, deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                        legacy_state=bootstrap_avoid_state, legacy_goal=bootstrap_obs['goal'],
                     )
                     bootstrap_policy_goal, _ = build_learned_w_gate_goal(
                         env,
@@ -7049,9 +7333,10 @@ def train(args):
                         goal,
                         reset_mask_prev,
                     )
-                    cmd_a, _ = avoid_model.get_action(
-                        moe_avoid_aff_stack_buf, moe_avoid_state, goal_raw, avoid_difficulty,
-                        deterministic=bool(getattr(args, "moe_expert_deterministic", True))
+                    cmd_a, _ = get_avoid_command(
+                        avoid_model, moe_avoid_aff_stack_buf, moe_expert_state, cmd_f, goal, avoid_difficulty,
+                        deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                        legacy_state=moe_avoid_state, legacy_goal=goal_raw,
                     )
                     cmd_f, cmd_f_bad = _sanitize_or_fail_action_tensor(
                         "moe_follow_action",
@@ -7237,6 +7522,13 @@ def train(args):
                     )
                     policy_nonfinite_action_count += int(cmd_bad.sum().item())
                     action_valid = action_valid & (~cmd_bad)
+                    action = cmd
+                    if clutter_avoid:
+                        cmd = torch.cat([
+                            action,
+                            state[:, 13:14],
+                            torch.zeros_like(action),
+                        ], dim=1)
                     if use_expert_guidance and compute_s0_follow_expert_cmd is not None:
                         policy_cmd_raw = cmd
                         target_world_xy = getattr(env.env, "target_world", None)
@@ -7317,7 +7609,7 @@ def train(args):
                         state,
                         goal,
                         difficulty,
-                        cmd,
+                        action if clutter_avoid else cmd,
                         critic_affordance_map=critic_aff_stack_buf,
                         critic_robot_state=state,
                         critic_goal=goal,
@@ -7396,7 +7688,8 @@ def train(args):
                             sign_match = (cmd_omega_eval[valid] * dyaw[valid]) > 0.0
                             egpo_yaw_resp_sign_match_sum += sign_match.float().sum()
                             egpo_yaw_resp_sign_count += valid.float().sum()
-                action = cmd
+                if not clutter_avoid:
+                    action = cmd
                 gate_y_prev = None
                 cmd_used = cmd
             last_dones = dones.clone()
@@ -8113,12 +8406,10 @@ def train(args):
                         goal,
                         reset_mask_prev,
                     )
-                    cmd_a_next, _ = avoid_model.get_action(
-                        aff_stack_bootstrap,
-                        moe_avoid_state_next,
-                        obs_dict['goal'],
-                        difficulty,
+                    cmd_a_next, _ = get_avoid_command(
+                        avoid_model, aff_stack_bootstrap, moe_expert_state_next, cmd_f_next, goal, difficulty,
                         deterministic=bool(getattr(args, "moe_expert_deterministic", True)),
+                        legacy_state=moe_avoid_state_next, legacy_goal=obs_dict['goal'],
                     )
                     policy_goal_next, _ = build_learned_w_gate_goal(
                         env,
@@ -9445,6 +9736,7 @@ if __name__ == "__main__":
                         help='旧参数保留；当前 moe 默认使用解析式 follow expert，不再需要该项')
     parser.add_argument('--avoid_ckpt', type=str, default=None,
                         help=f'(Gate) Avoid expert 模型路径（moe 默认 {DEFAULT_AVOID_CKPT}）')
+    parser.add_argument('--revision_contract', action='store_true', help='opt in to the canonical PCR actor-map/checkpoint contract')
     parser.add_argument('--vision_ckpt', type=str, default=None,
                         help='(Student) Vision 模型路径')
     parser.add_argument('--resume', type=str, default=None,

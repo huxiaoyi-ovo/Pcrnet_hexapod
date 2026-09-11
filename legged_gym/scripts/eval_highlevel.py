@@ -28,8 +28,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, PROJECT_ROOT)
 
 from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
+from legged_gym.scripts import avoid14d_diagnostic as a14d
 from legged_gym.scripts import play_highlevel as ph
 from legged_gym.scripts import train_highlevel as th
+from legged_gym.pcr_policy_contract import checkpoint_cmd_policy_kwargs, get_avoid_command, validate_frozen_avoid_revision, AVOID_1D_REVISION, PCR_CANONICAL_REVISION
 
 
 def _to_state_dict(ckpt_obj):
@@ -1588,6 +1590,15 @@ class EvalRunner:
         self.gate_state_dim = runtime.gate_state_dim
         self.gate_goal_dim = getattr(runtime, "gate_goal_dim", None)
         self.avoid_state_dim = runtime.avoid_state_dim
+        self.avoid14d_recorder = None
+        if str(getattr(self.args, "avoid14d_probe_dir", "") or "").strip():
+            a14d.validate_probe_args(self.args, self.avoid_state_dim)
+            self.avoid14d_recorder = a14d.Avoid14DProbeRecorder(
+                self.args.avoid14d_probe_dir,
+                self.env.num_envs,
+                stride=self.args.avoid14d_probe_stride,
+                max_samples=self.args.avoid14d_probe_max_samples,
+            )
 
         self.param_info = self._build_param_info()
         self.resolved_protocol = th.build_resolved_protocol(
@@ -1816,6 +1827,7 @@ class EvalRunner:
                 state_dim=self.gate_state_dim,
                 goal_dim=self.gate_goal_dim,
                 learned_w=expected_action_dim == 2,
+                actor_mask_xy=self.policy_meta.get("revision_contract") == PCR_CANONICAL_REVISION,
             ).to(self.device)
             self._validate_ckpt_meta(self.policy_meta, expected_skill="moe", source_name="gate ckpt")
             th.validate_checkpoint_contract_compatibility(
@@ -1830,13 +1842,15 @@ class EvalRunner:
 
             avoid_ckpt = torch.load(self.args.avoid_ckpt, map_location=self.device)
             avoid_meta = self._ckpt_meta(avoid_ckpt)
-            self.avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or state_dim
+            validate_frozen_avoid_revision(self.policy_meta, avoid_meta)
+            avoid_kwargs = checkpoint_cmd_policy_kwargs(avoid_ckpt, tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()))
+            self.avoid_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (th.infer_checkpoint_state_dim(avoid_ckpt) or state_dim)
             avoid_aff_channels = int(obs["local_map_2ch"].shape[1] * self.aff_stack)
             self.avoid_model = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
                 state_dim=self.avoid_state_dim,
-                goal_dim=goal_dim,
-                cmd_scale=cmd_scale,
+                goal_dim=2 if avoid_kwargs["action_dim"] == 1 else goal_dim,
+                **avoid_kwargs,
             ).to(self.device)
             self._validate_ckpt_meta(avoid_meta, expected_skill="avoid", source_name="avoid expert ckpt")
             th.validate_checkpoint_contract_compatibility(
@@ -1862,11 +1876,12 @@ class EvalRunner:
             ckpt = torch.load(self.args.ckpt, map_location=self.device)
             self.policy_meta = self._ckpt_meta(ckpt)
             self.gate_state_dim = th.infer_checkpoint_state_dim(ckpt) or state_dim
+            policy_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
             self.policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
                 state_dim=self.gate_state_dim,
-                goal_dim=goal_dim,
-                cmd_scale=cmd_scale,
+                goal_dim=2 if policy_kwargs["action_dim"] == 1 else goal_dim,
+                **policy_kwargs,
             ).to(self.device)
             self._validate_ckpt_meta(self.policy_meta, expected_skill=skill, source_name="policy ckpt")
             th.validate_checkpoint_contract_compatibility(
@@ -1932,6 +1947,88 @@ class EvalRunner:
         stack_buf[:, -aff_map.shape[1] :, :, :] = aff_map
         return stack_buf
 
+    def _avoid14d_pre_step_context(self):
+        """Read diagnostic-only pre-step signals; this does not alter env state."""
+        env_impl = self.env.env
+        num_envs = self.env.num_envs
+        base_lin_vel = getattr(env_impl, "base_lin_vel", None)
+        base_ang_vel = getattr(env_impl, "base_ang_vel", None)
+        if torch.is_tensor(base_lin_vel) and torch.is_tensor(base_ang_vel):
+            base_vel = torch.stack((base_lin_vel[:, 0], base_lin_vel[:, 1], base_ang_vel[:, 2]), dim=1)
+        else:
+            base_vel = torch.full((num_envs, 3), float("nan"), device=self.device)
+        row_index = torch.full((num_envs,), -1, dtype=torch.long, device=self.device)
+        row_valid = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        row_fn = getattr(self.env, "_compute_current_next_row_gap_state", None)
+        root_states = getattr(env_impl, "root_states", None)
+        if callable(row_fn) and torch.is_tensor(root_states):
+            row_state = row_fn(root_states[:, :3])
+            row_index = row_state[5]
+            row_valid = row_state[6]
+        return base_vel, row_index, row_valid
+
+    def _record_avoid14d_candidates(
+        self,
+        obs_dict,
+        aff_bundle,
+        gate_diag,
+        base_vel_pre,
+        row_index,
+        row_valid,
+        row_transition,
+    ):
+        """Record counterfactual Avoid actions without changing the live command path."""
+        recorder = self.avoid14d_recorder
+        if recorder is None:
+            return
+        selected_ids = np.flatnonzero(recorder.should_sample(row_transition))
+        selected_ids = selected_ids[: max(0, recorder.max_samples - recorder.sample_count)]
+        if selected_ids.size == 0:
+            return
+        state13 = obs_dict["state"]
+        if state13.ndim != 2 or int(state13.shape[1]) != 13:
+            raise RuntimeError(f"Avoid14D probe requires actual 13D state, got {tuple(state13.shape)}")
+        expert_state14 = th.get_moe_expert_state_inputs(
+            th.match_state_dim(state13, 14, label="avoid14d_probe_state")
+        )
+        if not torch.allclose(expert_state14[:, 9], torch.zeros_like(expert_state14[:, 9])):
+            raise RuntimeError("Avoid14D probe expected expert prev_gate_y state index 9 to be cleared")
+        ids_t = torch.as_tensor(selected_ids, device=self.device, dtype=torch.long)
+        state_before = state13.clone()
+        aff_before = self.avoid_aff_stack_buf.clone()
+        candidate_states, candidate_cmd = a14d.candidate_actions(
+            self.avoid_model,
+            self.avoid_aff_stack_buf[ids_t],
+            expert_state14[ids_t],
+            obs_dict["goal"][ids_t],
+            aff_bundle["avoid_difficulty"][ids_t],
+        )
+        if not torch.equal(candidate_states[:, :, :13], expert_state14[ids_t].unsqueeze(1).expand(-1, 4, -1)[:, :, :13]):
+            raise RuntimeError("Avoid14D probe changed a state feature other than index 13")
+        if not torch.equal(state13, state_before) or not torch.equal(self.avoid_aff_stack_buf, aff_before):
+            raise RuntimeError("Avoid14D probe mutated a live policy input")
+        live_cmd_a = gate_diag["cmd_a"]
+        if not torch.allclose(candidate_cmd[:, 0], live_cmd_a[ids_t], rtol=1e-5, atol=1e-6):
+            raise RuntimeError("Avoid14D probe baseline state[13]=0 disagrees with live cmd_a")
+        clearance = gate_diag.get("clearance_F", None)
+        if not torch.is_tensor(clearance):
+            clearance = torch.full((self.env.num_envs,), float("nan"), device=self.device)
+        recorder.record(
+            selected_ids,
+            state13=state13,
+            expert_state14=expert_state14,
+            aff_map=self.avoid_aff_stack_buf,
+            goal=obs_dict["goal"],
+            difficulty=aff_bundle["avoid_difficulty"],
+            candidate_cmd=candidate_cmd,
+            live_cmd_a=live_cmd_a,
+            base_vel_pre=base_vel_pre,
+            row_index=row_index,
+            row_valid=row_valid,
+            clearance_follow_proposal=clearance,
+            row_transition=row_transition,
+        )
+
     def _policy_step(
         self,
         obs_dict: Dict[str, torch.Tensor],
@@ -1983,13 +2080,8 @@ class EvalRunner:
                     tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()),
                     env_ref=self.env,
                 )
-                cmd_a, _ = self.avoid_model.get_action(
-                    avoid_aff_input,
-                    expert_state,
-                    avoid_goal,
-                    avoid_difficulty_input,
-                    deterministic=True,
-                )
+                cmd_a, _ = get_avoid_command(self.avoid_model, avoid_aff_input, state, cmd_f, goal,
+                    avoid_difficulty_input, deterministic=True, legacy_state=expert_state, legacy_goal=avoid_goal)
                 if bool(getattr(self.args, "velocity_search", False)):
                     gate_diag = _compute_velocity_search_diag(
                         self.env,
@@ -2123,13 +2215,8 @@ class EvalRunner:
                     tuple(float(v) for v in self.env.post_processor.max_cmd.detach().cpu().tolist()),
                     env_ref=self.env,
                 )
-                cmd_a, _ = self.avoid_model.get_action(
-                    avoid_aff_input,
-                    expert_state,
-                    avoid_goal,
-                    avoid_difficulty_input,
-                    deterministic=True,
-                )
+                cmd_a, _ = get_avoid_command(self.avoid_model, avoid_aff_input, state, cmd_f, goal,
+                    avoid_difficulty_input, deterministic=True, legacy_state=expert_state, legacy_goal=avoid_goal)
                 diag = th._pcr_gate_command_conflict_diag(
                     self.env,
                     self.args,
@@ -2268,6 +2355,10 @@ class EvalRunner:
                     self.aff_stack_buf = self._roll_aff_stack(self.aff_stack_buf, actor_aff_map, self.done_prev)
                     aff_stack = self.aff_stack_buf
 
+                if self.avoid14d_recorder is not None:
+                    base_vel_pre, row_index, row_valid = self._avoid14d_pre_step_context()
+                    row_transition = self.avoid14d_recorder.update_rows(row_index, row_valid)
+
                 # Pre-step follow error (avoid post-reset contamination on done envs).
                 if hasattr(self.env.env, "target_world"):
                     robot_xy = self.env.env.root_states[:, :2]
@@ -2311,6 +2402,16 @@ class EvalRunner:
                     gate_aff_map=aff_bundle["gate_aff"],
                 )
                 t_pol1 = time.perf_counter()
+                if self.avoid14d_recorder is not None:
+                    self._record_avoid14d_candidates(
+                        obs,
+                        aff_bundle,
+                        gate_diag,
+                        base_vel_pre,
+                        row_index,
+                        row_valid,
+                        row_transition,
+                    )
                 lat_ms = self._measure_inference_latency_ms(
                     cmd_raw,
                     aff_bundle["gate_aff"] if self.args.skill == "moe" else actor_aff_map,
@@ -2340,6 +2441,8 @@ class EvalRunner:
                     gate_y_raw=gate_y_raw,
                     pcr_obstacle_risk_override=pcr_risk_override,
                 )
+                if self.avoid14d_recorder is not None:
+                    self.avoid14d_recorder.advance_after_step(dones)
                 post_info = info.get("post_info", None) if isinstance(info, dict) else None
                 if isinstance(post_info, dict) and isinstance(gate_diag, dict):
                     post_info["gate_y_raw"] = gate_diag["gate_y_raw"].detach().clone()
@@ -4571,6 +4674,21 @@ class EvalRunner:
         episode_rows = episode_rows[:episodes_total]
 
         metrics = self._aggregate_metrics(episode_rows, latency_ms_samples)
+        if self.avoid14d_recorder is not None:
+            self.avoid14d_recorder.finalize(
+                {
+                    "task": str(self.args.task),
+                    "skill": str(self.args.skill),
+                    "layout": "standard",
+                    "generalize": False,
+                    "state13_source": "actual pre-step obs['state']",
+                    "expert_state14": "state13 padded at final index; prev_gate_y index 9 cleared for frozen expert",
+                    "candidate_actions": "frozen deterministic Avoid calls; candidates are not sent to env",
+                    "live_baseline": "candidate state[13]=0 asserted equal to live gate_diag['cmd_a']",
+                    "base_velocity": "pre-step env base_lin_vel x/y and base_ang_vel z",
+                    "clearance": "pre-step gate_diag clearance_F along follow proposal direction; not body distance",
+                }
+            )
         if dump_timeseries:
             metrics["timeseries"] = timeseries_rows
         return metrics
@@ -6724,6 +6842,14 @@ def parse_args():
         default=None,
         help="multiply s_pcr_line_avoid_basic default scripted target speed",
     )
+    parser.add_argument(
+        "--avoid14d_probe_dir",
+        type=str,
+        default="",
+        help="optional counterfactual-only Avoid 14D diagnostic output directory",
+    )
+    parser.add_argument("--avoid14d_probe_stride", type=int, default=4)
+    parser.add_argument("--avoid14d_probe_max_samples", type=int, default=8192)
 
     parser.add_argument("--gate_use_difficulty", action="store_true")
     parser.add_argument("--gate_safe_clamp", action="store_true")
@@ -6875,6 +7001,11 @@ def parse_args():
             parser.error("--eval_layout heldout_irregular_rows 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
     if getattr(args, "pcr_line_target_speed", None) is not None and getattr(args, "pcr_line_target_speed_scale", None) is not None:
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
+    if str(getattr(args, "avoid14d_probe_dir", "") or "").strip():
+        try:
+            a14d.validate_probe_args(args)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not getattr(args, "pcr_ckpt", None) and getattr(args, "ckpt", None):
         args.pcr_ckpt = args.ckpt
     if not str(getattr(args, "pcr_ckpt", "") or "").strip():

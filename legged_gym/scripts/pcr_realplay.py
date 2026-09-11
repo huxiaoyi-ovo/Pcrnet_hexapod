@@ -40,6 +40,27 @@ if DEPLOY_DIR not in sys.path:
     sys.path.insert(0, DEPLOY_DIR)
 
 
+def _find_repo_root() -> str:
+    """Locate the source checkout for pure policy-contract helpers."""
+    directory = os.path.abspath(DEPLOY_DIR)
+    while True:
+        if os.path.isfile(os.path.join(directory, "legged_gym", "pcr_observation.py")):
+            return directory
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    raise RuntimeError("cannot locate repository root containing legged_gym/pcr_observation.py")
+
+
+REPO_ROOT = _find_repo_root()
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+REAL_DEPLOY_DIR = os.path.join(REPO_ROOT, "src_real", "interface", "scripts", "pcr_real")
+if os.path.isdir(REAL_DEPLOY_DIR) and REAL_DEPLOY_DIR not in sys.path:
+    sys.path.insert(0, REAL_DEPLOY_DIR)
+
+
 SIM_ROBOT_BODY_WIDTH_M = 0.25
 SIM_ROBOT_BODY_LENGTH_M = 0.40
 SIM_ROBOT_SWING_ABDUCTION_M = 0.15
@@ -195,6 +216,16 @@ def _sanitize_array(values: np.ndarray, *, shape: Tuple[int, ...], name: str) ->
     return arr
 
 
+def _is_fresh_stamp(stamp: float, now: float, timeout: float) -> bool:
+    """Reject absent, non-finite, stale, and clearly future input timestamps."""
+    try:
+        value = float(stamp)
+    except (TypeError, ValueError):
+        return False
+    window = max(float(timeout), 0.0)
+    return bool(np.isfinite(value) and (now - value) <= window and value <= now + max(window, 0.1))
+
+
 def _actor_difficulty_from_local_map(local_map_2ch: np.ndarray, map_extent_m: float, radius_m: float) -> float:
     occ = np.clip(local_map_2ch[0], 0.0, 1.0)
     safety = np.clip(local_map_2ch[1], 0.0, 1.0)
@@ -258,7 +289,7 @@ class RealPcrPolicyShim:
         cell = extent / float(n)
         x = self.torch.linspace(-0.5 * extent + 0.5 * cell, 0.5 * extent - 0.5 * cell, n, device=self.device)
         y = self.torch.linspace(0.5 * cell, extent - 0.5 * cell, n, device=self.device)
-        grid_x, grid_y = self.torch.meshgrid(x, y, indexing="ij")
+        grid_x, grid_y = self.torch.meshgrid(x, y)
         bearing = self.torch.atan2(grid_x, grid_y)
         return grid_x, grid_y, bearing
 
@@ -268,7 +299,7 @@ class RealPcrPolicyShim:
         cell = extent / float(n)
         x = self.torch.linspace(-0.5 * extent + 0.5 * cell, 0.5 * extent - 0.5 * cell, n, device=self.device)
         y = self.torch.linspace(0.5 * cell, extent - 0.5 * cell, n, device=self.device)
-        grid_x, grid_y = self.torch.meshgrid(x, y, indexing="ij")
+        grid_x, grid_y = self.torch.meshgrid(x, y)
         return self.torch.sqrt(grid_x ** 2 + grid_y ** 2)
 
     @staticmethod
@@ -278,7 +309,7 @@ class RealPcrPolicyShim:
         x = (clearance - safe) / (free - safe)
         return 1.0 - x.clamp(0.0, 1.0)
 
-    def _compute_clearance_along_cmd(self, aff_map, cmd_xy, cone_half_angle_deg: float = 25.0):
+    def _compute_clearance_along_cmd(self, aff_map, cmd_xy, cone_half_angle_deg: float = 25.0, *, zero_cmd_global: bool = False):
         if aff_map.ndim != 4 or aff_map.shape[1] < 1:
             raise ValueError(f"aff_map shape invalid: {tuple(aff_map.shape)}")
         occ = aff_map[:, 0] > 0.5
@@ -289,7 +320,11 @@ class RealPcrPolicyShim:
         for i in range(cmd_xy.shape[0]):
             cmd = cmd_xy[i]
             speed = self.torch.norm(cmd)
-            if float(speed.detach().cpu().item()) < 1e-6:
+            zero_threshold = 1e-3 if zero_cmd_global else 1e-6
+            if float(speed.detach().cpu().item()) <= zero_threshold:
+                if zero_cmd_global and bool(occ[i].any().detach().cpu().item()):
+                    out.append(dist[occ[i]].min())
+                    continue
                 out.append(self.torch.full((), self.affordance_map_extent, device=aff_map.device, dtype=aff_map.dtype))
                 continue
             cmd_bearing = self.torch.atan2(cmd[0], cmd[1])
@@ -310,12 +345,15 @@ class PcrRealplay:
         self.device = self.torch.device(args.device if args.device else ("cuda" if self.torch.cuda.is_available() else "cpu"))
         self.snapshot = RealInputSnapshot()
         self.prev_cmd = np.zeros(3, dtype=np.float32)
+        self.prev_gate_y = 0.0
         self.prev_cmd_stamp = time.time()
         self.risk_memory = None
         self.risk_f_filter = None
         self.risk_a_filter = None
         self.bridge = RealPcrPolicyShim(args, self.torch, self.device)
         self._load_models()
+        if self.revision_contract and args.fake_input and args.publish_cmd:
+            raise RealPcrRuntimeError("revised PCR forbids --fake_input together with --publish_cmd")
 
         self.rospy = None
         self.cmd_pub = None
@@ -326,6 +364,11 @@ class PcrRealplay:
 
     def _load_models(self) -> None:
         from high_level_planner import CmdVelExpert, GatePolicy
+        from legged_gym.pcr_policy_contract import (
+            PCR_CANONICAL_REVISION,
+            checkpoint_cmd_policy_kwargs,
+            validate_frozen_avoid_revision,
+        )
 
         for path_name in ("pcr_ckpt", "avoid_ckpt"):
             path = getattr(self.args, path_name)
@@ -336,6 +379,7 @@ class PcrRealplay:
 
         gate_ckpt = _load_ckpt(self.args.pcr_ckpt, self.torch, self.device)
         gate_meta = _ckpt_meta(gate_ckpt)
+        self.revision_contract = gate_meta.get("revision_contract") == PCR_CANONICAL_REVISION
         trained_w_mode = str(gate_meta.get("trained_w_mode", gate_meta.get("w_mode", "learned"))).lower()
         if trained_w_mode not in ("learned", "learnedw2"):
             raise ValueError(f"pcr_realplay requires learned-w checkpoint, got trained_w_mode={trained_w_mode}")
@@ -372,6 +416,7 @@ class PcrRealplay:
             state_dim=self.gate_state_dim,
             goal_dim=self.gate_goal_dim,
             learned_w=True,
+            actor_mask_xy=self.revision_contract,
         ).to(self.device)
         _load_high_level_state_dict_compat(
             self.gate_policy,
@@ -382,6 +427,10 @@ class PcrRealplay:
         self.gate_policy.eval()
 
         avoid_ckpt = _load_ckpt(self.args.avoid_ckpt, self.torch, self.device)
+        avoid_meta = _ckpt_meta(avoid_ckpt)
+        validate_frozen_avoid_revision(gate_meta, avoid_meta)
+        if self.revision_contract and self.gate_state_dim != 13:
+            raise RealPcrRuntimeError(f"revised PCR gate must use state_dim=13, got {self.gate_state_dim}")
         self.avoid_state_dim = _infer_state_dim(avoid_ckpt, self.torch) or self.gate_state_dim
         self.avoid_goal_dim = _infer_goal_dim(avoid_ckpt, self.torch) or 2
         avoid_aff_channels = _infer_affordance_channels(avoid_ckpt, self.torch)
@@ -392,11 +441,12 @@ class PcrRealplay:
         if len(cmd_scale) != 3:
             raise ValueError("--cmd_scale must contain three comma-separated values")
         self.cmd_scale = cmd_scale
+        avoid_policy_kwargs = checkpoint_cmd_policy_kwargs(avoid_ckpt, cmd_scale)
         self.avoid_model = CmdVelExpert(
             affordance_channels=self.avoid_aff_channels,
             state_dim=self.avoid_state_dim,
             goal_dim=self.avoid_goal_dim,
-            cmd_scale=cmd_scale,
+            **avoid_policy_kwargs,
         ).to(self.device)
         _load_high_level_state_dict_compat(
             self.avoid_model,
@@ -416,7 +466,7 @@ class PcrRealplay:
             "[PCRRealplay] loaded models: "
             f"gate_state_dim={self.gate_state_dim}, gate_goal_dim={self.gate_goal_dim}, "
             f"gate_aff_channels={self.gate_aff_channels}, avoid_aff_channels={self.avoid_aff_channels}, "
-            f"aff_stack={self.aff_stack}, lowlevel_hint={self.args.lowlevel_ckpt}",
+            f"aff_stack={self.aff_stack}, revision={self.revision_contract}, lowlevel_hint={self.args.lowlevel_ckpt}",
             flush=True,
         )
 
@@ -619,13 +669,14 @@ class PcrRealplay:
                 max(0, ix - radius_cells):min(self.args.map_size, ix + radius_cells + 1),
                 max(0, iy - radius_cells):min(self.args.map_size, iy + radius_cells + 1),
             ] = 0.0
-        state = np.zeros((int(self.args.state_dim),), dtype=np.float32)
+        state = np.zeros((9 if self.revision_contract else int(self.args.state_dim),), dtype=np.float32)
+        visible_map = np.ones((1, self.args.map_size, self.args.map_size), dtype=np.float32)
         now = time.time()
         return RealInputSnapshot(
             target=target,
             local_map_2ch=local_map,
             risk_blocked_map=None,
-            policy_visible_map=None,
+            policy_visible_map=visible_map,
             state=state,
             row_not_released=float(self.args.row_not_released_default),
             actor_difficulty=None,
@@ -676,12 +727,21 @@ class PcrRealplay:
                 )
             visible_map = visible_flat.reshape(1, self.args.map_size, self.args.map_size).copy()
         stamp = float(payload.get("stamp", os.path.getmtime(path)))
+        state_key = "robot_state" if "robot_state" in payload else "state" if "state" in payload else None
+        state = None
+        state_stamp = 0.0
+        if state_key is not None:
+            state_values = np.asarray(payload[state_key], dtype=np.float32).reshape(-1)
+            if state_values.size == 0 or not np.isfinite(state_values).all():
+                raise RealPcrRuntimeError(f"obs_file {state_key} must be finite and non-empty")
+            state = state_values.copy()
+            state_stamp = float(payload.get(f"{state_key}_stamp", payload.get("state_stamp", stamp)))
         return RealInputSnapshot(
             target=target[:5].copy(),
             local_map_2ch=local_flat.reshape(self.args.map_channels, self.args.map_size, self.args.map_size).copy(),
             risk_blocked_map=risk_map,
             policy_visible_map=visible_map,
-            state=np.zeros((self.gate_state_dim,), dtype=np.float32),
+            state=state,
             row_not_released=float(self.args.row_not_released_default),
             actor_difficulty=(
                 float(np.clip(target[7], 0.0, 1.0))
@@ -700,7 +760,7 @@ class PcrRealplay:
             risk_blocked_stamp=stamp,
             policy_visible_stamp=stamp,
             front_distance_risk_stamp=stamp,
-            state_stamp=time.time(),
+            state_stamp=state_stamp,
             row_stamp=stamp,
         )
 
@@ -713,9 +773,9 @@ class PcrRealplay:
 
     def _build_tensors(self, snap: RealInputSnapshot):
         now = time.time()
-        if snap.target is None or (now - snap.target_stamp) > float(self.args.input_timeout_s):
+        if snap.target is None or not _is_fresh_stamp(snap.target_stamp, now, self.args.input_timeout_s):
             raise RealPcrRuntimeError("target input missing or stale")
-        if snap.local_map_2ch is None or (now - snap.local_map_stamp) > float(self.args.input_timeout_s):
+        if snap.local_map_2ch is None or not _is_fresh_stamp(snap.local_map_stamp, now, self.args.input_timeout_s):
             raise RealPcrRuntimeError("local_map_2ch input missing or stale")
         target = np.asarray(snap.target, dtype=np.float32).reshape(-1)
         if target.size < 5:
@@ -729,10 +789,29 @@ class PcrRealplay:
             shape=(self.args.map_channels, self.args.map_size, self.args.map_size),
             name="local_map_2ch",
         )
+        revision = bool(self.revision_contract)
+        visible_np = None
+        if revision:
+            if int(self.args.map_channels) != 2:
+                raise RealPcrRuntimeError("revised PCR requires a two-channel local map input")
+            if snap.policy_visible_map is None or not _is_fresh_stamp(snap.policy_visible_stamp, now, self.args.input_timeout_s):
+                raise RealPcrRuntimeError("revised PCR policy_visible_map missing or stale")
+            visible_np = _sanitize_array(
+                snap.policy_visible_map,
+                shape=(1, self.args.map_size, self.args.map_size),
+                name="policy_visible_map",
+            )
+            from legged_gym.pcr_observation import canonical_local_map
+            local_t = canonical_local_map(
+                self.torch.as_tensor(local_np[:1], device=self.device),
+                self.torch.as_tensor(visible_np, device=self.device),
+                extent=float(self.args.map_extent_m),
+                clearance=_resolve_robot_clearance_m(self.args),
+            )
+            local_np = local_t[0].detach().cpu().numpy().astype(np.float32)
         self._last_has_real_risk_map = False
-        if snap.risk_blocked_map is not None:
-            risk_age = now - float(snap.risk_blocked_stamp)
-            if risk_age <= float(self.args.input_timeout_s):
+        if not revision and snap.risk_blocked_map is not None:
+            if _is_fresh_stamp(snap.risk_blocked_stamp, now, self.args.input_timeout_s):
                 risk_np = _sanitize_array(
                     snap.risk_blocked_map,
                     shape=(1, self.args.map_size, self.args.map_size),
@@ -743,29 +822,39 @@ class PcrRealplay:
                 risk_np = local_np[:1].copy()
         else:
             risk_np = local_np[:1].copy()
-        if snap.policy_visible_map is not None:
-            visible_age = now - float(snap.policy_visible_stamp)
-            if visible_age <= float(self.args.input_timeout_s):
+        if not revision and snap.policy_visible_map is not None:
+            if _is_fresh_stamp(snap.policy_visible_stamp, now, self.args.input_timeout_s):
                 _sanitize_array(
                     snap.policy_visible_map,
                     shape=(1, self.args.map_size, self.args.map_size),
                     name="policy_visible_map",
                 )
-        if snap.state is None or (now - snap.state_stamp) > float(self.args.state_timeout_s):
-            if not self.args.allow_missing_state:
+        if snap.state is None or not _is_fresh_stamp(snap.state_stamp, now, self.args.state_timeout_s):
+            if revision or not self.args.allow_missing_state:
                 raise RealPcrRuntimeError("state input missing or stale")
             state_np = np.zeros((self.gate_state_dim,), dtype=np.float32)
         else:
             state_np = np.asarray(snap.state, dtype=np.float32).reshape(-1)
             if not np.isfinite(state_np).all():
                 raise RealPcrRuntimeError("state input contains non-finite values")
+        if revision:
+            if state_np.size < 9:
+                raise RealPcrRuntimeError("revised PCR requires at least nine fresh robot-state values")
+            raw_state = state_np[:9].copy()
+            state_np = np.zeros((13,), dtype=np.float32)
+            state_np[:9] = raw_state
+            state_np[9] = float(self.prev_gate_y)
+            state_np[10:13] = self.prev_cmd
 
         row_not_released = snap.row_not_released
-        if row_not_released is None or (now - snap.row_stamp) > float(self.args.row_timeout_s):
+        if row_not_released is None or not _is_fresh_stamp(snap.row_stamp, now, self.args.row_timeout_s):
             row_not_released = float(self.args.row_not_released_default)
         self.bridge.row_not_released_value = float(np.clip(row_not_released, 0.0, 1.0))
 
-        if snap.actor_difficulty is not None and np.isfinite(float(snap.actor_difficulty)):
+        if revision:
+            from legged_gym.pcr_observation import canonical_difficulty
+            actor_difficulty = float(canonical_difficulty(local_t, float(self.args.map_extent_m), float(self.args.difficulty_radius_m))[0].detach().cpu().item())
+        elif snap.actor_difficulty is not None and np.isfinite(float(snap.actor_difficulty)):
             actor_difficulty = float(np.clip(float(snap.actor_difficulty), 0.0, 1.0))
         else:
             actor_difficulty = _actor_difficulty_from_local_map(
@@ -785,10 +874,12 @@ class PcrRealplay:
             if (
                 snap.front_distance_risk is not None
                 and np.isfinite(float(snap.front_distance_risk))
-                and (now - float(snap.front_distance_risk_stamp)) <= float(self.args.input_timeout_s)
+                and _is_fresh_stamp(snap.front_distance_risk_stamp, now, self.args.input_timeout_s)
             )
             else 0.0
         )
+        if revision:
+            front_distance_risk = 0.0
         return (
             state,
             goal,
@@ -854,14 +945,18 @@ class PcrRealplay:
         if cmd_a_eff.shape[-1] >= 3:
             cmd_a_eff[:, 2] = 0.0
         risk_source_map = risk_aff_map if risk_aff_map is not None else aff_map[:, :1, :, :]
-        clearance_f = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_f[:, :2])
-        clearance_a = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_a_eff[:, :2])
+        clearance_f = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_f[:, :2], zero_cmd_global=self.revision_contract)
+        clearance_a = self.bridge._compute_clearance_along_cmd(risk_source_map, cmd_a_eff[:, :2], zero_cmd_global=self.revision_contract)
         risk_f_raw = self.bridge._risk_from_clearance(clearance_f, self.args.cmd_safe_dist, self.args.cmd_free_dist)
         risk_a_raw = self.bridge._risk_from_clearance(clearance_a, self.args.cmd_safe_dist, self.args.cmd_free_dist)
         front_risk = torch_mod.full_like(risk_f_raw, float(np.clip(front_distance_risk, 0.0, 1.0)))
-        forward_active = cmd_f[:, 1] > float(getattr(self.args, "risk_forward_cmd_thr", 0.02))
-        risk_f_raw = torch_mod.where(forward_active, torch_mod.maximum(risk_f_raw, front_risk), risk_f_raw)
-        risk_f, risk_a = self._filter_real_risks(risk_f_raw, risk_a_raw)
+        if self.revision_contract:
+            risk_f, risk_a = risk_f_raw, risk_a_raw
+            front_risk = torch_mod.zeros_like(risk_f_raw)
+        else:
+            forward_active = cmd_f[:, 1] > float(getattr(self.args, "risk_forward_cmd_thr", 0.02))
+            risk_f_raw = torch_mod.where(forward_active, torch_mod.maximum(risk_f_raw, front_risk), risk_f_raw)
+            risk_f, risk_a = self._filter_real_risks(risk_f_raw, risk_a_raw)
         lin_f = cmd_f[:, :2]
         lin_a = cmd_a_eff[:, :2]
         norm_f = torch_mod.norm(lin_f, dim=1)
@@ -971,14 +1066,18 @@ class PcrRealplay:
         with torch_mod.no_grad():
             expert_state = _match_2d_tensor(state, self.avoid_state_dim, torch_mod, label="real_expert_state")
             gate_state = _match_2d_tensor(state, self.gate_state_dim, torch_mod, label="real_gate_state")
-            robot_pos = expert_state[:, :2]
-            robot_heading = expert_state[:, 2]
-            cos_h = torch_mod.cos(robot_heading)
-            sin_h = torch_mod.sin(robot_heading)
-            # goal = (x_right, y_forward), heading=0 => forward is world +Y.
-            delta_world_x = cos_h * goal[:, 0] - sin_h * goal[:, 1]
-            delta_world_y = sin_h * goal[:, 0] + cos_h * goal[:, 1]
-            target_world = robot_pos + torch_mod.stack([delta_world_x, delta_world_y], dim=1)
+            if self.revision_contract:
+                robot_pos = torch_mod.zeros_like(state[:, :2])
+                robot_heading = torch_mod.zeros_like(state[:, 0])
+                target_world = goal
+            else:
+                robot_pos = expert_state[:, :2]
+                robot_heading = expert_state[:, 2]
+                cos_h = torch_mod.cos(robot_heading)
+                sin_h = torch_mod.sin(robot_heading)
+                delta_world_x = cos_h * goal[:, 0] - sin_h * goal[:, 1]
+                delta_world_y = sin_h * goal[:, 0] + cos_h * goal[:, 1]
+                target_world = robot_pos + torch_mod.stack([delta_world_x, delta_world_y], dim=1)
             cmd_f = compute_s0_follow_expert_cmd(
                 robot_pos_world_xy=robot_pos,
                 robot_heading=robot_heading,
@@ -988,13 +1087,19 @@ class PcrRealplay:
                 cmd_scale=self.cmd_scale,
                 reset_mask=None,
             )
+            from legged_gym.pcr_policy_contract import get_avoid_command
             avoid_goal = _match_2d_tensor(goal, self.avoid_goal_dim, torch_mod, label="real_avoid_goal")
-            cmd_a, _ = self.avoid_model.get_action(
+            cmd_a, _ = get_avoid_command(
+                self.avoid_model,
                 local_stack[:, : self.avoid_aff_channels, :, :],
-                expert_state,
-                avoid_goal,
+                state,
+                cmd_f,
+                goal,
                 difficulty,
                 deterministic=True,
+                legacy_state=expert_state,
+                legacy_goal=avoid_goal,
+                target_valid=torch_mod.tensor([target_valid], device=self.device),
             )
             gate_goal, diag = self._learned_w_goal(
                 goal,
@@ -1030,6 +1135,8 @@ class PcrRealplay:
             target_too_close=target_too_close,
             depth_invalid=depth_invalid,
         )
+        if self.revision_contract:
+            self.prev_gate_y = float(gate_diag["gate_y_raw"][0].detach().cpu().item())
         cell_m = float(self.args.map_extent_m) / float(max(int(self.args.map_size), 1))
         robot_clearance_m = _resolve_robot_clearance_m(self.args)
         result = {

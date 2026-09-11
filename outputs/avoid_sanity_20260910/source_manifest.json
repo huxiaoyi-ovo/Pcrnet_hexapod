@@ -1,0 +1,1135 @@
+{
+  "files": [
+    {
+      "path": "agents/low_level_best.pt",
+      "sha256": "75dfd7aae52b20f08ca9f654c37b2e20ba1e33f8b953737437ad774d122d1481",
+      "size": 5876697
+    },
+    {
+      "path": "legged_gym/__init__.py",
+      "sha256": "6997e11ba2ea0a3ce791c33c0e093fd703f7d51444a966e79235ce3221908118",
+      "size": 1834
+    },
+    {
+      "path": "legged_gym/avoid_clutter.py",
+      "sha256": "72429be0367926cbf8a5d30557c310ae9bb82255fcf385162023bf87fdbb3602",
+      "size": 20667
+    },
+    {
+      "path": "legged_gym/avoid_reward.py",
+      "sha256": "09857e5de948dd735b2a1130636ef0ee2b434e42a2dd089e71d0b2b909c8b0cc",
+      "size": 1491
+    },
+    {
+      "path": "legged_gym/data/processed/dataset_preview.png",
+      "sha256": "7f20122fe4dc526a64d5071387040ac253a4aa3ae6186b172bde2d032b1edf31",
+      "size": 749110
+    },
+    {
+      "path": "legged_gym/datasets/affordance_dataset.py",
+      "sha256": "5b4370ce6a655e43b96f7bd13f7e0474495745a945d87ec2e0627d7923d16a15",
+      "size": 26869
+    },
+    {
+      "path": "legged_gym/envs/__init__.py",
+      "sha256": "c30d18bce5aef270795b9dbf9523371cd597a61f0399b0af5cd5d246ad6e4954",
+      "size": 8114
+    },
+    {
+      "path": "legged_gym/envs/a1/a1_config.py",
+      "sha256": "d06e98eb13fc65070a4143633fde33ba0309f63483cdc81af33a38741a5b95f1",
+      "size": 3708
+    },
+    {
+      "path": "legged_gym/envs/anymal_b/anymal_b_config.py",
+      "sha256": "a95d263ea9338b057736e3f7ac6db11d691d6f67f2119737ef234305099ba055",
+      "size": 2251
+    },
+    {
+      "path": "legged_gym/envs/anymal_c/anymal.py",
+      "sha256": "925dae7c06f3debc05fa7e458977c829710de36cb1dbd59f71ed7e87eede0f50",
+      "size": 4151
+    },
+    {
+      "path": "legged_gym/envs/anymal_c/flat/anymal_c_flat_config.py",
+      "sha256": "96125c1a4b01d236c86ae1214fd52d552a5e554745b696c0a505f1fc750af2ec",
+      "size": 3249
+    },
+    {
+      "path": "legged_gym/envs/anymal_c/mixed_terrains/anymal_c_rough_config.py",
+      "sha256": "e30b1673b376e5f834a8cc3713cd1e6478db674b1fa0e711ab65540650b553c5",
+      "size": 3895
+    },
+    {
+      "path": "legged_gym/envs/base/base_config.py",
+      "sha256": "c2789af5409c82337862d78d99f82ef262d393af5dc810df6afe221d37ed2677",
+      "size": 2626
+    },
+    {
+      "path": "legged_gym/envs/base/base_task.py",
+      "sha256": "0d0e97e6fb712469c3e1e5321704502282ddb325d1cda8385f120fe3ab2da9d3",
+      "size": 6799
+    },
+    {
+      "path": "legged_gym/envs/base/legged_robot.py",
+      "sha256": "8f1699ab071318ce08047758debcb450600627a02708d149dff877287e44cffa",
+      "size": 55788
+    },
+    {
+      "path": "legged_gym/envs/base/legged_robot_config.py",
+      "sha256": "fbc3ec73e64b4ea5b3c1cdf72e2bbbf2976660d92e79cd2c1fcb54de79abb073",
+      "size": 10128
+    },
+    {
+      "path": "legged_gym/envs/cassie/cassie.py",
+      "sha256": "64b3d2f08c5476e56dd4e0c7e4521d74b0043ae4a79145d4507d79eabb6dff0e",
+      "size": 2100
+    },
+    {
+      "path": "legged_gym/envs/cassie/cassie_config.py",
+      "sha256": "bdbb302f48216c23b52f77f0c967959684d0d9d6ea4609a0d70a17f243ab6f84",
+      "size": 4711
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/affordance_estimator.py",
+      "sha256": "641418965fc96688f171543fb9085d87896237b3bca2532423b641cfa78a4cc3",
+      "size": 11000
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/expert.py",
+      "sha256": "0b8bd223ac2d002594fbef49721a636f21cf06ce918529240905d2a48d737384",
+      "size": 31815
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/expert_s0_follow.py",
+      "sha256": "3963218c31e0b52f506ddda5fe03090b9b531c34665f13f4beadd250b141995e",
+      "size": 6599
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_climb.py",
+      "sha256": "4f42b059da3b6b5300afd9a3665f2a0908d8a01d1b674da48a91893cceebd324",
+      "size": 55939
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_climb_config.py",
+      "sha256": "86bfa106e8c7ae607b7a0537b49534afe0dc961daaab92dcabe034d15c7aad0e",
+      "size": 6244
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_ground.py",
+      "sha256": "5b34349d5ed2f67a3ec3c2ea37d93981537e2be468b9f5b4993f75594790d744",
+      "size": 372402
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_ground_config.py",
+      "sha256": "577e7e9b6891600cc4ab100b79e0de0c46522ec293c650754c041791c7e112d3",
+      "size": 17433
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_scenes_config.py",
+      "sha256": "a982cabd3919001babfc9529295994f5eb4dfbd31cbe01e5ef5261d0c960bb6d",
+      "size": 74569
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_terrain.py",
+      "sha256": "58002dd7b31f093bdb8a4747d04b1938719dfaf50b587dc57ccceb33d6fd5cc3",
+      "size": 131457
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/hex_terrain_config.py",
+      "sha256": "8207bec8eac9bc6a3be6914eb942b2b718a32a5d03298030ae0672b2c27a9631",
+      "size": 21260
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/navigation_env.py",
+      "sha256": "f500257a398f8396d52fc3b3ff54a448889ed13e7fbfb8feba535126c6c8a1ff",
+      "size": 23885
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/__init__.py",
+      "sha256": "bf0af342a31184bc88ab89cd2fe9ee59c84076c2ae51ba6391586242e8df0656",
+      "size": 537
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/backend_heightfield.py",
+      "sha256": "1947f6e853173f5d6ab924617bb178e78eed0c4fe02ac1a37f8170ed862d5774",
+      "size": 3985
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/contracts.py",
+      "sha256": "91d147732893d8cc2b7c55925731293872a474297d8dc93233ebab26dcb44827",
+      "size": 9377
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/guards.py",
+      "sha256": "068281009cf6ef3d4ade920fe86a0c06bc48be783d6da1b40b187426ba152e5a",
+      "size": 2198
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/quantizer.py",
+      "sha256": "cc61c67c9b93fd4fb15636cf2eea8c9ac643fa0865c5caf29b552c977658d95d",
+      "size": 5260
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/scene_generator.py",
+      "sha256": "a4ed1d705a6a95065d0aa6eaafdbee5b393c051070f1d01fed57d93e440d0544",
+      "size": 22373
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_gen_v2/scene_spec.py",
+      "sha256": "cbc4914e7ebc6faafc8fdd819c43875feb1f500792eb67b2f308a68af11ae0ef",
+      "size": 4271
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_manager.py",
+      "sha256": "cdadd77c05c3c968da0439d99d86325eadada7e2e0473135a322ff4464c49002",
+      "size": 50009
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/scene_spec.py",
+      "sha256": "bbabc04e8f790bbf5830f87ab5289ad86369eaca2fbdebf72172c6ec32ddbc79",
+      "size": 665
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/terrain_builder.py",
+      "sha256": "f1cbae7dfee862fb8b380ffb65176db839603f0fca4ee2ff5a128a6a7637b36d",
+      "size": 17359
+    },
+    {
+      "path": "legged_gym/envs/hex_v4/test_.py",
+      "sha256": "d76306e3c1dd188c857d9356ac1971b00cfa6d227dd27b3e7c7bd04800a3b7e9",
+      "size": 11863
+    },
+    {
+      "path": "legged_gym/pcr_observation.py",
+      "sha256": "d45ff1cb0866a0d601fb7b53105247cb5b5f59b42beed0241e1161d70f2978dc",
+      "size": 4851
+    },
+    {
+      "path": "legged_gym/pcr_policy_contract.py",
+      "sha256": "a220ce10403ea1d85366e2072e99b0cf8d62f024080b1f25ab239c40b5429ca0",
+      "size": 3705
+    },
+    {
+      "path": "legged_gym/scripts/_test_module.py",
+      "sha256": "00a7fce9a4df0c0698f3bb0370c752a3e3f737a8f59ef659553d9830d18328dd",
+      "size": 531
+    },
+    {
+      "path": "legged_gym/scripts/audit_fig6_trajectory_pool.py",
+      "sha256": "28875c082af90d901df1657decd6af3a46759551f08b5b066d47c8dcb00287c8",
+      "size": 28737
+    },
+    {
+      "path": "legged_gym/scripts/avoid14d_diagnostic.py",
+      "sha256": "259365bdb59739abfe66bb492ecef415e65b3d12c973695e6e57a34f4d1e57d5",
+      "size": 12663
+    },
+    {
+      "path": "legged_gym/scripts/build_final_paper_outputs.py",
+      "sha256": "fe1a41d2eb07c265ef548e5dbf76b0ab11a7ca0c6960bad386246bf29e5c4375",
+      "size": 133713
+    },
+    {
+      "path": "legged_gym/scripts/compare_camera_eval.py",
+      "sha256": "2269c5e175b5669b7e4678095ffbe9335dae77fd7cfd0cf7af6a5c75eee1a990",
+      "size": 23333
+    },
+    {
+      "path": "legged_gym/scripts/control_test.py",
+      "sha256": "12e563cd684cafc606ab594a313fd895b262e8baf91e0763b93eb75e68c362f8",
+      "size": 19081
+    },
+    {
+      "path": "legged_gym/scripts/eval_highlevel.py",
+      "sha256": "0a81b970e9203d776fd987daee45a02000f8592e5233437626d164a6a89cb420",
+      "size": 427312
+    },
+    {
+      "path": "legged_gym/scripts/export_heldout_layout_isaac_topdown.py",
+      "sha256": "666247dd695e334aa8a607745d1033ad9d2f856de36f38b6b5afd2d44e373d6b",
+      "size": 10259
+    },
+    {
+      "path": "legged_gym/scripts/export_heldout_layout_topdown.py",
+      "sha256": "933bd687e958252f45632955c79ac4996727fd62a35a08f5b5631302fafc891a",
+      "size": 4956
+    },
+    {
+      "path": "legged_gym/scripts/export_pcr_session.py",
+      "sha256": "008a76ae4fe280fb12ccf786d5801b79f15da3d36b8c7de2b49b5087d38214ae",
+      "size": 7089
+    },
+    {
+      "path": "legged_gym/scripts/pcr_realplay.py",
+      "sha256": "98a20ff164aea52f27dd9921e7e31797fd82ff3050be026df364a5bbd595ef40",
+      "size": 70438
+    },
+    {
+      "path": "legged_gym/scripts/pcr_session_recorder.py",
+      "sha256": "fbf5f9ec39382a70d3e122de25e6600c5845731b3ceff4f91fdd2104d0ce262c",
+      "size": 9264
+    },
+    {
+      "path": "legged_gym/scripts/play.py",
+      "sha256": "dc9815cbe94d60541e8151f6d0985fee00becdbfa881d16e4413c25b606e9c39",
+      "size": 53384
+    },
+    {
+      "path": "legged_gym/scripts/play_highlevel.py",
+      "sha256": "b4abb9d2106992b2fb7e8fe450744da59bcc583c37d7901e82ef87ae9b2d8454",
+      "size": 272034
+    },
+    {
+      "path": "legged_gym/scripts/play_keyboard.py",
+      "sha256": "153fcb38a4b8c41fc1251082efda927a71a17eb5213d6e34d586d38d0b679dfc",
+      "size": 8742
+    },
+    {
+      "path": "legged_gym/scripts/quick_scene_view.py",
+      "sha256": "7180728e5a2ae02380f83ca6eef86adc8bf86b2099c16a74b0a9847be6ab8d3b",
+      "size": 6950
+    },
+    {
+      "path": "legged_gym/scripts/real_pcr_input_check.py",
+      "sha256": "77f46ea852579ad51da5c6be5aafb334ba5fa41d513c012e37f45f96875e6de1",
+      "size": 95874
+    },
+    {
+      "path": "legged_gym/scripts/run_pcr_main_table_eval.py",
+      "sha256": "9e0cff92538f6afd13c6d60ad85bbd29898e64aa8fbbd365c4007ba021a87057",
+      "size": 12085
+    },
+    {
+      "path": "legged_gym/scripts/run_pcr_real_compat.sh",
+      "sha256": "0e71c4683d443c480dd2352d53a3f3872f26710e7d48c8c96e5dc0d6bb14e9a3",
+      "size": 23446
+    },
+    {
+      "path": "legged_gym/scripts/summarize_eval_metrics.py",
+      "sha256": "fa1fe2cf22edd0f5c770324f4598ee20d72ffdd6d9c7c343553eb284bd7a2353",
+      "size": 24886
+    },
+    {
+      "path": "legged_gym/scripts/test_affordance_axis_geometry.py",
+      "sha256": "1a8c751e122f694fa61c6cd76bfbbb1257cbbae0a5e71e4b8245ee368a772076",
+      "size": 15840
+    },
+    {
+      "path": "legged_gym/scripts/test_avoid_clutter_geometry.py",
+      "sha256": "92d83e1f43c7e8777e3111123466a045376506d3a19ca309c5391d2b18048446",
+      "size": 10616
+    },
+    {
+      "path": "legged_gym/scripts/test_avoid_clutter_training.py",
+      "sha256": "ac3df4eee5cc307cbfdef529eaf0de023e7a5c576976d3e5092b9bdee8bd46c4",
+      "size": 8779
+    },
+    {
+      "path": "legged_gym/scripts/test_avoid_training_state.py",
+      "sha256": "4a33c4a0afb3abfb6666eb04771891393e61dcf9d597f6433cbd10cb65032da1",
+      "size": 4185
+    },
+    {
+      "path": "legged_gym/scripts/test_clutter_env_contract.py",
+      "sha256": "2bf7717e4cac40be513021560c577d470aa534dc42217bf847f05018ec8ffb8c",
+      "size": 8972
+    },
+    {
+      "path": "legged_gym/scripts/test_pcr_training_speed.py",
+      "sha256": "73e84bdef1f10cf430a151ad4dfb082f2b0aefc94a9692781e5c49fa877bbf1f",
+      "size": 3863
+    },
+    {
+      "path": "legged_gym/scripts/test_revision_observation_contract.py",
+      "sha256": "e8a9582876204a746eefe7895dd1d6852c5cde6a26afa4e6a776e571cb5ddbbc",
+      "size": 4802
+    },
+    {
+      "path": "legged_gym/scripts/test_revision_policy_reuse.py",
+      "sha256": "35799220456b90ed5128bb5a4f00bb10f2305c7a5800f5d8853c8ff2a170941c",
+      "size": 3562
+    },
+    {
+      "path": "legged_gym/scripts/test_revision_real_contract.py",
+      "sha256": "26f13611baa2b39866ee07b79857dcf1594e24efd875a15d9af5cd3723aaf501",
+      "size": 13200
+    },
+    {
+      "path": "legged_gym/scripts/train.py",
+      "sha256": "213a4399710936a72a3dd149e647106f5107cd48604d8fed92bb0bffb6f9bdb0",
+      "size": 2299
+    },
+    {
+      "path": "legged_gym/scripts/train_affordance.py",
+      "sha256": "89e64d97724151cc892752054827637f9e4a6fd70b1e9cb7127ada5d699f1b5b",
+      "size": 15958
+    },
+    {
+      "path": "legged_gym/scripts/train_highlevel.py",
+      "sha256": "73eb0a937b9c95438f65274463c1bab363db904d6a405e2a9cd08618a0295ce6",
+      "size": 526497
+    },
+    {
+      "path": "legged_gym/scripts/usr_command_mux.py",
+      "sha256": "55372dc2bd8e28e2c3330487387d89feeaf32c02a641ebe28569dae7ddba2378",
+      "size": 9793
+    },
+    {
+      "path": "legged_gym/scripts/yolo_test.py",
+      "sha256": "a2c16951433e30c40979165e1895d35782f92c531e301a7e47683a15aba0b1c7",
+      "size": 7121
+    },
+    {
+      "path": "legged_gym/tests/check_depth_headless.py",
+      "sha256": "b27113ac19365e13a44322c68f910c542f06d1a7c783bbb9a3fc38b3bd08fbfe",
+      "size": 3193
+    },
+    {
+      "path": "legged_gym/tests/test_env.py",
+      "sha256": "7148330dec541c8116242bccbfd3b5dc4d3e49cb8f15d779fb09fe846932d1d7",
+      "size": 2434
+    },
+    {
+      "path": "legged_gym/tests/visualize_depth_camera.py",
+      "sha256": "4aa5d8f72a23f297ed5a3fd7284d681a856b4e62d01c5da0265eddaba008fd55",
+      "size": 10322
+    },
+    {
+      "path": "legged_gym/tests/visualize_rgb_camera.py",
+      "sha256": "cef96723526a9afbf1eb61a9a8919f9047bf2b311f5f066a40e2e5e2e44975f0",
+      "size": 17080
+    },
+    {
+      "path": "legged_gym/tests/visualize_rgb_depth_combined.py",
+      "sha256": "c2f1a49d32671d12209004f1107a836dc58ba242dafabcf6e3964ff336bbcdc1",
+      "size": 10732
+    },
+    {
+      "path": "legged_gym/utils/__init__.py",
+      "sha256": "f8b8c157d9d575af97b7d9a9e856d6273b11a9df1bfce499d48b6deaa6cfda9c",
+      "size": 1898
+    },
+    {
+      "path": "legged_gym/utils/actuator.py",
+      "sha256": "2a299bf890c9673512a0dc1a82ad5cdb869693e67d57bfb0cda19c2c6037f1f5",
+      "size": 20130
+    },
+    {
+      "path": "legged_gym/utils/helpers.py",
+      "sha256": "93bd1c97bbd6595eb55ceb6a3a8ef3c7d6688408edd26a2244df4a465211f604",
+      "size": 11521
+    },
+    {
+      "path": "legged_gym/utils/joy_stick.py",
+      "sha256": "cd156a77ac5c0e8c9a89196ddff7367866a4bcc6d33752c714734617fa4fbca7",
+      "size": 2024
+    },
+    {
+      "path": "legged_gym/utils/kinematic.py",
+      "sha256": "5ae601f4509c368be1b8a395cd316bb9f16fcd88ab7811829f71edf7114a5112",
+      "size": 7807
+    },
+    {
+      "path": "legged_gym/utils/logger.py",
+      "sha256": "7a64b8d2e5b17f12b013b963e766cfabfb856c4bc5d5a0ef7a086be74636258e",
+      "size": 6031
+    },
+    {
+      "path": "legged_gym/utils/my_math.py",
+      "sha256": "84890383f04d8cab0c3d2a4c2fbe39912fbd5e5a0a7b9b512ea2c6b12414db02",
+      "size": 2429
+    },
+    {
+      "path": "legged_gym/utils/plot_tensorboard.py",
+      "sha256": "49718c3199741c4ce2968aee78ef4681fe651c17275cf834db6100e8645e5986",
+      "size": 8058
+    },
+    {
+      "path": "legged_gym/utils/task_registry.py",
+      "sha256": "cf9d4e5a7bd006aa0d63870f5cfee1957f31954e69159f19e1deec9c6b258689",
+      "size": 8589
+    },
+    {
+      "path": "legged_gym/utils/terrain.py",
+      "sha256": "8d05b0ebb092dde699e807fc15bdf6c737b9f0b8efb38ff5ccf94196710146fc",
+      "size": 87756
+    },
+    {
+      "path": "outputs/avoid_sanity_20260910/continue_overnight.py",
+      "sha256": "decc61f4b56a6f41c6cf63157e04ed6eed348b7ca13c722f950f5ba6bc28d167",
+      "size": 16788
+    },
+    {
+      "path": "outputs/avoid_sanity_20260910/deploy_overnight.py",
+      "sha256": "3504a51e3f789679a691501604ac1b5f2a89d50ecb8b77bac7e333c7c871d287",
+      "size": 5004
+    },
+    {
+      "path": "outputs/avoid_sanity_20260910/test_continue_overnight.py",
+      "sha256": "22522a64b2be46501d45aaed8b6302bbb6ee32ea30e7a3d84593469a0134bd70",
+      "size": 4433
+    },
+    {
+      "path": "resources/actuator_nets/DM4340_24v_0917.pth",
+      "sha256": "2462f1abb3983c9d17b13530146c19a3f3e5120841a68fde1c576bc5106c09c4",
+      "size": 8280
+    },
+    {
+      "path": "resources/actuator_nets/DM4340_24v_0924.pth",
+      "sha256": "501fabe96b32c7fe9a97640e5cc74b6b441c68ed73efbf71e84b38295d2d1af8",
+      "size": 8280
+    },
+    {
+      "path": "resources/actuator_nets/DM4340_24v_0924_1.pth",
+      "sha256": "8b66f49a9082305f3b6a4bfa277587906be6b0e741efa638b192af2997695a94",
+      "size": 8300
+    },
+    {
+      "path": "resources/actuator_nets/DM4340_24v_0928.pth",
+      "sha256": "fd1efe895de9b5ab9d83ba85506b45e800cc10122c21906367d179eb0d3ed0c6",
+      "size": 7512
+    },
+    {
+      "path": "resources/actuator_nets/DM4340_24v_0929.pth",
+      "sha256": "58e7c4a4e984bf26426778aeb03d1026dad704c18f4c022b45b561a2bef32e5f",
+      "size": 10256
+    },
+    {
+      "path": "resources/actuator_nets/anydrive_v3_lstm.pt",
+      "sha256": "21e596737788d7328f28513643e88775a62ef60bf31bdbd0b8fc796928bdb135",
+      "size": 16648
+    },
+    {
+      "path": "resources/objects/avoid_clutter_cylinder.urdf",
+      "sha256": "3e83b6291529904def862f3ef5d01b59b0a5ed4b93a5f2dfa269d82a11db67bd",
+      "size": 517
+    },
+    {
+      "path": "resources/robots/a1/a1_license.txt",
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+      "size": 16725
+    },
+    {
+      "path": "resources/robots/a1/meshes/calf.dae",
+      "sha256": "744798832678e7315ec90a3d419070f72f4049182ce1d36c627a7c53e0347729",
+      "size": 1759398
+    },
+    {
+      "path": "resources/robots/a1/meshes/hip.dae",
+      "sha256": "601ad36dcb3a459338d91d4eb0aa15995a169ebd7f268f91b3d941f68ffd8a8d",
+      "size": 668998
+    },
+    {
+      "path": "resources/robots/a1/meshes/thigh.dae",
+      "sha256": "63a7c33a0c04549e7d001e8432f27e639b09393233ad1131c6035148aa0ac1a4",
+      "size": 1151660
+    },
+    {
+      "path": "resources/robots/a1/meshes/thigh_mirror.dae",
+      "sha256": "73fc605150683746d709522ca7d84cee3c5504de77baae51f95ee757184bc8c2",
+      "size": 1187646
+    },
+    {
+      "path": "resources/robots/a1/meshes/trunk.dae",
+      "sha256": "be2f4256cd8d2944881e4fcca6f0aaac0632cdb09ae73fa9040f75cb5e15a15c",
+      "size": 4246287
+    },
+    {
+      "path": "resources/robots/a1/meshes/trunk_A1.png",
+      "sha256": "512e8cfa5ebedfc4199afe172590d3d486461e42244ab5d439020111f9fc7e78",
+      "size": 71835
+    },
+    {
+      "path": "resources/robots/a1/urdf/a1.urdf",
+      "sha256": "9ab724867bd6c55c6aec0171d1072d0ab4723b8801789dc7ec14c2e50723a883",
+      "size": 18262
+    },
+    {
+      "path": "resources/robots/anymal_b/ANYmal_b_license.txt",
+      "sha256": "3e3b375fe5502ed3f8f181630267fc632b2d1451c2c72896427230f4bc0a306c",
+      "size": 1455
+    },
+    {
+      "path": "resources/robots/anymal_c/ANYmal_c_license.txt",
+      "sha256": "de5f42e8397f2e1c2339f41b00d2e4e64d09ad8c5b9251be9388445ae7f6b41d",
+      "size": 1477
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/base.dae",
+      "sha256": "785bea9b33831f8c741fc0ca070162e73cbf560ea9b03c53abf8978be877fc48",
+      "size": 278817
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/base.jpg",
+      "sha256": "b2fd8e67a836ff57e17bb6c9cea8962641d40b2a6c6d534c15ebd36d07456d4b",
+      "size": 198456
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/battery.dae",
+      "sha256": "690077db5140751f38deb1a450ab7c1e92977fc517cd39347758b30da6ca0a84",
+      "size": 5333
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/battery.jpg",
+      "sha256": "dc2968cc934d7259539aa7cacf04d8dba05cce45335c7a17940a56fada1d33be",
+      "size": 113546
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/bottom_shell.dae",
+      "sha256": "3a5cfba0c6f632bc3ea816d18a069aefad06698de3f9dea47cc54b6d445a75ac",
+      "size": 1452045
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/bottom_shell.jpg",
+      "sha256": "03890114260bb60c4e074f64d863939ce8dcb6660c867f5847b45fdbef97c000",
+      "size": 169218
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/depth_camera.dae",
+      "sha256": "44876e510ee0c549a85be20ba68ad25dea57322a62983996527a659dbdbaba3c",
+      "size": 5425
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/depth_camera.jpg",
+      "sha256": "2d9567d3599fc3fcc2f83a2edbef1831835e816e67d6a91cedfe080e56341453",
+      "size": 190120
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/drive.dae",
+      "sha256": "7f8f2e34bed73d0b6ba5b3b0c60850ee2ee6a5e5aa29b8ce30839c1a9ab2b142",
+      "size": 27885
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/drive.jpg",
+      "sha256": "2ba492037a1aa86c965725aa184db19f6a4be2791ee204ca099c57ec25dde4d4",
+      "size": 178021
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/face.dae",
+      "sha256": "6230397a1618fadc72c7bd5320f5b934048a94259831a53a978ebd03859a046c",
+      "size": 831503
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/face.jpg",
+      "sha256": "2ba488643ad18a7332e773f4c68cfd2c9dcbb7ad5da10c49293ff469c4fea3e7",
+      "size": 301962
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/foot.dae",
+      "sha256": "145ac1bea2b3c92286cf396251970463f1d67b260b889b1ceaa5be30de0671d2",
+      "size": 118105
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/foot.jpg",
+      "sha256": "2ca199d5111e9d72214a026efcf2f4843eff121051f1b8bd660c837032143c3d",
+      "size": 189653
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/handle.dae",
+      "sha256": "0ae653321953c54b2d482b7f95e36b7fcf3d92fbadd7c40e02c1656d6e80916e",
+      "size": 22670
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/handle.jpg",
+      "sha256": "77f09127642cf642678d13bf73d3fef8fcacb08c3621eff94d8843801da461cb",
+      "size": 170512
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/hatch.dae",
+      "sha256": "00ecbf99896b05b191daa622e85a5cfaec98141d199705f61fbe6d61d6675245",
+      "size": 9657
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/hatch.jpg",
+      "sha256": "2c94f1942f88dde4041a0dcf7eb7d66c289b0017d37a23df3e3c80631ae7dc5e",
+      "size": 105331
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/hip.jpg",
+      "sha256": "fb7a307df788b2396d769ea2d24d066a83c689932679b78a48c4363b8b525e86",
+      "size": 232010
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/hip_l.dae",
+      "sha256": "88ac066c129be6807ccb700a28d5fcf1f9ec4a70c2967ff27dca480972be03d6",
+      "size": 36985
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/hip_r.dae",
+      "sha256": "e862980f2fe4e2de20f4085aede4449c3e58022a18e658828358e5ce821c8e07",
+      "size": 37111
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/lidar.dae",
+      "sha256": "633db35d619694d2dfa9f263cf76e1db3a8556c801baeb9298ead365d96947ae",
+      "size": 36393
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/lidar.jpg",
+      "sha256": "1a5ae29ab0bfbe1392a03a2713d6b35c0818fc14b51a3ec7ee52948e477348ab",
+      "size": 184577
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/lidar_cage.dae",
+      "sha256": "1d0f16f34f36ae844f4935256c0cbe382f532d3b370d4ca2db123b0f0ffb1ce1",
+      "size": 66614
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/lidar_cage.jpg",
+      "sha256": "59b58b6dfe7919e93a8a49307c7a731a2722e16a9e4f112801deab6385c07ace",
+      "size": 282722
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/remote.dae",
+      "sha256": "0a372ada65117f5f595b97df15fcb6a20d5ac05d101b5ac99335b5ffa228b03a",
+      "size": 43323
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/remote.jpg",
+      "sha256": "ac3fff39a244809b7cd2e61bc264a2500ae0730fd1ab0db2ed7931452cfaf284",
+      "size": 109971
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/shank.jpg",
+      "sha256": "1b5f30dcbfef846f23da1b2348cd6d2dd92a9bccc3a3e6a7d7c50e7802d8d7cf",
+      "size": 168946
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/shank_l.dae",
+      "sha256": "1c8787d9e055f1330fb7c7cb02a3b780cf4f16b9319c081ebe9cd8d86f5de875",
+      "size": 237042
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/shank_r.dae",
+      "sha256": "386f85f0c8572794dac06fdfa439a2f90d803d28263d10002e6417b0f947ffc4",
+      "size": 239262
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/thigh.dae",
+      "sha256": "f2046f66c75689322eef919828b07f02c1ace1838677f78e14e28f2b2343c446",
+      "size": 265853
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/thigh.jpg",
+      "sha256": "1fc8e0c0bda1028c6392ad72bb820f1e9744a8068497c4ada51286fc5823efb3",
+      "size": 236107
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/top_shell.dae",
+      "sha256": "d53bc2412da380d7b3ddf11da617880b435e99388a0d19c8db07fdf0b2c756d7",
+      "size": 1331969
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/top_shell.jpg",
+      "sha256": "3fa585c862a8f9eb3f18b3fcc23ad169869d333939fff57f0f1b12cb1c36bc6c",
+      "size": 218160
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/wide_angle_camera.dae",
+      "sha256": "de0ecd4ff062973990ae232e16f6965a92fb874614b02e982f111bdde8accfb0",
+      "size": 20722
+    },
+    {
+      "path": "resources/robots/anymal_c/meshes/wide_angle_camera.jpg",
+      "sha256": "f94a9e342de634ad96c82fd36f02c3f8365ea3fdbeb47d9333b88138cd16f2c1",
+      "size": 155846
+    },
+    {
+      "path": "resources/robots/anymal_c/urdf/anymal_c.urdf",
+      "sha256": "f94f7fee1dedfda4face86c864a1db255c0c198f5ce685ce3ba0395c50306186",
+      "size": 54450
+    },
+    {
+      "path": "resources/robots/cassie/cassie_license.txt",
+      "sha256": "6aa4db0ab823ca3383ca5bedc2b77d9a94638fce9d3ddda1012267b6496ba84e",
+      "size": 1087
+    },
+    {
+      "path": "resources/robots/cassie/meshes/abduction.stl",
+      "sha256": "9d1ae3b92bbe603dfbb21ebd5798ca62341cddb7eda5e105d1fb46413cfdf89d",
+      "size": 130484
+    },
+    {
+      "path": "resources/robots/cassie/meshes/abduction_mirror.stl",
+      "sha256": "c37cb97dee32825af42f11e94234582a173f2122f6d4218d633a096c8fbce54b",
+      "size": 130884
+    },
+    {
+      "path": "resources/robots/cassie/meshes/achilles-rod.stl",
+      "sha256": "bc05a9150f958ef7ee1d08f524fbbeb5a0ee35c335121ba0b7c33780bade18c6",
+      "size": 15384
+    },
+    {
+      "path": "resources/robots/cassie/meshes/hip.stl",
+      "sha256": "6b0f1034d5cf80644aca0c973b41f2acfcc43a16e17e1c9bdc81d6e4bf29b4ce",
+      "size": 59434
+    },
+    {
+      "path": "resources/robots/cassie/meshes/hip_mirror.stl",
+      "sha256": "544e3c3096deb673b6280492ccfcf6b0d61196a9cffa9d734f1abc60a8b0620e",
+      "size": 59434
+    },
+    {
+      "path": "resources/robots/cassie/meshes/knee-output.stl",
+      "sha256": "900462151d64fef892e60a2dc884aa9a07ae06e4f5eef06a02b955f6a6cdcc51",
+      "size": 68234
+    },
+    {
+      "path": "resources/robots/cassie/meshes/knee-output_mirror.stl",
+      "sha256": "bc2a8dbf7a0fd0c1fa5169cb7931da236ef0c4aae4e775f741d1286b698b196f",
+      "size": 68184
+    },
+    {
+      "path": "resources/robots/cassie/meshes/pelvis.stl",
+      "sha256": "ad22bc7822ac987b2169c220dae20b43783351e780df16a4026606c798b86557",
+      "size": 181684
+    },
+    {
+      "path": "resources/robots/cassie/meshes/plantar-rod.stl",
+      "sha256": "b81ac41e167cd568d24958b6558c132b63d5b33c86d3bce3aaca8a6662cd5039",
+      "size": 12884
+    },
+    {
+      "path": "resources/robots/cassie/meshes/shin-bone.stl",
+      "sha256": "f19a1df02891cca70abf5f7e73a8d44156c3b216d9e2945069f02476139d9781",
+      "size": 128884
+    },
+    {
+      "path": "resources/robots/cassie/meshes/shin-bone_mirror.stl",
+      "sha256": "d5735948172265a9fc47de41a08d6f8b49896b86b03a8d2b0a41af6419a7e402",
+      "size": 129284
+    },
+    {
+      "path": "resources/robots/cassie/meshes/tarsus.stl",
+      "sha256": "1ecd101a598dec160112499b32150382c2ed5a17fd7e80b418e93ac1a5a04eee",
+      "size": 115684
+    },
+    {
+      "path": "resources/robots/cassie/meshes/tarsus_mirror.stl",
+      "sha256": "bcdc65d1b003f05354521f561470ba5de5e28eff381f7f30db7f669008a429ff",
+      "size": 115234
+    },
+    {
+      "path": "resources/robots/cassie/meshes/thigh.stl",
+      "sha256": "263066ca8dea5dd8755dab6ebc8d5048177561bc0678a0880a2811ff52dd31c1",
+      "size": 246934
+    },
+    {
+      "path": "resources/robots/cassie/meshes/thigh_mirror.stl",
+      "sha256": "40c73e34768de31426bb9ec7e676739fb4dd2c8a257cf5e517cc32ff9efeccc1",
+      "size": 246934
+    },
+    {
+      "path": "resources/robots/cassie/meshes/toe-output-crank.stl",
+      "sha256": "56c73773c45a95e56fef7d5aa3e990d8c5d30752ea4864ee59ed9c30ec7b5b89",
+      "size": 28734
+    },
+    {
+      "path": "resources/robots/cassie/meshes/toe.stl",
+      "sha256": "7378042d6932e31248871b96b61c4f6ac6544dcc27239cc8d9189c2ffaefbd23",
+      "size": 40634
+    },
+    {
+      "path": "resources/robots/cassie/meshes/toe_mirror.stl",
+      "sha256": "3d9c7c81eca860abd23ec90d6f5c8ba7185c88b85122009893a72886c731ad28",
+      "size": 40634
+    },
+    {
+      "path": "resources/robots/cassie/meshes/torso.stl",
+      "sha256": "e57a36e577e6c4efd29cadcacb921107ba9c286ec20e3d8cb3877f852215706d",
+      "size": 1371484
+    },
+    {
+      "path": "resources/robots/cassie/meshes/yaw.stl",
+      "sha256": "fca746aacf8a02111093462476002b1daa2416da5428727496c1bf94ac1d7491",
+      "size": 137684
+    },
+    {
+      "path": "resources/robots/cassie/meshes/yaw_mirror.stl",
+      "sha256": "8f2320c5b17d78b124302e16160637b0f1904c9dc0284a17e9565bddde3eb736",
+      "size": 137834
+    },
+    {
+      "path": "resources/robots/cassie/urdf/cassie.urdf",
+      "sha256": "d195a87fac5f2ccd92df16177b65612d37e55e163f40ea377c30a34307f6a885",
+      "size": 16923
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/body.obj",
+      "sha256": "9412650210711a2c1db0ff4d07263b99ed90295f4d695eee429c9616dd481fb2",
+      "size": 37248
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_l_ankle.obj",
+      "sha256": "afefb7295b7c86ba0c878a7ec86db1671e0b3b7beb47c20cd2c9587783eba747",
+      "size": 1782
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_l_foot.obj",
+      "sha256": "43c689172e1fb2e49b99f51788e9d7c315f0733ae228b82ab6ab8127cb692e84",
+      "size": 141396
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_l_knee.obj",
+      "sha256": "074b0040aaeadb047c9fdc4e354ac38fc59091d35655a5ac0186d71640a87435",
+      "size": 739
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_l_suck.obj",
+      "sha256": "b6d6c116bbc4ae2759bec7a4e15f0e3f781a3f8f516cb2d1f12d5fe613913d3f",
+      "size": 399473
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_l_thigh.obj",
+      "sha256": "5addffd24edc247b54c52b158e90e7b9a0ffeee55d82bd945b441fbb111e3d26",
+      "size": 3577
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_r_ankle.obj",
+      "sha256": "03812b14d4aa4054efa4df5f489c0757498459e6bbcb80975d972d95ca821f20",
+      "size": 1782
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_r_foot.obj",
+      "sha256": "086a2bbd2d21d2817f3b1dc9060350458a8daeb6a04a338d32ac0d923261a1c2",
+      "size": 208501
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_r_knee.obj",
+      "sha256": "88c42b900f0d64edfd2ef49144648bc0559a88199b7a8e681ae03529b3c8e71e",
+      "size": 739
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_r_suck.obj",
+      "sha256": "4d1e482edcf6b657a02d41fbadf8b914d86e1804be0e42c9e1d2d36f91366686",
+      "size": 396125
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/collision/l_r_thigh.obj",
+      "sha256": "44943f5efb40eaf97b01812530ce255bc6ec652e0cbe76fe072e0534a7959964",
+      "size": 3578
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/readme.md",
+      "sha256": "72a69f3798be012e3d39367a493044195279ea2589a6b1211ba7762d021957ec",
+      "size": 254
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/body.dae",
+      "sha256": "cea614c114aa6afaa709cf34edba325ebb40b5c6ca6354178ca43ad22ad06b09",
+      "size": 15407207
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_l_ankle.dae",
+      "sha256": "d80f7763ae1b47fc3301b464464e449a60e90157b696db27b1037a1b554a59a9",
+      "size": 2910041
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_l_foot.dae",
+      "sha256": "f8a18408ff2af9548fee28834fe1519c84cacc99a6b34fde0b26331d7c7a148e",
+      "size": 126371
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_l_knee.dae",
+      "sha256": "6068d5829876b08e486369ef48f911dc2f00dcdab63980009e77802face98d3a",
+      "size": 522369
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_l_suck.dae",
+      "sha256": "19dab0c150e21b679f0eda46ea5dad435dd8defd8ea4c3eb9b292239f1727f10",
+      "size": 353627
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_l_thigh.dae",
+      "sha256": "06fca88848a4b6872e788854baea74ded44669abb45d172a255436171b1e3e35",
+      "size": 2525414
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_r_ankle.dae",
+      "sha256": "d80edc49a6a96372e53faef82961fc2b95943007537e0a0f7f638ca6c1d19908",
+      "size": 2938508
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_r_foot.dae",
+      "sha256": "9e7dc8f7b6ea0a86b95502e0da24a08e9cbdcd308b32f702f6dbc1ea36b3eb6a",
+      "size": 187660
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_r_knee.dae",
+      "sha256": "b1d7cb55bf64f5af1d876f9b0f624013026c2c296090d80a54e335a1bdccde33",
+      "size": 516525
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_r_suck.dae",
+      "sha256": "3bcf39947ab15387cb770051884533de0f5acca73835f70e792f5fd5f1c7e939",
+      "size": 353362
+    },
+    {
+      "path": "resources/robots/hex_v4/two_set_meshes/visual/l_r_thigh.dae",
+      "sha256": "9a4cfc3c37a51aa02957cb09cd29f2dc86b2ed2135215cb7630e7c5860191b69",
+      "size": 2522316
+    },
+    {
+      "path": "resources/robots/hex_v4/urdf/hex_climb.urdf",
+      "sha256": "5c256b2ecd4bf62a7a323fff750061d0c79c9d44001d7907eb9f9ec306e6775e",
+      "size": 43371
+    },
+    {
+      "path": "resources/robots/hex_v4/urdf/hex_climb.xacro",
+      "sha256": "1419d0c77a59c4e372d16c974e4caf97fc952e6a265196d9aeb92326f445c478",
+      "size": 10380
+    },
+    {
+      "path": "resources/robots/hex_v4/urdf/hex_correct_inertia.urdf",
+      "sha256": "b13d20c36ce0bbee7ace2c65163132a18832fa940dd22d18631bc98769e500fd",
+      "size": 14401
+    },
+    {
+      "path": "resources/robots/hex_v4/urdf/hex_ground.urdf",
+      "sha256": "187f8281e1976e050c7a960c288e033368c5d5ded3932725e34942a5085215e6",
+      "size": 26364
+    },
+    {
+      "path": "resources/robots/hex_v4/urdf/hex_ground.xacro",
+      "sha256": "c0938f49bb03a48f43a4c3b0aa8b3772516cb30bd15fbfdbd02be7a2083a0d24",
+      "size": 7397
+    },
+    {
+      "path": "rsl_rl/__init__.py",
+      "sha256": "5c70c5a865ae3a49f5201bfc873678548b69f3b0ddec4d00bcf8bf28bb24f33d",
+      "size": 1661
+    },
+    {
+      "path": "rsl_rl/algorithms/EGPO.py",
+      "sha256": "833fe2c2990aaf1083415398e9247e079a4284fe7c1e1bc1bdb2bb11f38b25ce",
+      "size": 13105
+    },
+    {
+      "path": "rsl_rl/algorithms/EGPO_encoder.py",
+      "sha256": "d3b40871dfcd17e0b7885a8a90e566bc0c9a43ce3a80d5165837f608ce2ba365",
+      "size": 16378
+    },
+    {
+      "path": "rsl_rl/algorithms/__init__.py",
+      "sha256": "72a8c73105f83fbbcd846d2dd2e25809accf57f87d947eae95b3aae25eb025e5",
+      "size": 1744
+    },
+    {
+      "path": "rsl_rl/algorithms/hierarchical_ppo.py",
+      "sha256": "037582df2858ea38fa4b8beea4006d6a4f34c92fec3557cc3928e8df032041f1",
+      "size": 14866
+    },
+    {
+      "path": "rsl_rl/algorithms/high_level_planner.py",
+      "sha256": "74c988af5b40e86f8f62d86217245efb32ffa6c6dcf95730a1b7d937b76b133a",
+      "size": 51303
+    },
+    {
+      "path": "rsl_rl/algorithms/ppo.py",
+      "sha256": "9f6630578b17eb2d1c6f01206f46c0da830660859a1256b9d475a36d9f1e336f",
+      "size": 9532
+    },
+    {
+      "path": "rsl_rl/env/__init__.py",
+      "sha256": "b4c617f8535f521496d62b4b057e6523a6d2f83520e3c0ce3a0c2ee0ef028b5c",
+      "size": 1690
+    },
+    {
+      "path": "rsl_rl/env/vec_env.py",
+      "sha256": "6e8f46bec6a4081f4248f010bf5641f71b51cdbaa0282bce76e6ef5580caace7",
+      "size": 2574
+    },
+    {
+      "path": "rsl_rl/modules/__init__.py",
+      "sha256": "3bfa5cbe3ca242aba6d79013777126fd8e09474511b1b31ccea818b61c4ba798",
+      "size": 1810
+    },
+    {
+      "path": "rsl_rl/modules/actor_critic.py",
+      "sha256": "7157d57d5920c167499f399b5e622282ca227675121d188c1f7717e480e4680c",
+      "size": 6749
+    },
+    {
+      "path": "rsl_rl/modules/actor_critic_encoder.py",
+      "sha256": "833982f2f5ceb4509880075318f889d2756edb2daa1f62c223d28a4f0e747775",
+      "size": 6491
+    },
+    {
+      "path": "rsl_rl/modules/actor_critic_recurrent.py",
+      "sha256": "db5eeb05c963e5ab61829b076a7360ce9441deb0441cca7e08d214623cadce3c",
+      "size": 5301
+    },
+    {
+      "path": "rsl_rl/runners/__init__.py",
+      "sha256": "ec92fd6bb46514aa86d22115e2e5e00155dd98624f33ca2030fb819880bc7f48",
+      "size": 1867
+    },
+    {
+      "path": "rsl_rl/runners/expert_guided_encoder_runner.py",
+      "sha256": "043a47b3d00ff54f12261cf72e04410d8b1e4144e80a0d4ee2478a3745546442",
+      "size": 14702
+    },
+    {
+      "path": "rsl_rl/runners/expert_guided_runner.py",
+      "sha256": "e99d6fc73f82b3d18e57a6ce78b876bd602c4479b5ca390d19001949906e3d68",
+      "size": 14110
+    },
+    {
+      "path": "rsl_rl/runners/expert_preload_runner.py",
+      "sha256": "bcb9862237506336ee1a0d0ec10264932a88c5487a3ba179bba1a0280fc7b951",
+      "size": 5194
+    },
+    {
+      "path": "rsl_rl/runners/on_policy_runner.py",
+      "sha256": "557ddc7ec04bcbc5356741a4ae95f10d45cdc39c2a6f4ca68fb8cd505ad9ef89",
+      "size": 16471
+    },
+    {
+      "path": "rsl_rl/storage/__init__.py",
+      "sha256": "caec44a20e6eac4a1d68f9dfaa6cb031552e5b995b3ce34e30b8685c7b86ab38",
+      "size": 156
+    },
+    {
+      "path": "rsl_rl/storage/rollout_storage.py",
+      "sha256": "00e6044d9b7d441a328f686c11bb14b2248e4bbd09b76d0fa71199fe89ceb093",
+      "size": 25178
+    },
+    {
+      "path": "rsl_rl/utils/__init__.py",
+      "sha256": "64055ba769d27df163a690808e028e1c61be222ebcf3a738a2e78b46db4075e7",
+      "size": 1752
+    },
+    {
+      "path": "rsl_rl/utils/plot_summary.py",
+      "sha256": "b878ed5159c3742fd08026023658170e157a6dbf7638b72109880e4a07985611",
+      "size": 1930
+    },
+    {
+      "path": "rsl_rl/utils/test_.py",
+      "sha256": "859e28f382137b8999580e0345db0d06b00fca2f0e1194cb040add0dc710746c",
+      "size": 5432
+    },
+    {
+      "path": "rsl_rl/utils/utils.py",
+      "sha256": "f34d552bf6b02f4eb70de67c621a7c680a83c9bfbeb8325f52c693ef00fab551",
+      "size": 5183
+    },
+    {
+      "path": "tools/qualify_avoid_clutter.py",
+      "sha256": "c780194008e6fbd73a7b1be755b0afa94bf4cc7e7b0fa0e19bfb9034b18ed7f1",
+      "size": 25992
+    },
+    {
+      "path": "tools/smoke_avoid_clutter_training.py",
+      "sha256": "3c61ff27c53541e7702b705fc0b556a97dc59bd81ebd8e0551e448431b2bcf9d",
+      "size": 4984
+    },
+    {
+      "path": "tools/test_qualify_avoid_clutter.py",
+      "sha256": "dacf7273e849c39c94beb6df1197a3f4020abc7e932c6fd5485a5ea7b42c5e39",
+      "size": 3585
+    }
+  ],
+  "manifest_sha256": "b1144ccb97ecf267f35216949148ce4426f18caf11168ee650bf0854614cd303"
+}

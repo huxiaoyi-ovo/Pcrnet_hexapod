@@ -56,6 +56,8 @@ from .hex_v4.hex_scenes_config import (
     HexESCorridorCfgPPO,
     HexAvoidBasicCfg,
     HexAvoidBasicCfgPPO,
+    HexAvoidClutterCfg,
+    HexAvoidClutterCfgPPO,
     HexPCRLineAvoidBasicCfg,
     HexPCRLineAvoidBasicCfgPPO,
     HexPCRNewCfg,
@@ -132,6 +134,7 @@ task_registry.register("hex_calib", HexGround, HexCalibCfg(), HexCalibCfgPPO())
 # Canonical scene names (s_*) for daily use; keep legacy hex_* names for compatibility.
 task_registry.register("s_follow_basic", HexGround, HexS0FollowCfg(), HexS0FollowCfgPPO())
 task_registry.register("s_avoid_basic", HexGround, HexAvoidBasicCfg(), HexAvoidBasicCfgPPO())
+task_registry.register("s_avoid_clutter", HexGround, HexAvoidClutterCfg(), HexAvoidClutterCfgPPO())
 task_registry.register("s_pcr_line_avoid_basic", HexGround, HexPCRLineAvoidBasicCfg(), HexPCRLineAvoidBasicCfgPPO())
 task_registry.register("s_pcr_new", HexGround, HexPCRNewCfg(), HexPCRNewCfgPPO())
 task_registry.register("s_avoid_basic_large", HexGround, HexS1LargeCfg(), HexS1LargeCfgPPO())

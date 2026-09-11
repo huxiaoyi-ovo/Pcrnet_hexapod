@@ -1,0 +1,19 @@
+{
+  "status": "pre_reviewed_source_only",
+  "scope": "This is an implementation and source-contract review before Sanity completion; it is not a policy-performance, safety, or formal-training approval.",
+  "approved_source_manifest_sha256": "b1144ccb97ecf267f35216949148ce4426f18caf11168ee650bf0854614cd303",
+  "reviewed_contract": {
+    "action_sampling_eval_gae": "1-D Avoid action distribution is used consistently in sampling, evaluation, and GAE.",
+    "actor_critic_inputs": "Actor uses the 14-D mask and visible local map; critic retains the reviewed GT input path.",
+    "command_semantics": "Standalone Avoid expands to nominal forward drive with zero yaw and lateral learned action.",
+    "terminal_semantics": "Failure-first terminal precedence covers physical, envelope, and fall; first-terminal latching is retained.",
+    "timeout_semantics": "Timeout bootstrap observation is captured before reset and used only for timeout bootstrap.",
+    "curriculum": "Decision episodes are counted in the current stage window; the Sanity run uses its recorded Stage-1 freeze.",
+    "logging": "The reviewed P1 logging repair does not alter gradients."
+  },
+  "next_required_evidence": [
+    "Sanity completion marker plus valid model_200 checkpoint",
+    "independent seed9174 qualification JSON and recomputed final gate",
+    "source and low-level SHA agreement in the fresh remote snapshot"
+  ]
+}

@@ -4,7 +4,6 @@ from rsl_rl.modules import ActorCritic
 from rsl_rl.algorithms import PPO
 import time
 import torch
-from torch.utils.tensorboard import SummaryWriter
 import os
 from collections import deque
 class ExpertPreloadRunner(OnPolicyRunner):
@@ -50,6 +49,7 @@ class ExpertPreloadRunner(OnPolicyRunner):
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
+            from torch.utils.tensorboard import SummaryWriter
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))

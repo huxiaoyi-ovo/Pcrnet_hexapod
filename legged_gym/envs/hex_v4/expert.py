@@ -1,4 +1,5 @@
 #六足简单位置控制器，用于早期训练引导到专家策略附近
+import math
 import torch
 from typing import Tuple
 from .hex_climb_config import HexClimbCfg
@@ -398,8 +399,8 @@ class ExpertClimb:
         return next_B_e_des
 
     def _GetFootAngle(self,joint_pos:torch.Tensor):
-        self.q_des_flat[:,3]=-(joint_pos[:,1]+joint_pos[:,2])-torch.pi/2.0
-        # joint_pos[:,3]=-(joint_pos[:,1]+joint_pos[:,2])-torch.pi/2.0
+        self.q_des_flat[:,3]=-(joint_pos[:,1]+joint_pos[:,2])-math.pi/2.0
+        # joint_pos[:,3]=-(joint_pos[:,1]+joint_pos[:,2])-math.pi/2.0
 
     #return env_nums*6 bool tensor
     def _FeasiCheck(self,B_e_des:torch.Tensor)->torch.Tensor:
@@ -408,7 +409,7 @@ class ExpertClimb:
         # x_feasi=(B_e_des[...,0]>=0.16) & (B_e_des[...,0]<=0.28)
         z_feasi=(B_e_des[...,2]>=-0.2) & (B_e_des[...,2]<=0.1)
         thigh_angle=torch.atan(B_e_des[...,1]/B_e_des[...,0])
-        angle_feasi=(thigh_angle>=-torch.pi/4.0) & (thigh_angle<=torch.pi/4.0)
+        angle_feasi=(thigh_angle>=-math.pi/4.0) & (thigh_angle<=math.pi/4.0)
         # print("x_feasi\n",x_feasi,"\nz_feasi\n",z_feasi,"\nangle_feasi\n",angle_feasi)
         # return x_feasi&z_feasi&angle_feasi
         return xy_feasi&z_feasi&angle_feasi

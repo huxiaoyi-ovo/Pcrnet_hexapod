@@ -1,4 +1,5 @@
-from torch import sin,cos,acos,atan,atan2,asin,pi,sqrt
+from math import pi
+from torch import sin,cos,acos,atan,atan2,asin,sqrt
 import torch
 
 class Kinematic:
