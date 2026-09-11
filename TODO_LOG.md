@@ -10,6 +10,10 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-11 Avoid clutter 取消地图规则减速（代码完成，待重训）
+
+- [x] ~~[P0] `s_avoid_clutter` 的 Avoid 训练、play 与 eval 固定关闭 CommandPostProcessor 的 clearance 风险缩放：保持 1-D 横移决策、名义前进、命令限幅与 slew 不变；不改历史 `s_avoid_basic`、PCR、Mono、奖励、几何或 PPO。旧 checkpoint 若回放为启用缩放，必须显式报告覆盖，保存的运行元数据必须为 `disable_risk_scale=true`。补充 CPU 行为检查，验证近障碍不会因该规则将命令置零。~~
+
 ## 2026-09-11 Reviewer-proof Mono-PPO 最终训练/评测证据口径（已完成）
 
 - [x] ~~[P0] 将 Strong Mono 的预算节点改为角色明确的 `gate-stage interaction reference`（12,288,000）、`PCR-total-interaction reference`（24,576,000）和固定最终 `full-training`（36,864,000）；三 seed 均连续完成 3000 iterations，不实行 plateau/early stop 或 validation 选 Full。补齐 reviewer 专用严格 completed-iteration 保存、Avoid 成本来源边界、offline-only validation guard、tanh command-scale Jacobian，以及可恢复的交互/更新/wall-time/动作饱和和后处理 clamp 证据；仅做本地静态/CPU 验证，不启动训练或服务器操作。~~

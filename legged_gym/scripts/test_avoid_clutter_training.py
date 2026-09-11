@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from legged_gym.avoid_reward import avoid_clutter_reward
 from legged_gym.pcr_observation import build_avoid_actor_state
-from rsl_rl.algorithms.high_level_planner import CmdVelExpert
+from rsl_rl.algorithms.high_level_planner import CmdVelExpert, CommandPostProcessor
 
 
 def _extract_runtime_methods():
@@ -37,25 +37,51 @@ def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval
         body = getattr(parent, "body", None)
         if not isinstance(body, list):
             continue
+        fixed_index = None
+        checkpoint_index = None
         for index, node in enumerate(body):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "fixed_checkpoint_interval"
+                for target in node.targets
+            ):
+                fixed_index = index
             if not isinstance(node, ast.Assign):
                 continue
             if not any(isinstance(target, ast.Name) and target.id == "should_save_checkpoint" for target in node.targets):
                 continue
-            if index == 0 or not isinstance(body[index - 1], ast.Assign):
+            checkpoint_index = index
+            break
+        if checkpoint_index is not None:
+            if fixed_index is None or fixed_index >= checkpoint_index:
                 raise AssertionError("checkpoint condition must retain its fixed interval setup")
-            setup = body[index - 1]
-            if not any(isinstance(target, ast.Name) and target.id == "fixed_checkpoint_interval" for target in setup.targets):
-                raise AssertionError("checkpoint condition must follow the fixed interval setup")
             namespace = {
                 "iteration": iteration,
                 "total_iterations": total_iterations,
                 "args": SimpleNamespace(save_interval=save_interval),
+                "is_mono_ppo": False,
             }
-            module = ast.Module(body=[copy.deepcopy(setup), copy.deepcopy(node)], type_ignores=[])
+            module = ast.Module(
+                body=[copy.deepcopy(item) for item in body[fixed_index:checkpoint_index + 1]],
+                type_ignores=[],
+            )
             exec(compile(ast.fix_missing_locations(module), "train_highlevel.py", "exec"), namespace)
             return bool(namespace["should_save_checkpoint"])
     raise AssertionError("missing checkpoint save condition")
+
+
+def _extract_clutter_risk_scale_contract():
+    source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
+    tree = ast.parse(source)
+    wanted = {"normalize_task_name", "is_avoid_clutter_task_name", "enforce_avoid_clutter_risk_scale_contract"}
+    functions = [
+        copy.deepcopy(node)
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    assert {function.name for function in functions} == wanted
+    namespace = {"Any": object, "LEGACY_TASK_ALIASES": {}}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), "train_highlevel.py", "exec"), namespace)
+    return namespace["enforce_avoid_clutter_risk_scale_contract"]
 
 
 class MockPostProcessor:
@@ -189,6 +215,41 @@ def main():
     assert not _actual_save_checkpoint_condition(998, 1000, 200)
     assert _actual_save_checkpoint_condition(999, 1000, 200)
     assert _actual_save_checkpoint_condition(0, 1, 200)
+
+    enforce_clutter_contract = _extract_clutter_risk_scale_contract()
+    clutter_args = SimpleNamespace(task="s_avoid_clutter", disable_risk_scale=False)
+    assert enforce_clutter_contract(clutter_args, context="test")
+    assert clutter_args.disable_risk_scale
+    other_args = SimpleNamespace(task="s_avoid_basic", disable_risk_scale=False)
+    assert not enforce_clutter_contract(other_args, context="test")
+    assert not other_args.disable_risk_scale
+
+    post = CommandPostProcessor(
+        max_cmd=(0.6, 0.6, 1.0),
+        max_delta=(0.2, 0.2, 0.4),
+        safe_distance=0.27,
+        free_distance=0.57,
+        enable_risk_scale=not clutter_args.disable_risk_scale,
+    )
+    post.reset(1, torch.device("cpu"))
+    post.last_cmd[:] = torch.tensor([[0.2, 0.3, 0.0]])
+    near_cmd = torch.tensor([[0.8, 0.6, 0.0]])
+    native_clamp = torch.clamp
+    # The local CPU fixture uses torch 1.8, which lacks tensor min/max support
+    # for torch.clamp. Keep the production process path under test.
+    def _compat_tensor_clamp(value, minimum=None, maximum=None, *, out=None):
+        if out is None and torch.is_tensor(minimum) and torch.is_tensor(maximum):
+            return torch.minimum(torch.maximum(value, minimum), maximum)
+        return native_clamp(value, minimum, maximum, out=out)
+    torch.clamp = _compat_tensor_clamp
+    try:
+        near_exec, near_info = post.process(near_cmd, clearance=torch.tensor([0.0]))
+    finally:
+        torch.clamp = native_clamp
+    assert near_info["risk_scale"] is None
+    assert torch.allclose(near_info["cmd_clamped"], torch.tensor([[0.6, 0.6, 0.0]]))
+    assert torch.allclose(near_exec, torch.tensor([[0.4, 0.5, 0.0]]))
+    assert torch.allclose(near_exec, near_info["cmd_slew_pre_scale"])
 
     def reward_clearance(current, straight, *, failure=False, success=False):
         return avoid_clutter_reward(

@@ -504,6 +504,20 @@ def is_avoid_clutter_task_name(task_name: str) -> bool:
     return normalize_task_name(task_name) == "s_avoid_clutter"
 
 
+def enforce_avoid_clutter_risk_scale_contract(args: Any, *, context: str) -> bool:
+    """Disable map-driven command scaling for the canonical 1-D Avoid task."""
+    if not is_avoid_clutter_task_name(getattr(args, "task", "")):
+        return False
+    was_disabled = bool(getattr(args, "disable_risk_scale", False))
+    setattr(args, "disable_risk_scale", True)
+    if not was_disabled:
+        print(
+            f"[{context}] s_avoid_clutter overrides disable_risk_scale=False from runtime or checkpoint metadata; "
+            "clearance risk scaling is disabled by the task contract."
+        )
+    return True
+
+
 def validate_pcr_reward_config(nav_cfg: Any, reward_cfg_dict: Dict[str, Any]) -> None:
     missing_nav = [key for key in PCR_REQUIRED_NAV_ATTRS if not hasattr(nav_cfg, key)]
     if missing_nav:
@@ -2212,6 +2226,7 @@ class HierarchicalHexapodEnv:
         self.args = args
         self.device = device
         self.mode = args.mode
+        enforce_avoid_clutter_risk_scale_contract(self.args, context="HighLevelEnv")
         self.debug = bool(getattr(args, "debug", False))
         if getattr(self.args, "mode", "teacher") == "student":
             setattr(self.args, "camera_enable", True)
