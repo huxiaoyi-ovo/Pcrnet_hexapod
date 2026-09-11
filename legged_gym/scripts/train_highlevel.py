@@ -6166,6 +6166,7 @@ def train(args):
             "skill",
             "seed",
             "num_envs",
+            "num_iterations",
             "num_steps",
             "num_epochs",
             "mini_batch_size",
@@ -6187,6 +6188,7 @@ def train(args):
             "vision_ckpt",
             "follow_ckpt",
             "avoid_ckpt",
+            "finetune_from",
             "low_level_ckpt",
             "output_dir",
             "save_interval",
@@ -6249,6 +6251,7 @@ def train(args):
                 "clearance_reward_formula": "0.03*(dt/0.1)*rho_forward*clamp(rho_forward-rho_request,-1,1)",
                 "clearance_baseline": "pre_action_visible_map_nominal_forward_request",
                 "clearance_current": "pre_action_visible_map_raw_request",
+                "scene_raster_bounds_version": "exclusive_ceil_upper_v1",
                 "preference_reward_disabled_stages": [1],
                 "sanity_approved_changes_relative_to_initial": [
                     "relative_forward_clearance_improvement",
@@ -9597,9 +9600,12 @@ def train(args):
         # Save checkpoint
         fixed_checkpoint_interval = 100
         should_save_checkpoint = (
-            iteration > 0 and (
-                iteration % args.save_interval == 0
-                or iteration % fixed_checkpoint_interval == 0
+            iteration == total_iterations - 1
+            or (
+                iteration > 0 and (
+                    iteration % args.save_interval == 0
+                    or iteration % fixed_checkpoint_interval == 0
+                )
             )
         )
         if should_save_checkpoint:

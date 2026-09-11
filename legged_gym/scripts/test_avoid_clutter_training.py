@@ -4,6 +4,7 @@ import ast
 import copy
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -27,6 +28,34 @@ def _extract_runtime_methods():
     module = ast.Module(body=methods, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "train_highlevel.py", "exec"), namespace)
     return namespace
+
+
+def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval):
+    source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
+    tree = ast.parse(source)
+    for parent in ast.walk(tree):
+        body = getattr(parent, "body", None)
+        if not isinstance(body, list):
+            continue
+        for index, node in enumerate(body):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(isinstance(target, ast.Name) and target.id == "should_save_checkpoint" for target in node.targets):
+                continue
+            if index == 0 or not isinstance(body[index - 1], ast.Assign):
+                raise AssertionError("checkpoint condition must retain its fixed interval setup")
+            setup = body[index - 1]
+            if not any(isinstance(target, ast.Name) and target.id == "fixed_checkpoint_interval" for target in setup.targets):
+                raise AssertionError("checkpoint condition must follow the fixed interval setup")
+            namespace = {
+                "iteration": iteration,
+                "total_iterations": total_iterations,
+                "args": SimpleNamespace(save_interval=save_interval),
+            }
+            module = ast.Module(body=[copy.deepcopy(setup), copy.deepcopy(node)], type_ignores=[])
+            exec(compile(ast.fix_missing_locations(module), "train_highlevel.py", "exec"), namespace)
+            return bool(namespace["should_save_checkpoint"])
+    raise AssertionError("missing checkpoint save condition")
 
 
 class MockPostProcessor:
@@ -154,6 +183,12 @@ def main():
     (log_prob.mean() + value.mean() + entropy.mean()).backward()
     assert action.shape == (4, 1) and torch.isfinite(action).all()
     assert all(torch.isfinite(param.grad).all() for param in policy.parameters() if param.grad is not None)
+
+    assert _actual_save_checkpoint_condition(100, 1000, 200)
+    assert _actual_save_checkpoint_condition(200, 1000, 200)
+    assert not _actual_save_checkpoint_condition(998, 1000, 200)
+    assert _actual_save_checkpoint_condition(999, 1000, 200)
+    assert _actual_save_checkpoint_condition(0, 1, 200)
 
     def reward_clearance(current, straight, *, failure=False, success=False):
         return avoid_clutter_reward(

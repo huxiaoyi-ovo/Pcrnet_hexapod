@@ -17,6 +17,8 @@
 
 ## 2026-09-10 Avoid 1-D 正式基线（C1/D2 代码完成；训练未开始）
 
+- [ ] [P0，进行中] 以修正 exclusive-upper scene raster 的新隔离快照，将本轮 Sanity 的 `model_200.pt` 仅作为 `--finetune_from` 权重来源（fresh optimizer、非 resume），启动 GPU1 的 128 env、24 step、1000 PPO iteration 全课程 Avoid 长训练；固定既有 `.04` entropy、PPO、reward、其余观测定义、几何和低层权重，不以 Sanity 成功率设性能门槛。trainer 必须保存最终 `model_999.pt`，并在 run metadata 记录 iteration、finetune 来源与 raster 版本。
+
 - [ ] [P0，进行中] 将 Avoid 第三组 clearance 从绝对风险惩罚收口为“相对直行风险改善”：以 pre-action 同一 visible map 上的 nominal forward clearance 为基线，只奖励横移把原本直行危险的风险降低；直行安全、等风险或横移后更危险不产生正奖励。保持其余五组、terminal-first 覆盖、几何、PPO、entropy、安全缩放、观测和课程不变；下一次 Sanity 仍固定 Stage-1 preference reward 关闭。
 
 - [x] ~~[P0] 已完成固定 45 条 Central layout、同名义前进速度的 `u_x=0` 对照：45/45 terminal，success `40/45`、physical `5/45`；原资格的 physical `31/45` 中 29 条变为 success、2 条仍为 physical，原 success `14/45` 中 11 条保持、3 条变为 physical。45 个 layout 与原 `qualification.json` 的 Central 集合一致；5,462 条命令的 raw/executed/forced `u_x` 均为 0，raw `u_y` 与名义速度最大差 `1.49e-08`，原安全缩放和低层保持。结果支持当前主要问题是策略产生不必要横移，不能归因为中央开口普遍不可通过；同时仍有 5 条踝部 physical，几何中心 safe 不等于全腿安全。历史完整物理状态/RNG 未保存，不能宣称逐位配对因果。完整记录见 `outputs/avoid_sanity_20260910/central_zero_lateral_20260911/report.md`。当前决策：`s_pcr_new` 三柱主开口名义净宽 `1.00 m` 与本批 `.9619–1.1512 m` 接近，暂不改几何、PPO、entropy 或参数，也不新增测试/训练。下一次 Sanity 仅在起始 Stage-1 关闭 preference reward，保持 observation、采样和全局系数不变。~~
