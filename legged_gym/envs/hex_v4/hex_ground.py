@@ -18,6 +18,7 @@ from legged_gym.utils.terrain import (
     _get_e_s_corridor_geom as terrain_get_e_s_corridor_geom,
     _build_e_s_corridor_centerline as terrain_build_e_s_corridor_centerline,
 )
+from legged_gym.avoid_clutter import AvoidClutterGenerator
 from isaacgym.torch_utils import torch_rand_float,quat_rotate_inverse
 
 import math
@@ -393,6 +394,8 @@ class HexGround(LeggedRobot):
         self.s_avoid_capsule_quat = None
         self.s_avoid_identity_quat = None
         self.s_avoid_direct_single_obstacle = False
+        self.s_avoid_clutter_enabled = False
+        self.s_avoid_cylinder_asset = None
 
         terrain_type = str(getattr(self.cfg.terrain, "terrain_type", "")).lower()
         if terrain_type in ("e_l_conflict", "e_l_confilct", "e_l_conflict_turn"):
@@ -454,7 +457,8 @@ class HexGround(LeggedRobot):
                 f"width={geom['corridor_width']:.3f}, amp={geom['amplitude']:.3f}"
             )
 
-        if terrain_type == "s_avoid_basic":
+        if terrain_type in ("s_avoid_basic", "s_avoid_clutter"):
+            self.s_avoid_clutter_enabled = terrain_type == "s_avoid_clutter"
             self.s_avoid_direct_single_obstacle = bool(
                 getattr(self.cfg.terrain, "avoid_direct_single_obstacle", False)
             )
@@ -484,7 +488,16 @@ class HexGround(LeggedRobot):
             wall_l = float(getattr(self.cfg.terrain, "avoid_wall_length", 6.0))
             wall_h = float(getattr(self.cfg.terrain, "avoid_wall_height", 0.5))
 
-            if self.s_avoid_direct_single_obstacle:
+            if self.s_avoid_clutter_enabled:
+                asset_root = f"{LEGGED_GYM_ROOT_DIR}/resources/objects"
+                self.s_avoid_cylinder_asset = self.gym.load_asset(
+                    self.sim, asset_root, "avoid_clutter_cylinder.urdf", pooled_asset_options
+                )
+                self.s_avoid_capsule_asset = self.s_avoid_cylinder_asset
+                self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_cylinder_slots", 64))
+                self.s_avoid_box_slot_count = 0
+                self.s_avoid_wall_slot_count = 0
+            elif self.s_avoid_direct_single_obstacle:
                 self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, fixed_asset_options)
                 self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, fixed_asset_options)
                 self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, fixed_asset_options)
@@ -511,10 +524,13 @@ class HexGround(LeggedRobot):
             ]
             self.s_avoid_actor_indices = np.zeros((self.num_envs, self.s_avoid_total_slots), dtype=np.int32)
             self.s_avoid_identity_quat = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
-            self.s_avoid_capsule_quat = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
+            self.s_avoid_capsule_quat = (
+                self.s_avoid_identity_quat if self.s_avoid_clutter_enabled
+                else gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
+            )
             self.s_avoid_enabled = True
             print(
-                "[Scene] s_avoid_basic obstacle pool: "
+                f"[Scene] {terrain_type} obstacle pool: "
                 f"capsule_slots={self.s_avoid_capsule_slot_count}, "
                 f"box_slots={self.s_avoid_box_slot_count}, "
                 f"wall_slots={self.s_avoid_wall_slot_count}, "
@@ -1271,6 +1287,34 @@ class HexGround(LeggedRobot):
         self.s_avoid_terminal_cross_line_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.s_avoid_env_episode_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.s_avoid_stage_per_env = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
+        self.s_avoid_exit_y = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_band_exit_y = torch.full(
+            (self.num_envs, 5), float("inf"), device=self.device, dtype=torch.float
+        )
+        self.s_avoid_band_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.s_avoid_decision_episode = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_v_drive_nom = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.s_avoid_terminal_physical = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_envelope = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_fall = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_terminal_timeout = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_episode_physical = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_episode_envelope = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_episode_fall = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.s_avoid_clutter_layouts = [None for _ in range(self.num_envs)]
+        if self.s_avoid_clutter_enabled:
+            self.s_avoid_clutter_generator = AvoidClutterGenerator(
+                radius=float(getattr(self.cfg.terrain, "avoid_clutter_radius", .15)),
+                strict_radius=float(getattr(self.cfg.terrain, "avoid_clutter_strict_radius", .28)),
+                band_half_width=float(getattr(self.cfg.terrain, "avoid_clutter_band_half_width", 1.55)),
+                spawn_y=-1.6,
+                v_lat_eff=float(getattr(self.cfg.terrain, "avoid_clutter_v_lat_eff", .15)),
+                response_delay=float(getattr(self.cfg.terrain, "avoid_clutter_response_delay", .30)),
+                v_lat_max=float(getattr(self.cfg.terrain, "avoid_clutter_v_lat_max", .60)),
+                y_jitter=float(getattr(self.cfg.terrain, "avoid_clutter_y_jitter", .04)),
+                max_attempts=int(getattr(self.cfg.terrain, "avoid_clutter_max_attempts", 128)),
+                episode_length_s=float(getattr(self.cfg.env, "episode_length_s", 50.0)),
+            )
         self.s_avoid_stage = 1
         self.s_avoid_total_completed_episodes = 0
         stage12_window = int(
@@ -1282,13 +1326,7 @@ class HexGround(LeggedRobot):
         )
         stage23_window = int(getattr(self.cfg.terrain, "avoid_stage23_window", stage12_window))
         stage34_window = int(getattr(self.cfg.terrain, "avoid_stage34_window", stage23_window))
-        stage4_window = int(
-            getattr(
-                self.cfg.terrain,
-                "avoid_stage4_shrink_window",
-                getattr(self.cfg.terrain, "avoid_stage3_shrink_window", 100),
-            )
-        )
+        stage4_window = int(getattr(self.cfg.terrain, "avoid_stage4_window", 200))
         self.s_avoid_stage_metric_hists = {
             1: self._make_s_avoid_metric_history(stage12_window),
             2: self._make_s_avoid_metric_history(stage23_window),
@@ -1309,7 +1347,9 @@ class HexGround(LeggedRobot):
             )
         )
         self.s_avoid_last_shrink_stage_episode = 0
-        self.s_avoid_stage_presets = self._build_s_avoid_stage_presets()
+        self.s_avoid_stage_presets = (
+            {} if self.s_avoid_clutter_enabled else self._build_s_avoid_stage_presets()
+        )
         self.pcr_new_curriculum_enabled = bool(
             self.nav_cfg is not None and getattr(self.nav_cfg, "pcr_new_curriculum_enable", False)
         )
@@ -2954,8 +2994,79 @@ class HexGround(LeggedRobot):
         episode_progress_flags: Optional[torch.Tensor] = None,
         episode_success_flags: Optional[torch.Tensor] = None,
         episode_row_success_flags: Optional[torch.Tensor] = None,
+        episode_decision_flags: Optional[torch.Tensor] = None,
     ):
         if not self.s_avoid_enabled or episode_collision_flags.numel() == 0:
+            return
+        if self.s_avoid_clutter_enabled:
+            if episode_success_flags is None:
+                raise RuntimeError("clutter curriculum requires explicit success flags")
+            decisions = (
+                torch.ones_like(episode_collision_flags, dtype=torch.bool)
+                if episode_decision_flags is None else episode_decision_flags.to(dtype=torch.bool)
+            )
+            stages = episode_stage_ids if episode_stage_ids is not None else torch.full_like(episode_collision_flags, self.s_avoid_stage, dtype=torch.long)
+            exposures = (
+                torch.ones_like(episode_collision_flags, dtype=torch.bool)
+                if episode_exposure_flags is None else episode_exposure_flags.to(dtype=torch.bool)
+            )
+            progresses = (
+                torch.ones_like(episode_collision_flags, dtype=torch.float32)
+                if episode_progress_flags is None else episode_progress_flags.to(dtype=torch.float32)
+            )
+            successes = episode_success_flags if episode_success_flags is not None else ~episode_collision_flags
+            row_successes = (
+                successes.to(dtype=torch.float32)
+                if episode_row_success_flags is None else episode_row_success_flags.to(dtype=torch.float32)
+            )
+            current_stage = int(self.s_avoid_stage)
+            for stage, failed, exposed, progressed, success, row_succeeded, decision in zip(
+                stages.tolist(),
+                episode_collision_flags.tolist(),
+                exposures.tolist(),
+                progresses.tolist(),
+                successes.tolist(),
+                row_successes.tolist(),
+                decisions.tolist(),
+            ):
+                if not decision or int(stage) != current_stage:
+                    continue
+                hist = self.s_avoid_stage_metric_hists[current_stage]
+                hist["collision"].append(float(bool(failed)))
+                hist["exposure"].append(float(bool(exposed)))
+                hist["progress"].append(float(progressed))
+                hist["success"].append(float(success))
+                hist["row_success"].append(float(row_succeeded))
+                self.s_avoid_stage_completed_episodes[current_stage] += 1
+                self.s_avoid_total_completed_episodes += 1
+            hist = self.s_avoid_stage_metric_hists[current_stage]
+            enough = len(hist["collision"]) >= hist["collision"].maxlen
+            success_rate = float(np.mean(hist["success"])) if hist["success"] else 0.0
+            failure_rate = float(np.mean(hist["collision"])) if hist["collision"] else 0.0
+            success_threshold = float(getattr(self.cfg.terrain, f"avoid_stage{current_stage}{current_stage + 1}_success_threshold", .85))
+            collision_threshold = float(getattr(self.cfg.terrain, f"avoid_stage{current_stage}{current_stage + 1}_collision_threshold", .10))
+            if enough and success_rate >= success_threshold and failure_rate <= collision_threshold and current_stage < 4:
+                old = current_stage
+                self._advance_s_avoid_stage(old + 1)
+                self.extras["avoid_stage_switch_event"] = 1.0
+            active_stage = int(self.s_avoid_stage)
+            active_hist = self.s_avoid_stage_metric_hists[active_stage]
+            active_failure_rate = float(np.mean(active_hist["collision"])) if active_hist["collision"] else 0.0
+            active_exposure_rate = float(np.mean(active_hist["exposure"])) if active_hist["exposure"] else 0.0
+            active_progress_rate = float(np.mean(active_hist["progress"])) if active_hist["progress"] else 0.0
+            active_success_rate = float(np.mean(active_hist["success"])) if active_hist["success"] else 0.0
+            active_row_success_rate = float(np.mean(active_hist["row_success"])) if active_hist["row_success"] else 0.0
+            self.extras["avoid_stage"] = active_stage
+            self.extras["avoid_stage_rate_source"] = active_stage
+            self.extras["avoid_stage_collision_rate"] = active_failure_rate
+            self.extras["avoid_stage_exposure_rate"] = active_exposure_rate
+            self.extras["avoid_stage_progress_rate"] = active_progress_rate
+            self.extras["avoid_stage_success_rate"] = active_success_rate
+            self.extras["avoid_stage_row_success_rate"] = active_row_success_rate
+            self.extras["avoid_stage_completed_episodes"] = int(self.s_avoid_stage_completed_episodes[active_stage])
+            self.extras["avoid_stage_window"] = int(active_hist["collision"].maxlen)
+            self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
+            self.extras["avoid_decision_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
             return
         flags = episode_collision_flags.detach().to(device="cpu", dtype=torch.bool).tolist()
         if episode_stage_ids is None:
@@ -3163,6 +3274,9 @@ class HexGround(LeggedRobot):
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         robot_center_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        if self.s_avoid_clutter_enabled:
+            cross_line_y = self.s_avoid_exit_y[env_ids]
+            return torch.clamp(cross_line_y - robot_center_local_y, min=0.0), robot_center_local_y, cross_line_y
         cross_line_y = torch.full_like(
             robot_center_local_y,
             float(self._get_s_avoid_fixed_stage_last_row_y(4)),
@@ -3205,6 +3319,10 @@ class HexGround(LeggedRobot):
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
         robot_center_local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+        if self.s_avoid_clutter_enabled:
+            thresholds = self.s_avoid_band_exit_y[env_ids]
+            valid = torch.arange(thresholds.shape[1], device=self.device).unsqueeze(0) < self.s_avoid_band_count[env_ids].unsqueeze(1)
+            return ((robot_center_local_y.unsqueeze(1) >= thresholds) & valid).sum(dim=1).to(torch.long)
         pass_counts = torch.zeros_like(stage_ids, dtype=torch.long)
         for stage_v in (1, 2, 3, 4):
             stage_mask = stage_ids == stage_v
@@ -3231,6 +3349,15 @@ class HexGround(LeggedRobot):
             return torch.zeros(0, device=self.device, dtype=torch.float32)
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
+        if self.s_avoid_clutter_enabled:
+            row_totals = torch.clamp(self.s_avoid_band_count[env_ids].to(dtype=torch.float32), min=1.0)
+            current_counts = self._get_s_avoid_episode_row_pass_counts(env_ids).to(dtype=torch.float32)
+            best_counts = torch.maximum(self.s_avoid_episode_rows_passed_best[env_ids].to(dtype=torch.float32), current_counts)
+            row_ratio = torch.clamp(best_counts / row_totals, min=0.0, max=1.0)
+            free = self.s_avoid_band_count[env_ids] == 0
+            local_y = self.root_states[env_ids, 1] - self.env_origins[env_ids, 1]
+            physical = torch.clamp((local_y + 1.6) / torch.clamp(self.s_avoid_exit_y[env_ids] + 1.6, min=1e-6), min=0.0, max=1.0)
+            return torch.where(free, physical, row_ratio)
         stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
         row_totals = torch.ones_like(stage_ids, dtype=torch.float32)
         for stage_v in (1, 2, 3, 4):
@@ -3257,6 +3384,13 @@ class HexGround(LeggedRobot):
             return torch.zeros(0, device=self.device, dtype=torch.float32)
         if stage_ids is None:
             stage_ids = self.s_avoid_stage_per_env[env_ids]
+        if self.s_avoid_clutter_enabled:
+            row_totals = torch.clamp(self.s_avoid_band_count[env_ids].to(dtype=torch.float32), min=1.0)
+            current_counts = self._get_s_avoid_episode_row_pass_counts(env_ids).to(dtype=torch.float32)
+            safe = ~(self.s_avoid_episode_physical[env_ids] | self.s_avoid_episode_envelope[env_ids] | self.s_avoid_episode_fall[env_ids])
+            current_counts = current_counts * safe.to(dtype=torch.float32)
+            best_counts = torch.maximum(self.s_avoid_episode_rows_success_best[env_ids].to(dtype=torch.float32), current_counts)
+            return torch.where(self.s_avoid_band_count[env_ids] == 0, safe.to(dtype=torch.float32), torch.clamp(best_counts / row_totals, min=0.0, max=1.0))
         stage_ids = stage_ids.to(device=self.device, dtype=torch.long)
         row_totals = torch.ones_like(stage_ids, dtype=torch.float32)
         for stage_v in (1, 2, 3, 4):
@@ -3294,6 +3428,9 @@ class HexGround(LeggedRobot):
             stage_ids = self.s_avoid_stage_per_env[env_ids]
         cross_line_dist = self._get_s_avoid_cross_line_dist(env_ids, stage_ids=stage_ids)
         crossed = cross_line_dist <= 0.0
+        if self.s_avoid_clutter_enabled:
+            safe = ~(self.s_avoid_episode_physical[env_ids] | self.s_avoid_episode_envelope[env_ids] | self.s_avoid_episode_fall[env_ids])
+            return crossed & safe
         collision_free = ~self.s_avoid_episode_collision[env_ids]
         return crossed & collision_free
 
@@ -3378,7 +3515,11 @@ class HexGround(LeggedRobot):
         side_count = 0
         for row_idx, env_id in enumerate(env_ids.tolist()):
             stage_id = int(self.s_avoid_stage_per_env[env_id].item())
-            last_row_y = float(getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0))
+            last_row_y = (
+                float(self.s_avoid_exit_y[env_id].item())
+                if self.s_avoid_clutter_enabled
+                else float(getattr(self.cfg.terrain, f"avoid_stage{stage_id}_last_row_y", 2.0))
+            )
             valid_goal = torch.tensor(
                 [0.0, last_row_y + 0.5],
                 device=self.device,
@@ -3580,6 +3721,57 @@ class HexGround(LeggedRobot):
         cap_z = 0.5 * cap_h
         stage12_spawn_y = -1.6
         debug_case = self._get_s_avoid_debug_case()
+
+        if self.s_avoid_clutter_enabled:
+            if cap_slots <= 0:
+                raise RuntimeError("s_avoid_clutter requires a non-empty cylinder actor pool")
+            for env_id in env_ids.tolist():
+                episode_idx = int(self.s_avoid_env_episode_count[env_id].item())
+                self.s_avoid_env_episode_count[env_id] += 1
+                stage = self._resolve_s_avoid_stage(env_id, episode_idx=episode_idx)
+                layout = self.s_avoid_clutter_generator.generate(
+                    stage, int(getattr(self.cfg.terrain, "avoid_seed", 9173)), env_id, episode_idx
+                )
+                if int(layout.cylinders_xy.shape[0]) > cap_slots:
+                    raise RuntimeError(
+                        f"s_avoid_clutter actor pool exhausted: required={layout.cylinders_xy.shape[0]}, capacity={cap_slots}"
+                    )
+                active, pos, quat = self._get_s_avoid_stage_template()
+                active[:] = False
+                for slot, (x, y) in enumerate(layout.cylinders_xy):
+                    active[slot] = True
+                    pos[slot] = np.array([x, y, 0.0], dtype=np.float32)
+                    quat[slot] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+                env_origin = self.env_origins[env_id, :3].detach().cpu().numpy()
+                pos_world = pos.copy()
+                pos_world += env_origin
+                self.s_avoid_stage_per_env[env_id] = int(stage)
+                self.s_avoid_active[env_id] = torch.from_numpy(active).to(device=self.device)
+                self.s_avoid_pos_world[env_id] = torch.from_numpy(pos_world).to(device=self.device)
+                self.s_avoid_quat_world[env_id] = torch.from_numpy(quat).to(device=self.device)
+                self.s_avoid_exit_y[env_id] = float(layout.exit_y)
+                self.s_avoid_decision_episode[env_id] = bool(layout.decision_episode)
+                self.s_avoid_v_drive_nom[env_id] = float(layout.v_drive_nom)
+                self.s_avoid_clutter_layouts[env_id] = layout
+                if len(layout.coverage):
+                    self.s_avoid_band_x_min[env_id] = float(np.min(layout.coverage[:, 0]))
+                    self.s_avoid_band_x_max[env_id] = float(np.max(layout.coverage[:, 1]))
+                else:
+                    self.s_avoid_band_x_min[env_id] = 0.0
+                    self.s_avoid_band_x_max[env_id] = 0.0
+                self.s_avoid_band_y_min[env_id] = float(layout.band_y[0]) if len(layout.band_y) else 0.0
+                self.s_avoid_band_y_max[env_id] = float(layout.exit_y)
+                self.s_avoid_band_exit_y[env_id].fill_(float("inf"))
+                if len(layout.band_exit_y) > self.s_avoid_band_exit_y.shape[1]:
+                    raise RuntimeError("s_avoid_clutter supports at most five obstacle bands")
+                band_count = len(layout.band_exit_y)
+                self.s_avoid_band_count[env_id] = band_count
+                if band_count:
+                    self.s_avoid_band_exit_y[env_id, :band_count] = torch.tensor(
+                        layout.band_exit_y[:band_count], device=self.device, dtype=torch.float
+                    )
+            self._sync_s_avoid_obstacles(env_ids)
+            return
 
         forced_obstacles_world = getattr(self, "s_avoid_forced_obstacles_world", None)
         if forced_obstacles_world is not None:
@@ -5487,9 +5679,8 @@ class HexGround(LeggedRobot):
         action_scaled = actions * self.cfg.control.action_scale
         pos_err = (action_scaled+self.default_dof_pos) - self.dof_pos
         vel_err = -self.dof_vel
-        torques = torch.clip(self.actuator.get_torques(pos_err,vel_err),
-                                  min=-self.torque_limits,
-                                  max=self.torque_limits)
+        raw_torques = self.actuator.get_torques(pos_err,vel_err)
+        torques = torch.maximum(torch.minimum(raw_torques, self.torque_limits), -self.torque_limits)
         # print("pos_err\n",pos_err[0].reshape(6,3))
         # print("vel_err\n",vel_err[0].reshape(6,3))
         # print("torques\n",torques[0].reshape(6,3))
@@ -5531,7 +5722,8 @@ class HexGround(LeggedRobot):
         root_ang_acc = (self.root_states[:,10:13]-self.last_root_vel[:,3:])/self.cfg.sim.dt
         self.base_ang_acc[:] = quat_rotate_inverse(self.base_quat, root_ang_acc)
         #根据IMU安装的位置，根据基座质心计算IMU质心处加速度的大小
-        self.IMU_lin_acc = self.base_lin_acc + (self.base_ang_acc.cross(self.IMU_pos,dim=1) + self.base_ang_vel.cross(self.base_ang_vel.cross(self.IMU_pos,dim=1),dim=1))/9.81
+        imu_pos = self.IMU_pos.expand_as(self.base_ang_vel)
+        self.IMU_lin_acc = self.base_lin_acc + (self.base_ang_acc.cross(imu_pos,dim=1) + self.base_ang_vel.cross(self.base_ang_vel.cross(imu_pos,dim=1),dim=1))/9.81
 
         self._post_physics_step_callback()
 
@@ -5611,16 +5803,25 @@ class HexGround(LeggedRobot):
             torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > contact_threshold,
             dim=1,
         )
+        physical_collision = collision_now.clone()
+        penalised_indices = getattr(self, "penalised_contact_indices", None)
+        if penalised_indices is not None and penalised_indices.numel() > 0:
+            physical_collision |= torch.any(
+                torch.norm(self.contact_forces[:, penalised_indices, :], dim=-1) > contact_threshold,
+                dim=1,
+            )
         self.reset_buf = collision_now.clone()
+        strict_penetration = None
+        if self.s_avoid_clutter_enabled:
+            self.reset_buf |= physical_collision
+            strict_penetration = self._compute_s_avoid_strict_penetration_mask()
+            self.reset_buf |= strict_penetration
+            self.s_avoid_episode_physical |= physical_collision
+            self.s_avoid_episode_envelope |= strict_penetration
         if self.s_avoid_enabled and hasattr(self, "s_avoid_episode_collision"):
-            episode_collision_now = collision_now.clone()
-            penalised_indices = getattr(self, "penalised_contact_indices", None)
-            if penalised_indices is not None and penalised_indices.numel() > 0:
-                penalised_collision_now = torch.any(
-                    torch.norm(self.contact_forces[:, penalised_indices, :], dim=-1) > contact_threshold,
-                    dim=1,
-                )
-                episode_collision_now |= penalised_collision_now
+            episode_collision_now = physical_collision.clone()
+            if self.s_avoid_clutter_enabled:
+                episode_collision_now |= strict_penetration
             self.s_avoid_episode_collision |= episode_collision_now
             nearest_obs = self._compute_s_avoid_nearest_obstacle_distance()
             if nearest_obs is not None:
@@ -5646,6 +5847,7 @@ class HexGround(LeggedRobot):
                     self.s_avoid_episode_rows_success_best,
                 )
 
+        fall_now = torch.zeros_like(self.reset_buf, dtype=torch.bool)
         height_threshold = getattr(self.cfg.env, "termination_height_threshold", None)
         if height_threshold is not None:
             if hasattr(self, "measured_heights"):
@@ -5653,12 +5855,17 @@ class HexGround(LeggedRobot):
                 base_height = torch.mean(height, dim=1)
             else:
                 base_height = self.root_states[:, 2]
-            self.reset_buf |= base_height < height_threshold
+            fall_now |= base_height < height_threshold
 
         max_tilt_deg = getattr(self.cfg.env, "termination_max_tilt_deg", None)
         if max_tilt_deg is not None:
             cos_max_tilt = math.cos(math.radians(max_tilt_deg))
-            self.reset_buf |= self.projected_gravity[:, 2] > -cos_max_tilt
+            fall_now |= self.projected_gravity[:, 2] > -cos_max_tilt
+
+        self.reset_buf |= fall_now
+
+        if self.s_avoid_clutter_enabled:
+            self.s_avoid_episode_fall |= fall_now
 
         no_episode_timeout = bool(getattr(self.cfg.env, "no_episode_timeout", False))
         if no_episode_timeout:
@@ -5695,18 +5902,35 @@ class HexGround(LeggedRobot):
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
+                if self.s_avoid_clutter_enabled:
+                    terminal_collision = (
+                        self.s_avoid_episode_physical[completed_env_ids]
+                        | self.s_avoid_episode_envelope[completed_env_ids]
+                    )
+                    completed_safety_failure = (
+                        terminal_collision
+                        | self.s_avoid_episode_fall[completed_env_ids]
+                    )
+                    completed_flags = completed_safety_failure
                 completed_row_success = self._get_s_avoid_episode_row_success_ratios(
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
                 self.s_avoid_terminal_valid[completed_env_ids] = True
-                self.s_avoid_terminal_collision[completed_env_ids] = completed_flags
+                self.s_avoid_terminal_collision[completed_env_ids] = (
+                    terminal_collision if self.s_avoid_clutter_enabled else completed_flags
+                )
                 self.s_avoid_terminal_success[completed_env_ids] = completed_success
                 self.s_avoid_terminal_progress_ratio[completed_env_ids] = completed_progress
                 self.s_avoid_terminal_row_success_ratio[completed_env_ids] = completed_row_success
                 self.s_avoid_terminal_cross_line_dist[completed_env_ids] = completed_cross_line_dist
                 self.s_avoid_terminal_center_y[completed_env_ids] = completed_center_y
                 self.s_avoid_terminal_cross_line_y[completed_env_ids] = completed_cross_line_y
+                if self.s_avoid_clutter_enabled:
+                    self.s_avoid_terminal_physical[completed_env_ids] = self.s_avoid_episode_physical[completed_env_ids]
+                    self.s_avoid_terminal_envelope[completed_env_ids] = self.s_avoid_episode_envelope[completed_env_ids]
+                    self.s_avoid_terminal_fall[completed_env_ids] = self.s_avoid_episode_fall[completed_env_ids]
+                    self.s_avoid_terminal_timeout[completed_env_ids] = self.time_out_buf[completed_env_ids]
                 self._update_s_avoid_curriculum(
                     completed_flags,
                     completed_stage_ids,
@@ -5714,11 +5938,16 @@ class HexGround(LeggedRobot):
                     completed_progress,
                     completed_success,
                     completed_row_success,
+                    self.s_avoid_decision_episode[completed_env_ids].clone(),
                 )
             self.s_avoid_episode_collision[env_ids] = False
             self.s_avoid_episode_exposed[env_ids] = False
             self.s_avoid_episode_goal_init_dist[env_ids] = 0.0
             self.s_avoid_episode_goal_best_dist[env_ids] = 0.0
+            if self.s_avoid_clutter_enabled:
+                self.s_avoid_episode_physical[env_ids] = False
+                self.s_avoid_episode_envelope[env_ids] = False
+                self.s_avoid_episode_fall[env_ids] = False
         self._maybe_resample_scene_columns(env_ids)
         super().reset_idx(env_ids)
 

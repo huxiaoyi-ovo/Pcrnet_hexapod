@@ -19,6 +19,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,23 @@ from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
+import torch
+
+
+def _find_repo_root() -> str:
+    directory = Path(__file__).resolve().parent
+    while True:
+        if (directory / "legged_gym" / "pcr_observation.py").is_file():
+            return str(directory)
+        if directory.parent == directory:
+            raise RuntimeError("cannot locate repository root containing legged_gym/pcr_observation.py")
+        directory = directory.parent
+
+
+REPO_ROOT = _find_repo_root()
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from legged_gym.pcr_observation import canonical_difficulty, canonical_local_map
 
 
 SIM_ROBOT_BODY_WIDTH_M = 0.25
@@ -547,8 +565,16 @@ def build_local_map_from_depth(
     # Match sim visible_mask semantics with a dense camera-FOV mask.  Sparse
     # depth samples are obstacle evidence, not the definition of visibility.
     passable = passable_raw * policy_visible
-    local_map_2ch = np.stack([occ, passable], axis=0).astype(np.float32)
-    risk_blocked_map = np.maximum(occ, inflated_occ_f * policy_visible).astype(np.float32)
+    # Learned policy input is immediate observed occupancy only.  Keep the
+    # optional fused/inflated maps below for diagnostics, never for actor map/D.
+    canonical_map = canonical_local_map(
+        torch.from_numpy(raw_occ),
+        torch.from_numpy(policy_visible),
+        extent=map_extent,
+        clearance=robot_clearance_m,
+    )
+    local_map_2ch = canonical_map[0].cpu().numpy().astype(np.float32)
+    risk_blocked_map = local_map_2ch[0].copy()
     difficulty_stats = compute_actor_difficulty_stats(
         local_map_2ch,
         map_extent,
@@ -562,7 +588,13 @@ def build_local_map_from_depth(
         min_m=float(args.difficulty_front_min_m),
         max_m=float(args.difficulty_front_max_m),
     )
-    actor_difficulty = float(max(actor_difficulty_map_fused, front_distance_risk))
+    actor_difficulty = float(
+        canonical_difficulty(
+            canonical_map,
+            extent=map_extent,
+            radius=float(args.difficulty_radius_m),
+        )[0].item()
+    )
     visible_count = max(float(np.count_nonzero(policy_visible > 0.5)), 1.0)
     blocked_visible = ((policy_visible > 0.5) & (passable < 0.5)).astype(np.float32)
     front_spread_m = (
@@ -586,7 +618,8 @@ def build_local_map_from_depth(
         "actor_difficulty_current_raw": actor_difficulty_current_raw,
         "actor_difficulty_map_raw": actor_difficulty_current_raw,
         "actor_difficulty_map_fused": actor_difficulty_map_fused,
-        "actor_difficulty_map_front": actor_difficulty,
+        "actor_difficulty_map_front": float(max(actor_difficulty_map_fused, front_distance_risk)),
+        "actor_difficulty_canonical": actor_difficulty,
         "front_distance_risk": front_distance_risk,
         "nearest_blocked_m": float(difficulty_stats["nearest_blocked_m"]),
         "near_risk": float(difficulty_stats["near_risk"]),
@@ -1615,6 +1648,20 @@ def write_policy_obs_file(path: str, obs: Dict[str, np.ndarray]) -> None:
         "memory_occ_map": np.asarray(obs["memory_occ_map"], dtype=np.float32).reshape(-1).tolist(),
         "front_distance_risk": float(np.asarray(obs["front_distance_risk"], dtype=np.float32).reshape(-1)[0]),
     }
+    for state_key in ("robot_state", "state"):
+        if state_key not in obs:
+            continue
+        payload[state_key] = np.asarray(obs[state_key], dtype=np.float32).reshape(-1).tolist()
+        source_stamp_key = f"{state_key}_stamp"
+        if source_stamp_key in obs:
+            payload[source_stamp_key] = float(np.asarray(obs[source_stamp_key]).reshape(-1)[0])
+        elif "state_stamp" in obs:
+            payload["state_stamp"] = float(np.asarray(obs["state_stamp"]).reshape(-1)[0])
+        else:
+            # A file-write timestamp is not a sensor timestamp; revised runtime
+            # must reject this state rather than treating it as fresh.
+            payload["state_stamp"] = 0.0
+        break
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=".obs_", suffix=".json", dir=directory)
@@ -1672,7 +1719,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--difficulty_front_percentile", type=float, default=10.0)
     parser.add_argument("--obstacle_memory", dest="obstacle_memory", action="store_true")
     parser.add_argument("--no_obstacle_memory", dest="obstacle_memory", action="store_false")
-    parser.set_defaults(obstacle_memory=True)
+    parser.set_defaults(obstacle_memory=False)
     parser.add_argument("--obstacle_memory_tau_s", type=float, default=0.80)
     parser.add_argument("--obstacle_memory_threshold", type=float, default=0.35)
     parser.add_argument("--near_field_stop_m", type=float, default=0.35)
@@ -1801,8 +1848,7 @@ def main() -> None:
                 target.depth_m,
                 memory_state=obstacle_memory_state,
             )
-            actor_difficulty_map_front = float(actor_difficulty)
-            actor_difficulty = float(max(actor_difficulty_map_front, float(near_field_stats["near_field_risk"])))
+            actor_difficulty_map_front = float(map_debug["actor_difficulty_map_front"])
             obs = make_policy_ready_obs(
                 target,
                 local_map_2ch,

@@ -582,6 +582,53 @@ class HexAvoidBasicCfgPPO(HexGroundCfgPPO):
         experiment_name = "s_avoid_basic"
 
 
+class HexAvoidClutterCfg(HexAvoidBasicCfg):
+    """Single-generator cylinder-band Avoid task; legacy Avoid stays unchanged."""
+    class env(HexAvoidBasicCfg.env):
+        num_envs = 256
+        episode_length_s = 50
+        env_spacing = 24.0
+
+    class terrain(HexAvoidBasicCfg.terrain):
+        terrain_type = "s_avoid_clutter"
+        avoid_clutter_enabled = True
+        avoid_cylinder_slots = 192
+        avoid_capsule_slots = 192
+        avoid_box_slots = 0
+        avoid_wall_slots = 0
+        avoid_seed = 9173
+        avoid_clutter_radius = .15
+        avoid_clutter_height = .50
+        avoid_clutter_strict_radius = .28
+        avoid_clutter_band_half_width = 1.55
+        avoid_clutter_v_lat_eff = .15
+        avoid_clutter_response_delay = .30
+        avoid_clutter_v_lat_max = .60
+        avoid_clutter_y_jitter = .04
+        avoid_clutter_max_attempts = 128
+        avoid_stage12_window = 200
+        avoid_stage23_window = 200
+        avoid_stage34_window = 200
+        avoid_stage4_window = 200
+        avoid_stage12_min_episodes = 200
+        avoid_stage23_min_episodes = 200
+        avoid_stage34_min_episodes = 200
+        avoid_stage12_success_threshold = .85
+        avoid_stage23_success_threshold = .85
+        avoid_stage34_success_threshold = .85
+        avoid_stage12_collision_threshold = .10
+        avoid_stage23_collision_threshold = .10
+        avoid_stage34_collision_threshold = .10
+
+    class navigation(HexAvoidBasicCfg.navigation):
+        avoid_band_penalty_scale = 0.0
+
+
+class HexAvoidClutterCfgPPO(HexAvoidBasicCfgPPO):
+    class runner(HexAvoidBasicCfgPPO.runner):
+        experiment_name = "s_avoid_clutter"
+
+
 class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
     """
     s_pcr_line_avoid_basic:

@@ -2,6 +2,88 @@
 
 > 本日志记录作者决策与后续核对边界；不记录为已完成实验或历史事实。
 
+## 2026-09-10 Avoid overnight continuation blocked before GPU2 smoke
+
+- Sanity continues under its original server watchdog with the unchanged 201-iteration budget. The reviewed continuation controller is unarmed; no new formal process was spawned.
+- The fresh `21,525,518`-byte snapshot (SHA `5155f082…02f45`, source manifest `b1144ccb…cd303`) for `/home/dell/Pcrnet_hexapod_runs/avoid_overnight_20260910_gpu2_smoke` was rejected twice by automatic transfer review. GPU2 2-env/2-step smoke, qualification and formal training therefore did not run. Exact evidence is `outputs/avoid_sanity_20260910/deployment_blocked.json`.
+- The user has authorized the training workflow. The current stop is only the automatic review of this specific external payload/destination; do not retry it unless the user explicitly names and approves both.
+
+## 2026-09-10 Avoid clutter 日志语义修正（CPU contract 通过；当前 Sanity 快照不变）
+
+- `hex_ground` 的 clutter decision-only 分支此前只写入 collision/success history，并遗漏 trainer/TensorBoard 消费的当前阶段 completed、exposure、progress 与 row-success 字段；修正后只对 `decision && stage==current_stage` 写入五项已有 history，并发布同一当前阶段的 extras。课程升阶仍只看完整窗口的 success/failure，reward、终止与课程条件不变。
+- dedicated clutter high-level info 现显式返回 `s_avoid_episode_collision=terminal_physical|terminal_envelope`。因此 `Diag/EpisodeCollisionRate` 表示 physical/envelope，`Avoid/StageWindowCollisionRate` 表示 curriculum safety failure（physical/envelope/fall）；两者不能互相替代。后续独立评测将分别保存 physical、envelope 与 fall，不从两条旧标量反推失败类型。
+- `test_clutter_env_contract.py` 覆盖 current-stage decision filter、五项 history、阶段切换后的清窗/计数；`test_avoid_clutter_training.py` 覆盖 physical/envelope alias 与仅 fall failure 的区分。二者在既有 `grasp_hexapod` Python 环境通过。正在运行的 Sanity 使用修正前的隔离快照，故其旧日志不用于 eligibility gate；该问题不影响已发生的梯度、reward 或终止。
+
+## 2026-09-10 Avoid clutter server 动态 smoke 通过；未训练
+
+- 用户明确授权后，将 SHA `e9f1ccb6…` 的独立 bundle 传至 `pcrnet-server:/tmp/pcr_constructive_smoke_20260910_9s0AUs`，仅在该新临时目录运行既有、未修改的 4-env/24-step CPU-PhysX smoke。fresh import 路径均指向该临时 bundle；远端实际低层 checkpoint SHA `75dfd7aa…` 和 smoke script SHA `3c61ff27…` 与本机一致。
+- 结果为 `state=[4,14]`、`action=[4,1]`、`command=[4,3]`、24 high-level steps 全程 finite、`done_total=0`。actor 是随机初始化的 `CmdVelExpert`，因此这只证明有限动态 wrapper 闭环可运行，不是策略性能、训练、评测、sim-real 或安全结果。没有写服务器原仓库、安装包或启动训练。
+- 原始远端 log/result、fresh import 路径和完整 provenance 在 `outputs/avoid_clutter_constructive_acceptance_20260910/smoke/`。此前自动审批拒绝、尚未传输的记录保留在同目录的 `remote_transfer_blocked.json` 作为历史；随后用户明确授权的传输已实际完成，不能继续标作“未启动”。
+
+## 2026-09-10 Avoid clutter 最新静态预览通过；远端 smoke 未启动
+
+- 本机 `grasp_hexapod` 环境以 CPU PhysX、seed 9173 和四环境原生 viewer 重建了 Sanity/Core/Choice/Full 的静态预览；每个 active cylinder 的 live actor position 与 runtime metadata 完全相等（最大误差 `0.0 m`）。四张截图、metadata、启动口径和源码 SHA 位于 `outputs/avoid_clutter_constructive_acceptance_20260910/preview/`；红线仅为 nominal geometry/dynamic reference，不是策略轨迹或性能证据。
+- 远端 4-env、24 high-level-step CPU-PhysX smoke **未启动**。自动审批拒绝将准备好的 `/tmp/pcr_constructive_smoke_20260910_9s0AUs/bundle.tar.gz`（`21,646,544` bytes，SHA `e9f1ccb6…`）传给 `pcrnet-server:/tmp/pcr_constructive_smoke_20260910_9s0AUs`，因为 bundle 包含项目源码、resources 和 low-level checkpoint。没有传输、远端目录写入、安装、训练或远端运行；明确内容、hash 与预定命令见 `outputs/avoid_clutter_constructive_acceptance_20260910/smoke/remote_transfer_blocked.json`。须由用户明确授权该具体传输后才可继续。
+- 历史本地 Torch 1.8 wrapper smoke 的 `Tensor.clamp` 阻塞（0 high-level steps）仍是独立事实，不能与这次“未启动”的 server smoke 混写。
+
+## 2026-09-10 Avoid clutter constructive（CPU 几何完成；不训练）
+
+- 每带保持 `R` 的可达区间并集，记录 `d_min=dist(R,G)` 与既有局部时间预算使用的 `d_max`；`mandatory` 仅由 `d_min>=.10 m` 判定，`effective=mandatory OR choice`，同带双条件只计一次，不把候选带数当作决策数。
+- `choice` 仅接受同一前序点可到两个不同内缩 gap 的预算交集见证；两条二维进/出带路线加入 proof，并在每次新增圆柱后对所有历史 proof 复检。不同前序分支各通一个出口不是 choice；该候选不代表每个实际策略状态均有双出口。
+- Sanity/Core 的 decision layout 至少含一条 mandatory，Choice 的最后一带至少含一条 true choice，Full 前两带为 `.10 m` mandatory 以提供至少两条 effective；Free/Central 保持各 10% 且不计决策。候选带数在 speed/κ/45 s 可行集合内抽取，保留阶段范围而不重抽 speed 或截断 margin。
+- 固定 seed 9173、env 3 的 1024 layout CPU 几何检查通过：检查实际 reachable propagation、每个 gap 的 coverage、相机、45 s、192 cylinders、二维历史 recovery proof、真实 stage band-count 与 effective 门槛。`10 m` 是 resource cap，不是 anti-bypass 证明，也未增加远端终止、reward 或居中项；未运行 Isaac、训练、SSH、提交或推送。
+
+## 2026-09-10 Avoid clutter 非开口间距随机化（CPU 几何完成；未训练）
+
+- 仅 `s_avoid_clutter` generator 的非开口 chain 内部点加入有界独立 `x` 偏移；chain 两端、gap 边界、piece 数 `ceil(length/.60)`、既有 `y`-jitter、二维 gap/线段圆校验不变。偏移同时受真实圆柱不重叠和 expanded-circle 上界约束，因此不新增 gap 外通道；短段只有一个 interval 时保持固定。
+- geometry CPU 回归覆盖固定 seed 复现、不同 seed 的多段 `x` 间距变化、端点精确不动及二维上下界；既有 1024 固定样本检查仍执行。未修改课程范围、奖励、模型、训练参数或 `hex_ground`，未训练、SSH、截图、提交或推送。
+- 课程表同步写明 `side offset` 仅是单开口生成偏移而非实际 `Δx` 保证、safe/physical gap 宽度、采样比例和双 gap 条件候选；升阶与 Full 速度上下文只记录已核对的 `hex_ground` clutter 分支事实。旧截图出自旧间距，未重拍且不作为本次最新证据。
+
+## 2026-09-10 PCR revise 长期冻结（C1/D2 代码完成；未训练）
+
+- 本项目 revise 阶段固定一次选择性能、正确性、sim-real 一致性和返修说服力综合最优的可实施方案；仅验证影响核心架构、训练成立或论文结论的高风险不确定性。低概率低影响猜测用合理工程默认，不新增小测试或横向扩审计/消融/场景/参数拖延开训；不跳过必要实现正确性检查，也不编造结果。
+- 地图最终冻结为 sim/PCR/real 同语义即时 canonical local map；real-only obstacle-map memory 关闭，PCR learned-w risk memory 保留。D2 已将 shared map/D 接入 real builder/runtime，CPU fixture 通过；无 dropout 小测试或再分支讨论。相机实测 offset 等未知不伪造、也不新增测试要求。真实 Isaac 静态场景已核对；未训练、未运行 ROS/硬件。
+
+## 2026-09-10 最新优先声明：Avoid 1-D 基线（C1/D2 代码完成，未训练）
+
+- 正式 Avoid 已采用 1-D lateral actor 与 `v_drive_nom` 的统一语义；C1/D2 完成代码、pure-CPU contract 和 real dry-run fixture，不训练、不 SSH、不提交或推送。
+- 该方向回应 R1-16 的“训练 3-DoF 后丢两维”问题：将来 PPO 的 action distribution、log-prob、entropy、rollout buffer 与 `evaluate_actions` 均须为 1-D，而不是训练 3-D 后在 PCR 中丢弃 forward/yaw。尚无新训练、消融或性能结果。
+- canonical map 的批准目标是优先保留当前仿真 32×32、3 m、`[x_right,y_forward]` 与 soft passability 形状，并由同一函数从观测 occupancy 构造 actor 图和 difficulty。real-only actor obstacle-map memory 已冻结为关闭，PCR risk memory 独立保留；相机 origin/offset 实测值仍未知，不得伪造或要求新增测试；不得写作现已对齐。
+- 本轮实机与仿真 map 来源取证、静态 Isaac 场景核对已完成；动态 wrapper smoke 受本地 Torch 1.8 阻塞，均不构成训练或实机结果。
+
+详见 [Avoid 1-D baseline](docs/specs/AVOID_1D_BASELINE_20260910.md)。历史 14-D/3-DoF 记录仅为历史，不能覆盖本节。
+
+## 2026-09-10 Avoid 1-D reward 结构冻结（C1 实现完成，未训练）
+
+- failure 优先的 terminal outcome 与六组 reward 已在 C1 接入 dedicated Avoid loop 并经 CPU fixture 检查；旧 row-specific 项退出新 Avoid；PCR/Gate reward 不改。未训练、未作 Isaac 验收。
+- timeout/escape 不并入 collision/success，且本轮不新增 escape 罚分或声称 `terminated/truncated` 与 bootstrap 已实现。系数仍待按 `dt/T/gamma` 的折扣累计核算；示例步数、系数和 gamma 不是最终 config，不新增 sweep、训练或测试。
+
+## 2026-09-10 Avoid 单一障碍带与课程冻结（实现与静态核对完成；未训练）
+
+- `s_avoid_clutter` 采用单一圆柱障碍带 generator、少量 `y`-jitter 与每带 1–2 个真实 gap；机器人中心可达区按 safe intervals 的并集传播，保留未来不可见前的两个合法 gap 分支，并以二维 envelope 排除 gap 外斜向通道。局部反应时间、出生缓冲与执行速度假设是筛选边界，不构成已验证的不可绕保证。
+- 课程固定为 `Sanity/Core/Choice/Full`；`Free/Central` 是分布样本，Sanity 的四种基本情形仍来自同一 generator。只统计 decision episodes，并在切换阶段清窗口、报告 traversal success 与 safety failure；范围、窗口与旧 `85%/10%` 均为待标定工程候选。generator、actor pool 与静态 Isaac 实例化已完成；未训练或动态能力验证，旧 PCR 布局及 §4 reward 不改。
+- 已用真实 `s_avoid_clutter` 生成四张不同阶段的原生 Isaac 静态截图，并逐布局核对 actor 位置与 metadata。红线是 nominal 几何参考而非策略轨迹；约 5 mm 的中心路线余隙不代表全腿包络安全。“用户截图批准仍是训练门槛”是当时记录；用户随后明确授权隔离过夜 Sanity、资格评测和 gated continuation，不能继续作为 SSH/PPO 的当前禁止项。
+
+## 2026-09-10 Avoid 1-D 批 A（未接训练环境）
+
+- `legged_gym/pcr_observation.py` 新增 pure-Torch canonical observed map/difficulty、14-D Avoid actor state 与 side-preference helper；channel 0 保持 raw observed occupancy，soft channel 单独按 pooled free 公式处理，unknown 保持 `[0,0]`。CmdVelExpert 新增显式 `action_dim=1` 与 actor-only mask，GatePolicy 新增显式 actor `xy` mask；新 mask 模式默认调用也保留 raw critic，旧 3-D 默认与参数 key 不变。
+- 本批未修改 CNN 结构、PPO、默认权重 scale、训练环境或实机调用；仅将既有 CNN 的 `meshgrid` 写法换为等价默认 `ij` 以兼容当前 CPU Torch。后续调用必须显式选择新 1-D/mask 配置。CPU 契约测试已覆盖并通过 map、difficulty、actor/critic mask 与 1-D 分布 shape；未训练、SSH 或提交。
+
+## 2026-09-10 Avoid 1-D 批 B（场景与课程；未训练）
+
+- 批 A 的 deterministic NumPy generator 已完成；其 1024 个固定 CPU 样本及独立几何检查通过。批 B 的真圆柱 URDF actor-pool、reset、实际 layout 指标、终止/课程已在真实 Isaac 静态场景中实例化；这不是动态训练验收。
+- 旧 `s_avoid_basic` 预设、资产与路径未改。候选 generator 使用 `r=.15 m,h=.50 m` 圆柱、safe/reachable interval 并集、二维线段-圆 envelope、局部反应时间与 50 s 名义可完成性；`.15 m/s/.30 s` 仅为筛选配置，不构成物理能力或不可绕证明。训练、评测与部署未执行。
+
+## 2026-09-10 Avoid 1-D C1（CPU 实现；未训练）
+
+- C1 为 standalone `s_avoid_clutter` 增加 1-D lateral actor 的训练入口、14-D actor mask/原始 critic state、canonical observed map/difficulty，以及 pure-Torch terminal-first six-group reward helper。训练请求由 1-D lateral action 展开为 `[x, v_drive_nom, 0]`，不改旧任务路径。
+- 指定 Conda 下的语法和 CPU reward/state/action 夹具通过，真实 Isaac 静态截图已完成。4-env wrapper 的动态 smoke 完成 reset、但在首个高层 step 的本地 Torch 1.8 Tensor `clamp` 兼容错误处停止（完成 0 个高层步）；未运行 PPO、SSH、评测或部署。实际闭环和开训仍受该运行环境与用户截图门槛阻断。
+
+## 2026-09-10 静态预览出生缓冲核对
+
+- `s_avoid_basic` 的真实出生函数返回 `-1.6 m`，reset 也使用同值；本次未见实际不安全实例，故不改训练源码。`s_pcr_line_avoid_basic` 继承该几何，仅增加移动目标；Mono、Rule、Additive、DWA 是同一 task 的动作分支。本结论不外推为所有历史场景已完成安全核验。
+- 独立 Isaac 设计预览已将旧障碍/路线前移 `1.6 m`、保留机器人 `y=.45 m` 并加直行入口，产物单独写入 `outputs/avoid_clutter_design_preview/spawn_fixed/`。它仍不是训练 generator、四类目的场景集合、策略输出或性能/安全证据。
+
 ## 2026-09-08 Actor x/y 输入诊断（旧 checkpoint rollout 已完成；非正式实验）
 
 - 新增 `tools/audit_actor_xy.py`，仅在已有 eval 的 `CmdVelExpert.get_action` 与 `GatePolicy.get_action` 处旁路记录输入；live action 先原样执行并返回，所有额外输出均为 no-grad deterministic 副本，不送入环境、风险更新或下一步控制。
@@ -128,3 +210,8 @@
 
 - 后续重训仍以 `0.50 m/s` 为最高训练速度，`0.60 m/s` 只作外推评测；该后续决定不因历史速度待核实而改变。
 - 新速度外推测试布局仍须与作者共同商量后才可搭建；本轮未新增任何实验。
+## 2026-09-10 Avoid 1-D C2 reader contract（CPU 完成；未运行 Isaac）
+
+- 新增纯 Torch checkpoint contract：仅 `avoid_1d_canonical_v1` 的实际 1-D command head、14-D state encoder、2-D goal encoder 与五槽 mask 可作为 revised Avoid 读取；未知 1-D 一律拒绝，旧 3-D 权重保持旧输入。
+- PCR 复用时 revised Avoid 固定接收 Follow proposal 的 `y` 作为第 14 槽和 Follow goal 的 side preference，只输出 `[x_right,0,0]`；旧 3-D 调用仍保持原 state/goal。
+- C1 standalone、C2 helper、训练/eval/play 源码语法与 pure-Torch 夹具已通过；未加载真实 checkpoint，未启动 Isaac、训练、评测或实机。

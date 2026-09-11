@@ -12,6 +12,11 @@
     <arg name="lowlevel_device" default="cpu"/>
     <arg name="pcr_device" default="cpu"/>
     <arg name="rate_hz" default="10"/>
+    <!-- Optional Float32MultiArray: [x_world_m,y_world_m,yaw_world_rad,
+         vx_body_mps,vy_body_mps,omega_body_radps,height_m,roll_rad,pitch_rad].
+         No estimator is
+         supplied here; revised checkpoints hold when this topic is empty/stale. -->
+    <arg name="state_topic" default=""/>
 
     <arg name="pcr_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/moe_teacher_best_learnedw.pt"/>
     <arg name="avoid_ckpt" default="$(find interface)/scripts/pcr_real/checkpoints/avoid_best.pt"/>
@@ -98,6 +103,7 @@
                     --cmd_backend usr_command
                     --device $(arg pcr_device)
                     --rate_hz $(arg rate_hz)
+                    --state_topic=$(arg state_topic)
                     --risk_memory
                     --max_cmd_x 0.40
                     --max_cmd_y 0.80
@@ -114,6 +120,7 @@
                         --usr_command_topic $(arg pcr_usr_command_topic)
                         --device $(arg pcr_device)
                         --rate_hz $(arg rate_hz)
+                        --state_topic=$(arg state_topic)
                         --risk_memory
                         --max_cmd_x 0.40
                         --max_cmd_y 0.80

@@ -71,7 +71,8 @@ class AffordanceCNNEncoder(nn.Module):
         # i.e. height stores x and width stores y.
         coord_x = torch.linspace(-1.0, 1.0, height, device=affordance_map.device)
         coord_y = torch.linspace(-1.0, 1.0, width, device=affordance_map.device)
-        xx, yy = torch.meshgrid(coord_x, coord_y, indexing="ij")
+        # Torch 1.8 has only ij meshgrid semantics and no ``indexing=`` keyword.
+        xx, yy = torch.meshgrid(coord_x, coord_y)
         coord = torch.stack([xx, yy], dim=0).unsqueeze(0).expand(batch, -1, -1, -1)
         x = torch.cat([affordance_map, coord], dim=1)
         x = self.cnn(x)
@@ -495,9 +496,19 @@ class CmdVelExpert(nn.Module):
         hidden_dim: int = 256,
         min_std: float = 0.01,
         max_std: float = 1.0,
-        cmd_scale: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        cmd_scale: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        action_dim: int = 3,
+        actor_state_mask_indices: Optional[Tuple[int, ...]] = None,
     ):
         super().__init__()
+        if int(action_dim) <= 0:
+            raise ValueError("action_dim must be positive")
+        if len(cmd_scale) != int(action_dim):
+            raise ValueError("cmd_scale length must match action_dim")
+        self.action_dim = int(action_dim)
+        self.actor_state_mask_indices = tuple(actor_state_mask_indices or ())
+        if any(index < 0 or index >= state_dim for index in self.actor_state_mask_indices):
+            raise ValueError("actor_state_mask_indices must be within state_dim")
         self.min_std = min_std
         self.max_std = max_std
 
@@ -525,12 +536,12 @@ class CmdVelExpert(nn.Module):
         self.cmd_mean_head = nn.Sequential(
             nn.Linear(hidden_dim, 64),
             nn.ELU(),
-            nn.Linear(64, 3)
+            nn.Linear(64, self.action_dim)
         )
         self.cmd_std_head = nn.Sequential(
             nn.Linear(hidden_dim, 64),
             nn.ELU(),
-            nn.Linear(64, 3),
+            nn.Linear(64, self.action_dim),
             nn.Softplus()
         )
 
@@ -567,6 +578,9 @@ class CmdVelExpert(nn.Module):
         critic: bool = False,
     ) -> torch.Tensor:
         terrain_difficulty = self._format_difficulty(terrain_difficulty)
+        if not critic and self.actor_state_mask_indices:
+            robot_state = robot_state.clone()
+            robot_state[:, list(self.actor_state_mask_indices)] = 0.0
         if critic:
             aff_feat = self.critic_affordance_encoder(affordance_map)
             state_feat = self.critic_state_encoder(robot_state)
@@ -604,6 +618,7 @@ class CmdVelExpert(nn.Module):
             or critic_robot_state is not None
             or critic_goal is not None
             or critic_terrain_difficulty is not None
+            or bool(self.actor_state_mask_indices)
         ):
             critic_hidden = self._encode_hidden(
                 affordance_map if critic_affordance_map is None else critic_affordance_map,
@@ -725,9 +740,13 @@ class GatePolicy(nn.Module):
         goal_dim: int = 2,
         hidden_dim: int = 256,
         learned_w: bool = False,
+        actor_mask_xy: bool = False,
     ):
         super().__init__()
         self.learned_w = bool(learned_w)
+        self.actor_mask_xy = bool(actor_mask_xy)
+        if self.actor_mask_xy and state_dim < 2:
+            raise ValueError("actor_mask_xy requires state_dim >= 2")
         self.affordance_encoder = AffordanceCNNEncoder(affordance_channels, 128)
         self.state_encoder = StateEncoder(state_dim, 64)
         self.goal_encoder = GoalEncoder(goal_dim, 32)
@@ -810,6 +829,9 @@ class GatePolicy(nn.Module):
         critic: bool = False,
     ) -> torch.Tensor:
         terrain_difficulty = self._format_difficulty(terrain_difficulty)
+        if not critic and self.actor_mask_xy:
+            robot_state = robot_state.clone()
+            robot_state[:, :2] = 0.0
         if critic:
             aff_feat = self.critic_affordance_encoder(affordance_map)
             state_feat = self.critic_state_encoder(robot_state)
@@ -847,6 +869,7 @@ class GatePolicy(nn.Module):
             or critic_robot_state is not None
             or critic_goal is not None
             or critic_terrain_difficulty is not None
+            or self.actor_mask_xy
         ):
             critic_hidden = self._encode_hidden(
                 affordance_map if critic_affordance_map is None else critic_affordance_map,

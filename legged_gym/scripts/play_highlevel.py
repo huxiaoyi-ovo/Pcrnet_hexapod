@@ -25,6 +25,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from legged_gym.envs.hex_v4.expert_s0_follow import compute_s0_follow_expert_cmd as s0_follow_expert_fn
 from legged_gym.scripts import train_highlevel as th
+from legged_gym.pcr_policy_contract import checkpoint_cmd_policy_kwargs, get_avoid_command, validate_frozen_avoid_revision
 
 
 FIG6_SCENE_REPLAY = {
@@ -647,6 +648,7 @@ def _ensure_play_runtime_arg_defaults(args) -> None:
         "use_expert_cmd": False,
         "use_follow_expert": False,
         "mono_ppo": False,
+        "revision_contract": False,
         "force_cmd": None,
         "heading_offset_override": None,
         "heading_offset_flip": False,
@@ -677,6 +679,9 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
     if not (use_follow_expert or static_avoid_debug or (getattr(args, "force_cmd", None) is not None)):
         primary_contract_ckpt = getattr(args, "teacher_ckpt", None)
     primary_meta = _load_experiment_meta_from_ckpt(primary_contract_ckpt, device)
+    args.revision_contract = bool(
+        primary_meta.get("revision_contract") in ("avoid_1d_canonical_v1", "pcr_canonical_v1")
+    )
     th.apply_experiment_meta_to_args(args, primary_meta, context="PlayHigh")
     th.apply_runtime_ablation_cli_overrides(args, primary_meta, context="PlayHigh")
 
@@ -810,16 +815,19 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
                 state_dim=gate_state_dim,
                 goal_dim=gate_goal_dim,
                 learned_w=expected_gate_action_dim == 2,
+                actor_mask_xy=gate_meta.get("revision_contract") == "pcr_canonical_v1",
             ).to(device)
             avoid_ckpt = torch.load(args.avoid_ckpt, map_location=device)
             avoid_meta = _ckpt_meta_from_obj(avoid_ckpt)
-            avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim
+            validate_frozen_avoid_revision(gate_meta, avoid_meta)
+            avoid_kwargs = checkpoint_cmd_policy_kwargs(avoid_ckpt, cmd_scale)
+            avoid_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim)
             avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
             avoid_policy = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
                 state_dim=avoid_state_dim,
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
+                goal_dim=2 if avoid_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                **avoid_kwargs,
             ).to(device)
             _validate_expected_ckpt_meta(gate_meta, source_name="gate ckpt", expected_skill="moe", expected_mode=args.mode)
             th.validate_checkpoint_contract_compatibility(
@@ -856,11 +864,12 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             policy_meta = _ckpt_meta_from_obj(ckpt)
             gate_state_dim = th.infer_checkpoint_state_dim(ckpt) or gate_state_dim
+            policy_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
             policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
                 state_dim=gate_state_dim,
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
+                goal_dim=2 if policy_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                **policy_kwargs,
             ).to(device)
             _validate_expected_ckpt_meta(policy_meta, source_name="policy ckpt", expected_skill=skill, expected_mode=args.mode)
             th.validate_checkpoint_contract_compatibility(
@@ -880,13 +889,14 @@ def build_play_runtime_for_eval(args, device: Optional[torch.device] = None):
             if is_mono_ppo and args.avoid_ckpt:
                 avoid_ckpt = torch.load(args.avoid_ckpt, map_location=device)
                 avoid_meta = _ckpt_meta_from_obj(avoid_ckpt)
-                avoid_state_dim = th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim
+                avoid_kwargs = checkpoint_cmd_policy_kwargs(avoid_ckpt, cmd_scale)
+                avoid_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (th.infer_checkpoint_state_dim(avoid_ckpt) or avoid_state_dim)
                 avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
                 avoid_policy = th.CmdVelExpert(
                     affordance_channels=avoid_aff_channels,
                     state_dim=avoid_state_dim,
-                    goal_dim=obs["goal"].shape[1],
-                    cmd_scale=cmd_scale,
+                    goal_dim=2 if avoid_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                    **avoid_kwargs,
                 ).to(device)
                 _validate_expected_ckpt_meta(avoid_meta, source_name="diagnostic avoid ckpt", expected_skill="avoid", expected_mode=args.mode)
                 th.validate_checkpoint_contract_compatibility(
@@ -3441,7 +3451,7 @@ def parse_args():
     ):
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
     if getattr(args, "skill", None) is None:
-        args.skill = "follow"
+        args.skill = "avoid" if str(getattr(args, "task", "")) == "s_avoid_clutter" else "follow"
     th.capture_cli_explicit_arg_values(args, parser, argv=raw_argv[1:])
     _apply_play_common_defaults(args, raw_argv)
     _register_fig6_runtime_overrides(args)
@@ -3475,6 +3485,7 @@ def main():
     supported_tasks = (
         "s_follow_basic",
         "s_avoid_basic",
+        "s_avoid_clutter",
         "s_pcr_line_avoid_basic",
         "s_pcr_new",
         "s_cylinder",
@@ -3487,7 +3498,7 @@ def main():
     if not (args.task in supported_tasks or args.task.startswith("e_")):
         raise ValueError(
             "play_highlevel.py supports only "
-            "--task s_follow_basic/s_avoid_basic/s_pcr_line_avoid_basic/s_pcr_new/s_cylinder/"
+            "--task s_follow_basic/s_avoid_basic/s_avoid_clutter/s_pcr_line_avoid_basic/s_pcr_new/s_cylinder/"
             "s_narrow_passage/s_step_field/s_dense_obstacles/s_ood_holdout/s_calib "
             "or e_* paper scenes"
         )
@@ -3501,6 +3512,7 @@ def main():
         primary_contract_ckpt = getattr(args, "teacher_ckpt", None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     primary_meta = _load_experiment_meta_from_ckpt(primary_contract_ckpt, device)
+    args.revision_contract = bool(primary_meta.get("revision_contract") in ("avoid_1d_canonical_v1", "pcr_canonical_v1"))
     th.apply_experiment_meta_to_args(args, primary_meta, context="PlayHigh")
     th.apply_runtime_ablation_cli_overrides(args, primary_meta, context="PlayHigh")
     if static_avoid_debug and args.num_envs != 1:
@@ -3843,16 +3855,19 @@ def main():
                 state_dim=gate_state_dim,
                 goal_dim=gate_goal_dim,
                 learned_w=expected_gate_action_dim == 2,
+                actor_mask_xy=gate_meta.get("revision_contract") == "pcr_canonical_v1",
             ).to(device)
             ckpt = torch.load(args.avoid_ckpt, map_location=device)
             ckpt_meta = _ckpt_meta_from_obj(ckpt)
-            avoid_state_dim = th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim
+            validate_frozen_avoid_revision(gate_meta, ckpt_meta)
+            avoid_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
+            avoid_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim)
             avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
             avoid_policy = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
                 state_dim=avoid_state_dim,
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
+                goal_dim=2 if avoid_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                **avoid_kwargs,
             ).to(device)
             _validate_expected_ckpt_meta(
                 gate_meta,
@@ -3907,13 +3922,14 @@ def main():
             velocity_search_compute = eh._compute_velocity_search_diag
             ckpt = torch.load(args.avoid_ckpt, map_location=device)
             ckpt_meta = _ckpt_meta_from_obj(ckpt)
-            avoid_state_dim = th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim
+            avoid_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
+            avoid_state_dim = 14 if avoid_kwargs["action_dim"] == 1 else (th.infer_checkpoint_state_dim(ckpt) or avoid_state_dim)
             avoid_aff_channels = int(aff_bundle["avoid_aff"].shape[1] * aff_stack)
             avoid_policy = th.CmdVelExpert(
                 affordance_channels=avoid_aff_channels,
                 state_dim=avoid_state_dim,
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
+                goal_dim=2 if avoid_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                **avoid_kwargs,
             ).to(device)
             _validate_expected_ckpt_meta(
                 ckpt_meta,
@@ -3948,11 +3964,12 @@ def main():
             ckpt = torch.load(args.teacher_ckpt, map_location=device)
             ckpt_meta = _ckpt_meta_from_obj(ckpt)
             policy_state_dim = th.infer_checkpoint_state_dim(ckpt) or int(obs["state"].shape[1])
+            policy_kwargs = checkpoint_cmd_policy_kwargs(ckpt, cmd_scale)
             policy = th.CmdVelExpert(
                 affordance_channels=aff_channels,
                 state_dim=policy_state_dim,
-                goal_dim=obs["goal"].shape[1],
-                cmd_scale=cmd_scale,
+                goal_dim=2 if policy_kwargs["action_dim"] == 1 else obs["goal"].shape[1],
+                **policy_kwargs,
             ).to(device)
             _validate_expected_ckpt_meta(
                 ckpt_meta,
@@ -4159,13 +4176,8 @@ def main():
                             cmd_scale,
                             env_ref=env,
                         )
-                        cmd_a, _ = avoid_policy.get_action(
-                            avoid_aff_input,
-                            expert_state,
-                            avoid_goal_input,
-                            avoid_difficulty_input,
-                            deterministic=True,
-                        )
+                        cmd_a, _ = get_avoid_command(avoid_policy, avoid_aff_input, obs["state"], cmd_f, goal_input,
+                            avoid_difficulty_input, deterministic=True, legacy_state=expert_state, legacy_goal=avoid_goal_input)
                         if velocity_search_compute is None or velocity_search_hparams is None:
                             raise RuntimeError("velocity_search helper is not initialized")
                         gate_diag = velocity_search_compute(
@@ -4198,13 +4210,8 @@ def main():
                             cmd_scale,
                             env_ref=env,
                         )
-                        cmd_a, _ = avoid_policy.get_action(
-                            avoid_aff_input,
-                            expert_state,
-                            avoid_goal_input,
-                            avoid_difficulty_input,
-                            deterministic=True,
-                        )
+                        cmd_a, _ = get_avoid_command(avoid_policy, avoid_aff_input, obs["state"], cmd_f, goal_input,
+                            avoid_difficulty_input, deterministic=True, legacy_state=expert_state, legacy_goal=avoid_goal_input)
                         gate_policy_goal = goal_input
                         if th.is_learned_w_mode(getattr(args, "w_mode", "none")):
                             gate_policy_goal, _ = th.build_learned_w_gate_goal(
@@ -4278,13 +4285,24 @@ def main():
                             policy_state_dim,
                             label="play_policy_state",
                         )
-                        cmd, _ = policy.get_action(
-                            aff_input,
-                            policy_state,
-                            goal_input,
-                            difficulty_input,
-                            deterministic=deterministic,
-                        )
+                        if int(getattr(policy, "action_dim", 3)) == 1:
+                            # Standalone clutter already supplies frozen 14-D
+                            # state and [side_preference,0] goal.  Do not run the
+                            # PCR converter again: its input is an unprojected
+                            # Follow target.  Expand only for env request/logging.
+                            lateral, _ = policy.get_action(
+                                aff_input, policy_state, goal_input, difficulty_input,
+                                deterministic=deterministic,
+                            )
+                            cmd = torch.cat([lateral, policy_state[:, 13:14], torch.zeros_like(lateral)], dim=1)
+                        else:
+                            cmd, _ = policy.get_action(
+                                aff_input,
+                                policy_state,
+                                goal_input,
+                                difficulty_input,
+                                deterministic=deterministic,
+                            )
                         if (args.debug_cmd or debug) and skill == "avoid":
                             aff_input_flip = torch.flip(aff_input, dims=[-2])
                             aff_input_zero = torch.zeros_like(aff_input)

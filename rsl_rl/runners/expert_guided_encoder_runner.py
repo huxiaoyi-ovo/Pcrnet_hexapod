@@ -30,7 +30,6 @@ from rsl_rl.runners.on_policy_runner import OnPolicyRunner
 from rsl_rl.modules import ActorCritic, ActorCriticEncoder
 from rsl_rl.algorithms import EGPO, EGPOEncoder
 from rsl_rl.env import VecEnv
-from torch.utils.tensorboard import SummaryWriter
 import torch
 from collections import deque
 import time
@@ -99,6 +98,7 @@ class EGPOEncoderRunner(OnPolicyRunner):
     def learn(self,num_learning_iterations, init_at_random_ep_len=False):
         #因为要使用expert_actions的进行插值，所以重写learn函数, 并且alg返回中多了一项bc_loss
         if self.log_dir is not None and self.writer is None:
+            from torch.utils.tensorboard import SummaryWriter
             self.writer = SummaryWriter(log_dir=self.log_dir,flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))

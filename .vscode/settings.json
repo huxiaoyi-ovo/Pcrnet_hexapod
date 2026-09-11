@@ -3,5 +3,6 @@
     "python-envs.defaultPackageManager": "ms-python.python:conda",
     "ROS2.distro": "noetic",
     "editor.fontSize": 16,
+    "ros.distro": "noetic",
 
 }
