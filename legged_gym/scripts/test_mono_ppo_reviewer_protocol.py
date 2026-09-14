@@ -98,9 +98,11 @@ def main() -> None:
         ('"optimizer_updates_completed"', "completed optimizer updates"),
         ('"pcr_common_task_reward_v1"', "common reward contract"),
         ('"adaptive_lr_max_change_per_iteration"', "bounded adaptive LR provenance"),
+        ('"stop_remaining_minibatch_updates"', "target-KL early stop provenance"),
         ('"rollback_full_ppo_iteration"', "catastrophic update rollback provenance"),
         ('_bounded_mono_adaptive_lr(', "bounded adaptive LR implementation"),
         ('Diag/PostStepExactGaussianKLMax', "post-step exact KL diagnostic"),
+        ('Diag/KLEarlyStopTriggered', "target-KL early stop diagnostic"),
         ('Diag/CatastrophicUpdateRejected', "catastrophic update rejection diagnostic"),
     ):
         require(text, label)

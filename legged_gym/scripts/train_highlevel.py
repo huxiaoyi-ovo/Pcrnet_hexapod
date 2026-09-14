@@ -6547,6 +6547,10 @@ def train(args):
         meta["ppo_profile"] = "reviewer_proof_mono_v1" if is_mono_ppo and getattr(args, "revision_contract", False) else "task_default"
         if meta["ppo_profile"] == "reviewer_proof_mono_v1":
             meta["adaptive_lr_max_change_per_iteration"] = MONO_PPO_ADAPTIVE_LR_FACTOR
+            meta["kl_early_stop"] = {
+                "threshold": 2.0 * float(args.desired_kl),
+                "action": "stop_remaining_minibatch_updates",
+            }
             meta["catastrophic_kl_guard"] = {
                 "threshold": max(
                     MONO_PPO_CATASTROPHIC_KL_FLOOR,
@@ -8920,6 +8924,7 @@ def train(args):
         expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
         exact_kl_sum = 0
+        exact_kl_count = 0
         exact_kl_max = 0.0
         post_step_exact_kl_max = 0.0
         clip_frac_sum = 0
@@ -8946,6 +8951,7 @@ def train(args):
             MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
         )
         catastrophic_update_rejected = False
+        kl_early_stop_triggered = False
         optimizer_updates_before_iteration = int(optimizer_updates_completed)
         policy_state_before_update = None
         optimizer_state_before_update = None
@@ -9096,7 +9102,25 @@ def train(args):
                         continue
                     exact_kl_value = float(exact_kl.detach().item())
                     exact_kl_sum += exact_kl_value
+                    exact_kl_count += 1
                     exact_kl_max = max(exact_kl_max, exact_kl_value)
+                    if (
+                        mono_kl_guard_enabled
+                        and exact_kl_value > 2.0 * float(args.desired_kl)
+                    ):
+                        adaptive_learning_rate = max(
+                            MONO_PPO_MIN_LR,
+                            adaptive_lr_iteration_start / MONO_PPO_ADAPTIVE_LR_FACTOR,
+                        )
+                        adaptive_lr_min_seen = min(
+                            adaptive_lr_min_seen,
+                            adaptive_learning_rate,
+                        )
+                        current_lr = adaptive_learning_rate
+                        for param_group in optimizer.param_groups:
+                            param_group["lr"] = current_lr
+                        kl_early_stop_triggered = True
+                        break
                     adaptive_learning_rate = _bounded_mono_adaptive_lr(
                         adaptive_learning_rate,
                         exact_kl_value,
@@ -9385,7 +9409,7 @@ def train(args):
                     loss,
                 )
 
-            if catastrophic_update_rejected:
+            if catastrophic_update_rejected or kl_early_stop_triggered:
                 break
 
         if catastrophic_update_rejected:
@@ -9754,9 +9778,10 @@ def train(args):
             writer.add_scalar('Perf/TerrainLevelMax', terrain_level_max, iteration)
         writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
         if is_mono_ppo and str(getattr(args, "lr_schedule", "fixed")) == "adaptive":
-            writer.add_scalar('Diag/ExactGaussianKL', exact_kl_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Diag/ExactGaussianKL', exact_kl_sum / max(exact_kl_count, 1), iteration)
             writer.add_scalar('Diag/ExactGaussianKLMax', exact_kl_max, iteration)
         if mono_kl_guard_enabled:
+            writer.add_scalar('Diag/KLEarlyStopTriggered', float(kl_early_stop_triggered), iteration)
             writer.add_scalar('Diag/PostStepExactGaussianKLMax', post_step_exact_kl_max, iteration)
             writer.add_scalar(
                 'Diag/CatastrophicUpdateRejected',
