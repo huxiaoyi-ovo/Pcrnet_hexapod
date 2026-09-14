@@ -6863,11 +6863,11 @@ def train(args):
                 ckpt.get("best_online_selection_metric", ckpt.get("selection_metric", best_selection_metric_name))
             )
         if isinstance(ckpt, dict) and "torch_rng_state" in ckpt:
-            torch.set_rng_state(ckpt["torch_rng_state"])
+            torch.set_rng_state(ckpt["torch_rng_state"].cpu())
         if isinstance(ckpt, dict) and "numpy_rng_state" in ckpt:
             np.random.set_state(ckpt["numpy_rng_state"])
         if torch.cuda.is_available() and isinstance(ckpt, dict) and "cuda_rng_state" in ckpt:
-            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+            torch.cuda.set_rng_state_all([state.cpu() for state in ckpt["cuda_rng_state"]])
         log_dir = os.path.dirname(resume_path)
         dprint(f"[Main] Resume: {resume_path}")
     elif finetune_path:

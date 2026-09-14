@@ -72,6 +72,15 @@ def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval
     raise AssertionError("missing checkpoint save condition")
 
 
+def _resume_rng_restore_source():
+    source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
+    required = [
+        'torch.set_rng_state(ckpt["torch_rng_state"].cpu())',
+        'torch.cuda.set_rng_state_all([state.cpu() for state in ckpt["cuda_rng_state"]])',
+    ]
+    assert all(item in source for item in required)
+
+
 def _extract_clutter_risk_scale_contract():
     source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
     tree = ast.parse(source)
@@ -221,6 +230,10 @@ def main():
     assert _actual_save_checkpoint_condition(3999, 5000, 200, checkpoint_iterations=(3999,))
     assert not _actual_save_checkpoint_condition(3998, 5000, 200, checkpoint_iterations=(3999,))
     assert _actual_save_checkpoint_condition(4999, 5000, 200, checkpoint_iterations=(3999,))
+
+    _resume_rng_restore_source()
+    cpu_rng = torch.get_rng_state()
+    torch.set_rng_state(cpu_rng.cpu())
 
     enforce_clutter_contract = _extract_clutter_risk_scale_contract()
     clutter_args = SimpleNamespace(task="s_avoid_clutter", disable_risk_scale=False)
