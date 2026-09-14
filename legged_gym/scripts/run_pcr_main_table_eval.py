@@ -176,6 +176,77 @@ def _run(cmd: List[str], *, dry_run: bool, continue_on_error: bool) -> None:
         print("[PCRMainTableEval] failed; continuing because --continue_on_error is set", flush=True)
 
 
+def _terminate_processes(active) -> None:
+    for process, _ in active:
+        if process.poll() is None:
+            process.terminate()
+    deadline = time.monotonic() + 5.0
+    for process, _ in active:
+        if process.poll() is not None:
+            continue
+        timeout_s = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    for process, _ in active:
+        if process.poll() is None:
+            process.wait()
+
+
+def _run_grid(
+    commands: List[List[str]],
+    *,
+    max_parallel_jobs: int,
+    dry_run: bool,
+    continue_on_error: bool,
+) -> None:
+    workers = max(1, int(max_parallel_jobs))
+    if dry_run or workers == 1:
+        for cmd in commands:
+            _run(cmd, dry_run=dry_run, continue_on_error=continue_on_error)
+        return
+
+    pending = list(commands)
+    active = []
+    print(
+        f"[PCRMainTableEval] jobs={len(pending)} max_parallel_jobs={workers}",
+        flush=True,
+    )
+    try:
+        while pending or active:
+            while pending and len(active) < workers:
+                cmd = pending.pop(0)
+                print("[PCRMainTableEval] " + " ".join(cmd), flush=True)
+                active.append((subprocess.Popen(cmd, cwd=PROJECT_ROOT), cmd))
+
+            failed = None
+            still_active = []
+            for process, cmd in active:
+                returncode = process.poll()
+                if returncode is None:
+                    still_active.append((process, cmd))
+                    continue
+                if returncode != 0:
+                    if continue_on_error:
+                        print(
+                            f"[PCRMainTableEval] failed rc={returncode}; continuing because "
+                            "--continue_on_error is set",
+                            flush=True,
+                        )
+                    elif failed is None:
+                        failed = subprocess.CalledProcessError(returncode, cmd)
+            active = still_active
+            if failed is not None:
+                _terminate_processes(active)
+                raise failed
+            if active:
+                time.sleep(0.2)
+    except BaseException:
+        _terminate_processes(active)
+        raise
+
+
 def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
     method_cfg = METHODS[method]
     output_dir = os.path.join(args.output_root, f"s_{_speed_tag(speed)}")
@@ -210,12 +281,17 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         "--freeze_avoid_stage",
         "--pcr_line_target_speed",
         f"{float(speed):.2f}",
-        "--dump_timeseries",
-        "--timeseries_episodes",
-        str(args.timeseries_episodes),
-        "--timeseries_stride",
-        str(args.timeseries_stride),
     ]
+    if not bool(getattr(args, "skip_timeseries", False)):
+        cmd.extend(
+            [
+                "--dump_timeseries",
+                "--timeseries_episodes",
+                str(args.timeseries_episodes),
+                "--timeseries_stride",
+                str(args.timeseries_stride),
+            ]
+        )
     if str(getattr(args, "eval_layout", "") or "").strip():
         cmd.extend(["--eval_layout", str(args.eval_layout)])
     if str(getattr(args, "export_eval_layout_debug", "") or "").strip():
@@ -282,6 +358,17 @@ def parse_args():
     parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
     parser.add_argument("--timeseries_episodes", type=int, default=64)
     parser.add_argument("--timeseries_stride", type=int, default=1)
+    parser.add_argument(
+        "--skip_timeseries",
+        action="store_true",
+        help="skip step-level traces for faster table metrics; replay selected trajectories separately",
+    )
+    parser.add_argument(
+        "--max_parallel_jobs",
+        type=int,
+        default=1,
+        help="number of independent method-speed-seed evaluations to run concurrently",
+    )
     parser.add_argument("--output_root", type=str, default="agents/eval_data_seed23")
     parser.add_argument("--summary_dir", type=str, default="agents/eval_data_seed23/pcr_main_table")
     parser.add_argument("--extra_summary_paths", type=str, default="", help="extra metrics dirs/files to include in final table")
@@ -338,6 +425,10 @@ def main():
             raise ValueError("Reviewer Mono validation 固定 --difficulty_levels 0,.25,.5,.75,1。")
         if int(args.timeseries_episodes) != 64 or int(args.timeseries_stride) != 1:
             raise ValueError("Reviewer Mono validation 固定 --timeseries_episodes 64 与 --timeseries_stride 1。")
+        if bool(args.skip_timeseries):
+            raise ValueError("Reviewer Mono validation 禁止 --skip_timeseries。")
+        if int(args.max_parallel_jobs) != 1:
+            raise ValueError("Reviewer Mono validation 固定 --max_parallel_jobs 1。")
         if args.eval_layout:
             raise ValueError("Reviewer Mono validation 使用保留基础 layout；禁止 --eval_layout/heldout。")
         if args.velocity_search_split != "main_test":
@@ -349,14 +440,18 @@ def main():
         )
 
     if not args.summary_only:
-        for seed in seeds:
-            for speed in speeds:
-                for method in methods:
-                    _run(
-                        _eval_cmd(args, seed=seed, speed=speed, method=method),
-                        dry_run=args.dry_run,
-                        continue_on_error=args.continue_on_error,
-                    )
+        commands = [
+            _eval_cmd(args, seed=seed, speed=speed, method=method)
+            for seed in seeds
+            for speed in speeds
+            for method in methods
+        ]
+        _run_grid(
+            commands,
+            max_parallel_jobs=args.max_parallel_jobs,
+            dry_run=args.dry_run,
+            continue_on_error=args.continue_on_error,
+        )
 
     _run(_summary_cmd(args, speeds), dry_run=args.dry_run, continue_on_error=False)
 
