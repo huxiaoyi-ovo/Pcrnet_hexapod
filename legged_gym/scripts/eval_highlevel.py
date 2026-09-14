@@ -6796,6 +6796,7 @@ def parse_args():
     parser.add_argument("--mode", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--skill", type=str, default="moe", choices=["follow", "avoid", "moe"])
     parser.add_argument("--mono_ppo", action="store_true", help="PCR external baseline: direct cmd policy under --skill moe")
+    parser.add_argument("--revision_contract", action="store_true", help="use the canonical PCR/Mono evaluation contract")
 
     parser.add_argument("--pcr_ckpt", type=str, default=None, help="PCR gate policy checkpoint")
     parser.add_argument("--ckpt", type=str, default=None, help=argparse.SUPPRESS)
