@@ -385,13 +385,10 @@ class HexGround(LeggedRobot):
         self.s_avoid_actor_handles = None
         self.s_avoid_actor_indices = None
         self.s_avoid_capsule_asset = None
-        self.s_avoid_sphere_asset = None
         self.s_avoid_box_asset = None
         self.s_avoid_wall_asset = None
         self.s_avoid_stage4_wall_asset = None
         self.s_avoid_capsule_slot_count = 0
-        self.s_avoid_cylinder_slot_count = 0
-        self.s_avoid_sphere_slot_count = 0
         self.s_avoid_box_slot_count = 0
         self.s_avoid_wall_slot_count = 0
         self.s_avoid_total_slots = 0
@@ -499,7 +496,6 @@ class HexGround(LeggedRobot):
                 )
                 self.s_avoid_capsule_asset = self.s_avoid_cylinder_asset
                 self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_cylinder_slots", 64))
-                self.s_avoid_cylinder_slot_count = self.s_avoid_capsule_slot_count
                 self.s_avoid_box_slot_count = 0
                 self.s_avoid_wall_slot_count = 0
             elif self.s_avoid_direct_single_obstacle:
@@ -508,39 +504,14 @@ class HexGround(LeggedRobot):
                 self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, fixed_asset_options)
                 self.s_avoid_stage4_wall_asset = self.s_avoid_wall_asset
                 self.s_avoid_capsule_slot_count = 1
-                self.s_avoid_cylinder_slot_count = 1
                 self.s_avoid_box_slot_count = 0
                 self.s_avoid_wall_slot_count = 0
             else:
-                eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
-                if eval_layout == "revision_heldout_mixed_v1":
-                    layout = load_revision_heldout_layout()
-                    cylinder_count = sum(
-                        1 for obstacle in layout["obstacles"] if obstacle["primitive"] == "cylinder"
-                    )
-                    sphere_count = sum(
-                        1 for obstacle in layout["obstacles"] if obstacle["primitive"] == "sphere"
-                    )
-                    self.s_avoid_cylinder_asset = self.gym.load_asset(
-                        self.sim,
-                        f"{LEGGED_GYM_ROOT_DIR}/resources/objects",
-                        "revision_heldout_cylinder_r017_h034.urdf",
-                        pooled_asset_options,
-                    )
-                    self.s_avoid_capsule_asset = self.s_avoid_cylinder_asset
-                    self.s_avoid_sphere_asset = self.gym.create_sphere(self.sim, 0.17, pooled_asset_options)
-                    self.s_avoid_cylinder_slot_count = int(cylinder_count)
-                    self.s_avoid_sphere_slot_count = int(sphere_count)
-                    self.s_avoid_capsule_slot_count = int(cylinder_count + sphere_count)
-                else:
-                    self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, pooled_asset_options)
-                    self.s_avoid_cylinder_slot_count = self.s_avoid_capsule_slot_count
+                self.s_avoid_capsule_asset = self.gym.create_capsule(self.sim, cap_r, cap_half_h, pooled_asset_options)
                 self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, pooled_asset_options)
                 self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, fixed_asset_options)
                 self.s_avoid_stage4_wall_asset = self.s_avoid_wall_asset
-                if eval_layout != "revision_heldout_mixed_v1":
-                    self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
-                    self.s_avoid_cylinder_slot_count = self.s_avoid_capsule_slot_count
+                self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
                 self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
                 self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
             self.s_avoid_total_slots = (
@@ -558,13 +529,10 @@ class HexGround(LeggedRobot):
                 self.s_avoid_identity_quat if self.s_avoid_clutter_enabled
                 else gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
             )
-            if str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower() == "revision_heldout_mixed_v1":
-                self.s_avoid_capsule_quat = self.s_avoid_identity_quat
             self.s_avoid_enabled = True
             print(
                 f"[Scene] {terrain_type} obstacle pool: "
                 f"capsule_slots={self.s_avoid_capsule_slot_count}, "
-                f"cylinder_slots={self.s_avoid_cylinder_slot_count}, sphere_slots={self.s_avoid_sphere_slot_count}, "
                 f"box_slots={self.s_avoid_box_slot_count}, "
                 f"wall_slots={self.s_avoid_wall_slot_count}, "
                 f"capsule_d={2.0 * cap_r:.2f}, box=({box_x:.2f},{box_y:.2f},{box_z:.2f}), "
@@ -968,13 +936,7 @@ class HexGround(LeggedRobot):
         if self.s_avoid_enabled and self.s_avoid_actor_handles is not None:
             for slot in range(self.s_avoid_total_slots):
                 if slot < self.s_avoid_capsule_slot_count:
-                    if (
-                        self.s_avoid_sphere_asset is not None
-                        and slot >= int(self.s_avoid_cylinder_slot_count)
-                    ):
-                        asset = self.s_avoid_sphere_asset
-                    else:
-                        asset = self.s_avoid_capsule_asset
+                    asset = self.s_avoid_capsule_asset
                     pose = gymapi.Transform()
                     pose.r = self.s_avoid_capsule_quat
                 elif slot < self.s_avoid_capsule_slot_count + self.s_avoid_box_slot_count:
@@ -2027,36 +1989,17 @@ class HexGround(LeggedRobot):
         box_specs: List[Tuple[float, float, float]],
         cap_z: float,
         box_z: float,
-        cylinder_points: Optional[List[Tuple[float, float]]] = None,
-        sphere_points: Optional[List[Tuple[float, float]]] = None,
-        cylinder_z: Optional[float] = None,
-        sphere_z: Optional[float] = None,
     ):
         active, pos, quat = self._get_s_avoid_stage_template()
         cap_slots = int(self.s_avoid_capsule_slot_count)
         box_slots = int(self.s_avoid_box_slot_count)
-        cylinder_points = list(cylinder_points or [])
-        sphere_points = list(sphere_points or [])
-        round_points = list(capsule_points)
-        if cylinder_points or sphere_points:
-            if capsule_points:
-                raise RuntimeError("revision fixed preset cannot mix capsule and typed round points")
-            if len(cylinder_points) != int(self.s_avoid_cylinder_slot_count):
-                raise RuntimeError("revision fixed preset cylinder count does not match the actor pool")
-            if len(sphere_points) != int(self.s_avoid_sphere_slot_count):
-                raise RuntimeError("revision fixed preset sphere count does not match the actor pool")
-            round_points = cylinder_points + sphere_points
-        if len(round_points) > cap_slots or len(box_specs) > box_slots:
+        if len(capsule_points) > cap_slots or len(box_specs) > box_slots:
             raise RuntimeError(
-                "Fixed s_avoid preset exceeds available slots: "
-                f"round={len(round_points)}/{cap_slots}, boxes={len(box_specs)}/{box_slots}"
+                f"Fixed s_avoid preset exceeds available slots: capsules={len(capsule_points)}/{cap_slots}, boxes={len(box_specs)}/{box_slots}"
             )
-        cylinder_z = float(cap_z if cylinder_z is None else cylinder_z)
-        sphere_z = float(cap_z if sphere_z is None else sphere_z)
-        for i, (x, y) in enumerate(round_points):
+        for i, (x, y) in enumerate(capsule_points):
             active[i] = True
-            z = sphere_z if cylinder_points and i >= len(cylinder_points) else cylinder_z
-            pos[i] = np.array([float(x), float(y), z], dtype=np.float32)
+            pos[i] = np.array([float(x), float(y), float(cap_z)], dtype=np.float32)
         for j, (x, y, yaw_deg) in enumerate(box_specs):
             slot = cap_slots + j
             active[slot] = True
@@ -2077,7 +2020,10 @@ class HexGround(LeggedRobot):
         stage: int,
         rng: np.random.RandomState,
     ):
-        jitter_xy = float(getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0))
+        eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+        jitter_xy = 0.0 if eval_layout == "revision_heldout_mixed_v1" else float(
+            getattr(self.cfg.terrain, "avoid_fixed_preset_jitter_xy", 0.0)
+        )
         base_active = np.array(active, copy=True)
         base_pos = np.array(pos, copy=True)
         base_quat = np.array(quat, copy=True)
@@ -2189,7 +2135,11 @@ class HexGround(LeggedRobot):
         row_y = self._get_s_avoid_fixed_stage_row_y(stage)
         eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
         if eval_layout == "revision_heldout_mixed_v1":
-            return tuple(3 for _ in row_y)
+            layout = load_revision_heldout_layout()
+            return tuple(
+                sum(1 for obstacle in layout["obstacles"] if int(obstacle["row"]) == int(row["row"]))
+                for row in layout["rows"][:len(row_y)]
+            )
         if eval_layout == "heldout_irregular_rows":
             row_counts = (3, 2, 3, 2, 3)
             return row_counts[:len(row_y)]
@@ -2247,25 +2197,11 @@ class HexGround(LeggedRobot):
             if int(stage) != 4:
                 return []
             layout = load_revision_heldout_layout()
-            cylinders = []
-            spheres = []
-            boxes = []
-            for obstacle in layout["obstacles"]:
-                item = (float(obstacle["x"]), float(obstacle["y"]))
-                if obstacle["primitive"] == "cylinder":
-                    cylinders.append(item)
-                elif obstacle["primitive"] == "sphere":
-                    spheres.append(item)
-                elif obstacle["primitive"] == "cube":
-                    boxes.append((item[0], item[1], 0.0))
-                else:
-                    raise RuntimeError(f"unsupported revision primitive: {obstacle['primitive']}")
+            capsules = [(float(obstacle["x"]), float(obstacle["y"])) for obstacle in layout["obstacles"]]
             return [{
                 "name": str(layout["layout_id"]),
-                "capsules": [],
-                "cylinders": cylinders,
-                "spheres": spheres,
-                "boxes": boxes,
+                "capsules": capsules,
+                "boxes": [],
             }]
         if eval_layout == "heldout_irregular_rows":
             row_y = self._get_s_avoid_fixed_stage_row_y(stage)
@@ -2444,10 +2380,6 @@ class HexGround(LeggedRobot):
                     box_specs=layout["boxes"],
                     cap_z=cap_z,
                     box_z=box_z,
-                    cylinder_points=layout.get("cylinders"),
-                    sphere_points=layout.get("spheres"),
-                    cylinder_z=0.0 if layout.get("cylinders") else None,
-                    sphere_z=box_z if layout.get("spheres") else None,
                 )
                 analysis = self._analyze_s_avoid_preset_passage(
                     active=preset["active"],

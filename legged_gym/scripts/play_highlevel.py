@@ -2725,19 +2725,6 @@ def _maybe_apply_eval_layout_overrides(args, env_cfg) -> None:
     terrain_cfg.eval_layout = eval_layout
     if eval_layout == "revision_heldout_mixed_v1":
         metadata = revision_heldout_layout_metadata()
-        terrain_cfg.terrain_width = max(float(getattr(terrain_cfg, "terrain_width", 6.0)), 6.0)
-        terrain_cfg.terrain_length = max(float(getattr(terrain_cfg, "terrain_length", 12.0)), 12.0)
-        terrain_cfg.avoid_capsule_slots = 10
-        terrain_cfg.avoid_box_slots = 5
-        terrain_cfg.avoid_wall_slots = 0
-        terrain_cfg.avoid_capsule_radius = 0.17
-        terrain_cfg.avoid_capsule_height = 0.34
-        terrain_cfg.avoid_box_size_x = 0.34
-        terrain_cfg.avoid_box_size_y = 0.34
-        terrain_cfg.avoid_box_size_z = 0.34
-        terrain_cfg.avoid_fixed_presets_use_mirror = False
-        terrain_cfg.avoid_fixed_preset_jitter_xy = 0.0
-        terrain_cfg.avoid_fixed_row_y_spacing_scale = 1.0
         terrain_cfg.pcr_new_force_stage = 4
         args.avoid_stage_override = 4
         print(

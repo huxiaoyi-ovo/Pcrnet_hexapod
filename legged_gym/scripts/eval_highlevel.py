@@ -5957,7 +5957,7 @@ class EvalRunner:
                     "irregular_nonmirror_mixed_shape_rows"
                     if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
                     else (
-                        "fixed_five_row_mixed_primitives"
+                        "fixed_stage4_capsule_rows"
                         if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
                         else ""
                     )
@@ -5967,8 +5967,8 @@ class EvalRunner:
                     "variable passage width; 11 capsules plus 2 limited-size boxes; no walls; no dead ends; no dynamic obstacles"
                     if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
                     else (
-                        "frozen coordinates; L-L-R-R-L; unequal row spacing; variable openings; "
-                        "5 cube + 5 cylinder + 5 sphere; no walls; no dead ends; no dynamic obstacles"
+                        "frozen coordinates; L-L-R-R-L; unequal row spacing; native Stage-4 13-capsule geometry; "
+                        "no boxes; no walls; no dynamic obstacles"
                         if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
                         else ""
                     )

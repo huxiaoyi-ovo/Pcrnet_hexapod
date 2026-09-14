@@ -1,34 +1,31 @@
 {
   "coordinate_convention": {"x": "right", "y": "forward", "start_xy": [0.0, -1.6], "target_line_x": -0.6},
+  "fixed_across_seeds": true,
   "layout_id": "revision_heldout_mixed_v1",
-  "obstacle_geometry": {
-    "cube": {"side": 0.34},
-    "cylinder": {"height": 0.34, "radius": 0.17},
-    "sphere": {"radius": 0.17}
-  },
+  "obstacle_geometry": {"capsule": {"asset_rotation_y_deg": 90.0, "height": 0.5, "radius": 0.15}},
+  "obstacle_model": "native_stage4_capsules",
   "obstacles": [
-    {"primitive": "cylinder", "row": 1, "x": -1.23, "y": 0.8},
-    {"primitive": "cube", "row": 1, "x": 0.31, "y": 0.8},
-    {"primitive": "sphere", "row": 1, "x": 0.85, "y": 0.8},
-    {"primitive": "sphere", "row": 2, "x": -1.32, "y": 2.48},
-    {"primitive": "cylinder", "row": 2, "x": 0.16, "y": 2.48},
-    {"primitive": "cube", "row": 2, "x": 0.7, "y": 2.48},
-    {"primitive": "cube", "row": 3, "x": -0.93, "y": 4.6},
-    {"primitive": "sphere", "row": 3, "x": -0.39, "y": 4.6},
-    {"primitive": "cylinder", "row": 3, "x": 1.25, "y": 4.6},
-    {"primitive": "cylinder", "row": 4, "x": -0.98, "y": 6.42},
-    {"primitive": "cube", "row": 4, "x": -0.44, "y": 6.42},
-    {"primitive": "sphere", "row": 4, "x": 1.1, "y": 6.42},
-    {"primitive": "sphere", "row": 5, "x": -1.31, "y": 8.36},
-    {"primitive": "cylinder", "row": 5, "x": 0.19, "y": 8.36},
-    {"primitive": "cube", "row": 5, "x": 0.73, "y": 8.36}
+    {"primitive": "capsule", "row": 1, "x": -1.05, "y": -0.65},
+    {"primitive": "capsule", "row": 1, "x": 0.25, "y": -0.65},
+    {"primitive": "capsule", "row": 1, "x": 0.85, "y": -0.65},
+    {"primitive": "capsule", "row": 2, "x": 0.35, "y": 1.03},
+    {"primitive": "capsule", "row": 2, "x": 0.85, "y": 1.03},
+    {"primitive": "capsule", "row": 3, "x": -0.85, "y": 3.15},
+    {"primitive": "capsule", "row": 3, "x": -0.25, "y": 3.15},
+    {"primitive": "capsule", "row": 3, "x": 1.05, "y": 3.15},
+    {"primitive": "capsule", "row": 4, "x": -0.85, "y": 4.97},
+    {"primitive": "capsule", "row": 4, "x": -0.35, "y": 4.97},
+    {"primitive": "capsule", "row": 5, "x": -1.05, "y": 6.91},
+    {"primitive": "capsule", "row": 5, "x": 0.25, "y": 6.91},
+    {"primitive": "capsule", "row": 5, "x": 0.85, "y": 6.91}
   ],
+  "only_layout_change": true,
   "rows": [
-    {"gap_center_x": -0.46, "gap_width": 1.2, "opening_side": "L", "row": 1, "y": 0.8},
-    {"gap_center_x": -0.58, "gap_width": 1.14, "opening_side": "L", "row": 2, "y": 2.48},
-    {"gap_center_x": 0.43, "gap_width": 1.3, "opening_side": "R", "row": 3, "y": 4.6},
-    {"gap_center_x": 0.33, "gap_width": 1.2, "opening_side": "R", "row": 4, "y": 6.42},
-    {"gap_center_x": -0.56, "gap_width": 1.16, "opening_side": "L", "row": 5, "y": 8.36}
+    {"opening_side": "L", "row": 1, "y": -0.65},
+    {"opening_side": "L", "row": 2, "y": 1.03},
+    {"opening_side": "R", "row": 3, "y": 3.15},
+    {"opening_side": "R", "row": 4, "y": 4.97},
+    {"opening_side": "L", "row": 5, "y": 6.91}
   ],
   "training_provenance": {
     "source_commit": "29ee797",
@@ -40,8 +37,8 @@
     "opening_templates": ["R-L-R-L-R", "L-R-L-R-L"],
     "gap_center_support": {"left": [-0.46, -0.34], "right": [0.34, 0.46]},
     "gap_width_support": [0.88, 1.12],
-    "training_cylinder": {"height": 0.5, "radius": 0.15}
+    "training_capsule": {"height": 0.5, "radius": 0.15}
   },
-  "version": 1,
-  "sha256": "f1de9de6913f3e8be9b2eda46c430766fa29e8853e4e360207428730f6b26218"
+  "version": 2,
+  "sha256": "e55c9c2ca61d1e8b1c7291ab2f600e6aa80ebe4abd2c542203fad0081b51ea44"
 }
