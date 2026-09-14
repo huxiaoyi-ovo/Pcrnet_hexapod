@@ -101,6 +101,7 @@ def main() -> None:
         ('"stop_remaining_minibatch_updates"', "target-KL early stop provenance"),
         ('"rollback_full_ppo_iteration"', "catastrophic update rollback provenance"),
         ('_bounded_mono_adaptive_lr(', "bounded adaptive LR implementation"),
+        ('if num_updates > 0:', "no adaptive LR increase before the first optimizer step"),
         ('Diag/PostStepExactGaussianKLMax', "post-step exact KL diagnostic"),
         ('Diag/KLEarlyStopTriggered', "target-KL early stop diagnostic"),
         ('Diag/CatastrophicUpdateRejected', "catastrophic update rejection diagnostic"),

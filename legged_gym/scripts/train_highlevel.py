@@ -57,8 +57,7 @@ DEBUG_MODE = "--debug" in sys.argv
 MONO_PPO_ADAPTIVE_LR_FACTOR = 1.5
 MONO_PPO_MIN_LR = 1e-5
 MONO_PPO_MAX_LR = 1e-2
-MONO_PPO_CATASTROPHIC_KL_MULTIPLIER = 100.0
-MONO_PPO_CATASTROPHIC_KL_FLOOR = 1.0
+MONO_PPO_CATASTROPHIC_KL_MULTIPLIER = 5.0
 
 
 def _bounded_mono_adaptive_lr(
@@ -6552,10 +6551,7 @@ def train(args):
                 "action": "stop_remaining_minibatch_updates",
             }
             meta["catastrophic_kl_guard"] = {
-                "threshold": max(
-                    MONO_PPO_CATASTROPHIC_KL_FLOOR,
-                    MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
-                ),
+                "threshold": MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
                 "action": "rollback_full_ppo_iteration",
             }
         meta["num_mini_batches"] = int(math.ceil(float(env.num_envs * args.num_steps) / float(args.mini_batch_size)))
@@ -8946,9 +8942,8 @@ def train(args):
         adaptive_lr_iteration_start = float(adaptive_learning_rate)
         adaptive_lr_min_seen = float(adaptive_learning_rate)
         adaptive_lr_max_seen = float(adaptive_learning_rate)
-        catastrophic_kl_threshold = max(
-            MONO_PPO_CATASTROPHIC_KL_FLOOR,
-            MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
+        catastrophic_kl_threshold = (
+            MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl)
         )
         catastrophic_update_rejected = False
         kl_early_stop_triggered = False
@@ -9121,12 +9116,13 @@ def train(args):
                             param_group["lr"] = current_lr
                         kl_early_stop_triggered = True
                         break
-                    adaptive_learning_rate = _bounded_mono_adaptive_lr(
-                        adaptive_learning_rate,
-                        exact_kl_value,
-                        float(args.desired_kl),
-                        adaptive_lr_iteration_start,
-                    )
+                    if num_updates > 0:
+                        adaptive_learning_rate = _bounded_mono_adaptive_lr(
+                            adaptive_learning_rate,
+                            exact_kl_value,
+                            float(args.desired_kl),
+                            adaptive_lr_iteration_start,
+                        )
                     adaptive_lr_min_seen = min(adaptive_lr_min_seen, adaptive_learning_rate)
                     adaptive_lr_max_seen = max(adaptive_lr_max_seen, adaptive_learning_rate)
                     current_lr = adaptive_learning_rate
