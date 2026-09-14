@@ -1947,6 +1947,21 @@ def build_resolved_protocol(
             ),
             "row_spacing_scale": getattr(getattr(env_impl.cfg, "terrain", None), "avoid_fixed_row_y_spacing_scale", None),
         }
+        if bool(getattr(env_impl, "pcr_new_strong_mono_curriculum_enabled", False)):
+            protocol["pcr_new_curriculum"]["strong_mono"] = {
+                "enabled": True,
+                "transition_openings": list(getattr(env_impl, "pcr_new_strong_mono_openings", ())),
+                "stage_weights": [
+                    list(row) for row in getattr(env_impl, "pcr_new_strong_mono_stage_weights", ())
+                ],
+                "window_episodes": int(getattr(env_impl, "pcr_new_strong_mono_window", 0)),
+                "success_threshold": float(getattr(env_impl, "pcr_new_strong_mono_success_threshold", 0.0)),
+                "row_success_threshold": float(getattr(env_impl, "pcr_new_strong_mono_row_success_threshold", 0.0)),
+                "collision_threshold": float(getattr(env_impl, "pcr_new_strong_mono_collision_threshold", 0.0)),
+                "probe_ratio": float(getattr(env_impl, "pcr_new_strong_mono_probe_ratio", 0.0)),
+                "transition_count": int(getattr(env_impl, "pcr_new_strong_mono_transitions", 0)),
+                "mastery_stage": int(getattr(env_impl, "pcr_new_strong_mono_mastery_stage", 0)),
+            }
     if extra:
         protocol.update(extra)
     return protocol
@@ -2254,6 +2269,10 @@ class HierarchicalHexapodEnv:
             env_cfg.env.no_episode_timeout = True
         if getattr(args, "seed", None) is not None:
             env_cfg.seed = int(args.seed)
+        if bool(getattr(args, "mono_ppo", False)) and bool(getattr(args, "revision_contract", False)):
+            if getattr(env_cfg, "navigation", None) is None:
+                raise RuntimeError("Reviewer-proof Strong Mono requires navigation curriculum config.")
+            env_cfg.navigation.pcr_new_strong_mono_curriculum_enable = True
         if getattr(args, "skill", "follow") == "follow" and hasattr(env_cfg, "navigation"):
             if hasattr(env_cfg.navigation, "follow_goal_force_blocking_line"):
                 env_cfg.navigation.goal_force_blocking_line = bool(
@@ -4488,6 +4507,8 @@ class HierarchicalHexapodEnv:
         Returns:
             obs_dict, rewards, dones, info
         """
+        if bool(getattr(self.env, "pcr_new_strong_mono_curriculum_enabled", False)):
+            self.env._advance_pcr_new_strong_mono_transitions(self.num_envs)
         if is_avoid_clutter_task_name(getattr(self.args, "task", "")):
             return self._step_avoid_clutter(cmd_vel)
         # Debug: force a constant forward command along +Y to validate command direction/axis.
@@ -5803,6 +5824,10 @@ class HierarchicalHexapodEnv:
         manual_reset_mask = manual_reset_mask & (~done_during)
         if manual_reset_mask.any():
             reset_ids = manual_reset_mask.nonzero(as_tuple=False).flatten()
+            if bool(getattr(self.env, "pcr_new_strong_mono_curriculum_enabled", False)):
+                self.env._set_pcr_new_strong_mono_terminal_success_override(
+                    reset_ids, success_mask[reset_ids]
+                )
             self._reset_idx(reset_ids)
             # reset_idx 仅重置状态，不会刷新 high-level 观测缓存；这里显式刷新一次。
             if hasattr(self.env, "compute_observations"):
@@ -6794,10 +6819,12 @@ def train(args):
         raise ValueError("不能同时使用 --resume 与 --finetune_from。")
     reviewer_mono_formal = bool(is_mono_ppo and getattr(args, "revision_contract", False))
     if reviewer_mono_formal and resume_path:
-        raise ValueError(
-            "Reviewer-proof Mono-PPO 不允许 --resume：checkpoint 未保存 env/curriculum/physics 精确状态；"
-            "请使用同一 seed 从 completed iteration 0 重新连续训练到 3000。"
-        )
+        if not bool(getattr(args, "allow_inexact_resume", False)):
+            raise ValueError(
+                "Reviewer-proof Strong Mono 默认必须从 completed iteration 0 绝对连续训练到 3000。"
+                "若仅需恢复课程状态的诊断续训，必须显式加 --allow_inexact_resume；"
+                "该路径会 fresh-reset physics，不能作为 exact full-training resume。"
+            )
 
     start_iteration = 0
     adaptive_learning_rate = float(args.lr)
@@ -6867,6 +6894,15 @@ def train(args):
             np.random.set_state(ckpt["numpy_rng_state"])
         if torch.cuda.is_available() and isinstance(ckpt, dict) and "cuda_rng_state" in ckpt:
             torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+        curriculum_state = ckpt.get("pcr_new_curriculum_state", None) if isinstance(ckpt, dict) else None
+        import_curriculum_state = getattr(env.env, "import_pcr_new_curriculum_state", None)
+        if curriculum_state is not None and callable(import_curriculum_state):
+            if import_curriculum_state(curriculum_state):
+                # Physics and full environment RNG are intentionally not restored;
+                # reset once so the restored curriculum counters sample a coherent
+                # fresh scene rather than claiming an exact training continuation.
+                obs_dict = env.reset()
+                print("[Warn] Resumed Strong Mono curriculum state on a fresh environment reset; physics resume remains inexact.")
         log_dir = os.path.dirname(resume_path)
         dprint(f"[Main] Resume: {resume_path}")
     elif finetune_path:
@@ -6897,6 +6933,12 @@ def train(args):
     print(f"[Main] 日志目录: {log_dir}")
     run_meta = _build_experiment_meta()
     run_meta["log_dir"] = os.path.abspath(log_dir)
+    if resume_path:
+        run_meta["resume_semantics"] = (
+            "strong_mono_curriculum_restored_fresh_physics_inexact"
+            if bool(getattr(env.env, "pcr_new_strong_mono_curriculum_enabled", False))
+            else "inexact_resume"
+        )
     with open(os.path.join(log_dir, "run_meta.json"), "w", encoding="utf-8") as f:
         json.dump(run_meta, f, ensure_ascii=False, indent=2)
     
@@ -7017,6 +7059,8 @@ def train(args):
     _window_follow_dist_error = deque(maxlen=100)
     _window_success_steps = deque(maxlen=100)
     _window_success_follow_dist_mean = deque(maxlen=100)
+    strong_mono_early_success_history = deque(maxlen=50)
+    strong_mono_early_collision_history = deque(maxlen=50)
     eval_episode_count = 0
     eval_tracker = EpisodeMetricsTracker(
         num_envs=env.num_envs,
@@ -7031,8 +7075,10 @@ def train(args):
     running_returns = torch.zeros(env.num_envs, device=device)
     
     if reviewer_mono_formal:
-        if int(args.num_iterations) != 3000 or start_iteration != 0:
-            raise RuntimeError("Reviewer-proof Mono-PPO 必须从 completed iteration 0 绝对连续训练到 3000。")
+        if int(args.num_iterations) != 3000:
+            raise RuntimeError("Reviewer-proof Strong Mono 的绝对训练预算必须为 3000 iterations。")
+        if start_iteration != 0 and not bool(getattr(args, "allow_inexact_resume", False)):
+            raise RuntimeError("Reviewer-proof Strong Mono 未授权 resume 时必须从 completed iteration 0 开始。")
         total_iterations = 3000
     else:
         total_iterations = start_iteration + args.num_iterations
@@ -7355,6 +7401,15 @@ def train(args):
         pcr_new_target_speed_mean_value = 0.0
         pcr_new_row_count_mean_value = 0.0
         pcr_new_level_ratio_values = [0.0, 0.0, 0.0, 0.0]
+        pcr_new_strong_mono_enabled_value = 0.0
+        pcr_new_strong_mono_transitions_value = 0
+        pcr_new_strong_mono_open_stage_value = 0
+        pcr_new_strong_mono_mastery_stage_value = 0
+        pcr_new_strong_mono_probe_ratio_value = 0.0
+        pcr_new_strong_mono_level_success_values = [0.0, 0.0, 0.0, 0.0]
+        pcr_new_strong_mono_level_row_success_values = [0.0, 0.0, 0.0, 0.0]
+        pcr_new_strong_mono_level_collision_values = [0.0, 0.0, 0.0, 0.0]
+        pcr_new_strong_mono_level_episode_values = [0, 0, 0, 0]
         avoid_goal_retry_total_base = float(getattr(env.env, "_avoid_goal_stats_retry_total", 0.0))
         avoid_goal_retry_count_base = float(getattr(env.env, "_avoid_goal_stats_retry_count", 0.0))
         avoid_goal_fallback_count_base = float(getattr(env.env, "_avoid_goal_stats_fallback_count", 0.0))
@@ -8405,6 +8460,46 @@ def train(args):
                                 pcr_new_level_ratio_values[pcr_new_level_idx],
                             )
                         )
+                    pcr_new_strong_mono_enabled_value = float(
+                        extras.get("pcr_new_strong_mono_enabled", pcr_new_strong_mono_enabled_value)
+                    )
+                    pcr_new_strong_mono_transitions_value = int(
+                        extras.get("pcr_new_strong_mono_transitions", pcr_new_strong_mono_transitions_value)
+                    )
+                    pcr_new_strong_mono_open_stage_value = int(
+                        extras.get("pcr_new_strong_mono_open_stage", pcr_new_strong_mono_open_stage_value)
+                    )
+                    pcr_new_strong_mono_mastery_stage_value = int(
+                        extras.get("pcr_new_strong_mono_mastery_stage", pcr_new_strong_mono_mastery_stage_value)
+                    )
+                    pcr_new_strong_mono_probe_ratio_value = float(
+                        extras.get("pcr_new_strong_mono_probe_ratio", pcr_new_strong_mono_probe_ratio_value)
+                    )
+                    for pcr_new_level_idx in range(4):
+                        pcr_new_strong_mono_level_success_values[pcr_new_level_idx] = float(
+                            extras.get(
+                                f"pcr_new_strong_mono_level{pcr_new_level_idx}_success",
+                                pcr_new_strong_mono_level_success_values[pcr_new_level_idx],
+                            )
+                        )
+                        pcr_new_strong_mono_level_row_success_values[pcr_new_level_idx] = float(
+                            extras.get(
+                                f"pcr_new_strong_mono_level{pcr_new_level_idx}_row_success",
+                                pcr_new_strong_mono_level_row_success_values[pcr_new_level_idx],
+                            )
+                        )
+                        pcr_new_strong_mono_level_collision_values[pcr_new_level_idx] = float(
+                            extras.get(
+                                f"pcr_new_strong_mono_level{pcr_new_level_idx}_collision",
+                                pcr_new_strong_mono_level_collision_values[pcr_new_level_idx],
+                            )
+                        )
+                        pcr_new_strong_mono_level_episode_values[pcr_new_level_idx] = int(
+                            extras.get(
+                                f"pcr_new_strong_mono_level{pcr_new_level_idx}_episodes",
+                                pcr_new_strong_mono_level_episode_values[pcr_new_level_idx],
+                            )
+                        )
                     avoid_stage_switch_event_value = float(
                         extras.get("avoid_stage_switch_event", avoid_stage_switch_event_value)
                     )
@@ -9418,6 +9513,20 @@ def train(args):
             if ((is_avoid_output_task or is_pcr_output_task) and episode_collision_flags)
             else 0.0
         )
+        strong_mono_early_stop_triggered = False
+        strong_mono_early_success_mean = 0.0
+        strong_mono_early_collision_mean = 0.0
+        if reviewer_mono_formal and bool(getattr(env.env, "pcr_new_strong_mono_curriculum_enabled", False)):
+            strong_mono_early_success_history.append(float(pcr_success_rate_mean))
+            strong_mono_early_collision_history.append(float(episode_collision_rate_value))
+            strong_mono_early_success_mean = float(np.mean(strong_mono_early_success_history))
+            strong_mono_early_collision_mean = float(np.mean(strong_mono_early_collision_history))
+            strong_mono_early_stop_triggered = bool(
+                (iteration + 1) == 300
+                and len(strong_mono_early_success_history) == 50
+                and strong_mono_early_success_mean < 0.05
+                and strong_mono_early_collision_mean > 0.90
+            )
         obstacle_contact_candidate_rate_mean = (obstacle_contact_candidate_rate_sum / total_samples).item()
         strict_obstacle_contact_rate_mean = (strict_obstacle_contact_rate_sum / total_samples).item()
         obstacle_contact_candidate_min_clearance_mean = (
@@ -9564,6 +9673,32 @@ def train(args):
             writer.add_scalar('PCRNew/RowCountMean', pcr_new_row_count_mean_value, iteration)
             for pcr_new_level_idx, pcr_new_ratio in enumerate(pcr_new_level_ratio_values):
                 writer.add_scalar(f'PCRNew/Level{pcr_new_level_idx}Ratio', pcr_new_ratio, iteration)
+        if pcr_new_strong_mono_enabled_value > 0.5:
+            writer.add_scalar('StrongMono/CurriculumTransitions', pcr_new_strong_mono_transitions_value, iteration)
+            writer.add_scalar('StrongMono/OpenStage', pcr_new_strong_mono_open_stage_value, iteration)
+            writer.add_scalar('StrongMono/MasteryStage', pcr_new_strong_mono_mastery_stage_value, iteration)
+            writer.add_scalar('StrongMono/ProbeRatio', pcr_new_strong_mono_probe_ratio_value, iteration)
+            for level_idx in range(4):
+                writer.add_scalar(
+                    f'StrongMono/Level{level_idx}Success',
+                    pcr_new_strong_mono_level_success_values[level_idx],
+                    iteration,
+                )
+                writer.add_scalar(
+                    f'StrongMono/Level{level_idx}RowSuccess',
+                    pcr_new_strong_mono_level_row_success_values[level_idx],
+                    iteration,
+                )
+                writer.add_scalar(
+                    f'StrongMono/Level{level_idx}Collision',
+                    pcr_new_strong_mono_level_collision_values[level_idx],
+                    iteration,
+                )
+                writer.add_scalar(
+                    f'StrongMono/Level{level_idx}Episodes',
+                    pcr_new_strong_mono_level_episode_values[level_idx],
+                    iteration,
+                )
         if is_avoid_output_task:
             writer.add_scalar('Avoid/Stage', avoid_stage_value, iteration)
             writer.add_scalar('Avoid/CorridorWidth', avoid_corridor_width_value, iteration)
@@ -9947,6 +10082,8 @@ def train(args):
         if should_save_checkpoint:
             ckpt_name = f'model_completed_iter_{completed_iteration}.pt' if reviewer_mono else f'model_{iteration}.pt'
             ckpt_path = os.path.join(log_dir, ckpt_name)
+            export_curriculum_state = getattr(env.env, "export_pcr_new_curriculum_state", None)
+            curriculum_state = export_curriculum_state() if callable(export_curriculum_state) else None
             torch.save({
                 'iteration': iteration,
                 'completed_iterations': completed_iteration,
@@ -9973,6 +10110,10 @@ def train(args):
                 'torch_rng_state': torch.get_rng_state(),
                 'numpy_rng_state': np.random.get_state(),
                 'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                'pcr_new_curriculum_state': curriculum_state,
+                'strong_mono_early_stop_triggered': strong_mono_early_stop_triggered,
+                'strong_mono_early_stop_success_mean': strong_mono_early_success_mean,
+                'strong_mono_early_stop_collision_mean': strong_mono_early_collision_mean,
             }, ckpt_path)
             if reviewer_budget_marker:
                 checkpoint_role = {
@@ -10056,6 +10197,14 @@ def train(args):
                 )
             else:
                 dprint(f"  ★ New online best: {mean_reward:.2f}")
+        if strong_mono_early_stop_triggered:
+            print(
+                "[StrongMono] Early-stop diagnostic at completed iteration 300: "
+                f"success50={strong_mono_early_success_mean:.4f}, "
+                f"episode_collision50={strong_mono_early_collision_mean:.4f}",
+                flush=True,
+            )
+            break
     
     # 训练结束
     print(f"\n{'='*60}")

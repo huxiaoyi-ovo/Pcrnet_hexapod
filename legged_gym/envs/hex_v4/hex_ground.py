@@ -1353,6 +1353,64 @@ class HexGround(LeggedRobot):
         self.pcr_new_curriculum_enabled = bool(
             self.nav_cfg is not None and getattr(self.nav_cfg, "pcr_new_curriculum_enable", False)
         )
+        self.pcr_new_strong_mono_curriculum_enabled = bool(
+            self.pcr_new_curriculum_enabled
+            and self.nav_cfg is not None
+            and getattr(self.nav_cfg, "pcr_new_strong_mono_curriculum_enable", False)
+        )
+        self.pcr_new_strong_mono_transitions = 0
+        self.pcr_new_strong_mono_mastery_stage = 0
+        self.pcr_new_strong_mono_openings = (6144000, 12288000, 18432000)
+        self.pcr_new_strong_mono_stage_weights = (
+            (1.00, 0.00, 0.00, 0.00),
+            (0.40, 0.60, 0.00, 0.00),
+            (0.20, 0.30, 0.50, 0.00),
+            (0.10, 0.20, 0.30, 0.40),
+        )
+        self.pcr_new_strong_mono_window = 2048
+        self.pcr_new_strong_mono_success_threshold = 0.50
+        self.pcr_new_strong_mono_row_success_threshold = 0.70
+        self.pcr_new_strong_mono_collision_threshold = 0.30
+        self.pcr_new_strong_mono_probe_ratio = 0.20
+        if self.pcr_new_strong_mono_curriculum_enabled:
+            configured_openings = tuple(
+                int(v) for v in getattr(self.nav_cfg, "pcr_new_strong_mono_transition_openings", ())
+            )
+            if configured_openings != self.pcr_new_strong_mono_openings:
+                raise RuntimeError(
+                    "Strong Mono curriculum transition openings must be "
+                    "(6144000, 12288000, 18432000)."
+                )
+            configured_weights = tuple(
+                tuple(float(v) for v in row)
+                for row in getattr(self.nav_cfg, "pcr_new_strong_mono_stage_weights", ())
+            )
+            if configured_weights != self.pcr_new_strong_mono_stage_weights:
+                raise RuntimeError("Strong Mono curriculum stage weights are frozen.")
+            configured_window = int(getattr(self.nav_cfg, "pcr_new_strong_mono_window_episodes", 0))
+            configured_thresholds = (
+                float(getattr(self.nav_cfg, "pcr_new_strong_mono_success_threshold", float("nan"))),
+                float(getattr(self.nav_cfg, "pcr_new_strong_mono_row_success_threshold", float("nan"))),
+                float(getattr(self.nav_cfg, "pcr_new_strong_mono_collision_threshold", float("nan"))),
+                float(getattr(self.nav_cfg, "pcr_new_strong_mono_probe_ratio", float("nan"))),
+            )
+            if configured_window != self.pcr_new_strong_mono_window or configured_thresholds != (
+                self.pcr_new_strong_mono_success_threshold,
+                self.pcr_new_strong_mono_row_success_threshold,
+                self.pcr_new_strong_mono_collision_threshold,
+                self.pcr_new_strong_mono_probe_ratio,
+            ):
+                raise RuntimeError("Strong Mono curriculum contract values are frozen.")
+        self.pcr_new_strong_mono_level_hists = {
+            level: self._make_s_avoid_metric_history(self.pcr_new_strong_mono_window)
+            for level in range(4)
+        }
+        self.pcr_new_strong_mono_terminal_success_override = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
+        self.pcr_new_strong_mono_terminal_success_override_valid = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
         self.pcr_new_curriculum_level = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long
         )
@@ -1404,6 +1462,16 @@ class HexGround(LeggedRobot):
         self.extras["avoid_preset_core_depth_mean"] = 0.0
         self.extras["pcr_new_curriculum_enabled"] = float(self.pcr_new_curriculum_enabled)
         self.extras["pcr_new_curriculum_progress"] = 0.0
+        self.extras["pcr_new_strong_mono_enabled"] = float(self.pcr_new_strong_mono_curriculum_enabled)
+        self.extras["pcr_new_strong_mono_transitions"] = 0
+        self.extras["pcr_new_strong_mono_open_stage"] = 0
+        self.extras["pcr_new_strong_mono_mastery_stage"] = 0
+        self.extras["pcr_new_strong_mono_probe_ratio"] = 0.0
+        for level_idx in range(4):
+            self.extras[f"pcr_new_strong_mono_level{level_idx}_success"] = 0.0
+            self.extras[f"pcr_new_strong_mono_level{level_idx}_row_success"] = 0.0
+            self.extras[f"pcr_new_strong_mono_level{level_idx}_collision"] = 0.0
+            self.extras[f"pcr_new_strong_mono_level{level_idx}_episodes"] = 0
         self.extras["pcr_new_level_mean"] = 0.0
         self.extras["pcr_new_target_speed_mean"] = 0.0
         self.extras["pcr_new_row_count_mean"] = 0.0
@@ -2862,6 +2930,9 @@ class HexGround(LeggedRobot):
     def _pcr_new_curriculum_progress(self) -> float:
         if not bool(getattr(self, "pcr_new_curriculum_enabled", False)):
             return 0.0
+        if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            final_opening = float(self.pcr_new_strong_mono_openings[-1])
+            return float(np.clip(float(self.pcr_new_strong_mono_transitions) / final_opening, 0.0, 1.0))
         progress_override = getattr(self.nav_cfg, "pcr_new_curriculum_progress_override", None)
         if progress_override is not None:
             return float(np.clip(float(progress_override), 0.0, 1.0))
@@ -2882,11 +2953,72 @@ class HexGround(LeggedRobot):
         arr = arr / max(float(arr.sum()), 1e-12)
         return arr
 
+    def _pcr_new_strong_mono_open_stage(self) -> int:
+        if not bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            return 0
+        return int(sum(
+            int(self.pcr_new_strong_mono_transitions) >= int(opening)
+            for opening in self.pcr_new_strong_mono_openings
+        ))
+
+    def _pcr_new_strong_mono_level_rates(self, level: int) -> Tuple[float, float, float]:
+        hist = self.pcr_new_strong_mono_level_hists.get(int(level), None)
+        if hist is None:
+            return 0.0, 0.0, 0.0
+        return (
+            self._s_avoid_collision_rate(hist["success"]),
+            self._s_avoid_collision_rate(hist["row_success"]),
+            self._s_avoid_collision_rate(hist["collision"]),
+        )
+
+    def _pcr_new_strong_mono_frontier_competent(self) -> bool:
+        level = int(self.pcr_new_strong_mono_mastery_stage)
+        hist = self.pcr_new_strong_mono_level_hists[level]
+        if len(hist["success"]) < self.pcr_new_strong_mono_window:
+            return False
+        success, row_success, collision = self._pcr_new_strong_mono_level_rates(level)
+        return bool(
+            success >= self.pcr_new_strong_mono_success_threshold
+            and row_success >= self.pcr_new_strong_mono_row_success_threshold
+            and collision <= self.pcr_new_strong_mono_collision_threshold
+        )
+
+    def _advance_pcr_new_strong_mono_transitions(self, transitions: int) -> None:
+        if not bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            return
+        transitions = int(transitions)
+        if transitions < 0:
+            raise ValueError("Strong Mono curriculum transitions must be non-negative.")
+        self.pcr_new_strong_mono_transitions += transitions
+        open_stage = self._pcr_new_strong_mono_open_stage()
+        # At most one sequential mastery change per update; episode count never
+        # changes availability or advances a stage on its own.
+        if (
+            self.pcr_new_strong_mono_mastery_stage < open_stage
+            and self._pcr_new_strong_mono_frontier_competent()
+        ):
+            self.pcr_new_strong_mono_mastery_stage += 1
+        self._update_pcr_new_curriculum_extras()
+
+    def _pcr_new_strong_mono_sampling_weights(self, rng: np.random.RandomState) -> Tuple[np.ndarray, bool]:
+        mastery = int(self.pcr_new_strong_mono_mastery_stage)
+        open_stage = self._pcr_new_strong_mono_open_stage()
+        probe = bool(mastery < open_stage and not self._pcr_new_strong_mono_frontier_competent())
+        if probe and float(rng.uniform()) < self.pcr_new_strong_mono_probe_ratio:
+            weights = np.zeros(4, dtype=np.float64)
+            weights[mastery + 1] = 1.0
+            return weights, True
+        return np.asarray(self.pcr_new_strong_mono_stage_weights[mastery], dtype=np.float64), False
+
     def _sample_pcr_new_curriculum(self, env_id: int, episode_idx: int) -> Tuple[int, float, int]:
-        progress = self._pcr_new_curriculum_progress()
-        weights = self._pcr_new_curriculum_weights(progress)
         seed0 = int(getattr(self.cfg.terrain, "avoid_seed", 7001))
-        rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131 + 7919)
+        if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131 + 19301)
+            weights, _ = self._pcr_new_strong_mono_sampling_weights(rng)
+        else:
+            progress = self._pcr_new_curriculum_progress()
+            weights = self._pcr_new_curriculum_weights(progress)
+            rng = np.random.RandomState(seed0 + env_id * 10007 + episode_idx * 131 + 7919)
         level = int(rng.choice(np.arange(4, dtype=np.int64), p=weights))
         if level == 0:
             stage = 1
@@ -2914,12 +3046,115 @@ class HexGround(LeggedRobot):
             speed = float(speed_override)
         return stage, speed, level
 
+    def _set_pcr_new_strong_mono_terminal_success_override(
+        self, env_ids: torch.Tensor, success_flags: torch.Tensor
+    ) -> None:
+        if not bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            return
+        if env_ids.numel() != success_flags.numel():
+            raise ValueError("Strong Mono terminal success override shape mismatch.")
+        self.pcr_new_strong_mono_terminal_success_override[env_ids] = success_flags.to(
+            device=self.device, dtype=torch.bool
+        )
+        self.pcr_new_strong_mono_terminal_success_override_valid[env_ids] = True
+
+    def export_pcr_new_curriculum_state(self) -> Optional[dict]:
+        if not bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            return None
+        return {
+            "schema": "strong_mono_curriculum_v1",
+            "transitions": int(self.pcr_new_strong_mono_transitions),
+            "mastery_stage": int(self.pcr_new_strong_mono_mastery_stage),
+            "openings": list(self.pcr_new_strong_mono_openings),
+            "stage_weights": [list(row) for row in self.pcr_new_strong_mono_stage_weights],
+            "window": int(self.pcr_new_strong_mono_window),
+            "thresholds": {
+                "success": float(self.pcr_new_strong_mono_success_threshold),
+                "row_success": float(self.pcr_new_strong_mono_row_success_threshold),
+                "collision": float(self.pcr_new_strong_mono_collision_threshold),
+                "probe_ratio": float(self.pcr_new_strong_mono_probe_ratio),
+            },
+            "level_histories": {
+                str(level): {name: list(values) for name, values in hists.items()}
+                for level, hists in self.pcr_new_strong_mono_level_hists.items()
+            },
+            "env_episode_count": self.s_avoid_env_episode_count.detach().cpu().tolist(),
+            "curriculum_level": self.pcr_new_curriculum_level.detach().cpu().tolist(),
+            "target_speed": self.pcr_new_target_speed.detach().cpu().tolist(),
+            "stage_per_env": self.s_avoid_stage_per_env.detach().cpu().tolist(),
+        }
+
+    def import_pcr_new_curriculum_state(self, state: Optional[dict]) -> bool:
+        if state is None:
+            return False
+        if not bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            raise RuntimeError("Strong Mono curriculum state cannot be loaded outside its opt-in profile.")
+        if state.get("schema") != "strong_mono_curriculum_v1":
+            raise ValueError("Unsupported Strong Mono curriculum state schema.")
+        if tuple(int(v) for v in state.get("openings", ())) != self.pcr_new_strong_mono_openings:
+            raise ValueError("Strong Mono curriculum openings mismatch on resume.")
+        saved_weights = tuple(
+            tuple(float(v) for v in row) for row in state.get("stage_weights", ())
+        )
+        if saved_weights != self.pcr_new_strong_mono_stage_weights:
+            raise ValueError("Strong Mono curriculum stage weights mismatch on resume.")
+        thresholds = state.get("thresholds", {})
+        if (
+            int(state.get("window", -1)) != self.pcr_new_strong_mono_window
+            or float(thresholds.get("success", float("nan"))) != self.pcr_new_strong_mono_success_threshold
+            or float(thresholds.get("row_success", float("nan"))) != self.pcr_new_strong_mono_row_success_threshold
+            or float(thresholds.get("collision", float("nan"))) != self.pcr_new_strong_mono_collision_threshold
+            or float(thresholds.get("probe_ratio", float("nan"))) != self.pcr_new_strong_mono_probe_ratio
+        ):
+            raise ValueError("Strong Mono curriculum contract mismatch on resume.")
+        mastery = int(state.get("mastery_stage", -1))
+        if mastery < 0 or mastery > 3:
+            raise ValueError("Invalid Strong Mono mastery stage in checkpoint.")
+        self.pcr_new_strong_mono_transitions = max(0, int(state.get("transitions", 0)))
+        self.pcr_new_strong_mono_mastery_stage = mastery
+        histories = state.get("level_histories", {})
+        for level in range(4):
+            saved = histories.get(str(level), {})
+            for name, hist in self.pcr_new_strong_mono_level_hists[level].items():
+                hist.clear()
+                hist.extend(float(v) for v in saved.get(name, ()))
+        tensor_specs = (
+            ("env_episode_count", self.s_avoid_env_episode_count, torch.long),
+            ("curriculum_level", self.pcr_new_curriculum_level, torch.long),
+            ("target_speed", self.pcr_new_target_speed, torch.float32),
+            ("stage_per_env", self.s_avoid_stage_per_env, torch.long),
+        )
+        for key, target, dtype in tensor_specs:
+            values = state.get(key, None)
+            if not isinstance(values, list) or len(values) != self.num_envs:
+                raise ValueError(f"Strong Mono curriculum checkpoint has invalid {key}.")
+            target.copy_(torch.as_tensor(values, device=self.device, dtype=dtype))
+        self._update_pcr_new_curriculum_extras()
+        return True
+
     def _update_pcr_new_curriculum_extras(self) -> None:
         if not bool(getattr(self, "pcr_new_curriculum_enabled", False)):
             return
         levels = self.pcr_new_curriculum_level.to(dtype=torch.float32)
         stages = self.s_avoid_stage_per_env.to(dtype=torch.float32)
         self.extras["pcr_new_curriculum_progress"] = float(self._pcr_new_curriculum_progress())
+        if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            open_stage = self._pcr_new_strong_mono_open_stage()
+            mastery = int(self.pcr_new_strong_mono_mastery_stage)
+            probe_active = mastery < open_stage and not self._pcr_new_strong_mono_frontier_competent()
+            self.extras["pcr_new_strong_mono_transitions"] = int(self.pcr_new_strong_mono_transitions)
+            self.extras["pcr_new_strong_mono_open_stage"] = int(open_stage)
+            self.extras["pcr_new_strong_mono_mastery_stage"] = mastery
+            self.extras["pcr_new_strong_mono_probe_ratio"] = (
+                float(self.pcr_new_strong_mono_probe_ratio) if probe_active else 0.0
+            )
+            for level_idx in range(4):
+                success, row_success, collision = self._pcr_new_strong_mono_level_rates(level_idx)
+                hist = self.pcr_new_strong_mono_level_hists[level_idx]
+                self.extras[f"pcr_new_strong_mono_level{level_idx}_success"] = success
+                self.extras[f"pcr_new_strong_mono_level{level_idx}_row_success"] = row_success
+                self.extras[f"pcr_new_strong_mono_level{level_idx}_collision"] = collision
+                self.extras[f"pcr_new_strong_mono_level{level_idx}_episodes"] = len(hist["success"])
         self.extras["pcr_new_level_mean"] = float(levels.mean().item()) if levels.numel() > 0 else 0.0
         self.extras["pcr_new_target_speed_mean"] = (
             float(self.pcr_new_target_speed.mean().item()) if self.pcr_new_target_speed.numel() > 0 else 0.0
@@ -2990,6 +3225,7 @@ class HexGround(LeggedRobot):
         self,
         episode_collision_flags: torch.Tensor,
         episode_stage_ids: Optional[torch.Tensor] = None,
+        episode_curriculum_level_ids: Optional[torch.Tensor] = None,
         episode_exposure_flags: Optional[torch.Tensor] = None,
         episode_progress_flags: Optional[torch.Tensor] = None,
         episode_success_flags: Optional[torch.Tensor] = None,
@@ -3084,6 +3320,30 @@ class HexGround(LeggedRobot):
         if episode_row_success_flags is None:
             episode_row_success_flags = torch.ones_like(episode_collision_flags, dtype=torch.float32)
         row_success_flags = episode_row_success_flags.detach().to(device="cpu", dtype=torch.float32).tolist()
+        if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+            if episode_curriculum_level_ids is None:
+                raise RuntimeError("Strong Mono curriculum requires per-episode curriculum levels.")
+            level_ids = episode_curriculum_level_ids.detach().to(device="cpu", dtype=torch.long).tolist()
+            decisions = (
+                torch.ones_like(episode_collision_flags, dtype=torch.bool)
+                if episode_decision_flags is None else episode_decision_flags.to(dtype=torch.bool)
+            ).detach().to(device="cpu", dtype=torch.bool).tolist()
+            for level, failed, succeeded, row_succeeded, decision in zip(
+                level_ids, flags, success_flags, row_success_flags, decisions
+            ):
+                if not decision or int(level) not in self.pcr_new_strong_mono_level_hists:
+                    continue
+                hist = self.pcr_new_strong_mono_level_hists[int(level)]
+                hist["collision"].append(1.0 if bool(failed) else 0.0)
+                hist["success"].append(float(succeeded))
+                hist["row_success"].append(float(row_succeeded))
+            # Kept only as a legacy diagnostic counter.  It has no effect on
+            # Strong Mono availability, probes, or mastery.
+            self.s_avoid_total_completed_episodes += len(flags)
+            self._advance_pcr_new_strong_mono_transitions(0)
+            self.extras["avoid_stage"] = float(torch.mode(self.s_avoid_stage_per_env).values.item())
+            self.extras["avoid_completed_episodes"] = int(self.s_avoid_total_completed_episodes)
+            return
         for stage_id, flag, exposed, progressed, succeeded, row_succeeded in zip(
             stage_ids,
             flags,
@@ -5886,6 +6146,11 @@ class HexGround(LeggedRobot):
             if bool(completed_mask.any().item()):
                 completed_env_ids = env_ids[completed_mask]
                 completed_stage_ids = self.s_avoid_stage_per_env[completed_env_ids].clone()
+                completed_curriculum_level_ids = (
+                    self.pcr_new_curriculum_level[completed_env_ids].clone()
+                    if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False))
+                    else None
+                )
                 completed_flags = self.s_avoid_episode_collision[completed_env_ids].clone()
                 completed_exposed = self.s_avoid_episode_exposed[completed_env_ids].clone()
                 completed_cross_line_dist, completed_center_y, completed_cross_line_y = (
@@ -5902,6 +6167,13 @@ class HexGround(LeggedRobot):
                     completed_env_ids,
                     stage_ids=completed_stage_ids,
                 )
+                if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+                    override_valid = self.pcr_new_strong_mono_terminal_success_override_valid[completed_env_ids]
+                    completed_success = torch.where(
+                        override_valid,
+                        self.pcr_new_strong_mono_terminal_success_override[completed_env_ids],
+                        completed_success,
+                    )
                 if self.s_avoid_clutter_enabled:
                     terminal_collision = (
                         self.s_avoid_episode_physical[completed_env_ids]
@@ -5934,12 +6206,15 @@ class HexGround(LeggedRobot):
                 self._update_s_avoid_curriculum(
                     completed_flags,
                     completed_stage_ids,
+                    completed_curriculum_level_ids,
                     completed_exposed,
                     completed_progress,
                     completed_success,
                     completed_row_success,
                     self.s_avoid_decision_episode[completed_env_ids].clone(),
                 )
+                if bool(getattr(self, "pcr_new_strong_mono_curriculum_enabled", False)):
+                    self.pcr_new_strong_mono_terminal_success_override_valid[completed_env_ids] = False
             self.s_avoid_episode_collision[env_ids] = False
             self.s_avoid_episode_exposed[env_ids] = False
             self.s_avoid_episode_goal_init_dist[env_ids] = 0.0

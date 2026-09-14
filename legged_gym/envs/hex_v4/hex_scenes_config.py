@@ -759,6 +759,21 @@ class HexPCRNewCfg(HexPCRLineAvoidBasicCfg):
     class navigation(HexPCRLineAvoidBasicCfg.navigation):
         pcr_new_curriculum_enable = True
         pcr_new_curriculum_total_episodes = 120000
+        # Opt-in only for the reviewer-proof monolithic PPO baseline.  The
+        # historical PCR/Avoid episode-count curriculum remains the default.
+        pcr_new_strong_mono_curriculum_enable = False
+        pcr_new_strong_mono_transition_openings = (6144000, 12288000, 18432000)
+        pcr_new_strong_mono_stage_weights = (
+            (1.00, 0.00, 0.00, 0.00),
+            (0.40, 0.60, 0.00, 0.00),
+            (0.20, 0.30, 0.50, 0.00),
+            (0.10, 0.20, 0.30, 0.40),
+        )
+        pcr_new_strong_mono_window_episodes = 2048
+        pcr_new_strong_mono_success_threshold = 0.50
+        pcr_new_strong_mono_row_success_threshold = 0.70
+        pcr_new_strong_mono_collision_threshold = 0.30
+        pcr_new_strong_mono_probe_ratio = 0.20
 
 
 class HexPCRNewCfgPPO(HexPCRLineAvoidBasicCfgPPO):

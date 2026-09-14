@@ -10,6 +10,10 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-09-14 Strong Mono 混合课程（已完成 CPU smoke）
+
+- [x] ~~[P0] 仅为 reviewer-proof Strong Mono 的 `s_pcr_new` 增加固定 transition 开放点（6,144,000 / 12,288,000 / 18,432,000）、按 level 隔离的 2048 回合能力窗口（success/row-success/collision=`.50/.70/.30`）和未达标时固定 20% next-level probe；失败、碰撞和回合长度不得通过 completed-episode 计数加速 transition 开放或 mastery，collision 仍作为 competence 门槛阻止达标。PCR/Avoid/default 保持旧 completed-episode 课程路径；不改 reward、PPO、网络、观测、动作、几何或评测，不启动训练/评测。`py_compile`、`test_pcr_training_speed.py`（边界、失败不加速、probe、level 隔离、state roundtrip、旧路径）和 `test_mono_ppo_reviewer_protocol.py` 通过。~~
+
 ## 2026-09-11 Avoid clutter 取消地图规则减速（重训进行中）
 
 - [x] ~~[P0] `s_avoid_clutter` 的 Avoid 训练、play 与 eval 固定关闭 CommandPostProcessor 的 clearance 风险缩放：保持 1-D 横移决策、名义前进、命令限幅与 slew 不变；不改历史 `s_avoid_basic`、PCR、Mono、奖励、几何或 PPO。旧 checkpoint 若回放为启用缩放，必须显式报告覆盖，保存的运行元数据必须为 `disable_risk_scale=true`。补充 CPU 行为检查，验证近障碍不会因该规则将命令置零。~~
