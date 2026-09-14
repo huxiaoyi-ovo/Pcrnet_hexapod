@@ -6889,11 +6889,13 @@ def train(args):
                 ckpt.get("best_online_selection_metric", ckpt.get("selection_metric", best_selection_metric_name))
             )
         if isinstance(ckpt, dict) and "torch_rng_state" in ckpt:
-            torch.set_rng_state(ckpt["torch_rng_state"])
+            torch.set_rng_state(ckpt["torch_rng_state"].detach().cpu())
         if isinstance(ckpt, dict) and "numpy_rng_state" in ckpt:
             np.random.set_state(ckpt["numpy_rng_state"])
         if torch.cuda.is_available() and isinstance(ckpt, dict) and "cuda_rng_state" in ckpt:
-            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+            torch.cuda.set_rng_state_all([
+                state.detach().cpu() for state in ckpt["cuda_rng_state"]
+            ])
         curriculum_state = ckpt.get("pcr_new_curriculum_state", None) if isinstance(ckpt, dict) else None
         import_curriculum_state = getattr(env.env, "import_pcr_new_curriculum_state", None)
         if curriculum_state is not None and callable(import_curriculum_state):
