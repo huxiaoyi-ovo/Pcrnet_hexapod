@@ -72,6 +72,17 @@ def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval
     raise AssertionError("missing checkpoint save condition")
 
 
+def _resume_avoid_stage_restore_source():
+    source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
+    required = [
+        'not getattr(args, "resume", None) or not is_avoid_clutter_task_name(args.task)',
+        'env.env._advance_s_avoid_stage(int(resume_avoid_stage))',
+        'env.env.s_avoid_stage_per_env.fill_(int(resume_avoid_stage))',
+        '"resume_stage_history_reset": bool(resume_avoid_stage is not None)',
+    ]
+    assert all(item in source for item in required)
+
+
 def _resume_rng_restore_source():
     source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
     required = [
@@ -231,6 +242,7 @@ def main():
     assert not _actual_save_checkpoint_condition(3998, 5000, 200, checkpoint_iterations=(3999,))
     assert _actual_save_checkpoint_condition(4999, 5000, 200, checkpoint_iterations=(3999,))
 
+    _resume_avoid_stage_restore_source()
     _resume_rng_restore_source()
     cpu_rng = torch.get_rng_state()
     torch.set_rng_state(cpu_rng.cpu())

@@ -6044,6 +6044,9 @@ def train(args):
     if args.mode == "student" and skill == "moe":
         raise ValueError("当前未实现 Gate 的 student 蒸馏训练链路，禁止使用 --mode student --skill moe。")
     use_avoid_local_map = skill in ("avoid", "moe")
+    resume_avoid_stage = getattr(args, "resume_avoid_stage", None)
+    if resume_avoid_stage is not None and (not getattr(args, "resume", None) or not is_avoid_clutter_task_name(args.task)):
+        raise ValueError("--resume_avoid_stage 只允许与 s_avoid_clutter 的 --resume 一起使用。")
 
     env_cfg_override = None
     train_cfg_override = None
@@ -6060,6 +6063,9 @@ def train(args):
 
     # 创建环境
     env = HierarchicalHexapodEnv(args, device, env_cfg=env_cfg_override, train_cfg=train_cfg_override)
+    if resume_avoid_stage is not None:
+        env.env._advance_s_avoid_stage(int(resume_avoid_stage))
+        env.env.s_avoid_stage_per_env.fill_(int(resume_avoid_stage))
     env.disable_pcr_gate_aux = bool(is_mono_ppo or getattr(args, "revision_contract", False))
     env.mono_ppo_direct_cmd = bool(is_mono_ppo)
     dprint(f"[Main] 环境初始化完成: {env.num_envs} envs")
@@ -6351,6 +6357,7 @@ def train(args):
             "output_dir",
             "save_interval",
             "checkpoint_iterations",
+            "resume_avoid_stage",
             "gamma",
             "gae_lambda",
             "clip_range",
@@ -6412,6 +6419,8 @@ def train(args):
                 "clearance_current": "pre_action_visible_map_raw_request",
                 "scene_raster_bounds_version": "exclusive_ceil_upper_v1",
                 "preference_reward_disabled_stages": [1],
+                "resume_stage_restore": int(resume_avoid_stage) if resume_avoid_stage is not None else None,
+                "resume_stage_history_reset": bool(resume_avoid_stage is not None),
                 "sanity_approved_changes_relative_to_initial": [
                     "relative_forward_clearance_improvement",
                     "stage1_preference_reward_disabled",
@@ -10137,6 +10146,8 @@ if __name__ == "__main__":
                         help='微调 checkpoint 路径（仅加载权重）')
     parser.add_argument('--allow_inexact_resume', action='store_true',
                         help='允许近似续训：接受 checkpoint 未保存 env/curriculum 完整状态')
+    parser.add_argument('--resume_avoid_stage', type=int, choices=[1, 2, 3, 4], default=None,
+                        help='s_avoid_clutter 近似续训时恢复的课程阶段；阶段统计窗口从空开始')
     
     # 训练超参数
     parser.add_argument('--num_iterations', type=int, default=1000,
