@@ -189,12 +189,12 @@ def sample_levels(harness, count=20000):
     return np.asarray([harness._sample_pcr_new_curriculum(i % 64, i // 64)[2] for i in range(count)])
 
 
-def append_level_outcomes(harness, level, success, row_success, collision, count=2048):
+def append_level_outcomes(harness, level, success, row_success, collision, count=2048, decision=False):
     harness._update_s_avoid_curriculum(
         Tensor([bool(collision)] * count),
         Tensor([1] * count),
         Tensor([int(level)] * count),
-        Tensor([True] * count),
+        Tensor([bool(decision)] * count),
         Tensor([1.0] * count),
         Tensor([float(success)] * count),
         Tensor([float(row_success)] * count),
@@ -218,6 +218,8 @@ def assert_strong_mono_contract(methods):
         raise AssertionError("next-level probe is not deterministic 20% sampling: {}".format(probe_ratio))
 
     append_level_outcomes(harness, level=0, success=0.0, row_success=0.0, collision=1.0)
+    if len(harness.pcr_new_strong_mono_level_hists[0]["success"]) != 2048:
+        raise AssertionError("non-clutter Strong Mono episodes were filtered by decision_episode")
     harness._advance_pcr_new_strong_mono_transitions(6144000)
     if harness._pcr_new_strong_mono_open_stage() != 2 or harness.pcr_new_strong_mono_mastery_stage != 0:
         raise AssertionError("failure episodes changed availability or mastery")

@@ -3324,14 +3324,13 @@ class HexGround(LeggedRobot):
             if episode_curriculum_level_ids is None:
                 raise RuntimeError("Strong Mono curriculum requires per-episode curriculum levels.")
             level_ids = episode_curriculum_level_ids.detach().to(device="cpu", dtype=torch.long).tolist()
-            decisions = (
-                torch.ones_like(episode_collision_flags, dtype=torch.bool)
-                if episode_decision_flags is None else episode_decision_flags.to(dtype=torch.bool)
-            ).detach().to(device="cpu", dtype=torch.bool).tolist()
-            for level, failed, succeeded, row_succeeded, decision in zip(
-                level_ids, flags, success_flags, row_success_flags, decisions
+            # decision_episode belongs to the clutter generator and remains false
+            # for s_pcr_new. Record every completed Strong Mono episode under the
+            # curriculum level that was sampled for that episode.
+            for level, failed, succeeded, row_succeeded in zip(
+                level_ids, flags, success_flags, row_success_flags
             ):
-                if not decision or int(level) not in self.pcr_new_strong_mono_level_hists:
+                if int(level) not in self.pcr_new_strong_mono_level_hists:
                     continue
                 hist = self.pcr_new_strong_mono_level_hists[int(level)]
                 hist["collision"].append(1.0 if bool(failed) else 0.0)

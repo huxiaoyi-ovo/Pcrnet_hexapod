@@ -2391,3 +2391,8 @@
 ## 2026-07-16 GitHub 仓库迁移
 
 - [x] Must: 将项目远程仓库迁移到 `huxiaoyi-ovo/Pcrnet_hexapod`，当前仓库后续提交统一使用 `huxiaoyi <huxiaoyi_0106@163.com>`；保留既有提交历史身份不变。
+
+## 2026-09-14 Strong Mono competence 记账修复
+
+- [x] Must: 修复非 clutter 的 `s_pcr_new` 被 clutter 专属 `decision_episode` 标志错误过滤的问题，使每个完成回合按其采样 level 写入 competence 窗口。
+- [x] Must: 保持 transition 开放点、50%/70%/30% 门槛、20% probe、2048 回合窗口、PPO、奖励及旧 PCR/Avoid 口径不变；丢弃此前 iteration 0–420 诊断 run，正式训练从 0 重启。
