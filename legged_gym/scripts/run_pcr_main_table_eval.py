@@ -285,7 +285,7 @@ def parse_args():
     parser.add_argument("--output_root", type=str, default="agents/eval_data_seed23")
     parser.add_argument("--summary_dir", type=str, default="agents/eval_data_seed23/pcr_main_table")
     parser.add_argument("--extra_summary_paths", type=str, default="", help="extra metrics dirs/files to include in final table")
-    parser.add_argument("--eval_layout", type=str, default="", choices=["", "heldout_irregular_rows"])
+    parser.add_argument("--eval_layout", type=str, default="", choices=["", "heldout_irregular_rows", "revision_heldout_mixed_v1"])
     parser.add_argument("--export_eval_layout_debug", type=str, default="")
     parser.add_argument(
         "--velocity_search_split",

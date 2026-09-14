@@ -32,6 +32,7 @@ from legged_gym.scripts import avoid14d_diagnostic as a14d
 from legged_gym.scripts import play_highlevel as ph
 from legged_gym.scripts import train_highlevel as th
 from legged_gym.pcr_policy_contract import checkpoint_cmd_policy_kwargs, get_avoid_command, validate_frozen_avoid_revision, AVOID_1D_REVISION, PCR_CANONICAL_REVISION
+from legged_gym.envs.hex_v4.revision_heldout_layout import revision_heldout_layout_metadata
 
 
 def _to_state_dict(ckpt_obj):
@@ -71,6 +72,22 @@ def _json_dumps_compact(obj) -> str:
     return json.dumps(obj, separators=(",", ":"), sort_keys=True)
 
 
+def _s_avoid_slot_primitive(env_impl, slot: int) -> str:
+    cylinder_slots = int(getattr(env_impl, "s_avoid_cylinder_slot_count", 0))
+    sphere_slots = int(getattr(env_impl, "s_avoid_sphere_slot_count", 0))
+    cap_slots = int(getattr(env_impl, "s_avoid_capsule_slot_count", 0))
+    box_slots = int(getattr(env_impl, "s_avoid_box_slot_count", 0))
+    if cylinder_slots and int(slot) < cylinder_slots:
+        return "cylinder"
+    if sphere_slots and int(slot) < cylinder_slots + sphere_slots:
+        return "sphere"
+    if int(slot) < cap_slots:
+        return "capsule"
+    if int(slot) < cap_slots + box_slots:
+        return "cube"
+    return "wall"
+
+
 def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
     if (
         env_impl is None
@@ -91,8 +108,10 @@ def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
     box_end = max(box_start, min(box_start + box_slots, int(active.shape[1])))
     terrain_cfg = getattr(getattr(env_impl, "cfg", None), "terrain", None)
     radius = float(getattr(terrain_cfg, "avoid_capsule_radius", 0.15))
+    round_height = float(getattr(terrain_cfg, "avoid_capsule_height", 0.5))
     box_x = float(getattr(terrain_cfg, "avoid_box_size_x", 0.4))
     box_y = float(getattr(terrain_cfg, "avoid_box_size_y", 0.4))
+    box_z = float(getattr(terrain_cfg, "avoid_box_size_z", 0.5))
     quat_world = getattr(env_impl, "s_avoid_quat_world", None)
     out = []
     for slot in range(cap_slots):
@@ -101,10 +120,11 @@ def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
         out.append(
             {
                 "slot": int(slot),
-                "type": "capsule",
+                "type": _s_avoid_slot_primitive(env_impl, slot),
                 "x": _safe_float(pos_world[env_id, slot, 0].item()),
                 "y": _safe_float(pos_world[env_id, slot, 1].item()),
                 "r": radius,
+                "height": 2.0 * radius if _s_avoid_slot_primitive(env_impl, slot) == "sphere" else round_height,
             }
         )
     for slot in range(box_start, box_end):
@@ -118,11 +138,12 @@ def _trajectory_obstacles_json(env_impl, env_id: int) -> str:
         out.append(
             {
                 "slot": int(slot),
-                "type": "box",
+                "type": "cube" if _s_avoid_slot_primitive(env_impl, slot) == "cube" else "box",
                 "x": _safe_float(pos_world[env_id, slot, 0].item()),
                 "y": _safe_float(pos_world[env_id, slot, 1].item()),
                 "sx": box_x,
                 "sy": box_y,
+                "sz": box_z,
                 "yaw": yaw,
             }
         )
@@ -1649,15 +1670,17 @@ class EvalRunner:
         box_slots = int(getattr(env_impl, "s_avoid_box_slot_count", 0))
         slot_count = int(active.shape[1])
         cap_radius = float(getattr(terrain_cfg, "avoid_capsule_radius", 0.15))
+        cap_height = float(getattr(terrain_cfg, "avoid_capsule_height", 0.5))
         box_x = float(getattr(terrain_cfg, "avoid_box_size_x", 0.4))
         box_y = float(getattr(terrain_cfg, "avoid_box_size_y", 0.4))
+        box_z = float(getattr(terrain_cfg, "avoid_box_size_z", 0.5))
         rows = []
         for slot in range(slot_count):
             if not bool(active[env_id, slot].item()):
                 continue
             p_world = pos_world[env_id, slot, :3]
             p_local = p_world - origin
-            kind = "capsule" if slot < cap_slots else ("box" if slot < cap_slots + box_slots else "wall")
+            kind = _s_avoid_slot_primitive(env_impl, slot)
             yaw = 0.0
             if torch.is_tensor(quat_world):
                 qz = _safe_float(quat_world[env_id, slot, 2].item())
@@ -1673,17 +1696,20 @@ class EvalRunner:
                     "x_world": _safe_float(p_world[0].item()),
                     "y_world": _safe_float(p_world[1].item()),
                     "z_world": _safe_float(p_world[2].item()),
-                    "radius": cap_radius if kind == "capsule" else "",
-                    "size_x": box_x if kind == "box" else "",
-                    "size_y": box_y if kind == "box" else "",
+                    "radius": cap_radius if kind in ("capsule", "cylinder", "sphere") else "",
+                    "height": (2.0 * cap_radius if kind == "sphere" else cap_height) if kind in ("capsule", "cylinder", "sphere") else "",
+                    "size_x": box_x if kind in ("box", "cube") else "",
+                    "size_y": box_y if kind in ("box", "cube") else "",
+                    "size_z": box_z if kind in ("box", "cube") else "",
                     "yaw_deg": math.degrees(yaw),
                 }
             )
-        csv_path = os.path.join(out_dir, "heldout_irregular_rows_layout.csv")
+        layout_name = str(getattr(self.args, "eval_layout", "") or "heldout_irregular_rows")
+        csv_path = os.path.join(out_dir, f"{layout_name}_layout.csv")
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
             fieldnames = [
                 "slot", "type", "x_local", "y_local", "z_local",
-                "x_world", "y_world", "z_world", "radius", "size_x", "size_y", "yaw_deg",
+                "x_world", "y_world", "z_world", "radius", "height", "size_x", "size_y", "size_z", "yaw_deg",
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
             writer.writeheader()
@@ -1700,7 +1726,7 @@ class EvalRunner:
             for row in rows:
                 x = float(row["x_local"])
                 y = float(row["y_local"])
-                if row["type"] == "box":
+                if row["type"] in ("box", "cube"):
                     sx = float(row["size_x"])
                     sy = float(row["size_y"])
                     yaw_deg = float(row["yaw_deg"])
@@ -1731,7 +1757,7 @@ class EvalRunner:
                 row_y = list(env_impl._get_s_avoid_fixed_stage_row_y(4))
             for y in row_y:
                 ax.axhline(float(y), color="#e0e0e0", linewidth=0.8, zorder=0)
-            ax.set_title("held-out irregular rows")
+            ax.set_title(layout_name)
             ax.set_xlabel("local x / lateral [m]")
             ax.set_ylabel("local y / forward [m]")
             ax.set_xlim(-1.5, 1.5)
@@ -5910,23 +5936,42 @@ class EvalRunner:
                 "pcr_new_curriculum": self.resolved_protocol.get("pcr_new_curriculum", None),
                 "generalize": bool(getattr(self.args, "generalize", False)),
                 "eval_layout": str(getattr(self.args, "eval_layout", "") or ""),
+                "layout_id": (
+                    revision_heldout_layout_metadata()["layout_id"]
+                    if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
+                    else ""
+                ),
+                "layout_sha256": (
+                    revision_heldout_layout_metadata()["layout_sha256"]
+                    if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
+                    else ""
+                ),
                 "layout_split": (
                     "heldout_test"
-                    if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
+                    if str(getattr(self.args, "eval_layout", "") or "") in ("heldout_irregular_rows", "revision_heldout_mixed_v1")
                     else "main_test"
                 ),
-                "layout_used_for_training": False if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows" else None,
-                "layout_used_for_validation": False if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows" else None,
+                "layout_used_for_training": False if str(getattr(self.args, "eval_layout", "") or "") in ("heldout_irregular_rows", "revision_heldout_mixed_v1") else None,
+                "layout_used_for_validation": False if str(getattr(self.args, "eval_layout", "") or "") in ("heldout_irregular_rows", "revision_heldout_mixed_v1") else None,
                 "layout_family": (
                     "irregular_nonmirror_mixed_shape_rows"
                     if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
-                    else ""
+                    else (
+                        "fixed_five_row_mixed_primitives"
+                        if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
+                        else ""
+                    )
                 ),
                 "layout_features": (
                     "non-mirror; non-strict alternating; consecutive same-side rows; variable row spacing; "
                     "variable passage width; 11 capsules plus 2 limited-size boxes; no walls; no dead ends; no dynamic obstacles"
                     if str(getattr(self.args, "eval_layout", "") or "") == "heldout_irregular_rows"
-                    else ""
+                    else (
+                        "frozen coordinates; L-L-R-R-L; unequal row spacing; variable openings; "
+                        "5 cube + 5 cylinder + 5 sphere; no walls; no dead ends; no dynamic obstacles"
+                        if str(getattr(self.args, "eval_layout", "") or "") == "revision_heldout_mixed_v1"
+                        else ""
+                    )
                 ),
                 "avoid_stage_override": None if getattr(self.args, "avoid_stage_override", None) is None else int(self.args.avoid_stage_override),
                 "freeze_avoid_stage": bool(getattr(self.args, "freeze_avoid_stage", False)) or (
@@ -6824,7 +6869,7 @@ def parse_args():
         "--eval_layout",
         type=str,
         default="",
-        choices=["", "heldout_irregular_rows"],
+        choices=["", "heldout_irregular_rows", "revision_heldout_mixed_v1"],
         help="eval-only layout split; heldout_irregular_rows is never used for training or tuning",
     )
     parser.add_argument(
@@ -7013,7 +7058,7 @@ def parse_args():
         if str(getattr(args, "task", "")) != "s_pcr_line_avoid_basic":
             parser.error("--eval_layout 当前只支持 --task s_pcr_line_avoid_basic")
         if getattr(args, "avoid_stage_override", None) not in (None, 4):
-            parser.error("--eval_layout heldout_irregular_rows 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
+            parser.error("--eval_layout 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
     if getattr(args, "pcr_line_target_speed", None) is not None and getattr(args, "pcr_line_target_speed_scale", None) is not None:
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
     if str(getattr(args, "avoid14d_probe_dir", "") or "").strip():
