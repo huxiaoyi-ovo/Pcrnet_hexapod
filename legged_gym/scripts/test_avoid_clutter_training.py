@@ -30,7 +30,7 @@ def _extract_runtime_methods():
     return namespace
 
 
-def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval):
+def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval, checkpoint_iterations=()):
     source = (Path(__file__).resolve().parent / "train_highlevel.py").read_text()
     tree = ast.parse(source)
     for parent in ast.walk(tree):
@@ -57,7 +57,10 @@ def _actual_save_checkpoint_condition(iteration, total_iterations, save_interval
             namespace = {
                 "iteration": iteration,
                 "total_iterations": total_iterations,
-                "args": SimpleNamespace(save_interval=save_interval),
+                "args": SimpleNamespace(
+                    save_interval=save_interval,
+                    checkpoint_iterations=list(checkpoint_iterations),
+                ),
                 "is_mono_ppo": False,
             }
             module = ast.Module(
@@ -215,6 +218,9 @@ def main():
     assert not _actual_save_checkpoint_condition(998, 1000, 200)
     assert _actual_save_checkpoint_condition(999, 1000, 200)
     assert _actual_save_checkpoint_condition(0, 1, 200)
+    assert _actual_save_checkpoint_condition(3999, 5000, 200, checkpoint_iterations=(3999,))
+    assert not _actual_save_checkpoint_condition(3998, 5000, 200, checkpoint_iterations=(3999,))
+    assert _actual_save_checkpoint_condition(4999, 5000, 200, checkpoint_iterations=(3999,))
 
     enforce_clutter_contract = _extract_clutter_risk_scale_contract()
     clutter_args = SimpleNamespace(task="s_avoid_clutter", disable_risk_scale=False)

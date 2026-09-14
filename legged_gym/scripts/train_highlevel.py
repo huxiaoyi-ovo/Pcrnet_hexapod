@@ -6350,6 +6350,7 @@ def train(args):
             "low_level_ckpt",
             "output_dir",
             "save_interval",
+            "checkpoint_iterations",
             "gamma",
             "gae_lambda",
             "clip_range",
@@ -9937,6 +9938,7 @@ def train(args):
             or (
                 reviewer_mono and completed_iteration % 100 == 0
             )
+            or iteration in getattr(args, "checkpoint_iterations", [])
             or (
                 not reviewer_mono and iteration > 0 and (
                     iteration % args.save_interval == 0
@@ -10139,6 +10141,8 @@ if __name__ == "__main__":
     # 训练超参数
     parser.add_argument('--num_iterations', type=int, default=1000,
                         help='训练迭代次数')
+    parser.add_argument('--checkpoint_iterations', nargs='*', type=int, default=[],
+                        help='额外保存 checkpoint 的 zero-based iteration 索引')
     parser.add_argument('--num_steps', type=int, default=24,
                         help='每次迭代的步数')
     parser.add_argument('--num_epochs', type=int, default=2,
