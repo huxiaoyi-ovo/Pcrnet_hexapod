@@ -54,6 +54,46 @@ from legged_gym.pcr_policy_contract import checkpoint_cmd_policy_kwargs, get_avo
 # Use CLI flag to gate debug output before args are parsed.
 DEBUG_MODE = "--debug" in sys.argv
 
+MONO_PPO_ADAPTIVE_LR_FACTOR = 1.5
+MONO_PPO_MIN_LR = 1e-5
+MONO_PPO_MAX_LR = 1e-2
+MONO_PPO_CATASTROPHIC_KL_MULTIPLIER = 100.0
+MONO_PPO_CATASTROPHIC_KL_FLOOR = 1.0
+
+
+def _bounded_mono_adaptive_lr(
+    current_lr: float,
+    exact_kl: float,
+    desired_kl: float,
+    iteration_start_lr: float,
+) -> float:
+    """Adapt Mono PPO LR without compounding beyond one factor per iteration."""
+    proposed = float(current_lr)
+    if exact_kl > 2.0 * desired_kl:
+        proposed /= MONO_PPO_ADAPTIVE_LR_FACTOR
+    elif 0.0 < exact_kl < 0.5 * desired_kl:
+        proposed *= MONO_PPO_ADAPTIVE_LR_FACTOR
+    iteration_min = max(MONO_PPO_MIN_LR, iteration_start_lr / MONO_PPO_ADAPTIVE_LR_FACTOR)
+    iteration_max = min(MONO_PPO_MAX_LR, iteration_start_lr * MONO_PPO_ADAPTIVE_LR_FACTOR)
+    return float(np.clip(proposed, iteration_min, iteration_max))
+
+
+def _diagonal_gaussian_kl_mean(
+    old_mean: torch.Tensor,
+    old_std: torch.Tensor,
+    new_mean: torch.Tensor,
+    new_std: torch.Tensor,
+) -> torch.Tensor:
+    """Return KL(old || new) for diagonal Gaussian command distributions."""
+    old_std = old_std.clamp_min(1e-6)
+    new_std = new_std.clamp_min(1e-6)
+    return torch.sum(
+        torch.log(new_std / old_std)
+        + (old_std.square() + (old_mean - new_mean).square()) / (2.0 * new_std.square())
+        - 0.5,
+        dim=-1,
+    ).mean()
+
 
 def _debug_print(*args, **kwargs):
     if DEBUG_MODE:
@@ -6505,6 +6545,15 @@ def train(args):
         )
         meta["pcr_w_aux_is_method_auxiliary_loss"] = True
         meta["ppo_profile"] = "reviewer_proof_mono_v1" if is_mono_ppo and getattr(args, "revision_contract", False) else "task_default"
+        if meta["ppo_profile"] == "reviewer_proof_mono_v1":
+            meta["adaptive_lr_max_change_per_iteration"] = MONO_PPO_ADAPTIVE_LR_FACTOR
+            meta["catastrophic_kl_guard"] = {
+                "threshold": max(
+                    MONO_PPO_CATASTROPHIC_KL_FLOOR,
+                    MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
+                ),
+                "action": "rollback_full_ppo_iteration",
+            }
         meta["num_mini_batches"] = int(math.ceil(float(env.num_envs * args.num_steps) / float(args.mini_batch_size)))
         meta["transitions_per_iteration"] = int(env.num_envs * args.num_steps)
         meta["planned_total_transitions"] = int(env.num_envs * args.num_steps * args.num_iterations)
@@ -8871,6 +8920,8 @@ def train(args):
         expert_log_prob_mean_sum = 0
         approx_kl_sum = 0
         exact_kl_sum = 0
+        exact_kl_max = 0.0
+        post_step_exact_kl_max = 0.0
         clip_frac_sum = 0
         num_updates = 0
         expert_alpha_update = (
@@ -8883,6 +8934,27 @@ def train(args):
             current_lr = adaptive_learning_rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
+        mono_kl_guard_enabled = bool(
+            reviewer_mono_formal
+            and str(getattr(args, "lr_schedule", "fixed")) == "adaptive"
+        )
+        adaptive_lr_iteration_start = float(adaptive_learning_rate)
+        adaptive_lr_min_seen = float(adaptive_learning_rate)
+        adaptive_lr_max_seen = float(adaptive_learning_rate)
+        catastrophic_kl_threshold = max(
+            MONO_PPO_CATASTROPHIC_KL_FLOOR,
+            MONO_PPO_CATASTROPHIC_KL_MULTIPLIER * float(args.desired_kl),
+        )
+        catastrophic_update_rejected = False
+        optimizer_updates_before_iteration = int(optimizer_updates_completed)
+        policy_state_before_update = None
+        optimizer_state_before_update = None
+        if mono_kl_guard_enabled:
+            policy_state_before_update = {
+                name: tensor.detach().clone()
+                for name, tensor in policy.state_dict().items()
+            }
+            optimizer_state_before_update = copy.deepcopy(optimizer.state_dict())
         skipped_nonfinite_updates = 0
         sanitized_param_count = 0
         fail_fast_nonfinite = not bool(getattr(args, "allow_nonfinite_recovery", False))
@@ -9013,21 +9085,26 @@ def train(args):
                     new_cmd_std = policy_eval_info["cmd_std"][mb_action_valid].clamp_min(1e-6)
                     old_cmd_mean = mb_old_cmd_means[mb_action_valid]
                     old_cmd_std = mb_old_cmd_stds[mb_action_valid]
-                    exact_kl = torch.sum(
-                        torch.log(new_cmd_std / old_cmd_std)
-                        + (old_cmd_std.square() + (old_cmd_mean - new_cmd_mean).square()) / (2.0 * new_cmd_std.square())
-                        - 0.5,
-                        dim=-1,
-                    ).mean()
+                    exact_kl = _diagonal_gaussian_kl_mean(
+                        old_cmd_mean,
+                        old_cmd_std,
+                        new_cmd_mean,
+                        new_cmd_std,
+                    )
                     if not torch.isfinite(exact_kl):
                         _handle_nonfinite_event("non-finite exact Gaussian KL", epoch=epoch, try_sanitize=False)
                         continue
                     exact_kl_value = float(exact_kl.detach().item())
                     exact_kl_sum += exact_kl_value
-                    if exact_kl_value > 2.0 * float(args.desired_kl):
-                        adaptive_learning_rate = max(1e-5, adaptive_learning_rate / 1.5)
-                    elif 0.0 < exact_kl_value < 0.5 * float(args.desired_kl):
-                        adaptive_learning_rate = min(1e-2, adaptive_learning_rate * 1.5)
+                    exact_kl_max = max(exact_kl_max, exact_kl_value)
+                    adaptive_learning_rate = _bounded_mono_adaptive_lr(
+                        adaptive_learning_rate,
+                        exact_kl_value,
+                        float(args.desired_kl),
+                        adaptive_lr_iteration_start,
+                    )
+                    adaptive_lr_min_seen = min(adaptive_lr_min_seen, adaptive_learning_rate)
+                    adaptive_lr_max_seen = max(adaptive_lr_max_seen, adaptive_learning_rate)
                     current_lr = adaptive_learning_rate
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = current_lr
@@ -9235,6 +9312,33 @@ def train(args):
                         try_sanitize=True,
                     )
                     continue
+
+                if mono_kl_guard_enabled and mb_action_valid.any():
+                    with torch.no_grad():
+                        post_step_out = policy.forward(
+                            mb_aff_maps,
+                            mb_states,
+                            mb_goals,
+                            mb_difficulties,
+                        )
+                        post_step_exact_kl = _diagonal_gaussian_kl_mean(
+                            mb_old_cmd_means[mb_action_valid],
+                            mb_old_cmd_stds[mb_action_valid],
+                            post_step_out.cmd_mean[mb_action_valid],
+                            post_step_out.cmd_std[mb_action_valid],
+                        )
+                    post_step_exact_kl_value = float(post_step_exact_kl.detach().item())
+                    if math.isfinite(post_step_exact_kl_value):
+                        post_step_exact_kl_max = max(
+                            post_step_exact_kl_max,
+                            post_step_exact_kl_value,
+                        )
+                    if (
+                        not math.isfinite(post_step_exact_kl_value)
+                        or post_step_exact_kl_value > catastrophic_kl_threshold
+                    ):
+                        catastrophic_update_rejected = True
+                        break
                 
                 total_loss += loss.item()
                 policy_loss_sum += policy_loss.item()
@@ -9280,6 +9384,29 @@ def train(args):
                     effective_w_aux_loss,
                     loss,
                 )
+
+            if catastrophic_update_rejected:
+                break
+
+        if catastrophic_update_rejected:
+            if policy_state_before_update is None or optimizer_state_before_update is None:
+                raise RuntimeError("Mono PPO KL guard is missing rollback state")
+            policy.load_state_dict(policy_state_before_update)
+            optimizer.load_state_dict(optimizer_state_before_update)
+            optimizer_updates_completed = optimizer_updates_before_iteration
+            adaptive_learning_rate = max(
+                MONO_PPO_MIN_LR,
+                adaptive_lr_iteration_start / MONO_PPO_ADAPTIVE_LR_FACTOR,
+            )
+            current_lr = adaptive_learning_rate
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
+            print(
+                "[StrongMono][PPOGuard] Rejected and rolled back PPO iteration "
+                f"{iteration + 1}: post_step_exact_kl={post_step_exact_kl_value:.6g} "
+                f"> threshold={catastrophic_kl_threshold:.6g}; next_lr={current_lr:.6g}"
+            )
+        del policy_state_before_update, optimizer_state_before_update
         
         update_time = time.time() - start_time - rollout_time
         if log_memory_this_iter and debug_memory_device_index is not None:
@@ -9628,6 +9755,17 @@ def train(args):
         writer.add_scalar('Diag/ApproxKL', approx_kl_sum / max(num_updates, 1), iteration)
         if is_mono_ppo and str(getattr(args, "lr_schedule", "fixed")) == "adaptive":
             writer.add_scalar('Diag/ExactGaussianKL', exact_kl_sum / max(num_updates, 1), iteration)
+            writer.add_scalar('Diag/ExactGaussianKLMax', exact_kl_max, iteration)
+        if mono_kl_guard_enabled:
+            writer.add_scalar('Diag/PostStepExactGaussianKLMax', post_step_exact_kl_max, iteration)
+            writer.add_scalar(
+                'Diag/CatastrophicUpdateRejected',
+                float(catastrophic_update_rejected),
+                iteration,
+            )
+            writer.add_scalar('Diag/AdaptiveLRIterationStart', adaptive_lr_iteration_start, iteration)
+            writer.add_scalar('Diag/AdaptiveLRMin', adaptive_lr_min_seen, iteration)
+            writer.add_scalar('Diag/AdaptiveLRMax', adaptive_lr_max_seen, iteration)
         writer.add_scalar('Diag/ClipFrac', clip_frac_sum / max(num_updates, 1), iteration)
         writer.add_scalar('Diag/ExplainedVar', explained_var.item(), iteration)
         writer.add_scalar('Diag/CollisionRate', collision_rate_mean, iteration)

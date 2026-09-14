@@ -1,8 +1,11 @@
-"""Static regression checks for the Reviewer-proof Mono-PPO protocol.
+"""Lightweight regression checks for the Reviewer-proof Mono-PPO protocol.
 
 This file intentionally imports neither Torch nor Isaac Gym.
 """
+import ast
 from pathlib import Path
+
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +18,32 @@ RUNNER = (ROOT / "legged_gym/scripts/run_pcr_main_table_eval.py").read_text(enco
 def require(text: str, label: str) -> None:
     if text not in TRAIN:
         raise AssertionError(f"missing protocol invariant: {label}")
+
+
+def check_bounded_adaptive_lr() -> None:
+    tree = ast.parse(TRAIN)
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id.startswith("MONO_PPO_")
+            for target in node.targets
+        ):
+            selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == "_bounded_mono_adaptive_lr":
+            selected.append(node)
+    namespace = {"np": np}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(ROOT), "exec"), namespace)
+    adapt = namespace["_bounded_mono_adaptive_lr"]
+    start_lr = 3e-4
+    low_kl_lr = start_lr
+    high_kl_lr = start_lr
+    for _ in range(20):
+        low_kl_lr = adapt(low_kl_lr, 1e-4, 1e-2, start_lr)
+        high_kl_lr = adapt(high_kl_lr, 1.0, 1e-2, start_lr)
+    if not np.isclose(low_kl_lr, start_lr * 1.5):
+        raise AssertionError("adaptive LR may increase by more than one factor per PPO iteration")
+    if not np.isclose(high_kl_lr, start_lr / 1.5):
+        raise AssertionError("adaptive LR may decrease by more than one factor per PPO iteration")
 
 
 def main() -> None:
@@ -68,8 +97,14 @@ def main() -> None:
         ('"config_sha256"', "configuration hash"),
         ('"optimizer_updates_completed"', "completed optimizer updates"),
         ('"pcr_common_task_reward_v1"', "common reward contract"),
+        ('"adaptive_lr_max_change_per_iteration"', "bounded adaptive LR provenance"),
+        ('"rollback_full_ppo_iteration"', "catastrophic update rollback provenance"),
+        ('_bounded_mono_adaptive_lr(', "bounded adaptive LR implementation"),
+        ('Diag/PostStepExactGaussianKLMax', "post-step exact KL diagnostic"),
+        ('Diag/CatastrophicUpdateRejected', "catastrophic update rejection diagnostic"),
     ):
         require(text, label)
+    check_bounded_adaptive_lr()
     if 'pcr_yaw_suppress_scale = 0.0 if bool(getattr(self.args, "revision_contract", False))' not in TRAIN:
         raise AssertionError("revision contract must disable yaw suppression")
     if 'env.disable_pcr_gate_aux = bool(is_mono_ppo or getattr(args, "revision_contract", False))' not in TRAIN:
