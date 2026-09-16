@@ -37,25 +37,27 @@ def validate_layout(layout: dict) -> dict:
         raise ValueError("layout must retain the native Stage-4 capsule model and change coordinates only")
     if not bool(layout.get("fixed_across_seeds")):
         raise ValueError("layout must remain fixed across evaluation seeds")
-    if len(rows) != 5 or len(layout["obstacles"]) != 13:
-        raise ValueError("layout must contain exactly five rows and thirteen obstacles")
+    if layout.get("coordinate_convention", {}).get("start_xy") != [-0.2, -1.85]:
+        raise ValueError("unexpected fixed robot start_xy")
+    if len(rows) != 5 or len(layout["obstacles"]) != 15:
+        raise ValueError("layout must contain exactly five rows and fifteen obstacles")
     sides = [row["opening_side"] for row in rows]
     if sides != ["L", "L", "R", "R", "L"] or all(sides[i] != sides[i + 1] for i in range(4)):
         raise ValueError("opening sequence must be the frozen non-alternating L-L-R-R-L sequence")
 
     row_y = [float(row["y"]) for row in rows]
-    if row_y != [-0.65, 1.03, 3.15, 4.97, 6.91]:
+    if row_y != [-0.65, 1.03, 3.05, 4.97, 6.91]:
         raise ValueError(f"unexpected row y coordinates: {row_y}")
     spacings = [round(row_y[i + 1] - row_y[i], 2) for i in range(4)]
-    if spacings != [1.68, 2.12, 1.82, 1.94]:
+    if spacings != [1.68, 2.02, 1.92, 1.94]:
         raise ValueError(f"unexpected row spacings: {spacings}")
     training = layout["training_provenance"]
     support = training["inter_row_spacing_support"]
     outside_spacing = [spacing for spacing in spacings if spacing < support[0] or spacing > support[1]]
-    if outside_spacing != [1.68, 2.12]:
+    if outside_spacing != [1.68, 2.02]:
         raise ValueError(f"unexpected OOD row spacings: {outside_spacing}")
 
-    expected_x = [(-1.05, 0.25, 0.85), (0.35, 0.85), (-0.85, -0.25, 1.05), (-0.85, -0.35), (-1.05, 0.25, 0.85)]
+    expected_x = [(-1.05, 0.45, 1.05), (-1.40, 0.20, 0.70), (-1.35, -0.85, 1.00), (-1.05, -0.55, 1.15), (-1.05, 0.25, 0.85)]
     row_counts = []
     for row, row_expected_x in zip(rows, expected_x):
         obstacles = _row_obstacles(layout, int(row["row"]))
@@ -66,13 +68,13 @@ def validate_layout(layout: dict) -> dict:
             raise ValueError(f"row {row['row']} obstacle y does not match its row y")
 
     primitive_counts = Counter(item["primitive"] for item in layout["obstacles"])
-    if primitive_counts != Counter({"capsule": 13}):
+    if primitive_counts != Counter({"capsule": 15}):
         raise ValueError(f"unexpected primitive counts: {primitive_counts}")
     geometry = layout["obstacle_geometry"]
     capsule = geometry.get("capsule", {})
     if capsule.get("radius") != 0.15 or capsule.get("height") != 0.50 or capsule.get("asset_rotation_y_deg") != 90.0:
         raise ValueError("capsule geometry does not match the native Stage-4 obstacle")
-    if row_counts != [3, 2, 3, 2, 3]:
+    if row_counts != [3, 3, 3, 3, 3]:
         raise ValueError(f"unexpected row counts: {row_counts}")
 
     return {

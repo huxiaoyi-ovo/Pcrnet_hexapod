@@ -511,7 +511,14 @@ class HexGround(LeggedRobot):
                 self.s_avoid_box_asset = self.gym.create_box(self.sim, box_x, box_y, box_z, pooled_asset_options)
                 self.s_avoid_wall_asset = self.gym.create_box(self.sim, wall_t, wall_l, wall_h, fixed_asset_options)
                 self.s_avoid_stage4_wall_asset = self.s_avoid_wall_asset
-                self.s_avoid_capsule_slot_count = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
+                configured_capsule_slots = int(getattr(self.cfg.terrain, "avoid_capsule_slots", 6))
+                eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+                if eval_layout == "revision_heldout_mixed_v1":
+                    configured_capsule_slots = max(
+                        configured_capsule_slots,
+                        len(load_revision_heldout_layout()["obstacles"]),
+                    )
+                self.s_avoid_capsule_slot_count = configured_capsule_slots
                 self.s_avoid_box_slot_count = int(getattr(self.cfg.terrain, "avoid_box_slots", 2))
                 self.s_avoid_wall_slot_count = int(getattr(self.cfg.terrain, "avoid_wall_slots", 2))
             self.s_avoid_total_slots = (
@@ -2670,8 +2677,15 @@ class HexGround(LeggedRobot):
         self.extras["avoid_preset_passage_depth_mean"] = float(stats.get("passage_depth_total", 0.0) / denom)
         self.extras["avoid_preset_core_depth_mean"] = float(stats.get("core_depth_total", 0.0) / denom)
 
+    def _get_s_avoid_spawn_local_xy(self, stage: int) -> Tuple[float, float]:
+        eval_layout = str(getattr(self.cfg.terrain, "eval_layout", "") or "").strip().lower()
+        if eval_layout == "revision_heldout_mixed_v1":
+            start_xy = load_revision_heldout_layout()["coordinate_convention"]["start_xy"]
+            return float(start_xy[0]), float(start_xy[1])
+        return 0.0, -1.6
+
     def _get_s_avoid_spawn_local_y(self, stage: int) -> float:
-        return -1.6
+        return self._get_s_avoid_spawn_local_xy(stage)[1]
 
     def _compute_s_avoid_band_world(
         self,
@@ -3730,11 +3744,12 @@ class HexGround(LeggedRobot):
         if not self.s_avoid_enabled or env_ids.numel() == 0:
             return
 
-        spawn_local_y = -1.6
+        spawn_local_x, spawn_local_y = self._get_s_avoid_spawn_local_xy(int(self.s_avoid_stage))
         self.root_states[env_ids] = self.base_init_state
         self.root_states[env_ids, :3] += self.env_origins[env_ids]
         self.root_states[env_ids, 7:13] = 0.0
 
+        self.root_states[env_ids, 0] += spawn_local_x
         self.root_states[env_ids, 1] += spawn_local_y
         self.s_avoid_spawn_world_y[env_ids] = self.root_states[env_ids, 1]
 

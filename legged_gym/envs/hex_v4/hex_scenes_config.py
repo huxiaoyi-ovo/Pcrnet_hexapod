@@ -652,6 +652,10 @@ class HexPCRLineAvoidBasicCfg(HexAvoidBasicCfg):
         target_visible_scale = 0.0
         pcr_follow_far_distance = 4.0
         pcr_follow_far_time_s = 3.0
+        # Ignore a one-step leg scrape, while keeping sustained or high-force
+        # contacts as hard collisions during PCR evaluation.
+        pcr_collision_contact_hysteresis_steps = 2
+        pcr_collision_severe_force_threshold = 20.0
         pcr_progress_reward_scale = 60.0
         pcr_progress_cap = 0.8
         pcr_follow_quality_floor = 0.12

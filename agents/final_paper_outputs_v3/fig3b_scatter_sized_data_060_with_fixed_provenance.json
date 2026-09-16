@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "base_scatter_csv": "fig3b_scatter_sized_data_060.csv",
+  "added_method": "Fixed-Authority",
+  "protocol": {
+    "remote_repository": "/home/dell/RL_hexapod_gym_track_b_canonical_20260911",
+    "git_commit": "46b293e3020007abbdddd8c812e8dc58f0ff4db1",
+    "base_commit": "29ee797e208cece7c92beef22cb6ad5bcca4b1a3",
+    "task": "s_pcr_line_avoid_basic",
+    "speed_mps": 0.6,
+    "seeds": [1, 2, 3],
+    "num_envs": 64,
+    "episodes_per_seed": 128,
+    "difficulty_levels": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "avoid_stage_override": 4,
+    "freeze_avoid_stage": true,
+    "track_b_manifest": false,
+    "fixed_authority": true,
+    "fixed_y_const": 0.5,
+    "w_mode": "learnedw2",
+    "frozen_pcr_flags": {
+      "w_blend_mode": "multiply",
+      "signed_w_lambda": 0.3,
+      "signed_w_gamma_risk": 0.15,
+      "signed_w_margin": 0.05,
+      "w_disable_gate_safe_clamp": true,
+      "risk_memory": true,
+      "risk_memory_l_clear": 0.4,
+      "risk_memory_velocity_source": "body",
+      "pcr_w_aux_enable": true,
+      "pcr_w_aux_coef": 0.05,
+      "pcr_w_aux_risk_f_threshold": 0.25,
+      "pcr_w_aux_risk_margin": 0.05,
+      "pcr_w_aux_cmd_cos_threshold": 0.5
+    },
+    "checkpoint_sha256": {
+      "moe_teacher_best_learnedw.pt": "0626ca5d77c2f498cbc7fc43582e79b5716d7faa1dd50f8dbdb67a7102d5ad2a",
+      "avoid_best.pt": "fd23cebc9a0f1d7a280dd7561accdebccf4f6de0f41787a2214c6e9439adf3df",
+      "low_level_best.pt": "75dfd7aae52b20f08ca9f654c37b2e20ba1e33f8b953737437ad774d122d1481"
+    }
+  },
+  "per_seed": [
+    {"seed": 1, "task_success": 0.0, "collision": 0.46875, "follow_mae_m": 1.545928917338359, "row_progress": 0.4000000059604645},
+    {"seed": 2, "task_success": 0.0, "collision": 0.453125, "follow_mae_m": 1.5473615997201962, "row_progress": 0.4000000059604645},
+    {"seed": 3, "task_success": 0.0, "collision": 0.5078125, "follow_mae_m": 1.5533610943391198, "row_progress": 0.3984375059371814}
+  ],
+  "mean": {
+    "task_success": 0.0,
+    "collision": 0.4765625,
+    "follow_mae_m": 1.5488838704658916,
+    "row_progress": 0.3994791726193701
+  },
+  "std_sample": {
+    "task_success": 0.0,
+    "collision": 0.028168369339562415,
+    "follow_mae_m": 0.003943005821712645,
+    "row_progress": 0.0009021098090512737
+  },
+  "marker_area": {
+    "formula": "target_filled_area = 64 + 420 * task_success; matplotlib_scatter_area = target_filled_area / marker_fill_area_factor('X')",
+    "target_filled_area": 64.0,
+    "marker_fill_area_factor": 0.625,
+    "matplotlib_scatter_area": 102.4
+  },
+  "sentinel": {
+    "method": "PCR-Net",
+    "seed": 1,
+    "expected": {
+      "task_success": 0.9765625,
+      "collision": 0.0234375,
+      "row_progress": 0.9921875004656613,
+      "follow_mae_m": 0.618919203236322
+    },
+    "observed": {
+      "task_success": 0.9765625,
+      "collision": 0.0234375,
+      "row_progress": 0.9921875004656613,
+      "follow_mae_m": 0.618919203236322
+    },
+    "tolerance": 1e-06,
+    "passed": true
+  }
+}

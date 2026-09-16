@@ -688,6 +688,48 @@ def _compute_additive_fusion_diag(
     }
 
 
+def _compute_fixed_authority_diag(
+    env,
+    args,
+    aff_map: torch.Tensor,
+    cmd_f: torch.Tensor,
+    cmd_a: torch.Tensor,
+    y_const: float,
+) -> Dict[str, torch.Tensor]:
+    """Frozen Fixed-Authority fusion with no Gate-policy input."""
+    if not (math.isfinite(float(y_const)) and 0.0 <= float(y_const) <= 1.0):
+        raise ValueError("fixed authority y must be finite and in [0, 1]")
+    diag = th._pcr_gate_command_conflict_diag(env, args, aff_map, cmd_f, cmd_a)
+    cmd_a_eff = diag["cmd_a_eff"]
+    y_eff = torch.full_like(cmd_f[:, 0], float(y_const))
+    zero = torch.zeros_like(y_eff)
+    nan = torch.full_like(y_eff, float("nan"))
+    cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a_eff
+    return {
+        "cmd": cmd,
+        "cmd_f": cmd_f,
+        "cmd_a": cmd_a_eff,
+        "gate_y_raw": nan,
+        "gate_y": nan,
+        "gate_y_safe": nan,
+        "y_eff": y_eff,
+        "w": nan,
+        "signed_w": nan,
+        "signed_w_active": zero,
+        "w_support_correction": zero,
+        "risk_diff_correction": zero,
+        "delta_y_w_raw": nan,
+        "delta_y_w_used": nan,
+        "delta_y_r": nan,
+        "delta_y_total": zero,
+        "risk_memory": zero,
+        "follow_weight": y_eff,
+        "avoid_weight": 1.0 - y_eff,
+        "fixed_authority_const": y_eff,
+        **diag,
+    }
+
+
 def _resolve_velocity_search_hparams(args) -> Dict[str, float]:
     defaults = {
         "vx_samples": 7,
@@ -1584,6 +1626,7 @@ class EvalRunner:
 
         self.aff_stack = max(int(getattr(self.args, "aff_stack", 1)), 1)
         self.is_mono_ppo = bool(getattr(self.args, "mono_ppo", False))
+        self.is_fixed_authority = bool(getattr(self.args, "fixed_authority", False))
         self.aff_stack_buf = None
         self.follow_aff_stack_buf = None
         self.avoid_aff_stack_buf = None
@@ -2122,6 +2165,16 @@ class EvalRunner:
                 )
                 cmd_a, _ = get_avoid_command(self.avoid_model, avoid_aff_input, state, cmd_f, goal,
                     avoid_difficulty_input, deterministic=True, legacy_state=expert_state, legacy_goal=avoid_goal)
+                if self.is_fixed_authority:
+                    gate_diag = _compute_fixed_authority_diag(
+                        self.env,
+                        self.args,
+                        gate_aff_input,
+                        cmd_f,
+                        cmd_a,
+                        float(self.args.fixed_y_const),
+                    )
+                    return gate_diag["cmd"], gate_diag["y_eff"], gate_diag
                 if bool(getattr(self.args, "velocity_search", False)):
                     gate_diag = _compute_velocity_search_diag(
                         self.env,
@@ -2326,7 +2379,12 @@ class EvalRunner:
     def evaluate(self) -> Dict:
         difficulty_levels = _difficulty_list(self.args.difficulty_levels)
         episodes_total = int(self.args.episodes)
-        per_level_target = int(math.ceil(episodes_total / max(1, len(difficulty_levels))))
+        num_levels = max(1, len(difficulty_levels))
+        level_targets = [
+            episodes_total // num_levels + int(level_idx < episodes_total % num_levels)
+            for level_idx in range(num_levels)
+        ]
+        balanced_env_episodes = bool(getattr(self.args, "balanced_env_episodes", False))
 
         latency_ms_samples: List[float] = []
         episode_rows: List[Dict] = []
@@ -2345,10 +2403,14 @@ class EvalRunner:
         target_lost_k = max(1, int(getattr(self.args, "target_lost_k_eval", 5)))
 
         global_episode_idx = 0
+        recorded_episodes_by_env = [0 for _ in range(self.env.num_envs)]
         eval_start_t = time.perf_counter()
         last_progress_t = eval_start_t
 
         for level_idx, d in enumerate(difficulty_levels):
+            per_level_target = int(level_targets[level_idx])
+            if per_level_target <= 0:
+                continue
             seed_level = int(self.args.seed + level_idx)
             _setup_seed(seed_level)
             print(
@@ -2370,6 +2432,12 @@ class EvalRunner:
 
             acc = [EpisodeAccumulator() for _ in range(self.env.num_envs)]
             done_episodes = 0
+            env_episode_targets = [
+                per_level_target // self.env.num_envs
+                + int(env_id < per_level_target % self.env.num_envs)
+                for env_id in range(self.env.num_envs)
+            ]
+            env_episode_counts = [0 for _ in range(self.env.num_envs)]
 
             while done_episodes < per_level_target:
                 aff_bundle = self._build_affordance_bundle(obs)
@@ -2467,12 +2535,12 @@ class EvalRunner:
                 is_velocity_search = bool(getattr(self.args, "velocity_search", False))
                 gate_y_raw = (
                     gate_diag["gate_y_raw"]
-                    if isinstance(gate_diag, dict) and not self.is_mono_ppo and not is_additive_fusion and not is_velocity_search
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo and not is_additive_fusion and not self.is_fixed_authority and not is_velocity_search
                     else None
                 )
                 pcr_risk_override = (
                     gate_diag.get("risk_F", None)
-                    if isinstance(gate_diag, dict) and not self.is_mono_ppo
+                    if isinstance(gate_diag, dict) and not self.is_mono_ppo and not self.is_fixed_authority
                     else None
                 )
                 next_obs, rewards, dones, info = self.env.step(
@@ -3751,7 +3819,10 @@ class EvalRunner:
 
                 done_ids = dones.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
                 for i in done_ids:
-                    if done_episodes >= per_level_target:
+                    if balanced_env_episodes and env_episode_counts[i] >= env_episode_targets[i]:
+                        acc[i] = EpisodeAccumulator()
+                        continue
+                    if (not balanced_env_episodes) and done_episodes >= per_level_target:
                         break
 
                     ai = acc[i]
@@ -4168,6 +4239,8 @@ class EvalRunner:
                     episode_rows.append(
                         {
                             "episode_id": global_episode_idx,
+                            "env_id": int(i),
+                            "env_episode_index": int(env_episode_counts[i]),
                             "difficulty": float(d),
                             "success": int(task_success),
                             "task_success": int(task_success),
@@ -4690,6 +4763,8 @@ class EvalRunner:
                                 timeseries_rows.append(ts_row)
                     global_episode_idx += 1
                     done_episodes += 1
+                    env_episode_counts[i] += 1
+                    recorded_episodes_by_env[i] += 1
 
                     acc[i] = EpisodeAccumulator()
 
@@ -4710,8 +4785,17 @@ class EvalRunner:
                 self.done_prev = dones.clone()
                 obs = next_obs
 
-        # Trim overshoot to exact requested episode count.
-        episode_rows = episode_rows[:episodes_total]
+            if balanced_env_episodes and env_episode_counts != env_episode_targets:
+                raise RuntimeError(
+                    "balanced episode quota mismatch: "
+                    f"counts={env_episode_counts}, targets={env_episode_targets}"
+                )
+
+        if len(episode_rows) != episodes_total:
+            raise RuntimeError(
+                f"evaluation collected {len(episode_rows)} episodes, expected exactly {episodes_total}"
+            )
+        self._eval_recorded_episodes_by_env = recorded_episodes_by_env
 
         metrics = self._aggregate_metrics(episode_rows, latency_ms_samples)
         if self.avoid14d_recorder is not None:
@@ -5932,6 +6016,12 @@ class EvalRunner:
                 "difficulty_levels": _difficulty_list(self.args.difficulty_levels),
                 "episodes": int(self.args.episodes),
                 "num_envs": int(self.args.num_envs),
+                "episode_sampling": (
+                    "balanced_per_env_quota" if bool(getattr(self.args, "balanced_env_episodes", False))
+                    else "first_completed"
+                ),
+                "balanced_env_episodes": bool(getattr(self.args, "balanced_env_episodes", False)),
+                "recorded_episodes_by_env": list(getattr(self, "_eval_recorded_episodes_by_env", [])),
                 "pcr_play_env_alignment": bool(_is_pcr_eval_task(self.args)),
                 "pcr_new_curriculum": self.resolved_protocol.get("pcr_new_curriculum", None),
                 "generalize": bool(getattr(self.args, "generalize", False)),
@@ -6018,6 +6108,8 @@ class EvalRunner:
                     if bool(getattr(self.args, "mono_ppo", False))
                     else "additive_fusion"
                     if is_additive_fusion
+                    else "fixed_authority"
+                    if self.is_fixed_authority
                     else "velocity_search"
                     if is_velocity_search
                     else "rule_override"
@@ -6035,16 +6127,22 @@ class EvalRunner:
                     self.args.skill == "moe"
                     and not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "uses_learned_w_output": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not self.is_fixed_authority and not is_velocity_search
                 ),
                 "uses_learned_w_for_control": bool(
-                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not is_velocity_search
+                    th.is_learned_w_mode(str(self.args.w_mode)) and not is_additive_fusion and not self.is_fixed_authority and not is_velocity_search
                     and not bool(getattr(self.args, "disable_delta_y_w", False))
                 ),
                 "uses_additive_fusion": bool(is_additive_fusion),
+                "uses_fixed_authority": bool(self.is_fixed_authority),
+                "fixed_authority_y_const": (
+                    float(self.args.fixed_y_const) if self.is_fixed_authority else None
+                ),
+                "fixed_authority_gate_policy_call_count": 0 if self.is_fixed_authority else None,
                 "uses_velocity_search": bool(is_velocity_search),
                 "uses_target_aware_velocity_search": bool(is_velocity_search),
                 "velocity_search_definition": (
@@ -6053,11 +6151,12 @@ class EvalRunner:
                     "rejects footprint collisions as infeasible, then selects by tracking-clearance cost."
                     if is_velocity_search else ""
                 ),
-                "uses_lateral_projection": bool(is_additive_fusion),
+                "uses_lateral_projection": bool(is_additive_fusion or self.is_fixed_authority),
                 "shared_postprocess": True,
                 "uses_risk_diff_correction": bool(
                     (th.is_learnedw2_mode(str(self.args.w_mode)) or th.is_risk_only_mode(str(self.args.w_mode)))
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "disable_delta_y_w": bool(getattr(self.args, "disable_delta_y_w", False)),
@@ -6069,6 +6168,7 @@ class EvalRunner:
                     self.args.skill == "moe"
                     and not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "uses_follow_expert_for_metrics": bool(self.args.skill == "moe"),
@@ -6080,6 +6180,7 @@ class EvalRunner:
                 "mechanism_metrics_available": bool(
                     not getattr(self.args, "mono_ppo", False)
                     and not is_additive_fusion
+                    and not self.is_fixed_authority
                     and not is_velocity_search
                 ),
                 "velocity_search_split": str(getattr(self.args, "velocity_search_split", "")),
@@ -6137,6 +6238,21 @@ class EvalRunner:
                 "rule_s_min": float(getattr(self.args, "rule_s_min", 0.85)),
                 "rule_slow_ratio": float(getattr(self.args, "rule_slow_ratio", 0.10)),
                 "rule_yaw_keep_loss": float(getattr(self.args, "rule_yaw_keep_loss", 0.30)),
+                "risk_memory": bool(getattr(self.args, "risk_memory", False)),
+                "risk_memory_l_clear": float(getattr(self.args, "risk_memory_l_clear", 0.40)),
+                "risk_memory_velocity_source": str(getattr(self.args, "risk_memory_velocity_source", "body")),
+                "pcr_lateral_direction_memory": bool(
+                    getattr(self.args, "pcr_lateral_direction_memory", False)
+                ),
+                "pcr_lateral_memory_hold_distance": float(
+                    getattr(self.args, "pcr_lateral_memory_hold_distance", 1.45)
+                ),
+                "pcr_lateral_memory_risk_on": float(
+                    getattr(self.args, "pcr_lateral_memory_risk_on", 0.25)
+                ),
+                "pcr_lateral_memory_cmd_min": float(
+                    getattr(self.args, "pcr_lateral_memory_cmd_min", 0.08)
+                ),
                 "pcr_w_aux_enable": bool(getattr(self.args, "pcr_w_aux_enable", False)),
                 "pcr_w_aux_coef": float(getattr(self.args, "pcr_w_aux_coef", 0.0)),
                 "pcr_w_aux_risk_f_threshold": float(getattr(self.args, "pcr_w_aux_risk_f_threshold", 0.4)),
@@ -6255,6 +6371,8 @@ def _write_outputs(metrics: Dict, out_dir: str) -> None:
     rows = metrics.get("per_episode", [])
     fieldnames = [
         "episode_id",
+        "env_id",
+        "env_episode_index",
         "difficulty",
         "success",
         "task_success",
@@ -6859,6 +6977,11 @@ def parse_args():
 
     parser.add_argument("--episodes", type=int, default=512)
     parser.add_argument("--difficulty_levels", type=str, default="0.0,0.25,0.5,0.75,1.0")
+    parser.add_argument(
+        "--balanced_env_episodes",
+        action="store_true",
+        help="record a deterministic per-environment episode quota instead of the first N completions",
+    )
     parser.add_argument("--stochastic", action="store_true", help="use stochastic policy sampling")
     parser.add_argument(
         "--generalize",
@@ -6937,6 +7060,8 @@ def parse_args():
     )
     parser.add_argument("--rule_override", action="store_true", help="replace learned PCR arbitration with reactive safety rule")
     parser.add_argument("--additive_fusion", action="store_true", help="eval-only baseline: cmd_F + lateral-projected cmd_A")
+    parser.add_argument("--fixed_authority", action="store_true", help="eval-only fixed Follow authority; bypass Gate policy")
+    parser.add_argument("--fixed_y_const", type=float, default=None, help="fixed Follow weight in [0, 1]")
     parser.add_argument("--velocity_search", action="store_true", help="eval-only target-aware velocity-space search baseline")
     parser.add_argument(
         "--velocity_search_split",
@@ -6979,6 +7104,10 @@ def parse_args():
     parser.add_argument("--risk_memory", action="store_true", help="use deployable temporal risk memory in learned-w row slot")
     parser.add_argument("--risk_memory_l_clear", type=float, default=0.40)
     parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"])
+    parser.add_argument("--pcr_lateral_direction_memory", action="store_true")
+    parser.add_argument("--pcr_lateral_memory_hold_distance", type=float, default=1.45)
+    parser.add_argument("--pcr_lateral_memory_risk_on", type=float, default=0.25)
+    parser.add_argument("--pcr_lateral_memory_cmd_min", type=float, default=0.08)
     parser.add_argument("--pcr_w_aux_enable", action="store_true")
     parser.add_argument("--pcr_w_aux_coef", type=float, default=0.05)
     parser.add_argument("--pcr_w_aux_risk_f_threshold", type=float, default=0.4)
@@ -7059,6 +7188,11 @@ def parse_args():
             parser.error("--eval_layout 当前只支持 --task s_pcr_line_avoid_basic")
         if getattr(args, "avoid_stage_override", None) not in (None, 4):
             parser.error("--eval_layout 固定 Stage 4，只允许省略 --avoid_stage_override 或显式传 4")
+    if str(getattr(args, "eval_layout", "") or "") == "revision_heldout_mixed_v1":
+        if len(_difficulty_list(args.difficulty_levels)) != 1:
+            parser.error("revision held-out 是固定布局，--difficulty_levels 必须只包含一个值")
+        if not bool(getattr(args, "balanced_env_episodes", False)):
+            parser.error("revision held-out 正式评测必须启用 --balanced_env_episodes")
     if getattr(args, "pcr_line_target_speed", None) is not None and getattr(args, "pcr_line_target_speed_scale", None) is not None:
         parser.error("--pcr_line_target_speed 与 --pcr_line_target_speed_scale 只能二选一")
     if str(getattr(args, "avoid14d_probe_dir", "") or "").strip():
@@ -7085,18 +7219,30 @@ def parse_args():
         if args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--mono_ppo 不使用 w/y 机制，--w_mode 必须为 none")
         selected_w_mode = "none"
-    elif args.additive_fusion:
+    elif args.additive_fusion or args.fixed_authority:
         if args.skill != "moe":
-            parser.error("--additive_fusion 只支持 --skill moe")
+            parser.error("--additive_fusion/--fixed_authority 只支持 --skill moe")
         if args.rule_override:
-            parser.error("--additive_fusion 不允许同时启用 --rule_override")
+            parser.error("--additive_fusion/--fixed_authority 不允许同时启用 --rule_override")
         if args.velocity_search:
-            parser.error("--additive_fusion 不允许同时启用 --velocity_search")
-        if any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
+            parser.error("--additive_fusion/--fixed_authority 不允许同时启用 --velocity_search")
+        if args.additive_fusion and args.fixed_authority:
+            parser.error("--additive_fusion 与 --fixed_authority 只能二选一")
+        if args.fixed_authority and (
+            args.fixed_y_const is None
+            or not math.isfinite(float(args.fixed_y_const))
+            or not 0.0 <= float(args.fixed_y_const) <= 1.0
+        ):
+            parser.error("--fixed_authority 需要有限的 --fixed_y_const [0,1]")
+        if args.additive_fusion and any((args.wgeom, args.wriskonly, args.wlearned, args.wlearned2)):
             parser.error("--additive_fusion 不允许同时指定 --wgeom/--wriskonly/--wlearned/--wlearned2")
-        if args.w_mode is not None and str(args.w_mode).lower() != "none":
+        if args.additive_fusion and args.w_mode is not None and str(args.w_mode).lower() != "none":
             parser.error("--additive_fusion 不使用 GatePolicy/w，--w_mode 必须为 none")
-        selected_w_mode = "none"
+        selected_w_mode = (
+            "learnedw2"
+            if args.fixed_authority and (args.wlearned2 or str(args.w_mode or "") == "learnedw2")
+            else "none"
+        )
     elif args.velocity_search:
         if args.skill != "moe":
             parser.error("--velocity_search 只支持 --skill moe")

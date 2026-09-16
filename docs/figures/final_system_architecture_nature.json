@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "claim": "PCR-Net learns only a bounded scalar arbitration between fixed orthogonal expert proposals; perception, command shaping, and locomotion remain shared components.",
+  "archetype": "Wide asymmetric mechanism schematic with a central hero module",
+  "sources": [
+    {
+      "path": "/home/artrc/下载/PCRNet_final_clean/final.tex",
+      "sha256": "4dd266389a08c603569a6afc3471de7d746d7bb754889445d98e3072af7be455"
+    }
+  ],
+  "outputs": {
+    "svg": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_system_architecture_nature.svg",
+      "sha256": "b1bf47baa06e0789c83d5fff86049ab88b0b760e0ba64e5e431b36370d54db67"
+    },
+    "pdf": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_system_architecture_nature.pdf",
+      "sha256": "b670863058e17d85c305758eb46eb3af0bf7c92f1c66608b05477aab7329a333"
+    },
+    "png": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_system_architecture_nature.png",
+      "sha256": "b5471883be32fb5a9aca36b9fdb9def30a8d9c22e75d27e9367fd932eec079a1"
+    },
+    "tiff": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_system_architecture_nature.tiff",
+      "sha256": "95f4a50feeb7633b71fcf105bec4aecee3cbdaede26b71444bc97053c6843128"
+    }
+  },
+  "notes": [
+    "The diagram is redrawn from the manuscript's problem formulation, method, training procedure, and system caption.",
+    "Solid arrows indicate command or observation flow; dashed warm arrows indicate risk or context flow.",
+    "No implementation detail absent from the manuscript is introduced."
+  ],
+  "rendering": {
+    "backend": "Python/Matplotlib",
+    "dpi": 600,
+    "editable_vector": true,
+    "minimum_nominal_font_pt": 5.4
+  }
+}

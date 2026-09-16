@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "claim": "PCR-Net preserves task success as speed increases and occupies the strongest tested safety-tracking trade-off at 0.60 m/s.",
+  "archetype": "Two-panel claim-escalating quantitative figure",
+  "sources": [
+    {
+      "path": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table1_main_performance_stage4.csv",
+      "sha256": "65472ff596dfbb3a4ff7fcb56983e7609e00f5c7544ccdfe9bf9fe0ceb605541"
+    },
+    {
+      "path": "agents/final_paper_outputs_v3/fig3b_scatter_sized_data_060_with_fixed.csv",
+      "sha256": "425945337e161cb862e339c4a1023774b7010e5a0198a1945739c12b5993f644"
+    }
+  ],
+  "outputs": {
+    "svg": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.svg",
+      "sha256": "d55bb3e1c9467cf68732da803b3ba24eee000626021911d0ad33757904bf50c7"
+    },
+    "pdf": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.pdf",
+      "sha256": "ef22fd5cf70569a841a00001a44b52ef6fedf2c8def59c00d2dc5e79ce5cedbb"
+    },
+    "png": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.png",
+      "sha256": "832efba3d738198b585e41fdb7a8f084ae305aeda994053c96d437795c9eb43f"
+    },
+    "tiff": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.tiff",
+      "sha256": "d4c77bdcce1228219a2a16266509d6903e502a7509bec2941cb16aab064a1b06"
+    }
+  },
+  "notes": [
+    "Panel a shows mean +/- standard deviation from the frozen three-seed table.",
+    "Panel b applies one constant 0.30 display scale to all frozen marker-area values; ordering and encoding are unchanged.",
+    "Panel b direct labels are placed from the rendered marker and text bounds with a fixed 2.4 pt edge clearance.",
+    "Fixed-Authority was plotted from the same-protocol scatter CSV.",
+    "The 0.60 m/s point is explicitly separated from the training-speed range."
+  ],
+  "rendering": {
+    "backend": "Python/Matplotlib",
+    "dpi": 600,
+    "editable_vector": true,
+    "minimum_nominal_font_pt": 5.4
+  }
+}

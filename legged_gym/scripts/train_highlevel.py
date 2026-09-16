@@ -1059,6 +1059,89 @@ def get_or_update_pcr_risk_memory(
     return next_memory
 
 
+def apply_pcr_lateral_direction_memory(
+    env,
+    args: argparse.Namespace,
+    cmd: torch.Tensor,
+    cmd_a: torch.Tensor,
+    risk_f: torch.Tensor,
+    *,
+    cmd_f: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Prevent an early lateral reversal during one deployable avoidance commitment."""
+    zero = torch.zeros_like(risk_f)
+    inactive = torch.zeros_like(risk_f, dtype=torch.bool)
+    diag = {
+        "lateral_memory_active": inactive,
+        "lateral_memory_sign": zero,
+        "lateral_memory_distance": zero,
+        "lateral_memory_latched": inactive,
+        "lateral_memory_released": inactive,
+        "lateral_reversal_blocked": inactive,
+        "cmd_before_lateral_memory": cmd,
+    }
+    enabled = bool(getattr(args, "pcr_lateral_direction_memory", False))
+    if not enabled or not bool(getattr(env, "is_pcr_line_task", False)):
+        return cmd, diag
+    if cmd.dim() != 2 or cmd.shape[1] < 1 or cmd_a.dim() != 2 or cmd_a.shape[1] < 1:
+        raise ValueError("PCR lateral direction memory requires batched commands with a lateral component")
+
+    ref = risk_f
+    if (
+        not hasattr(env, "pcr_lateral_memory_sign")
+        or not torch.is_tensor(getattr(env, "pcr_lateral_memory_sign"))
+        or env.pcr_lateral_memory_sign.shape != ref.shape
+    ):
+        env.pcr_lateral_memory_sign = torch.zeros_like(ref)
+        env.pcr_lateral_memory_distance = torch.zeros_like(ref)
+        env.pcr_lateral_memory_active = torch.zeros_like(ref, dtype=torch.bool)
+
+    sign = env.pcr_lateral_memory_sign.to(device=ref.device, dtype=ref.dtype)
+    distance = env.pcr_lateral_memory_distance.to(device=ref.device, dtype=ref.dtype)
+    active = env.pcr_lateral_memory_active.to(device=ref.device, dtype=torch.bool)
+
+    dt = max(float(getattr(env, "high_level_dt", 0.1)), 1e-6)
+    v_forward = _get_risk_memory_forward_velocity(env, args, cmd_f, ref)
+    delta_s = torch.clamp(v_forward, min=0.0) * dt
+    distance = torch.where(active, distance + delta_s, torch.zeros_like(distance))
+
+    hold_distance = max(float(getattr(args, "pcr_lateral_memory_hold_distance", 1.45)), 1e-6)
+    released = active & (distance >= hold_distance)
+    active = active & (~released)
+    sign = torch.where(released, torch.zeros_like(sign), sign)
+    distance = torch.where(released, torch.zeros_like(distance), distance)
+
+    risk_on = float(getattr(args, "pcr_lateral_memory_risk_on", 0.25))
+    cmd_min = max(float(getattr(args, "pcr_lateral_memory_cmd_min", 0.08)), 0.0)
+    avoid_lateral = cmd_a[:, 0]
+    latched = (~active) & (risk_f >= risk_on) & (torch.abs(avoid_lateral) >= cmd_min)
+    sign = torch.where(latched, torch.sign(avoid_lateral), sign)
+    distance = torch.where(latched, torch.zeros_like(distance), distance)
+    active = active | latched
+
+    cmd_before = cmd.clone()
+    reversal_blocked = active & ((cmd_before[:, 0] * sign) < 0.0)
+    cmd_after = cmd_before.clone()
+    cmd_after[:, 0] = torch.where(
+        reversal_blocked,
+        torch.zeros_like(cmd_after[:, 0]),
+        cmd_after[:, 0],
+    )
+
+    env.pcr_lateral_memory_sign = sign.detach()
+    env.pcr_lateral_memory_distance = distance.detach()
+    env.pcr_lateral_memory_active = active.detach()
+    return cmd_after, {
+        "lateral_memory_active": active,
+        "lateral_memory_sign": sign,
+        "lateral_memory_distance": distance,
+        "lateral_memory_latched": latched,
+        "lateral_memory_released": released,
+        "lateral_reversal_blocked": reversal_blocked,
+        "cmd_before_lateral_memory": cmd_before,
+    }
+
+
 def build_learned_w_gate_goal(
     env,
     args,
@@ -1197,6 +1280,14 @@ def resolve_moe_gate_pcr(
         y_eff = torch.clamp(gate_y * (1.0 - w), 0.0, 1.0)
 
     cmd = y_eff.unsqueeze(-1) * cmd_f + (1.0 - y_eff.unsqueeze(-1)) * cmd_a
+    cmd, lateral_memory_diag = apply_pcr_lateral_direction_memory(
+        env,
+        args,
+        cmd,
+        cmd_a,
+        risk_f,
+        cmd_f=cmd_f,
+    )
     return {
         "gate_y_raw": gate_y_raw,
         "gate_y": gate_y,
@@ -1234,6 +1325,7 @@ def resolve_moe_gate_pcr(
         "post_safe_distance": diag["post_safe_distance"],
         "post_free_distance": diag["post_free_distance"],
         "gate_safe_clamp_mask": clamp_mask,
+        **lateral_memory_diag,
     }
 
 
@@ -2475,6 +2567,13 @@ class HierarchicalHexapodEnv:
                 )
         self.is_s0_follow_task = is_s0_follow_task_name(str(getattr(args, "task", "")).lower()) or (terrain_type in ("s0_follow_plane", "s0"))
         self.is_pcr_line_task = is_pcr_line_task_name(str(getattr(args, "task", "")).lower())
+        self.pcr_collision_contact_hysteresis_steps = max(
+            1,
+            int(getattr(nav_cfg, "pcr_collision_contact_hysteresis_steps", 2)),
+        )
+        self.pcr_collision_severe_force_threshold = float(
+            getattr(nav_cfg, "pcr_collision_severe_force_threshold", 20.0)
+        )
         self.scene_difficulty_pending = 0.0
         self.scene_difficulty_override = torch.zeros(
             self.num_envs, device=self.env.device, dtype=torch.float32
@@ -2571,9 +2670,20 @@ class HierarchicalHexapodEnv:
         self.goal_change_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.prev_goal_world = None
         self.episode_length_buf = torch.zeros(self.num_envs, device=device, dtype=torch.long)
+        self.pcr_collision_contact_streak = torch.zeros(
+            self.num_envs, device=device, dtype=torch.long
+        )
+        self.pcr_episode_hard_collision = torch.zeros(
+            self.num_envs, device=device, dtype=torch.bool
+        )
         self.target_lost_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_follow_far_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_risk_memory = torch.zeros(self.num_envs, device=device)
+        self.pcr_lateral_memory_sign = torch.zeros(self.num_envs, device=device)
+        self.pcr_lateral_memory_distance = torch.zeros(self.num_envs, device=device)
+        self.pcr_lateral_memory_active = torch.zeros(
+            self.num_envs, device=device, dtype=torch.bool
+        )
         self.stable_follow_steps = torch.zeros(self.num_envs, device=device, dtype=torch.long)
         self.pcr_max_rows = 1
         if self.is_pcr_line_task and hasattr(self.env, "_get_s_avoid_fixed_stage_row_y"):
@@ -2748,6 +2858,9 @@ class HierarchicalHexapodEnv:
         self.target_lost_steps.zero_()
         self.pcr_follow_far_steps.zero_()
         self.pcr_risk_memory.zero_()
+        self.pcr_lateral_memory_sign.zero_()
+        self.pcr_lateral_memory_distance.zero_()
+        self.pcr_lateral_memory_active.zero_()
         self.stable_follow_steps.zero_()
         self.pcr_row_success_flags.zero_()
         self.pcr_row_collision_flags.zero_()
@@ -2785,6 +2898,9 @@ class HierarchicalHexapodEnv:
         self.pcr_prev_row_index[env_ids] = -1
         self.pcr_prev_row_valid[env_ids] = False
         self.pcr_risk_memory[env_ids] = 0.0
+        self.pcr_lateral_memory_sign[env_ids] = 0.0
+        self.pcr_lateral_memory_distance[env_ids] = 0.0
+        self.pcr_lateral_memory_active[env_ids] = False
         self.env.reset_idx(env_ids)
 
     def _resample_forced_forward_speed(self, env_ids: torch.Tensor) -> None:
@@ -4693,6 +4809,12 @@ class HierarchicalHexapodEnv:
         cmd_exec_sum = torch.zeros(self.num_envs, 3, device=self.device)
         cmd_exec_steps = torch.zeros(self.num_envs, device=self.device)
         cmd_exec_last = torch.zeros(self.num_envs, 3, device=self.device)
+        pcr_raw_collision_during = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        pcr_collision_force_max_during = torch.zeros(
+            self.num_envs, device=self.device
+        )
 
         for _ in range(self.decimation):
             if not active_mask.any():
@@ -4720,6 +4842,23 @@ class HierarchicalHexapodEnv:
                 actions[~active_mask] = 0.0
 
             obs, _, rewards, dones, infos = self.env.step(actions)
+            if self.is_pcr_line_task and hasattr(self.env, "contact_forces"):
+                pcr_contact_indices = getattr(self.env, "penalised_contact_indices", None)
+                if pcr_contact_indices is not None and pcr_contact_indices.numel() > 0:
+                    pcr_contact_norm = torch.norm(
+                        self.env.contact_forces[:, pcr_contact_indices, :], dim=-1
+                    )
+                    pcr_contact_force_max = pcr_contact_norm.max(dim=1).values
+                    pcr_collision_force_threshold = float(
+                        getattr(self.env.cfg.terrain, "collision_force_threshold", 1.0)
+                    )
+                    pcr_raw_collision_during |= (
+                        pcr_contact_force_max > pcr_collision_force_threshold
+                    )
+                    pcr_collision_force_max_during = torch.maximum(
+                        pcr_collision_force_max_during,
+                        pcr_contact_force_max,
+                    )
             rewards = rewards * active_mask.float()
             accumulated_reward += rewards
             done_any |= dones
@@ -4755,6 +4894,7 @@ class HierarchicalHexapodEnv:
         robot_pos = self.env.root_states[:, :3]
         
         collision_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        collision_raw_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_force_max = torch.zeros(self.num_envs, device=self.device)
         collision_threshold = None
         collision_threshold_src = None
@@ -4801,7 +4941,8 @@ class HierarchicalHexapodEnv:
             collision_indices_src = "penalised_contact_indices"
             if indices is not None and indices.numel() > 0:
                 penalized_contact_norm = torch.norm(self.env.contact_forces[:, indices, :], dim=-1)
-                collision_mask = torch.any(penalized_contact_norm > collision_threshold, dim=1)
+                collision_raw_mask = torch.any(penalized_contact_norm > collision_threshold, dim=1)
+                collision_mask = collision_raw_mask.clone()
                 collision_debug_indices = indices
                 if hasattr(self.env, "termination_contact_indices"):
                     term_indices = getattr(self.env, "termination_contact_indices", None)
@@ -4837,6 +4978,33 @@ class HierarchicalHexapodEnv:
                             obstacle_contact_candidate_min_clearance <= obstacle_contact_margin
                         )
                         collision_mask = collision_mask | strict_obstacle_contact_mask
+        if self.is_pcr_line_task:
+            collision_raw_mask |= pcr_raw_collision_during
+            collision_force_max = torch.maximum(
+                collision_force_max,
+                pcr_collision_force_max_during,
+            )
+            self.pcr_collision_contact_streak = torch.where(
+                collision_raw_mask,
+                self.pcr_collision_contact_streak + 1,
+                torch.zeros_like(self.pcr_collision_contact_streak),
+            )
+            sustained_collision_mask = (
+                self.pcr_collision_contact_streak
+                >= self.pcr_collision_contact_hysteresis_steps
+            )
+            severe_collision_mask = (
+                collision_force_max >= self.pcr_collision_severe_force_threshold
+            )
+            collision_mask = (
+                sustained_collision_mask
+                | severe_collision_mask
+            )
+            self.pcr_episode_hard_collision |= collision_mask
+            if hasattr(self.env, "s_avoid_episode_collision"):
+                hard_episode_collision = self.pcr_episode_hard_collision.clone()
+                hard_episode_collision[done_during] = False
+                self.env.s_avoid_episode_collision.copy_(hard_episode_collision)
         if self.clearance_override is not None:
             clearance = self.clearance_override
             self.clearance_override = None
@@ -5535,7 +5703,8 @@ class HierarchicalHexapodEnv:
         if bool(getattr(self.env, "s_avoid_enabled", False)):
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
             if hasattr(self.env, "s_avoid_episode_collision"):
-                self.env.s_avoid_episode_collision |= strict_obstacle_contact_mask
+                if not self.is_pcr_line_task:
+                    self.env.s_avoid_episode_collision |= strict_obstacle_contact_mask
                 s_avoid_episode_collision_snapshot = self.env.s_avoid_episode_collision.clone()
             if hasattr(self.env, "_get_s_avoid_episode_progress_flags"):
                 s_avoid_progress_mask = self.env._get_s_avoid_episode_progress_flags(env_ids)
@@ -5762,12 +5931,21 @@ class HierarchicalHexapodEnv:
                 print("[Mono-PPO Reward Audit] " + _fmt("pre_terminal", pre), flush=True)
                 print("[Mono-PPO Reward Audit] " + _fmt("post_terminal", post), flush=True)
                 self._mono_ppo_reward_audit_count = audit_count + 1
-        if self.debug and (collision_mask.any() or done_during.any()):
+        if self.debug and (
+            collision_raw_mask.any()
+            or collision_mask.any()
+            or strict_obstacle_contact_mask.any()
+            or done_during.any()
+        ):
             debug_count = int(getattr(self, "_collision_debug_count", 0))
             if debug_count < 20:
                 debug_env = None
-                if bool(collision_mask.any().item()):
+                if bool(collision_raw_mask.any().item()):
+                    debug_env = int(collision_raw_mask.nonzero(as_tuple=False).flatten()[0].item())
+                elif bool(collision_mask.any().item()):
                     debug_env = int(collision_mask.nonzero(as_tuple=False).flatten()[0].item())
+                elif bool(strict_obstacle_contact_mask.any().item()):
+                    debug_env = int(strict_obstacle_contact_mask.nonzero(as_tuple=False).flatten()[0].item())
                 elif bool(done_during.any().item()):
                     debug_env = int(done_during.nonzero(as_tuple=False).flatten()[0].item())
                 if debug_env is not None:
@@ -5826,7 +6004,9 @@ class HierarchicalHexapodEnv:
                     threshold_dbg = float(collision_threshold) if collision_threshold is not None else -1.0
                     print(
                         "[CollisionDebug] "
-                        f"env={debug_env} collision_mask={int(bool(collision_mask[debug_env].item()))} "
+                        f"env={debug_env} collision_raw={int(bool(collision_raw_mask[debug_env].item()))} "
+                        f"collision_mask={int(bool(collision_mask[debug_env].item()))} "
+                        f"contact_streak={int(self.pcr_collision_contact_streak[debug_env].item())} "
                         f"obstacle_contact_candidate={int(bool(obstacle_contact_candidate_mask[debug_env].item()))} "
                         f"done_during={int(bool(done_during[debug_env].item()))} "
                         f"collision_reward={collision_reward_dbg:.3f} "
@@ -5899,6 +6079,12 @@ class HierarchicalHexapodEnv:
             self.goal_change_count[done_any] = 0
             self.target_lost_steps[done_any] = 0
             self.pcr_follow_far_steps[done_any] = 0
+            self.pcr_risk_memory[done_any] = 0.0
+            self.pcr_lateral_memory_sign[done_any] = 0.0
+            self.pcr_lateral_memory_distance[done_any] = 0.0
+            self.pcr_lateral_memory_active[done_any] = False
+            self.pcr_collision_contact_streak[done_any] = 0
+            self.pcr_episode_hard_collision[done_any] = False
             self.stable_follow_steps[done_any] = 0
             self.pcr_row_success_flags[done_any] = False
             self.pcr_row_collision_flags[done_any] = False
@@ -5933,6 +6119,8 @@ class HierarchicalHexapodEnv:
             'goal_change_count': goal_change_count_snapshot,
             'episode': episode_info,
             'collision_mask': collision_mask,
+            'collision_raw_mask': collision_raw_mask,
+            'collision_contact_streak': self.pcr_collision_contact_streak.clone(),
             'collision_force_max': collision_force_max,
             'collision_threshold': collision_threshold,
             'collision_threshold_src': collision_threshold_src,

@@ -311,9 +311,15 @@ def _paper_row(metrics: Dict, src_path: str) -> Dict:
         "Speed": _speed_from_protocol(protocol),
         "Method": method,
         "Seed": protocol.get("seed", ""),
+        "Eval Layout": protocol.get("eval_layout", ""),
+        "Layout SHA256": protocol.get("layout_sha256", ""),
+        "Episode Sampling": protocol.get("episode_sampling", ""),
         "Num Episodes": overall.get("episodes", protocol.get("episodes", "")),
         "Checkpoint": _primary_checkpoint(metrics),
         "Source": src_path,
+        "_Difficulty Levels": protocol.get("difficulty_levels", []),
+        "_Num Envs": protocol.get("num_envs", 0),
+        "_Recorded Episodes By Env": protocol.get("recorded_episodes_by_env", []),
     }
     for title, key in PAPER_METRICS:
         if title in ("Unsafe Rate", "C_avoid Rate") and not conflict_metrics_available:
@@ -323,6 +329,53 @@ def _paper_row(metrics: Dict, src_path: str) -> Dict:
         else:
             row[title] = overall.get(key, "")
     return row
+
+
+def _validate_revision_rows(rows: List[Dict]) -> None:
+    layout_id = "revision_heldout_mixed_v1"
+    revision_rows = [row for row in rows if row.get("Eval Layout") == layout_id]
+    if not revision_rows:
+        return
+    if len(revision_rows) != len(rows):
+        raise RuntimeError("revision held-out results cannot be mixed with other layouts")
+
+    layout_hashes = {str(row.get("Layout SHA256", "")) for row in revision_rows}
+    if "" in layout_hashes or len(layout_hashes) != 1:
+        raise RuntimeError(f"revision held-out layout hash mismatch: {sorted(layout_hashes)}")
+
+    seen = set()
+    checkpoints_by_method: Dict[str, set] = {}
+    for row in revision_rows:
+        key = (str(row.get("Speed", "")), str(row.get("Method", "")), str(row.get("Seed", "")))
+        if key in seen:
+            raise RuntimeError(f"duplicate revision held-out result cell: {key}")
+        seen.add(key)
+
+        if int(float(row.get("Num Episodes", 0) or 0)) != 128:
+            raise RuntimeError(f"revision held-out cell must contain exactly 128 episodes: {key}")
+        if row.get("Episode Sampling") != "balanced_per_env_quota":
+            raise RuntimeError(f"revision held-out cell is not balanced per environment: {key}")
+        if row.get("_Difficulty Levels") != [0.0]:
+            raise RuntimeError(f"revision held-out cell must use one fixed difficulty label: {key}")
+
+        num_envs = int(row.get("_Num Envs", 0) or 0)
+        counts = row.get("_Recorded Episodes By Env", [])
+        if num_envs <= 0 or not isinstance(counts, list) or len(counts) != num_envs:
+            raise RuntimeError(f"revision held-out per-environment counts are missing: {key}")
+        counts_i = [int(value) for value in counts]
+        if sum(counts_i) != 128 or max(counts_i) - min(counts_i) > 1:
+            raise RuntimeError(f"revision held-out per-environment quota mismatch: {key}")
+
+        method = str(row.get("Method", ""))
+        checkpoints_by_method.setdefault(method, set()).add(str(row.get("Checkpoint", "")))
+
+    inconsistent = {
+        method: sorted(paths)
+        for method, paths in checkpoints_by_method.items()
+        if "" in paths or len(paths) != 1
+    }
+    if inconsistent:
+        raise RuntimeError(f"checkpoint mismatch within revision held-out method: {inconsistent}")
 
 
 def _dedupe_latest(rows: List[Dict]) -> List[Dict]:
@@ -360,6 +413,7 @@ def _write_paper_tables(metric_files: List[str], args) -> None:
         with open(p, "r", encoding="utf-8") as f:
             metrics = json.load(f)
         rows.append(_paper_row(metrics, p))
+    _validate_revision_rows(rows)
     if args.paper_dedupe_latest:
         rows = _dedupe_latest(rows)
 
@@ -388,6 +442,9 @@ def _paper_single_fieldnames() -> List[str]:
         "Speed",
         "Method",
         "Seed",
+        "Eval Layout",
+        "Layout SHA256",
+        "Episode Sampling",
         *[title for title, _ in PAPER_METRICS],
         "Num Episodes",
         "Checkpoint",
@@ -396,7 +453,7 @@ def _paper_single_fieldnames() -> List[str]:
 
 
 def _paper_aggregate_fieldnames() -> List[str]:
-    fields = ["Speed", "Method", "Seeds", "Num Runs", "Num Episodes Total"]
+    fields = ["Speed", "Method", "Eval Layout", "Layout SHA256", "Seeds", "Num Runs", "Num Episodes Total"]
     for title, _ in PAPER_METRICS:
         fields.extend([f"{title} Mean", f"{title} Std", f"{title}"])
     fields.append("Sources")
@@ -414,6 +471,8 @@ def _aggregate_paper_rows(rows: List[Dict]) -> List[Dict]:
         agg = {
             "Speed": speed,
             "Method": method,
+            "Eval Layout": group[0].get("Eval Layout", ""),
+            "Layout SHA256": group[0].get("Layout SHA256", ""),
             "Seeds": ",".join(str(r.get("Seed", "")) for r in sorted(group, key=lambda r: int(r.get("Seed", 0) or 0))),
             "Num Runs": len(group),
             "Num Episodes Total": sum(int(float(r.get("Num Episodes", 0) or 0)) for r in group),

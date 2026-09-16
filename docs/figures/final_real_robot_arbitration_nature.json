@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "claim": "During real-robot conflict intervals, PCR-Net reduces the Follow weight, restores part of it through the learned correction, and increases lateral motion while preserving forward motion.",
+  "archetype": "Three-stage aligned real-robot time-series figure",
+  "sources": [
+    {
+      "path": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/fig7_real_robot_arbitration_data.csv",
+      "sha256": "96a4bb700d3ae5aafa38064b617d2809b39dcd114c1125b763d3e1487b459874"
+    }
+  ],
+  "outputs": {
+    "svg": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.svg",
+      "sha256": "fe3a65d3b72a6536a2211c9a5a25e2fa217220db910560342a325b98b969a2fd"
+    },
+    "pdf": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.pdf",
+      "sha256": "72435870c84d78e23f5851b7c8a7e97ce5d39a0acb656c8995b5ff1a9077d9df"
+    },
+    "png": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.png",
+      "sha256": "5e49e989aa1be38bd3d91cf820acd1df6098cc1a1000ae793dfbb5d42c645325"
+    },
+    "tiff": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.tiff",
+      "sha256": "365b7e1525f0e7ac6dbd3270dfe5a91a275db6681b4b2ecbc0cb117a52ae7966"
+    }
+  },
+  "notes": [
+    "Conflict intervals are computed directly from the frozen CSV.",
+    "Panel a shows the recorded Follow-command risk and its 0.25 high-risk threshold; the redundant front-risk overlay is omitted.",
+    "The lateral trace uses the CSV's pre-conflict-baseline-adjusted magnitude.",
+    "A color-blind-safe semantic palette is used consistently across all three panels.",
+    "Axis limits follow the observed data range with explicit headroom; no trace is clipped.",
+    "No smoothing or resampling is applied."
+  ],
+  "rendering": {
+    "backend": "Python/Matplotlib",
+    "dpi": 600,
+    "editable_vector": true,
+    "minimum_nominal_font_pt": 5.4
+  }
+}

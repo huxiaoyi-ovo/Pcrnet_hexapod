@@ -33,8 +33,8 @@ def load_revision_heldout_layout() -> Dict[str, Any]:
         raise RuntimeError(f"revision held-out layout hash mismatch: expected={expected_hash}, actual={actual_hash}")
     if layout.get("obstacle_model") != "native_stage4_capsules" or not bool(layout.get("only_layout_change")):
         raise RuntimeError("revision held-out layout must retain the native Stage-4 capsule model")
-    if len(layout.get("rows", ())) != 5 or len(layout.get("obstacles", ())) != 13:
-        raise RuntimeError("revision held-out layout must contain five rows and thirteen capsules")
+    if len(layout.get("rows", ())) != 5 or len(layout.get("obstacles", ())) != 15:
+        raise RuntimeError("revision held-out layout must contain five rows and fifteen capsules")
     if any(obstacle.get("primitive") != "capsule" for obstacle in layout["obstacles"]):
         raise RuntimeError("revision held-out layout must contain capsules only")
     capsule = layout.get("obstacle_geometry", {}).get("capsule", {})

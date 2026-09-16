@@ -294,6 +294,8 @@ def _eval_cmd(args, *, seed: int, speed: float, method: str) -> List[str]:
         )
     if str(getattr(args, "eval_layout", "") or "").strip():
         cmd.extend(["--eval_layout", str(args.eval_layout)])
+    if str(getattr(args, "eval_layout", "") or "") == "revision_heldout_mixed_v1":
+        cmd.append("--balanced_env_episodes")
     if str(getattr(args, "export_eval_layout_debug", "") or "").strip():
         cmd.extend(["--export_eval_layout_debug", str(args.export_eval_layout_debug)])
     if bool(getattr(args, "headless", False)):

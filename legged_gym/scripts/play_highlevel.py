@@ -3190,6 +3190,10 @@ def parse_args():
     parser.add_argument("--risk_memory", action="store_true", help="learned-w 输入旧 row slot 改用可部署短时 risk_F 记忆")
     parser.add_argument("--risk_memory_l_clear", type=float, default=0.40, help="risk memory 距离衰减释放长度，单位 m")
     parser.add_argument("--risk_memory_velocity_source", type=str, default="body", choices=["body", "cmd"], help="risk memory 衰减速度来源")
+    parser.add_argument("--pcr_lateral_direction_memory", action="store_true", help="实验性：风险段内短时保持已选横移方向")
+    parser.add_argument("--pcr_lateral_memory_hold_distance", type=float, default=1.45, help="横移方向最短保持前进距离，单位 m")
+    parser.add_argument("--pcr_lateral_memory_risk_on", type=float, default=0.25, help="开始记住横移方向的 risk_F 阈值")
+    parser.add_argument("--pcr_lateral_memory_cmd_min", type=float, default=0.08, help="开始记住方向所需的最小 |cmd_A.x|")
     parser.add_argument("--disable_risk_scale", action="store_true", help="禁用 CommandPostProcessor 风险缩放（消融用）")
     parser.add_argument(
         "--debug_cmd",
@@ -4463,6 +4467,11 @@ def main():
                 post_info["signed_w_active"] = gate_diag["signed_w_active"].detach().clone()
                 post_info["w_support_correction"] = gate_diag["w_support_correction"].detach().clone()
                 post_info["risk_diff_correction"] = gate_diag["risk_diff_correction"].detach().clone()
+                post_info["lateral_memory_active"] = gate_diag["lateral_memory_active"].detach().clone()
+                post_info["lateral_memory_sign"] = gate_diag["lateral_memory_sign"].detach().clone()
+                post_info["lateral_memory_distance"] = gate_diag["lateral_memory_distance"].detach().clone()
+                post_info["lateral_reversal_blocked"] = gate_diag["lateral_reversal_blocked"].detach().clone()
+                post_info["cmd_before_lateral_memory"] = gate_diag["cmd_before_lateral_memory"].detach().clone()
             _update_e_s_metrics(e_s_metrics, env, obs_before_step, info, dones, step_idx, cmd)
             if e_s_metrics.get("enabled", False) and ((step_idx + 1) % e_s_metrics["autosave_steps"] == 0):
                 _export_e_s_metrics(e_s_metrics, final=False, stop_reason="autosave")
@@ -4512,7 +4521,22 @@ def main():
                     timeout_mask = ep_len_snapshot.to(device=dones.device) >= int(getattr(env, "max_episode_length", 0))
             timeout_mask &= dones
             timeout_mask &= (~done_during) & (~success_mask) & (~reach_mask)
-            other_done_mask = dones & (~done_during) & (~success_mask) & (~timeout_mask) & (~reach_mask)
+            collision_done_mask = torch.zeros_like(dones, dtype=torch.bool)
+            if isinstance(info, dict):
+                collision_from_info = info.get("collision_mask", None)
+                if torch.is_tensor(collision_from_info):
+                    collision_done_mask = collision_from_info.to(
+                        device=dones.device, dtype=torch.bool
+                    )
+            collision_done_mask &= dones & (~done_during)
+            other_done_mask = (
+                dones
+                & (~done_during)
+                & (~collision_done_mask)
+                & (~success_mask)
+                & (~timeout_mask)
+                & (~reach_mask)
+            )
             if dones.any():
                 stack_reset_mask = dones.clone()
                 track_done = bool(dones[track_env_idx].item())
@@ -4555,6 +4579,7 @@ def main():
                 if args.show_reset_reason or args.debug_cmd or debug:
                     done_n = int(dones.sum().item())
                     phys_n = int(done_during.sum().item())
+                    collision_n = int(collision_done_mask.sum().item())
                     succ_n = int(success_mask.sum().item())
                     tout_n = int(timeout_mask.sum().item())
                     reach_n = int(reach_mask.sum().item())
@@ -4563,6 +4588,8 @@ def main():
                     if track_done:
                         if bool(done_during[track_env_idx].item()):
                             track_reason = "done_during(physics)"
+                        elif bool(collision_done_mask[track_env_idx].item()):
+                            track_reason = "collision"
                         elif bool(success_mask[track_env_idx].item()):
                             track_reason = "success"
                         elif bool(timeout_mask[track_env_idx].item()):
@@ -4572,8 +4599,8 @@ def main():
                         else:
                             track_reason = "other"
                     print(
-                        "[PlayHigh][reset] step={} done={} reason(physics/success/timeout/reach/other)={}/{}/{}/{}/{} track_env_reason={}".format(
-                            step_idx, done_n, phys_n, succ_n, tout_n, reach_n, other_n, track_reason
+                        "[PlayHigh][reset] step={} done={} reason(physics/collision/success/timeout/reach/other)={}/{}/{}/{}/{}/{} track_env_reason={}".format(
+                            step_idx, done_n, phys_n, collision_n, succ_n, tout_n, reach_n, other_n, track_reason
                         )
                     )
 
@@ -4785,6 +4812,11 @@ def main():
                     follow_lost_dbg = 0
                     cmd_f_dbg = None
                     cmd_a_dbg = None
+                    cmd_before_lateral_memory_dbg = None
+                    lateral_memory_active_dbg = 0
+                    lateral_memory_sign_dbg = 0.0
+                    lateral_memory_distance_dbg = 0.0
+                    lateral_reversal_blocked_dbg = 0
                     y_eff_dbg = gate_val
                     if reward_terms is not None:
                         pcr_core_dbg = float(reward_terms.get("pcr_core", torch.zeros(1, device=rewards.device))[env_idx].detach().cpu())
@@ -4805,6 +4837,11 @@ def main():
                         cmd_a_t = post_info.get("cmd_A", None)
                         y_eff_t = post_info.get("y_eff", None)
                         row_not_released_t = post_info.get("row_not_released", None)
+                        cmd_before_lateral_memory_t = post_info.get("cmd_before_lateral_memory", None)
+                        lateral_memory_active_t = post_info.get("lateral_memory_active", None)
+                        lateral_memory_sign_t = post_info.get("lateral_memory_sign", None)
+                        lateral_memory_distance_t = post_info.get("lateral_memory_distance", None)
+                        lateral_reversal_blocked_t = post_info.get("lateral_reversal_blocked", None)
                         if torch.is_tensor(cmd_f_t):
                             cmd_f_dbg = cmd_f_t[env_idx].detach().cpu().numpy()
                         if torch.is_tensor(cmd_a_t):
@@ -4813,8 +4850,22 @@ def main():
                             y_eff_dbg = float(y_eff_t[env_idx].detach().cpu().item())
                         if torch.is_tensor(row_not_released_t):
                             row_not_released_dbg = float(row_not_released_t[env_idx].detach().cpu().item())
+                        if torch.is_tensor(cmd_before_lateral_memory_t):
+                            cmd_before_lateral_memory_dbg = cmd_before_lateral_memory_t[env_idx].detach().cpu().numpy()
+                        if torch.is_tensor(lateral_memory_active_t):
+                            lateral_memory_active_dbg = int(bool(lateral_memory_active_t[env_idx].item()))
+                        if torch.is_tensor(lateral_memory_sign_t):
+                            lateral_memory_sign_dbg = float(lateral_memory_sign_t[env_idx].item())
+                        if torch.is_tensor(lateral_memory_distance_t):
+                            lateral_memory_distance_dbg = float(lateral_memory_distance_t[env_idx].item())
+                        if torch.is_tensor(lateral_reversal_blocked_t):
+                            lateral_reversal_blocked_dbg = int(bool(lateral_reversal_blocked_t[env_idx].item()))
                     cmd_f_str = "None" if cmd_f_dbg is None else np.array2string(cmd_f_dbg, precision=3, floatmode="fixed")
                     cmd_a_str = "None" if cmd_a_dbg is None else np.array2string(cmd_a_dbg, precision=3, floatmode="fixed")
+                    cmd_before_lateral_memory_str = (
+                        "None" if cmd_before_lateral_memory_dbg is None
+                        else np.array2string(cmd_before_lateral_memory_dbg, precision=3, floatmode="fixed")
+                    )
                     target_bearing_deg_dbg = float("nan")
                     target_in_rgb_fov_dbg = 0
                     if follow_goal_dbg is not None and len(follow_goal_dbg) >= 2:
@@ -4849,11 +4900,17 @@ def main():
                         )
                     )
                     print(
-                        "[PlayHigh][PCR-cmd] pred={} exec={} cmd_F={} cmd_A={}".format(
+                        "[PlayHigh][PCR-cmd] pred={} pre_mem={} exec={} cmd_F={} cmd_A={} "
+                        "lat_mem(active/sign/dist/block)={}/{:.0f}/{:.3f}/{}".format(
                             np.array2string(cmd_pred, precision=3, floatmode="fixed"),
+                            cmd_before_lateral_memory_str,
                             cmd_str,
                             cmd_f_str,
                             cmd_a_str,
+                            lateral_memory_active_dbg,
+                            lateral_memory_sign_dbg,
+                            lateral_memory_distance_dbg,
+                            lateral_reversal_blocked_dbg,
                         )
                     )
                 if not is_pcr_demo_task:
