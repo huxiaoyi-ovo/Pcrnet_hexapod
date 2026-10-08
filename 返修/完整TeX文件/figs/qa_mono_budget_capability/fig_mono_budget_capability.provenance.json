@@ -1,0 +1,25 @@
+{
+  "mono_source": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table_mono_fixed_stage_detailed.csv",
+  "proposed_source": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table1_main_performance_stage4_audit.csv",
+  "remote_1500_source": "pcrnet-server:/home/dell/Pcrnet_hexapod_strong_mono_75b5582/outputs/strong_mono_budget_curve_backfill_5f268bd/iter1500",
+  "remote_1500_summary_percent_mean_and_sample_sd": {
+    "2": [
+      0.0,
+      0.0
+    ],
+    "3": [
+      0.0,
+      0.0
+    ],
+    "4": [
+      0.0,
+      0.0
+    ]
+  },
+  "layout": "horizontal",
+  "figure_size_in": [
+    7.1,
+    3.0
+  ],
+  "caption": "Fig. X. Monolithic PPO learning progression and formal comparison. (a) Deterministic capability probes at curriculum levels 2\u20134 at 0.35 m/s; policy updates are disabled during probing. The Adaptive marker shows its matched 24.576M interaction budget. (b) Strict task success on the same held out Stage 4 evaluation layout as Table I across target speeds for Mono checkpoints trained with 24.576M, 49.152M, and 61.440M interactions, together with Adaptive. The 0.60 m/s condition is 20% above the training speed range. Mono curves summarize one training seed; error bars are sample SD across three deterministic evaluation seeds. Mono and Adaptive use independent evaluation seed sets and are not episode-paired comparisons."
+}

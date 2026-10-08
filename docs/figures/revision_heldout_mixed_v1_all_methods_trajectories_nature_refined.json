@@ -1,28 +1,19 @@
 {
   "adaptation": {
     "nature_plotter": "legged_gym/scripts/plot_revision_heldout_method_trajectories_nature.py",
-    "nature_plotter_sha256": "c37d4a56974cec94278e06355ebf3cae74d008ea4aa46665007dc89980fb1b8e",
+    "nature_plotter_sha256": "07bf285e5eb04d6ccb24f0a40bfc1941b83a98b76ba4145a1b72dd500f105f65",
     "reuse_level": "style-only inheritance",
-    "scientific_mapping": "trajectory data unchanged; one display-only obstacle-center offset is recorded",
+    "scientific_mapping": "trajectory data and layout geometry unchanged; obstacles use their source layout centers",
     "source_plotter": "legged_gym/scripts/plot_revision_heldout_method_trajectories.py",
     "source_plotter_sha256": "646c011d93c78952c52b3ddc1e04b7b0b11085c422504da565bf75f531702c0d"
   },
   "artifact_role": "nature_refined_single_overview_trajectory_comparison",
-  "display_only_obstacle_offsets": [
-    {
-      "display_x": 0.8,
-      "display_y": 3.05,
-      "row": 3,
-      "source_x": 1.0,
-      "source_y": 3.05
-    }
-  ],
   "figure": {
     "axes_box_fraction": [
       0.105,
-      0.1,
+      0.09080459770114943,
       0.88,
-      0.7228260869565217
+      0.764367816091954
     ],
     "axis_aspect": "independent forward and lateral display scales",
     "axis_limits_basis": "robot trajectories and obstacle footprints plus 0.10 m padding",
@@ -38,31 +29,31 @@
     "global_visual_scale": 1.5,
     "grid": "none",
     "lateral_display_scale": 1.0,
-    "legend_layout": "method row plus semantic-glyph row inside the fixed canvas",
+    "legend_layout": "three centered rows: four primary methods, three remaining methods, then five semantic glyphs",
     "matplotlib_version": "3.1.2",
     "minimum_intended_font_size_pt": 5.0,
-    "obstacle_glyph": "fixed-size screen-circular glyph; one display-only center offset is recorded in the manifest",
+    "obstacle_glyph": "fixed-size screen-circular glyph centered at source layout coordinates",
     "obstacle_glyph_diameter_pt": 11.0,
     "panel_alignment": "not applicable: one axes panel",
     "pdf": "docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.pdf",
-    "pdf_sha256": "fa444077c282244beb288cc438beeddb38a53c13d2f57dcb906bf721ee9917b5",
+    "pdf_sha256": "9c5bbef253ac486bc9c4f064522ac62a6bcaeea96d278a740119e0101d598beb",
     "png": "docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.png",
     "png_dpi": 600,
-    "png_sha256": "60213a481838d8ed4f3ec84ff68d90d79007a53f3fd20176c8fb20968244aeaf",
-    "row_spacing_annotation": "adjacent-row dimension arrows and labels",
+    "png_sha256": "b8f4f9e858bf8100308c76b8d9d7ef2131987c9ac7aba81c129fb4f777bffefc",
+    "row_spacing_annotation": "omitted from this rendering; exact adjacent-row values remain recorded in layout.row_spacing_m",
     "size_inches": [
       4.366141732283465,
-      3.6220472440944884
+      3.425196850393701
     ],
     "speed_annotation": null,
     "spines": "left and bottom only",
     "style_profile": "Nature-style refined single overview",
     "svg": "docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.svg",
-    "svg_sha256": "30bf2d4257e9316a9ec27c2dacfd40f2b1ceb0250d6372547b022581bd12c8dc",
+    "svg_sha256": "0d1ea9f21b59d4fe45e11ef17b82cacb6937d39ab93eee3cec62a95e6b2f278e",
     "tiff": "docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.tiff",
-    "tiff_sha256": "74509a748df8be323fd488da1c7c8de37494c37e28be8ad01e2792913d1f43a0",
+    "tiff_sha256": "0aa464d0754de2cbd5ae720392103b4db2b7bdd340111520d7961d956985cd8b",
     "view": "single_overview",
-    "visual_hierarchy": "PCR uses a deep-blue 1.35 pt line without a halo; baselines use restrained colors, 0.95 pt lines, and alpha 0.62",
+    "visual_hierarchy": "Adaptive uses a deep-blue 1.35 pt line without a halo; baselines use restrained colors, 0.95 pt lines, and alpha 0.62",
     "width_mm": 110.9,
     "xlim": [
       -1.9565361022949248,
@@ -8692,8 +8683,7 @@
     "used the last pre-reset sample as the terminal-marker location",
     "rotated the display so forward is horizontal",
     "used independent forward and lateral display scales to expand the forward axis",
-    "rendered obstacles as fixed-size screen-circular glyphs centered at their displayed coordinates",
-    "displayed the row-3 obstacle at source (x=1.00, y=3.05) as (x=0.80, y=3.05) without changing the layout or trajectories",
+    "rendered obstacles as fixed-size screen-circular glyphs centered at their source layout coordinates",
     "used a moderately emphasized PCR line without a masking halo",
     "no trajectory coordinate translation, smoothing, interpolation, resampling, or reselection"
   ]

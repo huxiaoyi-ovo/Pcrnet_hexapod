@@ -1,0 +1,28 @@
+{
+  "mono_source": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table_mono_fixed_stage_detailed.csv",
+  "proposed_source": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table1_main_performance_stage4_audit.csv",
+  "remote_1500_source": "pcrnet-server:/home/dell/Pcrnet_hexapod_strong_mono_75b5582/outputs/strong_mono_budget_curve_backfill_5f268bd/iter1500",
+  "remote_1500_summary_percent_mean_and_sample_sd": {
+    "2": [
+      0.0,
+      0.0
+    ],
+    "3": [
+      0.0,
+      0.0
+    ],
+    "4": [
+      0.0,
+      0.0
+    ]
+  },
+  "layout": "vertical",
+  "figure_size_in": [
+    3.45,
+    2.25
+  ],
+  "caption": "Fig. X. Mono capability emergence. Frozen-checkpoint probes at curriculum levels 2\u20134 use 0.35 m/s with policy updates disabled. Error bars show sample SD across three evaluation seeds for one training seed; the vertical lines mark the Adaptive budget and curriculum transition.",
+  "panel_a_protocol": "Frozen-checkpoint Mono probes at curriculum levels 2-4 at 0.35 m/s; policy updates disabled; error bars are sample SD over three evaluation seeds for one training seed",
+  "source_data_changed": false,
+  "figure_claim": "Mono capability emergence from deterministic frozen-checkpoint probes; this is a diagnostic figure, not a formal-performance comparison"
+}

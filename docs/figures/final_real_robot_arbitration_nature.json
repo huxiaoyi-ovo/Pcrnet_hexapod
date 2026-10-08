@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "claim": "During real-robot conflict intervals, PCR-Net reduces the Follow weight, restores part of it through the learned correction, and increases lateral motion while preserving forward motion.",
+  "claim": "The real-robot trace decomposes Follow authority into the base gate output, analytic risk correction, and learned correction, alongside lateral and forward commands.",
   "archetype": "Three-stage aligned real-robot time-series figure",
   "sources": [
     {
@@ -10,20 +10,20 @@
   ],
   "outputs": {
     "svg": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.svg",
-      "sha256": "fe3a65d3b72a6536a2211c9a5a25e2fa217220db910560342a325b98b969a2fd"
+      "path": "docs/figures/final_real_robot_arbitration_nature.svg",
+      "sha256": "7fda3d19c079a70da4263188792b5d3d274366ad9fa1dc0517eda09a11066224"
     },
     "pdf": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.pdf",
-      "sha256": "72435870c84d78e23f5851b7c8a7e97ce5d39a0acb656c8995b5ff1a9077d9df"
+      "path": "docs/figures/final_real_robot_arbitration_nature.pdf",
+      "sha256": "dbc5417f08e4fd77ec18fd5bc46295fbb30860bee16d7840ae0547a9d7602d8c"
     },
     "png": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.png",
-      "sha256": "5e49e989aa1be38bd3d91cf820acd1df6098cc1a1000ae793dfbb5d42c645325"
+      "path": "docs/figures/final_real_robot_arbitration_nature.png",
+      "sha256": "fe5ae1e5697a34fb3d26e012647fd84f68ed39719cc488d007e1745975381e79"
     },
     "tiff": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.tiff",
-      "sha256": "365b7e1525f0e7ac6dbd3270dfe5a91a275db6681b4b2ecbc0cb117a52ae7966"
+      "path": "docs/figures/final_real_robot_arbitration_nature.tiff",
+      "sha256": "ede9842c8d8591c164867ee3c6a481e2be2f793ab0bbcc5f0c294c0268357586"
     }
   },
   "notes": [
@@ -38,6 +38,6 @@
     "backend": "Python/Matplotlib",
     "dpi": 600,
     "editable_vector": true,
-    "minimum_nominal_font_pt": 5.4
+    "minimum_nominal_font_pt": 5.04
   }
 }

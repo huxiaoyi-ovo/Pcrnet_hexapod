@@ -1,0 +1,29 @@
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+速度 & 方法 & 成功率 [\%] $\uparrow$ & 障碍行进度 [\%] $\uparrow$ & 碰撞率 [\%] $\downarrow$ & 跟随距离 MAE [m] $\downarrow$ \\
+\midrule
+\multirow{7}{*}{\rotatebox{90}{$0.35$}} & $\alpha$-only & \ms{97.9}{0.5} & \ms{99.6}{0.1} & \ms{2.1}{0.5} & \ms{0.217}{0.001} \\
+ & Geom-w & \ms{96.9}{1.4} & \ms{99.2}{0.6} & \ms{3.1}{1.4} & \ms{0.171}{0.001} \\
+ & Risk-only & \ms{96.4}{1.2} & \ms{99.3}{0.2} & \ms{3.6}{1.2} & \ms{0.164}{0.001} \\
+ & Rule-Override & \ms{64.6}{6.3} & \ms{82.1}{4.0} & \ms{34.6}{6.6} & \ms{0.164}{0.008} \\
+ & Additive-Fusion & \ms{65.4}{1.2} & \ms{84.2}{1.0} & \ms{34.4}{1.4} & \ms{\mathbf{0.102}}{0.001} \\
+ & \rev{Fixed-Authority} & \rev{\ms{74.2}{5.6}} & \rev{\ms{89.9}{3.0}} & \rev{\ms{24.5}{6.1}} & \rev{\ms{0.390}{0.009}} \\
+ & \textbf{Adaptive} & \ms{\mathbf{98.7}}{0.9} & \ms{\mathbf{99.8}}{0.1} & \ms{\mathbf{1.3}}{0.9} & \ms{0.120}{0.000} \\
+\midrule
+\multirow{7}{*}{\rotatebox{90}{$0.50$}} & $\alpha$-only & \ms{0.0}{0.0} & \ms{93.0}{1.2} & \ms{30.7}{6.4} & \ms{0.969}{0.035} \\
+ & Geom-w & \ms{93.5}{0.5} & \ms{97.2}{0.7} & \ms{6.5}{0.5} & \ms{0.430}{0.001} \\
+ & Risk-only & \ms{97.1}{0.9} & \ms{99.0}{0.5} & \ms{2.9}{0.9} & \ms{0.405}{0.001} \\
+ & Rule-Override & \ms{73.7}{7.1} & \ms{90.0}{2.8} & \ms{24.7}{7.3} & \ms{0.381}{0.013} \\
+ & Additive-Fusion & \ms{87.0}{0.9} & \ms{94.6}{0.4} & \ms{12.5}{0.8} & \ms{\mathbf{0.177}}{0.002} \\
+ & \rev{Fixed-Authority} & \rev{\ms{0.0}{0.0}} & \rev{\ms{43.6}{0.5}} & \rev{\ms{50.8}{4.1}} & \rev{\ms{1.220}{0.020}} \\
+ & \textbf{Adaptive} & \ms{\mathbf{99.2}}{0.8} & \ms{\mathbf{99.9}}{0.2} & \ms{\mathbf{0.8}}{0.8} & \ms{0.355}{0.003} \\
+\midrule
+\multirow{7}{*}{\rotatebox{90}{$0.60$}} & $\alpha$-only & \ms{0.0}{0.0} & \ms{79.4}{0.9} & \ms{71.4}{3.6} & \ms{1.133}{0.012} \\
+ & Geom-w & \ms{0.3}{0.5} & \ms{74.6}{1.8} & \ms{42.7}{8.4} & \ms{1.172}{0.015} \\
+ & Risk-only & \ms{0.8}{0.8} & \ms{71.5}{0.2} & \ms{29.4}{7.1} & \ms{1.305}{0.031} \\
+ & Rule-Override & \ms{73.4}{5.5} & \ms{86.1}{2.7} & \ms{21.1}{4.8} & \ms{0.582}{0.019} \\
+ & Additive-Fusion & \ms{66.9}{12.3} & \ms{87.4}{5.0} & \ms{32.6}{12.6} & \ms{\mathbf{0.334}}{0.040} \\
+ & \rev{Fixed-Authority} & \rev{\ms{0.0}{0.0}} & \rev{\ms{39.9}{0.1}} & \rev{\ms{47.7}{2.8}} & \rev{\ms{1.549}{0.004}} \\
+ & \textbf{Adaptive} & \ms{\mathbf{95.3}}{2.8} & \ms{\mathbf{98.5}}{0.8} & \ms{\mathbf{3.9}}{2.7} & \ms{0.623}{0.004} \\
+\bottomrule
+\end{tabular}

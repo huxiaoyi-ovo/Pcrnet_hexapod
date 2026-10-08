@@ -1,0 +1,205 @@
+\begin{center}
+{\LARGE\bfseries 通行性不匹配条件下目标跟随的指令空间自适应仲裁}\par
+\end{center}
+\begin{abstract}
+足式机器人在杂乱环境中跟随行人时，可能遇到行人能够通过、机器人却无法安全通过的通道。这种通行性不匹配使目标恢复与障碍间隙之间产生冲突。我们提出一种指令空间自适应仲裁框架，协调解析生成的前向—偏航跟随提议与预训练的横向避障提议。学习仲裁门控根据风险调整两者的相对控制权，同时固定两个专家和运动策略，使学习集中于行为协调。在留出评测中，该方法在 $0.60\,\mathrm{m/s}$ 下实现了 $95.3\%$ 的任务成功率，该速度比训练最高速度高 $20\%$。结合机载目标检测和双目深度，该方法在交错行走廊和急转弯走廊的 40 次实机试验中成功 37 次。与加性融合、固定控制权和单体 PPO 的比较支持了情境相关控制权分配在所测条件下的价值。
+\end{abstract}
+
+\section{引言}
+运动中的行人可以穿过某些间隙，而足式机器人的步态包络无法安全通过这些间隙（图~\ref{fig:teaser}）。这种\emph{通行性不匹配}使避碰与目标保持相互耦合：跟踪行人可能减小障碍间隙，而避障可能导致目标丢失。我们研究如何随着这一冲突的变化，在 Follow（跟随）和 Avoid（避障）提议之间分配控制权。
+
+所提出的仲裁框架在正交指令子空间中组合解析 Follow 提议与学习得到的 Avoid 提议（图~\ref{fig:system}）。门控利用沿各提议方向的障碍风险分配两者的控制权。专家和预训练运动策略保持固定，使学习集中于它们之间的协调。
+
+\zhfigure{1}{杂乱环境中六足机器人目标跟随的真实走廊场景。目标能够通过的间隙可能不足以容纳机器人包含腿部的包络，从而在目标恢复与碰撞规避之间产生冲突。}{fig:teaser}
+
+六足机器人能够完成该分解所需的横向运动，其固定的 18 关节运动策略负责实现指令。仲裁使用高层速度，而不使用六足机器人特有的关节观测。交错障碍行构成一种受控压力测试：目标持续前进时，机器人需要侧移通过连续障碍行。
+
+\noindent\textbf{贡献。}
+\begin{itemize}
+\item \textbf{通行性不匹配的指令空间表述。}我们将运动目标保持与局部碰撞规避之间的冲突，表述为指令空间中的连续控制权分配问题。
+\item \textbf{风险条件化自适应仲裁。}风险条件化门控融合正交指令子空间中固定的 Follow 和 Avoid 提议。有界的原始凸组合经过各方法共用的后处理，再由固定运动策略执行。
+\item \textbf{仲裁的受控验证。}仲裁变体之间的比较复用相同专家，推理消融复用同一检查点，从而保持专家能力和运动能力不变。留出仿真评测和实机试验量化了安全与跟随之间的权衡。
+\end{itemize}
+
+\section{相关工作}
+\emph{跟随、避障与敏捷运动。}行人跟随通常被表述为移动机器人跟踪与局部导航问题~\cite{ref:personfollowing}，而人机交互（HRI）研究还考虑可见性、人际距离及社会可接受的运动~\cite{ref:socialfollow}。He 等人~\cite{ref:abs}采用到达—避障表述，协调敏捷行为与恢复行为，实现朝向静态目标的无碰撞运动；Miki 等人~\cite{ref:miki}利用外感知和本体感知输入学习感知驱动的运动。我们的重点是在局部避障过程中持续跟踪运动目标。
+
+\emph{规划、安全与专家仲裁。}动态窗口方法对短时域内的间隙和推进进行评分~\cite{ref:dwa}；我们在第~VI-D 节纳入一种采用相同指令接口的 DWA 类替代方法。控制屏障函数将约束编码到在线二次规划中~\cite{ref:cbf}。约束策略优化在显式代价约束下最大化回报~\cite{ref:cpo}；我们的训练通过奖励塑形表达跟随与障碍间隙之间的权衡。在行为组合方面，经典混合专家方法学习门控函数~\cite{ref:moe}，而 MELA 组合专家网络参数~\cite{ref:mela}。Scheidemann 等人~\cite{ref:leaderfollow}通过 RMP 加速度与度量组合领航者跟随和避障。共享控制方法依据情境融合策略~\cite{ref:policyblend}，残差强化学习则学习加性动作修正~\cite{ref:residualrl}。相比之下，我们的门控学习固定 Follow 和 Avoid 速度提议之间的标量控制权。固定两个专家，使门控训练集中于何时以及在多大程度上偏向各行为。
+
+\section{问题表述}
+\textbf{A. 场景设定。}受控压力测试采用具有侧向通道的障碍行（图~\ref{fig:teaser}）。高层控制器以 $10\,\mathrm{Hz}$ 输出速度指令 $u=[u_x,u_y,u_\omega]^\top$（横向、前向、偏航），由固定的底层运动策略以 $50\,\mathrm{Hz}$ 实现。机器人感知局部占据—自由空间地图及目标相对状态；不使用全局地图。
+
+\textbf{B. 正交指令分解。}我们将跟随与避障分配到正交指令子空间。Follow 专家作用于前向—偏航子空间，Avoid 专家作用于横向子空间，
+\begin{equation}
+\mathcal{U}_F=\{[0,u_y,u_\omega]^\top\},\quad
+\mathcal{U}_A=\{[u_x,0,0]^\top\},
+\end{equation}
+因此 $\mathbb{R}^3=\mathcal{U}_F\oplus\mathcal{U}_A$，且 $\mathcal{U}_F\perp\mathcal{U}_A$。Follow 指令 $\uF=[0,u_{F,y},u_{F,\omega}]\in\mathcal{U}_F$ 通过解析方式计算；学习得到的 Avoid 专家生成原始指令，再投影到横向子空间，得到 $\uA=[u_{A,x},0,0]\in\mathcal{U}_A$。由于偏航位于 Follow 子空间，非零的 Follow 控制权会在横向避障时保留部分朝向目标的偏航，使机器人在侧移过程中更容易持续面向目标。
+
+\textbf{C. 冲突。}这些提议可以在代数上相加，但它们的执行效果受机器人足迹、障碍几何、运动动力学、指令限制和目标可见性共同耦合。因此，跟踪可能减小间隙，而避障可能增大目标误差。仲裁随着这一冲突的变化调节提议的相对控制权。
+
+\textbf{D. 任务成功与诊断量。}我们将事件层面的成功与轨迹诊断量区分开。只有当任务完成时机器人已通过最后一行障碍、处于 $[1.0,2.2]\,\mathrm{m}$ 的跟随距离区间内，且在整个回合中均未发生碰撞，该次试验才成功。我们还报告轨迹诊断量：跟随距离 MAE（在各高层时间步上计算 $|\mathrm{dist}(\text{target},\text{robot})-d_{\mathrm{des}}|$ 的均值，其中 $d_{\mathrm{des}}=1.5\,\mathrm{m}$）、L1（无碰撞）、L2（保持目标：跟随距离 MAE $\le0.5\,\mathrm{m}$ 且目标处于视野内的比例 $\ge0.90$），以及 L3（通过最后一行障碍）。距离条件在任务完成时检查；跟随距离 MAE 与 L2 概括整条轨迹上的跟踪表现，L2 不是额外的成功条件。
+
+\zhfigure{2}{指令空间中的自适应仲裁。机载感知提供局部占据—自由空间地图与目标相对状态（YOLOv8）。解析 Follow 专家提出前向—偏航运动，学习得到的 Avoid 专家提出横向运动，方向风险及其标量记忆作为仲裁门控的输入。门控计算 $\alphaeff$ 以融合指令，随后经过共用的指令后处理和固定运动策略。图中频率为部署频率：感知 30 Hz、仲裁 10 Hz、运动控制 50 Hz。}{fig:system}
+\figtranslation{图中文字对照：Observation：观测；High-level controller：高层控制器；Local Map：局部地图；occupancy/free-space：占据／自由空间；Target Detection：目标检测；Robot State：机器人状态；Expert Proposals：专家提议；Learned Avoid Expert：学习避障专家；Analytic Follow Expert：解析跟随专家；input：输入；map + robot state + relative goal：地图＋机器人状态＋相对目标；Avoid/Follow proposal：避障／跟随提议；Adaptive Arbitration：自适应仲裁；Command-Risk Query：指令风险查询；Arbitration Gate：仲裁门控；Beta heads：Beta 输出头；Effective Authority：有效控制权；Conflict-Aware Fusion：冲突感知融合；Low-level Locomotion：底层运动控制；Command Post-Processor：指令后处理器；Locomotion Policy：运动策略；joint command：关节指令；base state, velocity, attitude：机体状态、速度与姿态。}
+
+\section{方法}
+\label{sec:method}
+控制器由固定运动策略、正交专家提议和学习仲裁门控组成（图~\ref{fig:system}）。
+
+\textbf{A. Follow 专家（解析式）。}Follow 专家根据表示目标相对于机器人位置的二维相对目标，解析计算 $\uF=[0,u_{F,y},u_{F,\omega}]$，并采用带迟滞的先转向后前进规则：当方位角的绝对值超过 $0.35\,\mathrm{rad}$ 时，抑制前向项，机器人原地转向；当方位角的绝对值降至 $0.18\,\mathrm{rad}$ 以下时，恢复前进。
+
+\textbf{B. Avoid 专家（学习式）。}Avoid 在随机化障碍布局中独立预训练。通道难度随阶段变化，环境提供前向运动，Follow 不参与。预训练的演员网络保留三个指令输出，而仲裁仅使用其横向均值作为冻结的 Avoid 提议 $\uA$（观测与网络结构见第~IV-F 节及表~\ref{tab:architecture}）。
+
+奖励鼓励前向推进和方向间隙改善，惩罚横向指令的幅值与变化，并在两个横向备选方向均足够通畅时提供微弱的方向偏好。在 $\Delta t=0.1\,\mathrm{s}$ 时，稠密奖励为
+\begin{equation}
+\begin{aligned}
+r_t^A={}&\Delta y+0.03q_0(q_0-q_u)-0.005|u_x^{\mathrm{raw}}|\\
+&-0.01|u_{x,t}^{\mathrm{exec}}-u_{x,t-1}^{\mathrm{exec}}|
++0.0005Gp\tfrac{u_x^{\mathrm{exec}}}{u_{x,\max}},
+\end{aligned}
+\label{eq:avoid_reward}
+\end{equation}
+其中，$\Delta y$ 是前向位移，$q_j=\mathrm{clip}((0.57-d_j)/0.57,0,1)$，$j=0,u$。距离 $d_0,d_u$ 在动作执行前的同一地图上，分别沿正前方方向与原始指令方向，使用半角为 $25^\circ$ 的锥形区域查询。上标 raw/exec 分别表示处理前／后的指令；$u_{x,\max}$ 为横向限值。偏好 $p$ 是有效前向目标方向的归一化横向分量。只有在 Avoid 阶段 1 之后，且偏好有效、$\Delta y>0$、$d_0<0.57$、$d_L,d_R\ge0.57$、$|d_L-d_R|\le0.10$ 时，指示量 $G=1$（距离单位为米）；否则 $G=0$。这里，$d_L,d_R$ 分别查询横向指令 $\pm u_{x,\max}$ 与所提供前向指令组合后的方向。奖励不使用行索引、间隙中心或通道模板。
+
+终止奖励替代 $r_t^A$：机器人中心在未发生失败的情况下越过布局出口线时奖励为 $+2$；发生碰撞、包络侵入、跌倒或倾角／高度违规时奖励为 $-20$，且失败判定优先。超时结束回合，但不施加失败惩罚。横向避障假设前方可以观测到可行的绕行通道。
+
+\textbf{C. 方向指令风险。}门控接收机器人固定坐标系中的双通道局部占据—自由空间地图。该地图表示为 $32\times32$ 栅格，覆盖前方 $3\,\mathrm{m}\times3\,\mathrm{m}$ 区域，原点位于相机安装位置。占据通道标记被占据的单元。自由空间通道是一个无量纲分数：对占据区域进行膨胀，生成自由空间掩膜，将其与 $3\times3$ 局部平均值逐单元取最大值，再屏蔽被占据及未观测单元；它不是以实际距离为单位的距离场。仿真中，占据区域膨胀采用 $7\times7$ 方形核。膨胀半径依据六足机器人的实体测量选取，以考虑机身尺寸以及行走过程中腿部运动带来的额外横向范围。对于每个具有非零平移的提议，在以 $\mathrm{atan2}(u_x,u_y)$ 为中心、半角为 $25^\circ$ 的锥形区域中，查询地图原点到占据通道中最近占据单元的距离 $d$（若锥形区域内未观测到占据单元，则 $d=3.0\,\mathrm{m}$）。平移接近零时，仿真中的查询回退为局部地图内占据单元的最小距离。两种查询均不评估偏航运动的扫掠范围。侧移可利用前方已观测到的绕行空间提前开始，但查询锥内未观测到障碍，并不表示整条侧向路径都已确认畅通。风险为
+\begin{equation}
+\rho(u)=1-\mathrm{clip}\!\left(\tfrac{d-d_{\mathrm{safe}}}{d_{\mathrm{free}}-d_{\mathrm{safe}}},0,1\right),
+\end{equation}
+其中 $d_{\mathrm{safe}}=0.27\,\mathrm{m}$，$d_{\mathrm{free}}=0.57\,\mathrm{m}$。这些固定阈值定义的是方向接近程度分数，而不是机器人扫掠体的间隙。$25^\circ$ 半角是定义方向查询邻域的固定启发式参数；不使用速度缩放或制动距离模型。
+
+对于各提议，$\rho_F=\rho(\uF)$，$\rho_A=\rho(\uA)$。\emph{按距离衰减的风险记忆。}为保留近期危险信息，标量风险记忆随机体前向位移衰减，在纯横向运动或停止时不衰减：
+\begin{equation}
+\begin{aligned}
+m_t &= \max\!\big(\rho_{F,t},m_{t-1}e^{-\Delta s/L_{\mathrm{clear}}}\big),\\
+\Delta s &= \max(v_{y,t}^{\mathrm{body}},0)\,\Delta t,
+\end{aligned}
+\end{equation}
+其中 $L_{\mathrm{clear}}=0.40\,\mathrm{m}$。该标量作为派生冲突特征输入门控。瞬时风险反映当前地图观测；$m_t$ 保留的是标量危险信号，而不是障碍地图。
+
+\textbf{D. 门控与冲突感知融合。}单一仲裁门控通过 Beta 输出头生成基础 Follow 控制权 $\alpha\in(0,1)$ 和学习冲突变量 $w\in(0,1)$。门控结合局部几何、机器人与目标状态，以及依赖于提议的冲突特征；具体观测在第~IV-F 节列出。学习得到的有符号调制项与解析风险修正项为
+\begin{align}
+\Delta\alpha_w &= \lambda\,\mathrm{deadband}(2w-1),\quad
+\Delta\alpha_r = \gamma(\rAdir-\rFdir), \\
+\alphaeff &= \mathrm{clip}\!\left(\alpha+\Delta\alpha_w+\Delta\alpha_r,0,1\right),
+\end{align}
+其中 $\lambda=0.30$、$\gamma=0.15$；当 $|z|>0.05$ 时，$\mathrm{deadband}(z)=z$，否则为 $0$。融合指令为
+\begin{equation}
+u = \alphaeff\,\uF + (1-\alphaeff)\,\uA.
+\label{eq:fusion}
+\end{equation}
+在死区之外，$w>0.5$ 通过 $\Delta\alpha_w$ 增强跟随，$w<0.5$ 则抑制跟随。在调制生效且未饱和的区域，$\partial\alphaeff/\partial w=2\lambda=0.60$；在死区内或限幅后，该导数为零。这些增益将限幅前学习修正项和解析修正项的幅度分别限制在 $0.30$ 和 $0.15$ 内。
+
+\textbf{E. 底层运动接口。}固定运动策略以 $50\,\mathrm{Hz}$ 跟踪高层指令，各方法共用这一策略。执行前，所有方法均采用相同的幅值限幅、用于约束指令变化的变化率限制，以及基于间隙的缩放，以在接近障碍时减弱平移。
+
+\textbf{F. 训练过程。}首先使用 RSL-RL~\cite{ref:rudin} 预训练并冻结以速度指令为条件的六足运动策略，奖励项包括相机稳定性和平滑冲击。Avoid 也保持冻结（第~IV-B 节），此后仅训练仲裁门控。权重为 $0.05$ 的辅助二元交叉熵损失，在明显应偏向避障的状态下鼓励 $w=0$：一类是障碍行尚未释放，且满足 $\rFdir>0.25$、$\rFdir-\rAdir>0.05$、指令余弦值 $<0.5$ 的情形；另一类是不受行释放条件限制、满足 $\rFdir>0.45$、$\rFdir-\rAdir>0.15$、指令余弦值 $<0.3$ 的全局情形。
+
+Avoid 专家、运动策略和门控均使用 Isaac Gym~\cite{ref:isaac} 中相同的六足机器人模型；运动策略使用 RSL-RL，两个学习型高层策略使用 PPO~\cite{ref:ppo}。课程包含四个等级，同时将障碍行数从两行变到五行、将目标速度从 $0.25$ 变到 $0.50\msec$；每个回合内速度固定。在 $120{,}000$ 个回合中，采样逐步偏向更困难的等级，同时保留较简单回合。五行训练布局使用两个镜像模板，左右通道交替，障碍位置施加最大 $\pm0.06\,\mathrm{m}$ 的独立扰动；第~V-A 节介绍留出评测。训练障碍为静态，半径为 $0.15\,\mathrm{m}$、高度为 $0.50\,\mathrm{m}$；接触摩擦系数在 $[0.4,0.8]$ 内随机化。训练时，策略接收由仿真障碍几何栅格化得到、并限制在 D435i 双目视野内的局部占据—自由空间地图，而不是渲染深度。
+
+\begin{table}[htbp]
+\centering\small
+\caption{Avoid 专家与仲裁门控的网络结构。两者的地图编码器结构相同、权重独立；参数量包含训练时使用的评论家网络}
+\label{tab:architecture}
+\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.13\linewidth}p{0.405\linewidth}p{0.405\linewidth}@{}}
+\toprule
+模块 & Avoid 专家 & 仲裁门控\\\midrule
+地图编码器 & \multicolumn{2}{p{0.83\linewidth}@{}}{双通道局部占据／自由空间地图＋两个归一化坐标通道；卷积 $4\to32\to64\to128$（$3\times3$，步长 $2/2/1$，填充 1，ELU）；自适应 $4\times4$ 平均池化；全连接层 $2048\to128$。}\\
+标量编码器 & 状态 MLP $14\to64\to64\to64$；目标 MLP $2\to32\to32$（ELU）。 & 状态 MLP $13\to64\to64\to64$；目标／冲突 MLP $18\to32\to32$（ELU；总计 31 个标量输入）。\\
+融合 & \multicolumn{2}{p{0.83\linewidth}@{}}{拼接 $128+64+32+1=225$；MLP $225\to256\to256$（ELU）。评测门控的一维难度输入固定为零。}\\
+演员输出头 & 均值 $256\to64\to3$；标准差 $256\to64\to3$（Softplus）；执行横向均值。 & 四个 $256\to64\to1$ 的 Softplus 浓度参数输出头；构成 $\alpha,w$ 的两个 Beta 分布；评测时使用 Beta 分布均值。\\
+评论家／参数量 & 价值 $256\to64\to1$；1,029,575 个参数。 & 价值 $256\to64\to1$；1,063,237 个参数。\\
+\bottomrule\end{tabular}
+\end{table}
+
+表~\ref{tab:architecture} 汇总了网络结构；评论家使用独立的编码器和主干网络。门控的 13 维机器人状态包括世界坐标系平面位置、偏航角、机体系平面速度、偏航角速度、高度、横滚／俯仰角、上一时刻的基础控制权 $\alpha$，以及上一条指令。Avoid 将控制权槽位固定为零，并追加强制前向速度（构成 14 维状态）；其地图和二维相对目标为独立输入。门控的 18 维目标／冲突向量包括相对目标、Follow／Avoid 提议及其差值（9）、风险 $\rho_F,\rho_A$、风险记忆 $m_t$、平移指令余弦 $c$、冲突分数 $\max(\rho_F-\rho_A,0)(1-c)/2$，以及两个归一化间隙 $\mathrm{clip}(d/(3\,\mathrm{m}),0,1)$。当任一平移提议的范数不超过 $10^{-6}$ 时，令 $c=1$。
+
+两个高层阶段各使用 1,000 次迭代（12.288M 次交互），共计 24.576M 次；不计入共用且冻结的底层运动策略训练。门控 PPO 使用 256 个环境，每次迭代 48 步；Avoid 使用 512 个环境，每次迭代 24 步。门控每次迭代优化五个 epoch，小批量大小为 12,288，学习率为 $6\times10^{-5}$，熵系数为 0.04，截断比率为 0.05。门控训练将障碍行进度、跟随距离、成功以及碰撞／失败／时间奖励，与 $w$ 辅助损失相结合。行释放信息仅提供辅助训练标签；演员网络接收的则是标量风险记忆。
+
+\textbf{G. 结构性质与适用范围。}原始融合指令位于提议的凸包内。令 $u_{\mathrm{nom}}=\alpha\uF+(1-\alpha)\uA$，$\delta u=u-u_{\mathrm{nom}}$，则
+\begin{equation}
+\begin{aligned}
+\delta u &= (\alphaeff-\alpha)(\uF-\uA),\\
+\|\delta u\| &\le (\lambda+\gamma)\|\uF-\uA\|.
+\end{aligned}
+\label{eq:residual_bound}
+\end{equation}
+因此，当两提议一致时，修正消失；发生冲突时，修正保持有界。这些是原始指令的性质，而非避碰保证：安全执行运动的集合不一定为凸集。
+
+\section{实验}
+\textbf{A. 设置。}正式评测从一个五行 Stage-4 留出布局族中采样实例。该布局族未用于 Avoid／门控训练、检查点选择或参数调节。每个实例均通过围绕同一名义结构随机扰动障碍位置生成。它保留通行能力失配任务，并引入连续同侧通道，从而打破训练中的左右交替规则。名义布局的行间距涵盖了训练范围之外的取值。名义布局包含 15 个障碍（每行三个），最小通道宽度为 $0.75\,\mathrm{m}$，机器人包含腿部的包络约为 $0.65\,\mathrm{m}$。三种速度（$0.35$、$0.50$、$0.60\msec$）均按该协议评测；前两种位于训练范围内，$0.60\msec$ 则比训练最高速度 $0.50\msec$ 高 $20\%$。
+
+主要结果报告三个评测种子上的均值 $\pm$ 标准差（SD），每个种子 128 个回合（每种方法—速度设置共 384 个回合；时域为 50 s）。六足机器人具有 18 个驱动关节，通行包络半长为 $0.25\,\mathrm{m}$。D435i 的深度视野为 $87^\circ\times58^\circ$，距离范围为 $0.28$--$3.0\,\mathrm{m}$。仿真使用结构化几何基元；推理消融和 DWA 使用相同评测协议。对于 Mono，课程探测使用等级 2--4 的冻结检查点诊断训练能力；这些探测与正式留出评测相互独立。一项在混合难度等级上开展的独立敏感性测试，在固定策略及后处理的条件下，将两个标称风险阈值共同平移 $\pm0.05\,\mathrm{m}$，或仅将 $d_{\mathrm{free}}$ 改变 $\pm0.10\,\mathrm{m}$。汇总三种速度（每种设置、每种速度 128 个回合）后，成功率与碰撞率分别变化 1.6 和 1.3 个百分点。
+
+\textbf{B. 对比方法。}我们将比较分为三组。
+\emph{（1）仲裁消融}共享专家、基础传感器输入及执行系统，但采用不同仲裁规则：\emph{$\alpha$-only}（$\alphaeff=\alpha$，不使用风险调制或学习调制）；\emph{Geom-w}，几何间隙启发式 $w_{\mathrm{geom}}=e^{-d/\tau}$，其中 $d$ 是 Follow 指令间隙、$\tau=0.15\,\mathrm{m}$，且 $\alphaeff=\alpha(1-w_{\mathrm{geom}})$；\emph{Risk-only}，学习得到的基础 $\alpha$ 加解析项 $\darisk$，$\alpha_{\mathrm{eff}}=\mathrm{clip}(\alpha+\Delta\alpha_r,0,1)$，去除 $w$ 后从头重新训练；\emph{Rule-Override}，依据 $\rFdir-\rAdir$ 进行反应式覆盖，将前向指令降至最低 $10\%$，同时最多保留 $70\%$ 的偏航指令，以强制横向避障，在所有速度下使用同一组固定参数；以及完整的所提方法 \emph{Adaptive}。
+
+\emph{（2）结构替代方法。}\emph{Additive-Fusion} 以直接指令相加 $u=\uF+\uA$ 替代门控，保留相同专家，但不使用门控。Fixed-Authority 使用 $u=\alpha^*\uF+(1-\alpha^*)\uA$，其中全局常数 $\alpha^*=0.50$ 由 $[0,1]$ 上的 21 点验证扫描选出：在 $0.35$ 和 $0.50\msec$ 的独立验证试验中最大化平均任务成功率；随后在各速度下保持固定，并使用相同专家、后处理与运动策略。
+
+\emph{（3）外部替代方法}（第~VI-D 节）：\emph{单体 PPO} 策略与 \emph{DWA 类速度搜索}，两者均使用相同的基础地图、机器人状态和目标传感器输入、指令限制，以及固定底层执行系统。
+
+\textbf{C. 指标。}任务成功采用第~III-D 节的事件层面判据；我们报告碰撞率及通过最后一行障碍的进度作为轨迹诊断量，并在涉及目标保持时报告跟随距离 MAE 与 L2。障碍行进度是安全完成的障碍行所占比例，不同于表示是否通过最后一行的二值指标 L3。
+
+\section{结果}
+所有仿真结果均使用第~III-D 节的事件层面成功定义；评测协议见第~V-A 节。
+
+\textbf{A. 主要性能。}在高冲突条件下，Adaptive 同时获得较高任务成功率和较低碰撞率（表~\ref{tab:main}；图~\ref{fig:main}）。图~\ref{fig:simtraj}(a) 展示训练分布中的场景，与正式评测布局不同。在 $0.60\msec$ 下，成功率为 $95.3\%$、碰撞率为 $3.9\%$、跟随距离 MAE 为 $0.62\,\mathrm{m}$。
+
+随着目标速度增加，各仲裁变体呈现不同的性能退化。尽管 $\alpha$-only 学习了随情境变化的基础控制权，其任务成功率在两个较高速度下均降至零。Geom-w 和 Risk-only 在中间速度下仍然有效，但在 $0.60\msec$ 下，尽管它们的碰撞率低于 $\alpha$-only，任务成功率仍接近零，且跟随距离误差较大。Rule-Override 仍保有较高的任务成功率，但碰撞频繁。在这些变体中，任务失败表现为碰撞与跟随距离误差的不同组合。
+
+\zhfigure{3}{留出 Stage-4 评测上的主要性能。(a) 任务成功率随目标速度的变化。(b) $0.60\msec$ 下的跟随距离 MAE 与碰撞率；标记面积表示任务成功率。}{fig:main}
+\figtranslation{图中文字对照：Task success：任务成功率；Target speed：目标速度；Follow-distance MAE：跟随距离平均绝对误差；Collision rate：碰撞率；Marker area $\propto$ task success：标记面积与任务成功率成正比。方法名与正文一致。}
+
+\zhfigure{4}{训练与评测场景。(a) 代表性训练场景与策略输入。(b) 速度为 $0.60\msec$ 时的代表性轨迹；障碍物显示的是 Stage-4 留出布局的名义几何。}{fig:simtraj}
+\figtranslation{图中文字对照：Target：目标；Start：起点；Success：成功；Collision：碰撞；Follow lost / timeout：跟随目标丢失／超时；Lateral position, world x：横向位置（世界坐标 $x$）；Forward position, world y：前向位置（世界坐标 $y$）；Virtual Ego Camera / Policy Input：虚拟自视角相机／策略输入；Actor Occupancy：仿真物体占据通道；Actor Free Space：仿真物体自由空间通道。}
+
+\zhTable{2}{留出 Stage-4 评测上的性能。数值为均值 $\pm$ 标准差；速度单位为 m/s。粗体表示每种速度、每项指标的最佳均值}{tab:main}
+
+\textbf{B. 推理消融。}表~\ref{tab:mech} 复用 Adaptive 检查点，仅在推理时令 $\Delta\alpha_w=0$。在 $0.35$ 和 $0.50\msec$ 下，成功率仍然较高；但在 $0.60\msec$ 下，尽管障碍行进度仍然较高，成功率却降至零，同时跟随距离 MAE 升至 $1.46\,\mathrm{m}$。在专家和策略检查点均保持固定的条件下，这一比较支持学习修正项在所测试的最高冲突条件下维持目标跟随的作用。Avoid 和门控观测机体系速度，Follow 则响应目标相对状态；因此，最高速度对整个系统施加压力。
+
+\zhTable{3}{学习修正项消融（推理时 $\Delta\alpha_w=0$）。成功、障碍行进度和碰撞均以比例表示；速度单位为 m/s}{tab:mech}
+
+\textbf{C. 结构替代方法。}Additive-Fusion 保持较低的跟随距离误差，但碰撞明显更多，体现了尚未解决的安全与跟随权衡。Fixed-Authority 在较高速度下无法完成任务，表明单一全局控制权分配在不同条件下存在局限。代表性轨迹见图~\ref{fig:simtraj}(b)。
+
+\textbf{D. 外部替代方法。}\label{sec:external}
+我们以单体 PPO 作为主要学习基线，以 DWA 类速度搜索作为规划基线；两者均使用与 Adaptive 相同的指令接口和目标信息。
+
+\emph{单体 PPO（Monolithic PPO，简称 Mono）。}该策略输出完整高层指令，不采用 Follow／Avoid 分解。它与 Adaptive 共享基础观测、空间地图编码器类型、指令限制、后处理和冻结运动策略。Mono 与门控的演员—评论家参数量相近（1.03M 对 1.06M），而 Adaptive 还使用冻结的 Avoid 专家。Mono 在按任务表现推进的课程下训练，最多进行 61.4M 次交互，采用一个训练种子和三个评测种子。
+
+在匹配的 24.6M 预算下，Mono 在三种速度下的任务成功率均为零，而 Adaptive 均超过 $95\%$（表~\ref{tab:mono}）。延长训练使 Mono 在 $0.50\msec$ 下的成功率达到 $94.5\%$，证实无需专家分解也能学会完整任务。然而，在本次训练运行中，不同条件下的表现仍不均衡：在训练范围内的 $0.35\msec$ 下，成功率从 49.2M 次交互时的 $57.3\%$ 降至 61.4M 次时的零。在 49.2M 次交互、$0.60\msec$ 下，$60.4\%$ 的回合无碰撞完成全部障碍行，但任务成功率仍为零，跟随距离 MAE 达到 $1.25\,\mathrm{m}$。因此，策略可以获得障碍通过能力，却未能持续满足跟随目标。
+
+\zhfigure{5}{Mono 能力的形成。探测在课程等级 2--4、速度 $0.35\msec$ 下使用冻结检查点，关闭策略更新。误差条表示一个训练种子对应的三个评测种子之间的样本标准差；竖线标出 Adaptive 的预算和课程切换点。}{fig:mono}
+\figtranslation{图中文字对照：Mono capability probes across training budget：不同训练预算下的 Mono 能力探测；Task success：任务成功率；High-level training interactions (M)：高层训练交互次数（百万）；Adaptive high-level budget：Adaptive 高层训练预算；Curriculum Level $2\to3$ transition：课程等级从 2 切换至 3；Level 2/3/4：等级 2/3/4。}
+
+\zhTable{4}{Stage-4 留出布局上的任务成功率（\%）；速度单位为 m/s}{tab:mono}
+
+\emph{DWA 类速度搜索。}DWA 使用与 Adaptive 相同的地图、目标、指令限制、后处理器和底层策略。它以 10 Hz 搜索可达指令，对碰撞、风险、目标距离与方位、推进及平滑性评分。仅在验证阶段调参，选定 $7\times5\times5$ 网格和 $1.2\,\mathrm{s}$ 时域。所测试的最佳设置在 $0.35\msec$ 下获得 $8.2\%$ 成功率，在 $0.60\msec$ 下为零（表~\ref{tab:dwa}）。在所测试的代价设置中，障碍行进度和跟随误差的变化并未同时带来低碰撞率和高任务成功率。
+
+\zhTable{5}{DWA 类速度搜索}{tab:dwa}
+
+\textbf{E. 实机部署。}我们将策略部署到六足机器人上，在具有两行交错障碍的狭窄室内走廊中运行。可通行间隙左右交替，机器人必须侧移通过每一行，同时将行走的人保持在视野中。实机障碍行使用箱体和圆锥体替代规则仿真基元，以测试超出仿真障碍表示的迁移。
+
+YOLOv8 仅用于目标检测和相对目标估计；屏蔽与所检测目标关联的深度点后，从双目深度获取障碍几何。其余有效深度点利用相机内参反投影，转换到与机器人对齐的坐标系，经高度过滤后栅格化到局部地图的占据通道。局部地图在机器人固定坐标系中根据当前及短时深度观测更新，$m_t$ 则独立保留标量风险历史。不维护持久化的全局障碍地图。仿真使用仿真物体栅格化代替双目深度。Adaptive 与 Rule-Override 采用完全相同的目标检测、局部地图生成及感知设置。在交错行协议下，Adaptive 的任务成功率更高（表~\ref{tab:real}），平均跟随距离 MAE 也低于 Rule-Override（分别为 $0.52\,\mathrm{m}$ 和 $1.21\,\mathrm{m}$）。图~\ref{fig:real_arbitration} 给出代表性仲裁轨迹；图~\ref{fig:real_views} 展示实机及机载视角。
+
+急转弯走廊将两段障碍行以 $90^\circ$ 连接。Adaptive 无需针对场景切换，在 $20$ 次试验中成功 $18$ 次，使其在两个场景中的总体成功次数达到 $37/40$（表~\ref{tab:real}）。Adaptive 的三次失败包括两次障碍接触和一次目标丢失。任一事件都会使该次试验被判为失败，后续恢复不改变这一分类。补充视频展示了这一过程。
+
+\zhfigure{6}{代表性实机仲裁。(a) 由双目深度计算的风险在冲突期间达到峰值。(b) 解析风险项降低 Follow 控制权；蓝色阴影表示学习修正项对该控制权的部分恢复。(c) 前向与横向运动；$\Delta|u_x|$ 相对于冲突前的中位数计算。}{fig:real_arbitration}
+\figtranslation{图中文字对照：Follow-command risk：Follow 指令风险；Risk：风险；high-risk threshold：高风险阈值；Risk-conditioned arbitration：风险条件化仲裁；Base：基础；Risk-adjusted：经风险调整；Final：最终；Follow authority：Follow 控制权；Executed motion：执行运动；Lateral increase：横向幅值增量；Forward：前向；Time：时间。}
+
+\zhfigure{7}{实机部署视图。(a) 六足机器人一边跟随行走目标，一边侧移绕过走廊中的交错障碍。(b) 三个代表性机载时刻（第 1、3、5 帧）展示 Adaptive 使用的目标状态和由双目深度得到的局部占据—自由空间地图。}{fig:real_views}
+\figtranslation{图中文字对照：free/obstacle map：自由空间／障碍地图；target mask：目标掩膜。机载画面的状态叠字保留原始记录。}
+
+\zhTable{6}{实机结果（60 次试验）}{tab:real}
+
+\section{讨论与局限}
+\textbf{自适应仲裁的作用。}较低的碰撞率、较高的障碍通过进度和较低的跟随距离误差，都可能与任务失败同时出现。在专家保持不变的条件下，各仲裁变体呈现出不同的协调失败模式。更直接的证据是，在同一 Adaptive 检查点中关闭学习修正项，使最高测试速度下的任务成功率降至零。Mono 证实无需专家分解也能学会完整任务，但在所评估的训练运行中，并未在各个速度下稳定地同时维持障碍通过与持续跟随。这些发现支持学习控制权应如何随情境变化。
+
+\textbf{适用范围与局限。}仅横向输出的 Avoid 假设前向地图中可观测到可行绕行通道。所评测的障碍均为静态；与动态障碍的交互不在当前范围内。实体横向墙、死胡同、凹陷陷阱，或目标在屏障前停止，可能需要停车、后退或更高层重规划；所评测的控制器没有专门的死胡同恢复或全局重规划机制。方向风险度量的是接近程度，而非扫掠足迹间隙；有界凸组合并不保证执行时无碰撞。
+
+\section{结论}
+我们提出了面向通行性不匹配下目标跟随的自适应指令空间仲裁方法，将学习集中于固定 Follow 和 Avoid 提议之间的协调。受控比较表明，Additive-Fusion 和 Fixed-Authority 无法在所测条件下保持相当的任务表现，而延长单体 PPO 训练则证实无需专家分解也能学会完整任务。Adaptive 在留出评测中、$0.60\,\mathrm{m/s}$ 下取得 $95.3\%$ 的成功率，并在交错行及急转弯走廊的 40 次实机试验中成功 37 次。综合这些结果，情境相关的控制权分配有助于在所测条件下平衡障碍通过与持续目标跟随。
+
+\FloatBarrier
+\input{references_original.tex}

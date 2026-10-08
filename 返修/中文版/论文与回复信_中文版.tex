@@ -1,0 +1,79 @@
+\documentclass[a4paper,11pt,fontset=none]{ctexart}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\setmainfont{TeX Gyre Termes}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans CJK SC}
+\usepackage[left=22mm,right=22mm,top=20mm,bottom=20mm]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs,multirow,array,float,placeins,enumitem,needspace}
+\usepackage{xcolor}
+\definecolor{reviewgray}{gray}{0.28}
+\usepackage{setspace}
+\setstretch{1.18}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{3pt}
+\setlength{\emergencystretch}{2em}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\thesection}{\Roman{section}}
+\renewcommand{\thetable}{\Roman{table}}
+\usepackage[hidelinks,unicode,bookmarksnumbered]{hyperref}
+\pagestyle{plain}
+\newcommand{\uF}{u_{F}}
+\newcommand{\uA}{u_{A}}
+\newcommand{\alphaeff}{\alpha_{\mathrm{eff}}}
+\newcommand{\rFdir}{\rho_F}
+\newcommand{\rAdir}{\rho_A}
+\newcommand{\darisk}{\Delta \alpha_r}
+\newcommand{\msec}{\,\mathrm{m/s}}
+\newcommand{\ms}[2]{\ensuremath{#1{\pm}#2}}
+\newcommand{\bms}[2]{\ensuremath{\mathbf{#1{\pm}#2}}}
+\newcommand{\rev}[1]{#1}
+\newcommand{\figtranslation}[1]{\par\smallskip{\footnotesize\noindent#1\par}\smallskip}
+\newcommand{\zhfigure}[3]{%
+\begin{figure}[H]\centering
+\ifcase#1\relax
+\or\includegraphics[width=.65\linewidth]{../完整TeX文件/figs/fig1_real_scene.pdf}%1
+\or\includegraphics[trim=22.6bp 716.4bp 147.9bp 22.6bp,clip,width=.95\linewidth]{../完整TeX文件/figs/fig2_system.pdf}%2
+\or\includegraphics[width=.70\linewidth,trim=12bp 5bp 14bp 0bp,clip]{../完整TeX文件/figs/final_main_performance_nature.pdf}%3
+\or\begin{minipage}[c]{.41\linewidth}\centering\includegraphics[width=\linewidth]{../完整TeX文件/figs/fig5_sim_overview_crop_adaptive.pdf}\par{\small(a)}\end{minipage}\hfill\begin{minipage}[c]{.55\linewidth}\centering\includegraphics[width=\linewidth]{../完整TeX文件/figs/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.pdf}\par{\small(b)}\end{minipage}%4
+\or\includegraphics[width=.75\linewidth]{../完整TeX文件/figs/fig_mono_budget_capability_vertical.pdf}%5
+\or\includegraphics[width=.62\linewidth]{../完整TeX文件/figs/final_real_robot_arbitration_nature.pdf}%6
+\or\includegraphics[width=.94\linewidth,height=.34\textheight,keepaspectratio]{../完整TeX文件/figs/fig4a_real_follow.pdf}\par{\small(a)}\smallskip\includegraphics[width=.94\linewidth,height=.34\textheight,keepaspectratio]{../完整TeX文件/figs/revision_real_onboard.pdf}\par{\small(b)}%7
+\fi
+\caption{#2}\label{#3}\end{figure}}
+\newcommand{\zhTable}[3]{%
+\begin{table}[H]\centering\caption{#2}\label{#3}%
+\begingroup\fontsize{9.5}{11}\selectfont\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{1.12}%
+\csname zhTableFile#1\endcsname\endgroup\end{table}}
+\expandafter\def\csname zhTableFile2\endcsname{\input{table_II_zh.tex}}
+\expandafter\def\csname zhTableFile3\endcsname{\input{table_III_zh.tex}}
+\expandafter\def\csname zhTableFile4\endcsname{\input{table_IV_zh.tex}}
+\expandafter\def\csname zhTableFile5\endcsname{\input{table_V_zh.tex}}
+\expandafter\def\csname zhTableFile6\endcsname{\input{table_VI_zh.tex}}
+\renewenvironment{quote}{\list{}{\rightmargin=2em\leftmargin=2em}\item\relax\color{reviewgray}\normalfont}{\endlist}
+\newcommand{\reviewcomment}[2]{\par\Needspace{4\baselineskip}\noindent\textbf{意见 #1：#2}\par\smallskip}
+\newcommand{\response}{\par\noindent\textbf{回复。}\quad}
+\newcommand{\location}[1]{\par\smallskip\noindent{\small\itshape 修改位置：#1}\par\medskip}
+\newcounter{zhbookmark}
+\makeatletter
+\let\zh@oldsection\section
+\renewcommand{\section}{\@ifstar{\zh@starsection}{\zh@numberedsection}}
+\newcommand{\zh@starsection}[1]{\stepcounter{zhbookmark}\pdfbookmark[1]{#1}{zhsec\arabic{zhbookmark}}\zh@oldsection*{#1}}
+\newcommand{\zh@numberedsection}[1]{\zh@oldsection{#1}}
+\let\zh@oldsubsection\subsection
+\renewcommand{\subsection}{\@ifstar{\zh@starsubsection}{\zh@numberedsubsection}}
+\newcommand{\zh@starsubsection}[1]{\stepcounter{zhbookmark}\pdfbookmark[2]{#1}{zhsub\arabic{zhbookmark}}\zh@oldsubsection*{#1}}
+\newcommand{\zh@numberedsubsection}[1]{\zh@oldsubsection{#1}}
+\makeatother
+\begin{document}
+\pdfbookmark[0]{中文论文}{zh-main}
+\begin{center}\small 中文阅读版；依据 2026-10-01 英文修订稿及回复信翻译。公式、数据和文献条目保留原文；图内英文附中文对照；回复中修改位置指向英文修订稿。\end{center}
+\input{manuscript_zh_body.tex}
+\clearpage
+\pdfbookmark[0]{作者回复}{zh-response}
+\input{author_response_zh_body.tex}
+\end{document}

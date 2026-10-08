@@ -1,0 +1,412 @@
+\documentclass[letterpaper,11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{newtxtext}
+\usepackage{newtxmath}
+\usepackage{xcolor}
+\definecolor{reviewgray}{gray}{0.28}
+\usepackage[margin=0.90in]{geometry}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+\begin{document}
+\begin{center}
+{\Large\bfseries Response to the Associate Editor and Reviewers}\par
+{\normalsize\itshape Adaptive Arbitration in Command Space for Target Following under Passability Mismatch}\par
+{\small IEEE Robotics and Automation Letters --- Manuscript 26-3764}\par
+\end{center}
+We thank the Associate Editor and the reviewers for their careful assessment. This revision strengthens the experimental evidence, clarifies the evaluation protocol and scope, and refines the interpretation of the results while retaining the proposed command-space arbitration mechanism. We address all concerns, questions, and requested changes below, grouping related comments where useful. Purely positive or descriptive remarks requiring no action are omitted. Quoted comments retain their original wording; identifiers refer to their positions in the complete reviews rather than the order of presentation here. References within the comments refer to the original submission; locations in our responses refer to the revised manuscript. Blue text marks substantive manuscript changes.
+
+\Needspace{10\baselineskip}
+\section*{Associate Editor}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment AE.1.}
+\begin{quote}\color{reviewgray}
+Three expert reviewers evaluated the manuscript and provided detailed comments and suggestions that should be carefully addressed.
+
+R1: The reviewer finds the paper interesting and appreciates the extensive ablations and comparisons. The main concerns are the fairness of the monolithic PPO comparison, possible overfitting due to training and evaluation in the same environment, limited motivation for the hexapod embodiment, and insufficient positioning relative to prior work. The reviewer also requests clarification of several mathematical and methodological aspects.
+
+R2: The reviewer appreciates the clear structure and thorough experiments but raises several technical and reproducibility concerns. These mainly involve the affordance map and robot footprint, the per-command risk formulation, the lateral-only Avoid expert, training details, train/test separation, and the limitations of the safety argument.
+
+R10: The reviewer is positive about the proposed method and its experimental validation. The main concerns are the restriction to lateral avoidance, applicability beyond the structured environments considered in the paper, and missing network architecture details needed for reproducibility.
+
+In addition to the reviewers’ comments, the AE asks the authors to more clearly highlight the main contributions and novelty of the work, particularly with respect to the existing literature and closely related approaches.
+\end{quote}
+\noindent\textbf{Response.}
+We clarified the contribution as learning how to allocate authority between fixed Follow and Avoid velocity proposals according to context. The Introduction now separates the problem formulation, arbitration design, and validation. Comparisons among arbitration variants reuse the same experts, and an inference ablation reuses the same Adaptive checkpoint to assess arbitration while holding expert and locomotion capability fixed. We also extended Mono training, report its training budget alongside performance, and added Fixed-Authority with its authority selected on separate validation trials. The revised manuscript makes the held-out evaluation protocol and its separation from training explicit. Related Work now distinguishes our arbitration of velocity proposals from RMP composition and MELA's composition of expert network parameters. Together, these revisions make the central contribution explicit: learning how to coordinate available behaviors to maintain both target following and obstacle clearance.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Abstract and Introduction; Sec.~II; Secs.~V-A/B and VI-A--E; Tables~II and IV; Secs.~VII--VIII.}
+
+
+\Needspace{10\baselineskip}
+\section*{Reviewer 1}
+\Needspace{8\baselineskip}
+\subsection*{Major concerns}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.1: Monolithic PPO comparison.}
+\begin{quote}\color{reviewgray}
+The ablation comparing the proposed method to a monolithic PPO baseline is unconvincing. This comparison should arguably be the central one in the paper, and the failure to present it convincingly is a significant shortcoming. The authors state that the PPO network was trained with "the same training budget as PCR-Net," without specifying what this means in practice. If the intention is to argue that the proposed method is considerably cheaper to train, this is a reasonable claim, but it should be substantiated by training the PPO baseline to its fullest potential and then presenting training cost as a separate performance metric alongside the others. As currently presented, the comparison does not achieve this.
+\end{quote}
+\noindent\textbf{Response.}
+Following your suggestion, we extended Mono training from 24.576M interactions to 49.152M and 61.440M and evaluated checkpoints from all three budgets at 0.35, 0.50, and 0.60 m/s. Table~IV reports the training interactions alongside task success; Fig.~5 shows how task capability emerges using probes from frozen checkpoints.
+
+Mono shares the base sensor inputs, map encoder family, command limits, post-processing, and frozen locomotion. Mono and the gate have 1,029,447 and 1,063,237 trainable parameters, respectively, including training-only critics; Adaptive additionally uses the frozen Avoid expert. Adaptive's 24.576M budget includes 12.288M interactions for Avoid and 12.288M for the gate, with shared locomotion training excluded. Each Mono checkpoint is held fixed across speeds and evaluated with three evaluation seeds from one training run.
+
+Extended training achieves 94.5\% task success at 0.50 m/s, showing that Mono can learn the complete task. At 0.35 m/s, success falls from 57.3\% to zero between the two extended checkpoints. At 49.152M interactions and 0.60 m/s, 60.4\% of episodes complete all obstacle rows without collision, yet task success remains zero with 1.25 m follow-distance MAE. This separates the ability to traverse obstacles from sustained target following in this training run. Adaptive exceeds 95\% success at all three speeds at 24.576M interactions. The extended comparison therefore shows that Mono can acquire task competence, while Adaptive maintains more consistent complete-task performance across the tested speeds.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-F; Sec. VI-D; Fig.~5; Table~IV.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.2.}
+\begin{quote}\color{reviewgray}
+The simulation-based ablation is confounded by the fact that the network was trained on the same environment used for evaluation. This gives learned methods an inherent advantage, as they benefit from fine-tuning on the specific evaluation environment. This seems to be particularly visible in the accompanying video, where the learned policy seems overfit to the distance between rows of obstacles. I recommend repeating the evaluation on environments not seen during training, ideally on multiple such environments, as is standard practice in the field.
+\end{quote}
+\noindent\textbf{Response.}
+In the original manuscript, ``fixed hardest stage'' referred to the Stage-4 evaluation setting and nominal passage pattern. Obstacle positions were perturbed around that pattern in each episode. The formal comparisons reported in the original submission used this held-out layout family, excluded from Avoid pretraining, gate training, checkpoint selection, and parameter tuning. We have revised Sec.~V-A and Fig.~4 to clarify the protocol and distinguish the training and evaluation geometries.
+
+Training uses mirrored templates with alternating left/right passages. The evaluation preserves the passability-mismatch task and introduces successive passages on the same side, breaking the regular alternation used in training. The nominal row spacings extend beyond the range used in training. The nominal layout contains 15 obstacles (three per row) and has a minimum passage width of 0.75 m, compared with the robot's approximately 0.65 m leg-inclusive envelope. Fig.~4(a) shows a representative training scene, whereas Fig.~4(b) shows representative trajectories with obstacles at the nominal geometry. All three target speeds use the held-out evaluation protocol: 0.35 and 0.50 m/s are within the training speed range, while 0.60 m/s additionally tests speed extrapolation.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. V-A; Fig.~4; Table~II.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.3.}
+\begin{quote}\color{reviewgray}
+The hexapod embodiment, while featured in the title, is not well motivated in the paper. An ablation (in simulation) examining the impact of embodiment on system performance would strengthen the paper considerably—for instance, would such a complex architecture be necessary for a simpler embodiment?
+\end{quote}
+\noindent\textbf{Response.}
+We revised the title and Introduction to center the contribution on arbitration in command space and clarify the hexapod's role as the test platform. Its lateral maneuverability supports the proposed decomposition, while its body, legs, and locomotion dynamics create a concrete passability mismatch with a walking person. The gate operates on high-level velocity proposals without hexapod-specific joint observations. The revised paper therefore treats the hexapod as the validation platform for passability mismatch rather than as a requirement of the arbitration formulation.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Title; Sec.~I.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.4.}
+\begin{quote}\color{reviewgray}
+The related work section does not clearly establish the paper's contribution relative to prior work. In many instances, the contrast with existing approaches is presented, but the motivation for why the proposed approach should be superior is not adequately articulated.
+\end{quote}
+\noindent\textbf{Response.}
+The revised Introduction motivates the design around a simple question: how should fixed Follow and Avoid proposals share authority as their demands change? Related Work now distinguishes our arbitration of velocity proposals from target navigation, RMP composition, and MELA's composition of expert networks. Comparisons that reuse the same experts, together with the inference ablation on the same checkpoint, test this design directly against simpler alternatives.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs.~I--II; Secs.~V-B and VI-B/C; Sec.~VII.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.5.}
+\begin{quote}\color{reviewgray}
+The overall system appears overengineered, and even after reviewing the ablations, I remain unconvinced that this level of complexity is necessary.
+\end{quote}
+\noindent\textbf{Response.}
+Your concern about system complexity prompted us to test whether simpler coordination rules suffice. We therefore added Fixed-Authority alongside Additive-Fusion. Its global authority was chosen from 21 values between 0 and 1 on validation trials at 0.35 and 0.50 m/s, maximizing mean task success, and was then fixed for formal evaluation. These comparisons use the same analytic Follow expert, frozen Avoid expert, and locomotion policy. At 0.60 m/s, Adaptive achieves 95.3\% success, compared with 66.9\% for Additive-Fusion and 0\% for Fixed-Authority. Disabling the learned correction in the same Adaptive checkpoint also reduces success to zero. Together, these comparisons show the value of changing authority with context under high conflict.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec.~V-B; Sec.~VI-A--C; Tables~II--III; Sec.~VII.}
+
+
+\Needspace{8\baselineskip}
+\subsection*{Minor concerns}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R1.6--R1.7: Writing and method naming.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R1.6.}] The writing is at times overly elaborate, which detracts from clarity and precision. Examples include the phrases "PCR-Net uses command-direction-conditioned clearance," "matching their bounded semantics while allowing state-dependent concentration," and "command risk is used as a clearance prior rather than a reach-avoid value."
+\item[\textbf{R1.7.}] The choice of the name "PCR-Net" is questionable given the prior, influential work of Sarode et al. [1]; the authors should either change the name or provide explicit justification for the overlap. Furthermore, the usage of the name is inconsistent throughout the paper—at times referring to the learned gate, and at other times to the entire system. - The latter usage is particularly confusing, as the "-Net" suffix conventionally implies a monolithic network. In the Experiments section, the method is referred to inconsistently as both "PCR-Net" and "Learned-w," which adds further confusion.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We shortened elaborate descriptions and removed PCR-Net as a method name, avoiding the overlap with Sarode et al. The text uses the proposed method or arbitration framework; figures and tables use Adaptive. The arbitration gate names only the learned component, and Learned-w is no longer a name for the complete method. Risk queries, gate outputs, and command blending are described directly, with consistent terminology in Fig.~2.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Title and Secs. I--IV; Fig.~2; figures and tables throughout.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R1.8--R1.11: Conflict, map terminology, and notation.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R1.8.}] The sentence "PCR-Net addresses this conflict directly in the robot's command space…" does not clearly specify which conflict is being referenced. Relatedly, the statement "Standard local navigation formulations that treat the target only as a moving waypoint do not explicitly preserve target tracking during local avoidance, and fixed-priority switching between a follow and an avoid behavior can lose the target during the maneuver" describes a limitation that does not appear to be guaranteed to be resolved by the proposed solution either.
+\item[\textbf{R1.9.}] The term "affordance map" used to describe the occupancy map is confusing and may benefit from reconsideration.
+\item[\textbf{R1.10.}] The statement "and a single command generally cannot maximize both target recovery and immediate clearance" appears mathematically inconsistent if the two objectives are defined as orthogonal vectors. If they occupy decoupled subspaces, both could in principle be optimized independently, and therefore jointly maximized, simply through addition.
+\item[\textbf{R1.11.}] The mathematical exposition is at times difficult to follow. Some variables are introduced but never subsequently used (e.g., m\_t), while others are used without being introduced at all. In addition, the parameter y is used to denote both the common coordinate y and a scalar gating value, which is a source of confusion.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+The revised Introduction defines the conflict as the changing trade-off between target retention and collision avoidance. Sec.~III-C explains that orthogonality separates command coordinates, while executed effects remain coupled through robot footprint, obstacle geometry, locomotion, command limits, and visibility. Additive-Fusion directly tests the alternative of adding the proposals. This task-specific formulation replaces the broad statement about waypoint-based navigation.
+
+We replaced affordance map with local occupancy--free-space map, distinguishing its dimensionless free-space score from the directional distance query. The scalar authority is now $\alpha$, avoiding confusion with spatial $y$. We define $\rho_F$, $\rho_A$, $w$, and memory $m_t$ where introduced, specify memory as a gate input, and clarify that signed modulation applies outside the deadband.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs. I--III; Secs. IV-C/D; Sec. VI-C.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.12.}
+\begin{quote}\color{reviewgray}
+Several aspects of the method are described only briefly, leaving a number of important questions unanswered, including: Why are the gate parameters chosen in the manner described? Is there a benefit to supplying both the risk value and its memory? How exactly is the memory supplied to the gate? Why are slew-rate limiting and clearance-based scaling necessary?
+\end{quote}
+\noindent\textbf{Response.}
+Secs.~IV-C--F now explain the roles of the authority limits, risk memory, and command processing. The gains $\lambda=0.30$ and $\gamma=0.15$, together with the deadband threshold $0.05$, were set during development and retained as fixed hyperparameters in training and evaluation. The gains allow a learned correction of up to $0.30$ and an analytic correction of up to $0.15$ before clipping, giving the learned term twice the adjustment range; the deadband suppresses corrections when $|2w-1|\leq0.05$. Instantaneous risk reflects the current map, while $m_t$ retains recent hazard information and decays with forward displacement. Supplying both lets the gate distinguish current proximity from recent exposure. The memory value is one entry in the gate's 18-dimensional goal/conflict vector before fusion with map and state features. Slew-rate limiting bounds changes between successive commands, and clearance-based scaling reduces translation near obstacles. Both operations are shared across the compared methods.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-C; Secs. IV-D--F; Sec. V-A.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R1.13--R1.14: Positioning relative to related work.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R1.13.}] The contrast drawn with the work of Scheidemann et al. [2] is unclear. That work also addresses command-space arbitration, albeit in a less explicit manner, and this distinction should be clarified. References [3] and [4] are cited together, but only one of the two is compared against in the paper. The authors should clarify why both are not compared, or justify the omission.
+\item[\textbf{R1.14.}] The statement "Published leader-following and agile-navigation stacks often couple different sensors, planners, and low-level controllers" would benefit from a supporting citation, as it is currently unclear what specific works are being referenced.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We now distinguish the methods by what they combine. Scheidemann et al. address the closely related problem of coordinating following and obstacle avoidance through RMP accelerations and metrics, whereas our gate allocates scalar authority between fixed velocity proposals. He et al. address reach--avoid locomotion toward a static goal, and Miki et al. address perceptive terrain locomotion. He et al. and Miki et al. operate at the reach--avoid or locomotion level rather than as replacements for the high-level authority allocator, so we discuss them as related work and use alternatives with the same command interface for empirical comparison. We also removed the broad statement about published stacks.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. II; Sec. V-B.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.15.}
+\begin{quote}\color{reviewgray}
+The bottom row of images in Figure 6 is too small, and the accompanying text is illegible.
+\end{quote}
+\noindent\textbf{Response.}
+We revised Fig.~7(b) to present three representative onboard frames side by side across the full page width, improving the visibility of the target detections and local maps. The onboard images referred to as Fig.~6 in the review now appear in Fig.~7(b).
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Fig.~7.}
+
+
+\Needspace{8\baselineskip}
+\subsection*{Questions for the authors}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.16.}
+\begin{quote}\color{reviewgray}
+Why is a 3-DoF avoidance policy trained only for two of the output dimensions to subsequently be dropped? Would it not be more direct to train a 1-dimensional output from the outset?
+\end{quote}
+\noindent\textbf{Response.}
+A one-dimensional head would indeed match the executed Avoid action more directly. In the current implementation, the pretrained Avoid expert retains a parameterization with three command outputs, while arbitration uses only its lateral mean as $u_A$. This parameterization is therefore not required by the arbitration formulation. We keep this pretrained expert fixed across all arbitration comparisons so that the evaluated differences arise from authority allocation rather than changes in avoidance capability.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-B; Sec.~IV-F.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R1.17.}
+\begin{quote}\color{reviewgray}
+In the PPO training procedure, is the map provided as an unmodified input? If so, this would deviate from standard practice for state-of-the-art PPO networks applied to this type of task, and could substantially degrade training performance.
+\end{quote}
+\noindent\textbf{Response.}
+The map is processed by a CNN before fusion. Sec.~IV-F specifies the two map channels plus two coordinate channels, convolution dimensions, kernels, strides, pooling, scalar encoders, and fused features for Avoid and the gate. Mono uses the same spatial CNN encoder family, with map weights learned as part of its complete policy. The same section specifies the separate training-only critics.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-F; Sec. VI-D.}
+
+
+\Needspace{8\baselineskip}
+\subsection*{Reviewer-supplied references}
+\begin{quote}\color{reviewgray}
+[1] Sarode, Vinit, et al. "Pcrnet: Point cloud registration network using pointnet encoding." arXiv preprint arXiv:1908.07906 (2019).\par
+[2] C. Scheidemann et al., "Obstacle-avoidant leader following with a quadruped robot," in 2025 IEEE International Conference on Robotics and Automation (ICRA), 2025, pp. 1407–1413.\par
+[3] T. He, C. Zhang, W. Xiao, G. He, C. Liu, and G. Shi, “Agile but safe: Learning collision-free high-speed legged locomotion,” in Robotics: Science and Systems (RSS), 2024.\par
+[4] T. Miki, J. Lee, J. Hwangbo, L. Wellhausen, V. Koltun, and M. Hutter, ``Learning robust perceptive locomotion for quadrupedal robots in the wild,'' \emph{Science Robotics}, vol.~7, no.~62, Art. no.~eabk2822, 2022.\par
+\end{quote}
+\Needspace{10\baselineskip}
+\section*{Reviewer 2}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.3--R2.5: Organization and writing.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.3.}] Introduction makes heavy use of em-dashes, sometimes it is not clear why. Please revise, fix some overly complicated sentences
+\item[\textbf{R2.4.}] Generally, level of detail is not very consistent, consider re-structuring starting with the very fundamental ideas to the implementation details.
+\item[\textbf{R2.5.}] Avoid inconsistent capitalization.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We reduced em-dashes and shortened complicated sentences. The revised presentation moves from command decomposition to risk, arbitration, execution, and training; Table~I collects architecture details. Method labels and component names now use consistent capitalization.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs. I--IV; Table~I.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.7--R2.9: Figures and supplementary video.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.7.}] The supplementary video helps in understanding the setup. Please consider adding an indicator of how much of it is sped up.
+\item[\textbf{R2.8.}] Fig. 2 is low-res, consider vector graphics.
+\item[\textbf{R2.9.}] Sec. IV: I do not find PCR, Gate, conflict-aware fusion etc. in Fig. 2. Consider unifying the notation between text and figure so it is easier to see which block is being discussed.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We replaced Fig.~2 with revised PDF artwork and aligned its component names and $\alpha$, $w$, and $\alpha_{\mathrm{eff}}$ notation with the text. The supplementary video includes playback-speed indicators.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Fig.~2; supplementary video.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.12 and R2.14: Interpretability and command bounds.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.12.}] Learning only the gating: it keeps the underlying controllers in charge and keeps the behaviour explainable., highlight explainability / deterministic more
+\item[\textbf{R2.14.}] Bounded-residual / convex-hull argument for the fused command is a nice property to have, even tough not clear to me how this helps in terms of safety other then preventing anyway capped action magnitude
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+The revision makes the decision structure explicit: Follow is analytic, Avoid and locomotion are frozen, and evaluation uses the gate's Beta means, giving a deterministic output for a given input. The authority and residual show how the proposals are combined. The residual is collinear with the proposal difference, vanishes when the proposals agree, and has bounded magnitude. This constrains the correction relative to the expert proposals rather than only bounding its absolute magnitude. These are properties of the raw command blend; collision and task outcomes are evaluated empirically in simulation and hardware.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec.~IV; Sec.~VI; Fig.~6.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.15--R2.17: Map construction, coverage, and side-stepping.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.15.}] The affordance map is unclear: what coverage does it have around the robot, does it see sideways, and is it a built map or instantaneous from depth? Please state this explicitly. if its a robo-centric map, state which method was used
+\item[\textbf{R2.16.}] Related: why is side-stepping possible at all if there is no affordance information to the side? How is perception handled there?
+\item[\textbf{R2.17.}] Is YOLO used only for the person/target, or does it also contribute semantic obstacle detection? The masking of target-associated depth points is mentioned, but a single explicit sentence on the division of labour between detection and stereo depth would help.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We now specify how the map is built and why it supports sidestepping. The robot-fixed local occupancy--free-space map is represented as a $32\times32$ grid covering a forward $3\,\mathrm{m}\times3\,\mathrm{m}$ region, with its origin at the camera mount. YOLOv8 is used only for target detection and relative goal estimation. Obstacle geometry comes from stereo depth after masking depth points associated with the detected target. The remaining valid depth points are back-projected using camera intrinsics, transformed into robot-aligned coordinates, filtered by height, and rasterized into the occupancy channel of the local map. The map is updated from current and short-term depth observations, while $m_t$ separately stores scalar risk history; no persistent global obstacle map is maintained. Adaptive and Rule-Override use identical target detection, local map generation, and perception settings.
+
+The forward depth view captures obstacle geometry on the left and right portions of the scene ahead of the robot, so a feasible bypass can be observed before the robot reaches the obstruction and a sidestep can be initiated in advance. This does not imply complete side-facing coverage: regions directly beside the robot may lie outside the current depth view. A 3 m query return therefore means that no occupied cell was observed in the queried cone, rather than that the full lateral path has been verified clear. The scalar risk memory $m_t$ retains recent hazard information but does not reconstruct obstacle geometry outside the observed map.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs. IV-B/C; Sec. VI-E.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.18 and R2.21--R2.25: Map representation, robot extent, and directional risk.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.18.}] No footprint / body-size awareness is visible in the risk query. Given the leg-inclusive envelope of \textasciitilde{}0.65 m, how is the robot extent accounted for? - in particular during rotate-on-spot command
+\item[\textbf{R2.21.}] Map cell size is given as 0.09375 m; this sub-millimetre precision is not meaningful, consider rounding or stating map extent and resolution instead.
+\item[\textbf{R2.22.}] Could you elaborate on what exactly the "clearance proxy" channel is and how it is computed?
+\item[\textbf{R2.23.}] Why only a 25 deg half-angle cone? If the robot is already close to an obstacle, does it not need to look further sideways for the full robot extent to be covered by the swept motion?
+\item[\textbf{R2.24.}] The numeric values for free/safe (d\_safe = 0.27 m, d\_free = 0.57 m) appear without justification. Is this also where the clearance margin used in the results comes from? There is no sensitivity analysis on these values. Please consider whether they belong in the method at all, or whether they are hyperparameters to be tuned per robot/environment.
+\item[\textbf{R2.25.}] The speed-scaled risk variant is presented and then discarded inside the method section (ablation-style). It is not clear which variant is used for the reported results.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+The dilation radius was selected from physical measurements of the hexapod, accounting for its body dimensions and the additional lateral extent introduced by leg motion during locomotion. The resulting free-space channel therefore provides the learned policies with a spatial representation that reflects the robot's effective locomotion envelope.
+
+We report map coverage by extent and resolution: a $32\times32$ grid over a forward $3\,\mathrm{m}\times3\,\mathrm{m}$ region. The dimensionless free-space channel is formed by dilating occupancy, deriving a free mask, taking its cellwise maximum with a $3\times3$ local average, and masking occupied and unobserved cells. In simulation, occupancy dilation uses a $7\times7$ square kernel. Obstacle dilation thus shapes the spatial representation supplied to the learned policies, whereas the analytic directional-risk query separately uses the occupancy channel to measure metric obstacle proximity.
+
+Robot extent is also reflected in collision checks during training and evaluation and in the envelope-intrusion criterion used for Avoid pretraining. For a nonzero translational proposal, the analytic query measures distance from the map origin to the nearest occupied cell within a cone centered on the proposal direction. Its $25^\circ$ half-angle is a fixed heuristic defining the query neighborhood. In simulation, near-zero translation, including rotation on the spot, uses the distance to the nearest occupied cell in the local map as a proximity signal. Neither the fixed dilation nor this query computes the volume swept by the body and legs during rotation.
+
+The nominal thresholds $d_{\mathrm{safe}}=0.27\,\mathrm{m}$ and $d_{\mathrm{free}}=0.57\,\mathrm{m}$ are fixed design hyperparameters of the subsequent mapping from distance to risk, distinct from the dilation parameter used to construct the free-space channel. They are not derived from passage width and do not define a certified clearance margin. To assess local dependence around this nominal setting, the test summarized in Sec.~V-A used $(d_{\mathrm{safe}},d_{\mathrm{free}})$ pairs $(0.27,0.57)$, $(0.22,0.52)$, $(0.32,0.62)$, $(0.27,0.47)$, and $(0.27,0.67)$ m at all three speeds (one evaluation seed, 101; 128 episodes per setting and speed). Across mixed difficulty levels, the pooled success and collision rates varied by 1.56 and 1.30 percentage points, respectively, with the policy and post-processing fixed. This sensitivity test is separate from the formal held-out evaluation.
+
+All reported comparisons use this fixed-threshold risk formulation without speed scaling or a braking-distance model.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs.~IV-B/C; Sec.~V-A; Sec.~VII.}
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.19--R2.20: Concavities and dynamic obstacles.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.19.}] Concave obstacles: what happens when the avoidance direction points backwards or into the concavity?
+\item[\textbf{R2.20.}] Dynamic obstacles are not treated at all (all obstacles are static, only the target moves). At least discuss this as a limitation, ideally show one experimet / clearly mark as limitation
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+The Discussion now states that the method assumes a feasible lateral bypass is visible ahead. Concavities, dead ends, and transverse barriers may require stopping, reversing, or higher-level replanning beyond local sidestepping. The evaluation uses static obstacles; interaction with dynamic obstacles is outside the evaluated scope.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-B; Sec. VII.}
+
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R2.26.}
+\begin{quote}\color{reviewgray}
+There is no good motivation why the Avoid expert may only command lateral motion. Is backward motion not necessary for some obstacle configurations (dead ends, concave geometry)?
+\end{quote}
+\noindent\textbf{Response.}
+Sec.~III-B now explains the decomposition directly: Follow controls forward motion and yaw to keep the robot oriented toward the target, while Avoid supplies lateral motion around an observable bypass. Sec.~VII identifies dead ends, concave traps, and a target stopped before a barrier as cases that can require stopping, backward motion, or higher-level replanning beyond this local action model.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. III-B; Sec. IV-B; Sec. VII.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.27--R2.31: Training, observations, and network architecture.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.27.}] It is not clear how the Avoid expert is trained. Please state the reward function, observations and termination conditions.
+\item[\textbf{R2.28.}] When the Avoid expert is trained, is the Follow expert already in the loop? What kind of tuning happens in that stage?
+\item[\textbf{R2.29.}] which simulator setup is used?
+\item[\textbf{R2.30.}] The simulator and learning stack are mentioned only for the gating (Isaac Gym, RSL-RL, PPO) please state clearly which simulator/asset setup is used for each of the three training stages.
+\item[\textbf{R2.31.}] A table listing, for each learned module (Avoid expert and Gate), the exact observations and actions would help a lot. Does the gate observe only the risks, or more? What exactly is "robot state" in the gate observation? Stating this clearly would considerably improve reproducibility.
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+All three learned stages use the same hexapod asset in Isaac Gym. Locomotion is pretrained with RSL-RL and frozen; Avoid and the gate use PPO. Avoid is trained independently in randomized obstacle layouts. Passage difficulty varies by stage, the environment supplies forward motion, and Follow is absent. PPO updates Avoid while locomotion remains fixed.
+
+Gate training uses four curriculum levels: two rows at $0.25$--$0.40\,\mathrm{m/s}$, two rows at $0.35$--$0.50\,\mathrm{m/s}$, three rows at $0.30$--$0.50\,\mathrm{m/s}$, and four to five rows at $0.35$--$0.50\,\mathrm{m/s}$. Target speed is fixed within each episode; over 120,000 episodes, sampling shifts toward harder levels while retaining easier episodes.
+
+Sec.~IV-B gives the reward function, coefficients, activation conditions, and termination rules. The dense reward combines progress, improved directional clearance, penalties on the magnitude and variation of the lateral command, and a weak directional preference.  Terminal rewards replace it: $+2$ for crossing the layout exit without failure and $-20$ for collision, envelope intrusion, falling, or tilt/height violation, with failure taking precedence. Timeout alone has no failure penalty.
+
+Table~I and Sec.~IV-F give the CNN, scalar encoders, fusion, heads, critics, and budgets. Avoid receives a map, 14-D state, and 2-D goal; the gate receives a map, 13-D state, and 18-D goal/conflict vector, including commands, risks, clearances, and memory. The text enumerates the fields, specifying body-frame velocity, previous base authority $\alpha$, and the formula for the conflict score. Avoid's authority slot is zero. Its three-dimensional command distribution is evaluated through the lateral mean; four scalar gate heads form two Beta distributions for $\alpha,w$, evaluated through their means. Information on row release supplies auxiliary labels, not actor observations.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-B; Sec. IV-F; Table~I.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R2.32.}
+\begin{quote}\color{reviewgray}
+The convex-hull / bounded-residual guarantee is nice, but: just because each individual expert command is reasonable, does that imply the mixture is safe? This feels like a strong assumption, i.e. that nudging the command slightly is enough to make it safe-ish. Please discuss the limits of this argument, in particular in the high-conflict cases where the gate is most active.
+\end{quote}
+\noindent\textbf{Response.}
+Sec.~IV-G now states the guarantee at the command level. The raw blend stays within the proposals' convex hull, and the residual remains bounded and collinear with the proposal difference, including during high conflict. The set of safe executed motions need not be convex, so these properties of the commands do not certify collision avoidance.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-G; Sec. VII.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R2.33.}
+\begin{quote}\color{reviewgray}
+"Fixed hardest stage" of the curriculum: are these environments that were seen during training, or held-out layouts? Please make the train/test separation explicit.
+\end{quote}
+\noindent\textbf{Response.}
+The formal evaluation uses the held-out Stage-4 layout family described in our response to R1.2. The family is excluded from Avoid pretraining, gate training, checkpoint selection, and parameter tuning. Each instance is generated by randomly perturbing obstacle positions around the same nominal structure. Sec.~V-A specifies its passage arrangement; Table~II and Fig.~4(b) use this evaluation protocol, while Fig.~4(a) illustrates the training distribution. Reported variability is measured across three evaluation seeds under the same protocol.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. V-A; Fig.~4; Table~II.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.34--R2.36: Failure modes, target speed, and Mono evaluation.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.34.}] Please discuss failure modes more / when and why does it fail, which limitation triggers failiure, does it recover
+\item[\textbf{R2.35.}] Only the gate is velocity-dependent, correct? It is unclear which component is expected to break when exceeding the training speed, since the gating behaviour probably has no strong velocity gradient during training. Because this above-training speed carries much of the evaluation argument, please elaborate.
+\item[\textbf{R2.36.}] Monolithic PPO is only evaluated at 0.35 m/s over increasing difficulty, not across target speeds. Evaluating it at 0.50/0.60 m/s like the other methods would make the comparison more complete and would be an interesting addition. - nice to have, not crit
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We expanded Sec.~VI to analyze how the arbitration variants fail rather than only reporting their aggregate scores. The comparisons show that lower collision, substantial obstacle progress, or low follow-distance error can each coexist with task failure. The inference ablation tests the effect of disabling the learned correction in the same checkpoint: at $0.60\,\mathrm{m/s}$, setting $\Delta\alpha_w=0$ preserves substantial row progress but eliminates task success and increases follow-distance error.
+
+We also extended Mono evaluation to all three speeds and to matched and extended training budgets. Extended training reaches 94.5\% task success at 0.50 m/s, confirming that the complete task is learnable without expert decomposition. At 49.152M interactions and 0.60 m/s, 60.4\% of episodes complete all obstacle rows without collision, yet task success remains zero with 1.25 m follow-distance MAE, separating obstacle traversal from sustained following in this training run.
+
+The 0.60 m/s condition stresses the complete following--avoidance system rather than the gate alone: Avoid and the gate observe body-frame planar velocity, while the analytic Follow proposal changes with the relative target state. On hardware, Adaptive's three failures comprise two contacts and one target loss. Either event makes the trial unsuccessful; subsequent recovery does not change this classification.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs.~VI-A--E and VII; Tables~II--IV and VI.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comments R2.37--R2.39: Related literature and design choices.}
+\begin{quote}\color{reviewgray}
+\begin{itemize}[leftmargin=*,nosep,label={}]
+\item[\textbf{R2.37.}] The literature review covers only geometric and control-oriented work. Human following and human-robot interaction literature is not mentioned, although the target here is a walking person.
+\item[\textbf{R2.38.}] Some literature backing for the design choice of reward shaping vs. constrained RL would be nice.
+\item[\textbf{R2.39.}] The mixture-of-experts framing is grounded almost exclusively in very old work (Jacobs et al. 1991). Please add more recent work on learned gating / mixture-of-experts composition. where has this been used, why is it the go-to technology
+\end{itemize}
+\end{quote}
+\noindent\textbf{Response.}
+We added HRI work on visibility, interpersonal distance, and socially acceptable motion, together with constrained policy optimization and a recent legged mixture-of-experts example. Reward shaping expresses the graded trade-off between following and clearance in our training objective, whereas CPO maximizes return under an explicit cost constraint. MELA composes expert network parameters. Learned gating is appropriate here because Follow and Avoid already provide usable, interpretable command proposals; learning can focus on how their authority should change with context rather than relearning either behavior.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. II; Sec. IV-F; Secs. V-B--VI.}
+
+
+\Needspace{10\baselineskip}
+\section*{Reviewer 10}
+\Needspace{8\baselineskip}
+\subsection*{Required Clarifications}
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R10.1.}
+\begin{quote}\color{reviewgray}
+Longitudinal Avoidance \& Continuous Obstacles: Constraining the Avoid expert strictly to lateral motion presumes all collisions can be averted by lateral sidestepping. Please discuss how the framework behaves when encountering continuous transverse obstacles (such as solid walls, dead-ends, or when the target stops abruptly in front of a barrier) where lateral motion alone cannot resolve the collision.
+\end{quote}
+\noindent\textbf{Response.}
+We clarified that lateral-only Avoid requires a feasible bypass observable ahead. Solid transverse walls, dead ends, concave traps, and a target stopping before a barrier may require stopping, backward motion, or higher-level replanning. 
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-B; Sec. VII.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R10.2.}
+\begin{quote}\color{reviewgray}
+Environment Scope Discussion: The simulation benchmarks and hardware tests rely primarily on periodic, staggered-row geometries. While staggered rows isolate lateral passability mismatch, please explicitly discuss the operational boundaries of this formulation when navigating unstructured, randomly scattered clutter or non-convex obstacles.
+\end{quote}
+\noindent\textbf{Response.}
+The held-out layout breaks the regular passage alternation used in training, and the hardware tests use boxes and cones in staggered-row and $90^\circ$ corridors with the same deployed policy. These tests match the method's operating assumption that a feasible lateral bypass is visible in the forward map. In unstructured or non-convex clutter, cases that require backward escape or global replanning exceed this local action model.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Secs.~V-A and VI-E; Fig.~4; Sec.~VII.}
+
+
+\Needspace{4\baselineskip}
+\noindent\textbf{Comment R10.3.}
+\begin{quote}\color{reviewgray}
+Network Architecture \& Reproducibility: Section IV-F mentions that encoders feed a 256–256 ELU trunk with Beta heads for y and w. Please provide the exact architectural details of the local affordance map encoder (e.g., 2D CNN kernel sizes, strides, channel depths, or MLP projection dimensions) and specify how spatial map features are concatenated with the 31 scalar state inputs before entering the ELU trunk.
+\end{quote}
+\noindent\textbf{Response.}
+Following your request for architectural details, we specify the map CNN, kernels, strides, padding, pooling, and projection in Sec.~IV-F. The 13-state and 18-target/conflict vectors are encoded to 64 and 32 features; these join 128 map features and one difficulty input fixed to zero to form the gate's 225-dimensional input. The ELU trunk, four Beta-parameter heads, and separate training-only critic are specified, with parameter counts that include the critic.
+\par\nopagebreak[4]\noindent{\small\itshape Location of changes: Sec. IV-F.}
+
+
+\end{document}

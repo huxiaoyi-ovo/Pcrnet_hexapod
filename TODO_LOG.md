@@ -10,6 +10,52 @@
 - 短期 TODO（动态滚动）只保留最近 20 天；超过 20 天（以日期标题 `## YYYY-MM-DD` 为准）的段落直接删除。
 - 中长期 TODO 只能在你明确同意后才能新增条目。
 
+## 2026-10-08 返修资料整理与 GitHub 同步准备（已完成）
+
+- [x] ~~[P0] 备份并保留当前分支已有实验、论文与审稿材料；仅清理批准的20个TeX副产物、根texput.log和21个QA/渲染预览文件（共42项，释放约6.32 MB），保留tmp轨迹评测原始导出于本机。外部备份：`/home/artrc/Pcrnet_hexapod_cleanup_backups/2026-10-08-2026-10-08T063900Z/`。~~
+- [x] ~~[P0] 新增返修资料目录说明与精确Git忽略/纳入规则；保留返修源图、投稿PDF/ZIP/MP4及6个正式docs图PDF；取消根`.vscode/settings.json`跟踪但保留本地文件。~~
+- [x] ~~[P0] 完成5个绘图/输出脚本AST解析、4个TeX入口的递归依赖检查（35处引用、13个源文件、0缺失）、46个tmp轨迹导出大小/SHA256复核；冻结范围暂存171个路径、内容约172.76 MB，最大单文件约45.53 MB。`git diff --cached --check`仍报告既有SVG尾空格、审稿原文行尾空格及历史表格末尾空行，均与备份一致且未改动。~~
+
+## 2026-09-17 Strong Mono 最终六格与实验封账（执行中）
+
+- [x] ~~[P0] 仅用已冻结的 Strong Mono fixed-stage 正式汇总及主表三 seed 汇总，生成预算–能力双联论文图（0.35 m/s Stage 2/3/4 随训练交互量变化；Stage-4 held-out obstacle layout 的三速度比较）；不修改训练、评测、表格或论文正文。~~
+- [x] ~~[P0] 仅从旧 fixed `s_pcr_line_avoid_basic` 的已完成 Mono `metrics.json` 生成详细 Markdown/CSV 测试数据表；冻结 checkpoint 1000/2000/2500/3000/4000/5000，共核验 38 个完整单元格、114 个逐 seed 结果和 16 个显式 `not_evaluated` 单元格。表格包含事件计数、均值、三 seed 样本 SD、训练交互量、checkpoint/source commit/原始 metrics 路径；`revision_heldout_mixed_v1` 已排除，现有主表与论文图未修改。~~
+- [x] ~~[P0] 固定 `model_completed_iter_4000.pt`，仅补 Stage 4 的 `0.50/0.60 m/s × seeds 101/102/103 × 128 episodes` 六格确定性评测；与既有 `0.35 m/s` 完全同口径，不改 checkpoint、课程、reward、网络或评测定义。六格全部完成并通过 checkpoint/seed/episode/速度/Stage 协议核验；0.50 strict success 为 `94.53% ± 0.00%`，0.60 为 `0.00% ± 0.00%`。~~
+- [x] ~~[P0] 盘点 completed 2000 的旧 fixed Stage-4 `0.50/0.60 m/s × seeds 101/102/103 × 128 episodes` 原始结果；确认六格缺失后按正式确定性协议补齐并逐格验收，共 768 episodes。0.50/0.60 strict success 均为 `0%`，collision 分别为 `94.53% +/- 3.13%`、`91.15% +/- 3.52%`（三 seed 样本 SD）；未重复运行 completed 4000，也未混入 `revision_heldout_mixed_v1`。~~
+- [x] ~~[P0] 从 Strong Mono TensorBoard/checkpoint 元数据提取全部 MasteryStage 跃迁，并完成 Mono 与 arbitration gate 的 observation/action、CNN/MLP、参数量、PPO、reward、curriculum、optimizer-update 最终配置审计。精确跃迁为 `0->1: 14.868M`、`1->2: 15.188M`、`2->3: 42.394M transitions`；冻结证据写入 `agents/final_paper_outputs_v3/strong_mono_fixed_stage4_audit.md`。~~
+- [ ] [P0] 六格完成后冻结 Strong Mono 预算曲线为 completed `1000/2000/2500/3000/4000/5000`，主图仅展示 `0.35 m/s` 下 Stage 2/3/4 deterministic success，并在 `42.394M transitions` 标注 `Mastery Stage 2 -> 3`；单 training seed 只作描述性证据，不扩展到10000、新速度点或新训练 seed。
+- [x] ~~[P0] `revision_heldout_mixed_v1` 三速度独立确定性评测已完成，但按最终论文决策降级为参考诊断；Strong Mono 正式结论、预算曲线与主表只使用旧 fixed `s_pcr_line_avoid_basic` Stage 4，不把新 mixed 场景混入正式口径。~~
+
+## 2026-09-15 Strong Mono 简单场景诊断与扩展预算（执行中）
+
+- [x] ~~[P0] 在已独立验证的 completed 1000/2000 候选中，按固定 Stage-4 validation 的 collision 与 row progress 选择 completed 2000；仅用该 checkpoint 做 Stage 2/3、0.35/0.50/0.60 m/s、seeds 101/102/103、每格 128 episodes 的确定性诊断评测，success/collision/row-progress/follow 定义保持主表口径，GPU0/GPU1 分摊且不占用 GPU2。18 格全部完成并生成逐 seed 与聚合汇总。~~
+- [x] ~~[P0] 当前连续 3000-iteration formal run 正常完成后，保留 completed 3000 为公平预算正式节点；原计划的 3000→10000 fresh-physics/inexact-resume 扩展在进入第 3001 iteration 前停止，未生成续训 checkpoint。是否长训改由 completed 3000 的固定确定性评测决定。~~
+- [x] ~~[P0] completed 3000 验证通过后，已固化原始 TensorBoard event、控制台日志、run metadata 与关键 checkpoint 哈希；导出全量 scalar 长表、tag 完整性清单和固定 EWMA `alpha=0.05` 趋势图，明确为单 training seed 描述性曲线且不提供推断性不确定区间，`EXPORT_COMPLETE` 已生成。~~
+
+## 2026-09-16 Strong Mono completed 3000 固定评测（已完成）
+
+- [x] ~~[P0] 使用 `model_completed_iter_3000.pt` 完成 `s_pcr_line_avoid_basic` 的固定 Stage 2/3/4 确定性评测：0.35/0.50/0.60 m/s、seeds 101/102/103、每格 128 episodes、5 difficulty levels；GPU0/GPU1/GPU2 各负责一个 Stage。保持与 completed 2000 完全相同的 checkpoint 接入、底层、success/collision/row-progress/follow 定义和 timeseries 默认，仅以独立输出目录保存结果。27格协议核验、逐seed、均值/样本SD及2000→3000差值汇总均已完成；结果显示Stage 2低/中速与Stage 3低速明显提升，但Stage 4及0.60 m/s仍接近零严格成功。~~
+
+## 2026-09-16 Strong Mono 5000 封顶扩展（已完成）
+
+- [x] ~~[P0] 从正式 `model_completed_iter_3000.pt` 恢复模型、optimizer、Torch/NumPy/CUDA RNG与Strong Mono课程状态，以fresh-physics/inexact-resume语义续训至completed 5000；除总预算外保持PPO、网络、reward、课程、环境数与rollout配置不变，硬停止于61.44M transitions。completed 4000固定完成0.35 m/s的Stage 2/3/4、seeds 101/102/103、每格128 episodes；completed 5000完成Stage 2/3/4 × 0.35/0.50/0.60 m/s × 3 seeds的27格评测。5000表现出明显速度条件不均衡；未据此修改训练配置，且不扩到10000。~~
+
+## 2026-09-15 Strong Mono 预算节点诊断评测（已完成）
+
+- [x] ~~[P0] 使用干净提交 `5f268bd`，分别在 GPU0/GPU1 对 completed 1000/2000 checkpoint 完成冻结的 offline-only validation：仅 `s_pcr_line_avoid_basic`、Stage 4、0.35/0.50 m/s、seeds 101/102、每格 128 episodes、5 difficulty levels、完整 timeseries；未接触最终 0.60 m/s、seeds 1/2/3 或 held-out，也不据此停训、选择 checkpoint 或改课程。GPU2 Strong Mono 正式训练保持运行，两组共 8 格全部完成且无运行错误；底层权重两条路径 SHA-256 同为 `75dfd7aa...122d1481`。completed 1000 在 0.35/0.50 均 success `0`、collision `1.000`；completed 2000 均 success `0`，collision 分别 `0.965+/-0.028`、`0.930+/-0.022`。结果只作学习曲线诊断，训练窗口与独立 Stage-4 指标的显著差异须在最终 test 前解释。~~
+
+## 2026-09-15 Revision held-out 正式测评加速（已启动）
+
+- [x] ~~[P0] 保持固定 layout/hash、3 evaluation seeds、3 speeds、每格 128 episodes、5 difficulty levels、方法权重与指标定义不变；每个任务使用 26 个并行环境，每张空闲 GPU 最多同时运行 4 个独立 method-speed-seed 单元格。主表不保存逐步 timeseries，Fig. 4 后续用同 layout/seed 单独重放。单 GPU 实测并发 4 可完成且逐回合行为结果与串行一致；并发 6/8 不稳定，已排除。正式任务已按 GPU0/GPU1 各 4 并发启动，共 27 个单元格；固定 layout canonical SHA 为 `f1de9de6...b26218`，源码提交为 `1bbba08`，输出为 `/home/dell/Pcrnet_hexapod_revision_eval/revision_heldout_mixed_v1_1bbba08_dualgpu4`。并发争用下的推理延迟不作为正式结果，后续只对延迟单独串行复测。~~
+
+## 2026-09-15 Revision held-out 口径更正（待重新验证）
+
+- [ ] [P0] 停止上一轮 mixed-primitive/26-env 批次；其输出仅保留作诊断，不纳入正式结果。`revision_heldout_mixed_v1` 恢复原 Stage-4 的 13 个 capsule、原 9×9 场地和原评测设置，仅固定为 L-L-R-R-L 与不规则行距；正式协议仍为 3 methods × 3 speeds × 3 seeds × 128 episodes，默认 64 env。
+
+## 2026-09-15 PCR 横移方向短期保持（实验验证中）
+
+- [ ] [P0] 仅在显式 play 开关下，使用可部署的 `risk_F`、Avoid 横移命令与机体前进里程记住当前避让方向；保持期内只阻止融合命令提前反向，不使用固定布局的行号或障碍真值，不改地图、checkpoint、碰撞标准及正式评测配置。先以 `revision_heldout_mixed_v1`、PCR learnedw2、0.60 m/s viewer 验证，未通过前不得写入正式评测命令。
+
 ## 2026-09-14 Strong Mono 混合课程（已完成 CPU smoke）
 
 - [x] ~~[P0] 仅为 reviewer-proof Strong Mono 的 `s_pcr_new` 增加固定 transition 开放点（6,144,000 / 12,288,000 / 18,432,000）、按 level 隔离的 2048 回合能力窗口（success/row-success/collision=`.50/.70/.30`）和未达标时固定 20% next-level probe；失败、碰撞和回合长度不得通过 completed-episode 计数加速 transition 开放或 mastery，collision 仍作为 competence 门槛阻止达标。PCR/Avoid/default 保持旧 completed-episode 课程路径；不改 reward、PPO、网络、观测、动作、几何或评测，不启动训练/评测。`py_compile`、`test_pcr_training_speed.py`（边界、失败不加速、probe、level 隔离、state roundtrip、旧路径）和 `test_mono_ppo_reviewer_protocol.py` 通过。~~
@@ -2400,3 +2446,11 @@
 
 - [x] Must: 修复非 clutter 的 `s_pcr_new` 被 clutter 专属 `decision_episode` 标志错误过滤的问题，使每个完成回合按其采样 level 写入 competence 窗口。
 - [x] Must: 保持 transition 开放点、50%/70%/30% 门槛、20% probe、2048 回合窗口、PPO、奖励及旧 PCR/Avoid 口径不变；丢弃此前 iteration 0–420 诊断 run，正式训练从 0 重启。
+
+## 2026-09-15 Strong Mono 旧 300 诊断续训
+
+- [x] Must: 保留当前修复版从 0 训练的失败轨迹与 checkpoint；若 iteration 300 触发已冻结的止损规则，则在独立目录用修复后代码完整恢复旧 `model_completed_iter_300.pt` 的策略、优化器、随机数和 curriculum transition 状态继续训练。该运行因 fresh physics reset 只作为诊断续训，不宣称为单一 commit 从 0 绝对连续的正式 baseline。
+
+## 2026-09-15 Strong Mono PPO 灾难更新排查
+
+- [x] Must: 保留旧 300 续训在 iteration 391–395 从稳定策略突发崩塌的全部证据，系统核对 rollout、GAE/bootstrap、Gaussian log-prob/KL、PPO clipping、Adam/自适应学习率、checkpoint 恢复和奖励生命周期；只修复能够用旧/新轨迹反证的训练正确性问题，不调奖励、观测、动作或课程门槛。结论：限制单轮自适应学习率变化，目标 KL 超限时停止剩余更新，单步 KL 超限时整轮回退；由干净提交从 0 重启正式 Seed 1。

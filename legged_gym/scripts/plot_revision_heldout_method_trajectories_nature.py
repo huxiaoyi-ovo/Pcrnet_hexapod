@@ -36,9 +36,9 @@ import plot_revision_heldout_method_trajectories as source_plot
 
 
 FIG_WIDTH_MM = 110.9
-FIG_HEIGHT_MM = 92.0
+FIG_HEIGHT_MM = 87.0
 FIGURE_SIZE_IN = (FIG_WIDTH_MM / 25.4, FIG_HEIGHT_MM / 25.4)
-AXES_BOX = [0.105, 0.100, 0.880, 66.5 / FIG_HEIGHT_MM]
+AXES_BOX = [0.105, 7.9 / FIG_HEIGHT_MM, 0.880, 66.5 / FIG_HEIGHT_MM]
 PCR_LINEWIDTH = 1.35
 BASELINE_LINEWIDTH = 0.95
 BASELINE_ALPHA = 0.62
@@ -46,36 +46,16 @@ TARGET_COLOR = "#23866F"
 OBSTACLE_FACE = "#D8DADC"
 OBSTACLE_EDGE = "#A7AAAC"
 OBSTACLE_MARKER_DIAMETER_PT = 11.0
-DISPLAY_ONLY_OBSTACLE_OFFSET = {
-    "row": 3,
-    "source_x": 1.0,
-    "source_y": 3.05,
-    "display_x": 0.8,
-    "display_y": 3.05,
-}
 
 NATURE_STYLES = {
-    "pcr": {"color": "#174A7E", "label": "PCR"},
+    "pcr": {"color": "#174A7E", "label": "Adaptive"},
     "rule_override": {"color": "#5E9272", "label": "Rule-Override"},
     "additive_fusion": {"color": "#8069A6", "label": "Additive-Fusion"},
     "fixed_authority": {"color": "#A66B62", "label": "Fixed-Authority"},
     "geomw": {"color": "#438F98", "label": "Geom-w"},
     "risk_only": {"color": "#BF8538", "label": "Risk-only"},
-    "yonly": {"color": "#747474", "label": "Y-only"},
+    "yonly": {"color": "#747474", "label": r"$\alpha$-only"},
 }
-
-
-def _display_obstacle_xy(item: Dict) -> Sequence[float]:
-    x_value = float(item["x"])
-    y_value = float(item["y"])
-    offset = DISPLAY_ONLY_OBSTACLE_OFFSET
-    if (
-        int(item["row"]) == int(offset["row"])
-        and math.isclose(x_value, float(offset["source_x"]), abs_tol=1e-9)
-        and math.isclose(y_value, float(offset["source_y"]), abs_tol=1e-9)
-    ):
-        return float(offset["display_x"]), float(offset["display_y"])
-    return x_value, y_value
 
 
 def _terminal_marker(
@@ -185,7 +165,7 @@ def _nature_manifest(
     manifest["artifact_role"] = "nature_refined_single_overview_trajectory_comparison"
     manifest["adaptation"] = {
         "reuse_level": "style-only inheritance",
-        "scientific_mapping": "trajectory data unchanged; one display-only obstacle-center offset is recorded",
+        "scientific_mapping": "trajectory data and layout geometry unchanged; obstacles use their source layout centers",
         "source_plotter": source_plot._relative(
             Path(__file__).with_name("plot_revision_heldout_method_trajectories.py")
         ),
@@ -202,12 +182,10 @@ def _nature_manifest(
         "used the last pre-reset sample as the terminal-marker location",
         "rotated the display so forward is horizontal",
         "used independent forward and lateral display scales to expand the forward axis",
-        "rendered obstacles as fixed-size screen-circular glyphs centered at their displayed coordinates",
-        "displayed the row-3 obstacle at source (x=1.00, y=3.05) as (x=0.80, y=3.05) without changing the layout or trajectories",
+        "rendered obstacles as fixed-size screen-circular glyphs centered at their source layout coordinates",
         "used a moderately emphasized PCR line without a masking halo",
         "no trajectory coordinate translation, smoothing, interpolation, resampling, or reselection",
     ]
-    manifest["display_only_obstacle_offsets"] = [dict(DISPLAY_ONLY_OBSTACLE_OFFSET)]
     for track_id, item in manifest["trajectories"].items():
         method = item["method"]
         is_pcr = method == "pcr"
@@ -239,17 +217,20 @@ def _nature_manifest(
             "spines": "left and bottom only",
             "grid": "none",
             "panel_alignment": "not applicable: one axes panel",
-            "legend_layout": "method row plus semantic-glyph row inside the fixed canvas",
-            "row_spacing_annotation": "adjacent-row dimension arrows and labels",
+            "legend_layout": (
+                "three centered rows: four primary methods, three remaining "
+                "methods, then five semantic glyphs"
+            ),
+            "row_spacing_annotation": (
+                "omitted from this rendering; exact adjacent-row values remain "
+                "recorded in layout.row_spacing_m"
+            ),
             "axis_aspect": "independent forward and lateral display scales",
             "visual_hierarchy": (
-                "PCR uses a deep-blue 1.35 pt line without a halo; baselines "
+                "Adaptive uses a deep-blue 1.35 pt line without a halo; baselines "
                 "use restrained colors, 0.95 pt lines, and alpha 0.62"
             ),
-            "obstacle_glyph": (
-                "fixed-size screen-circular glyph; one display-only "
-                "center offset is recorded in the manifest"
-            ),
+            "obstacle_glyph": "fixed-size screen-circular glyph centered at source layout coordinates",
             "obstacle_glyph_diameter_pt": OBSTACLE_MARKER_DIAMETER_PT,
             "event_glyphs": {
                 "start": "black square with white edge",
@@ -285,7 +266,6 @@ def main() -> None:
         )
 
     tracks = source_plot._select_representative_tracks(method_datasets, layout)
-    centers = source_plot._row_centers(layout)
     obstacle_radius = float(layout["obstacle_geometry"]["capsule"]["radius"])
 
     forward_values: List[float] = []
@@ -295,7 +275,8 @@ def main() -> None:
             forward_values.append(float(row["robot_y_local"]))
             lateral_values.append(float(row["robot_x_local"]))
     for item in layout["obstacles"]:
-        lateral, forward = _display_obstacle_xy(item)
+        lateral = float(item["x"])
+        forward = float(item["y"])
         forward_values.extend([forward - obstacle_radius, forward + obstacle_radius])
         lateral_values.extend([lateral - obstacle_radius, lateral + obstacle_radius])
     plot_xlim = (min(forward_values) - 0.10, max(forward_values) + 0.10)
@@ -303,38 +284,9 @@ def main() -> None:
     fig = plt.figure(figsize=FIGURE_SIZE_IN, facecolor="white")
     ax = fig.add_axes(AXES_BOX)
 
-    row_items = list(centers.items())
-    for (_, left), (_, right) in zip(row_items[:-1], row_items[1:]):
-        ax.annotate(
-            "",
-            xy=(right, 1.035),
-            xytext=(left, 1.035),
-            xycoords=ax.get_xaxis_transform(),
-            textcoords=ax.get_xaxis_transform(),
-            arrowprops={
-                "arrowstyle": "<->",
-                "color": "#666A6C",
-                "linewidth": 0.62,
-                "mutation_scale": 6.8,
-            },
-            annotation_clip=False,
-            zorder=25,
-        )
-        ax.text(
-            0.5 * (left + right),
-            1.050,
-            f"{right - left:.2f} m",
-            transform=ax.get_xaxis_transform(),
-            ha="center",
-            va="bottom",
-            fontsize=6.2,
-            color="#4C5052",
-            clip_on=False,
-            zorder=26,
-        )
-
     for item in layout["obstacles"]:
-        lateral, forward = _display_obstacle_xy(item)
+        lateral = float(item["x"])
+        forward = float(item["y"])
         ax.scatter(
             [forward],
             [lateral],
@@ -441,8 +393,8 @@ def main() -> None:
     ax.spines["left"].set_color("#292929")
     ax.spines["bottom"].set_color("#292929")
 
-    method_handles = [
-        Line2D(
+    method_handles = {
+        method: Line2D(
             [0],
             [0],
             color=NATURE_STYLES[method]["color"],
@@ -451,8 +403,15 @@ def main() -> None:
             label=NATURE_STYLES[method]["label"],
         )
         for method in source_plot.TRACK_ORDER
+    }
+    method_row_1 = [
+        method_handles[method]
+        for method in ("pcr", "rule_override", "additive_fusion", "fixed_authority")
     ]
-    method_handles = [method_handles[index] for index in (0, 4, 1, 5, 2, 6, 3)]
+    method_row_2 = [
+        method_handles[method]
+        for method in ("geomw", "risk_only", "yonly")
+    ]
     status_handles = [
         Line2D([0], [0], color=TARGET_COLOR, linestyle=(0, (4.8, 3.0)), linewidth=1.05, label="Target"),
         Line2D([0], [0], marker="s", color="none", markerfacecolor="#262626", markeredgecolor="white", markeredgewidth=0.5, markersize=4.6, label="Start"),
@@ -461,10 +420,23 @@ def main() -> None:
         Line2D([0], [0], marker="o", color="none", markerfacecolor="white", markeredgecolor="#777777", markeredgewidth=1.0, markersize=4.8, label="Follow lost / timeout"),
     ]
     fig.legend(
-        handles=method_handles,
+        handles=method_row_1,
         loc="upper center",
-        bbox_to_anchor=(0.535, 0.995),
+        bbox_to_anchor=(0.5, 0.990),
         ncol=4,
+        fontsize=6.2,
+        handlelength=1.45,
+        handletextpad=0.38,
+        columnspacing=1.10,
+        labelspacing=0.22,
+        borderpad=0.0,
+        borderaxespad=0.0,
+    )
+    fig.legend(
+        handles=method_row_2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.954),
+        ncol=3,
         fontsize=6.2,
         handlelength=1.45,
         handletextpad=0.38,
@@ -476,7 +448,7 @@ def main() -> None:
     fig.legend(
         handles=status_handles,
         loc="upper center",
-        bbox_to_anchor=(0.535, 0.925),
+        bbox_to_anchor=(0.5, 0.918),
         ncol=5,
         fontsize=6.2,
         handlelength=1.35,

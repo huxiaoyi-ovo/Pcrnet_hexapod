@@ -68,3 +68,46 @@ agents/mono*
 s!agents/eval_data*/pcr_main_table/*.md
 
 agents/final_paper_outputs_v3_dryrun
+
+# Local LaTeX sidecars for the two revision source directories.
+/返修/完整TeX文件/*.aux
+/返修/完整TeX文件/*.fls
+/返修/完整TeX文件/*.log
+/返修/完整TeX文件/*.fdb_latexmk
+/返修/完整TeX文件/*.out
+/返修/完整TeX文件/*.xdv
+/返修/完整TeX文件/*.pass*.log
+/返修/中文版/*.aux
+/返修/中文版/*.fls
+/返修/中文版/*.log
+/返修/中文版/*.fdb_latexmk
+/返修/中文版/*.out
+/返修/中文版/*.xdv
+/返修/中文版/*.pass*.log
+/texput.log
+
+# Keep large held-out trajectory exports local; other tmp records remain eligible.
+/tmp/trajectory_capture/
+
+# Reproducible visual previews and overlays; keep adjacent QA JSON records.
+/tmp/figure_qa/commit_revision_heldout_layout.pdf
+/tmp/figure_qa/commit_revision_heldout_layout.png
+/tmp/figure_qa/final_nature_figures/*.collision.pdf
+/tmp/figure_qa/final_nature_figures/*.alignment*.svg
+/tmp/pdfs/final_paper_figures/*.png
+/docs/figures/qa_nature/*.alignment.svg
+/docs/figures/qa_mono_budget_capability/*.alignment.svg
+/docs/figures/qa_mono_budget_capability/fig_mono_budget_capability.collision-audit.pdf
+
+# Required revision deliverables and figures despite the general *.pdf rule.
+!返修/完整TeX文件/*.pdf
+!返修/完整TeX文件/figs/*.pdf
+!返修/完整TeX文件/figs/**/*.pdf
+!返修/中文版/*.pdf
+!返修/提交文件/*.pdf
+!docs/figures/fig_mono_budget_capability.pdf
+!docs/figures/fig_mono_budget_capability_vertical.pdf
+!docs/figures/final_main_performance_nature.pdf
+!docs/figures/final_real_robot_arbitration_nature.pdf
+!docs/figures/final_system_architecture_nature.pdf
+!docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.pdf

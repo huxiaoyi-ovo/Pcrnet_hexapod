@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "method": "Fixed-Authority",
+  "aggregation": {
+    "replicate_unit": "evaluation seed",
+    "seeds": [1, 2, 3],
+    "episodes_per_seed": 128,
+    "summary": "mean +/- sample standard deviation (ddof=1) across three seeds"
+  },
+  "protocol": {
+    "remote_repository": "/home/dell/RL_hexapod_gym_track_b_canonical_20260911",
+    "task": "s_pcr_line_avoid_basic",
+    "avoid_stage": 4,
+    "avoid_stage_frozen": true,
+    "fixed_y_const": 0.5,
+    "gate_policy_call_count": 0,
+    "difficulty_levels": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "num_envs": 64
+  },
+  "source_roots": {
+    "0.35": "revision_main_fixed_authority_curve_stage4_20260916_v2",
+    "0.50": "revision_main_fixed_authority_curve_stage4_20260916_v2",
+    "0.60": "revision_main_fixed_authority_stage4_20260916/formal_fixed_full_frozen_flags"
+  },
+  "per_seed": [
+    {"speed_mps": 0.35, "seed": 1, "task_success": 0.7890625, "row_progress": 0.928125002188608, "collision": 0.1953125, "follow_mae_m": 0.3849406609883427, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.35/seed_1/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260916_231518/metrics.json", "metrics_sha256": "069426bb6e91d9f486b31426ffb563075491f05ac227edd18bdcf03d9d70acd7"},
+    {"speed_mps": 0.35, "seed": 2, "task_success": 0.7578125, "row_progress": 0.9000000022351742, "collision": 0.2265625, "follow_mae_m": 0.3857358157193217, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.35/seed_2/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed2_20260916_231518/metrics.json", "metrics_sha256": "d9bd2d9206349a1d9f76d794e37987e446e975ee25f97d1473be22b7d9349f22"},
+    {"speed_mps": 0.35, "seed": 3, "task_success": 0.6796875, "row_progress": 0.868750003632158, "collision": 0.3125, "follow_mae_m": 0.40066100973146723, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.35/seed_3/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed3_20260916_231518/metrics.json", "metrics_sha256": "c6df094d1dfc2a730f72225e7de21db9a48e53c06527c3d711e53dd0ea81cf91"},
+    {"speed_mps": 0.5, "seed": 1, "task_success": 0.0, "row_progress": 0.43125000805594027, "collision": 0.4765625, "follow_mae_m": 1.230740501022404, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.50/seed_1/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260916_232705/metrics.json", "metrics_sha256": "57235edfe0d8a07141ba3b81366419ecd06fa507b951386b19f9500a61db7bba"},
+    {"speed_mps": 0.5, "seed": 2, "task_success": 0.0, "row_progress": 0.43593750754371285, "collision": 0.4921875, "follow_mae_m": 1.2325883871138212, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.50/seed_2/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed2_20260916_232706/metrics.json", "metrics_sha256": "6ae0e5cd96b622e6874c0e3a7ccc334d18d6d0ff9471bd151cfb89c21385c992"},
+    {"speed_mps": 0.5, "seed": 3, "task_success": 0.0, "row_progress": 0.4406250084284693, "collision": 0.5546875, "follow_mae_m": 1.1968289838536104, "remote_metrics": "revision_main_fixed_authority_curve_stage4_20260916_v2/speed_0.50/seed_3/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed3_20260916_232716/metrics.json", "metrics_sha256": "fc7be44ab2a195d8b4c3e9c8bf81699c33ff8815cff6c0e5f24467ea334515a8"},
+    {"speed_mps": 0.6, "seed": 1, "task_success": 0.0, "row_progress": 0.4000000059604645, "collision": 0.46875, "follow_mae_m": 1.545928917338359, "remote_metrics": "revision_main_fixed_authority_stage4_20260916/formal_fixed_full_frozen_flags/seed_1/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed1_20260916_161700/metrics.json", "metrics_sha256": "952a52819dafa52df9c068771f329423c59a7890b3ec211534c955bdf6c2035a"},
+    {"speed_mps": 0.6, "seed": 2, "task_success": 0.0, "row_progress": 0.4000000059604645, "collision": 0.453125, "follow_mae_m": 1.5473615997201962, "remote_metrics": "revision_main_fixed_authority_stage4_20260916/formal_fixed_full_frozen_flags/seed_2/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed2_20260916_161709/metrics.json", "metrics_sha256": "d951bc391750082a62e12f0e0d2a1d9108641d5362888a9b367782fff1f7b294"},
+    {"speed_mps": 0.6, "seed": 3, "task_success": 0.0, "row_progress": 0.3984375059371814, "collision": 0.5078125, "follow_mae_m": 1.5533610943391198, "remote_metrics": "revision_main_fixed_authority_stage4_20260916/formal_fixed_full_frozen_flags/seed_3/moe_teacher_s_pcr_line_avoid_basic_learnedw2_signed_lam0.3_gam0.15_m0.05_rowrel_aux0.05_riskmem_lc0.4_seed3_20260916_162146/metrics.json", "metrics_sha256": "481efca605f62c7ae2a4087e4016df3fbbe18b8b96864b70569e465aef148afb"}
+  ],
+  "aggregate": {
+    "0.35": {"task_success": {"mean": 0.7421875, "sample_sd": 0.05633673867912483}, "row_progress": {"mean": 0.8989583360186467, "sample_sd": 0.02970120224459948}, "collision": {"mean": 0.24479166666666666, "sample_sd": 0.06068323019651585}, "follow_mae_m": {"mean": 0.39044582881304385, "sample_sd": 0.008855535481191421}},
+    "0.50": {"task_success": {"mean": 0.0, "sample_sd": 0.0}, "row_progress": {"mean": 0.43593750800937414, "sample_sd": 0.004687500186264532}, "collision": {"mean": 0.5078125, "sample_sd": 0.04133986423538423}, "follow_mae_m": {"mean": 1.2200526239966119, "sample_sd": 0.020133473790442523}},
+    "0.60": {"task_success": {"mean": 0.0, "sample_sd": 0.0}, "row_progress": {"mean": 0.3994791726193701, "sample_sd": 0.0009021098090512737}, "collision": {"mean": 0.4765625, "sample_sd": 0.028168369339562415}, "follow_mae_m": {"mean": 1.5488838704658916, "sample_sd": 0.003943005821712645}}
+  }
+}

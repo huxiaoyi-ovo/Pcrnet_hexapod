@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "applicable": true,
+  "auditable": true,
+  "verdict": "PASS",
+  "backend": "python-matplotlib",
+  "summary": {
+    "fail": 0,
+    "warn": 0,
+    "comparisons": 1,
+    "exemptions": 0
+  },
+  "tolerances": {
+    "alignment_pt": 1.5,
+    "gutter_pt": 1.5
+  },
+  "layout": {
+    "schema_version": 1,
+    "backend": "python-matplotlib",
+    "figure": {
+      "width_pt": 252.28346456692913,
+      "height_pt": 356.40000000000003
+    },
+    "panels": [
+      {
+        "id": "a",
+        "bbox_pt": [
+          45.41102362204724,
+          249.48000000000002,
+          214.44094488188978,
+          320.76
+        ],
+        "panel_label": "a",
+        "panel_label_anchor_pt": [
+          18.36623622047244,
+          339.29279999999994
+        ]
+      },
+      {
+        "id": "b",
+        "bbox_pt": [
+          45.41102362204724,
+          142.56000000000003,
+          214.44094488188978,
+          213.84000000000006
+        ],
+        "panel_label": "b",
+        "panel_label_anchor_pt": [
+          18.36623622047244,
+          232.37280000000004
+        ]
+      },
+      {
+        "id": "c",
+        "bbox_pt": [
+          45.41102362204724,
+          35.64000000000001,
+          214.44094488188978,
+          106.92000000000003
+        ],
+        "panel_label": "c",
+        "panel_label_anchor_pt": [
+          18.36623622047244,
+          125.45280000000002
+        ]
+      }
+    ],
+    "row_groups": [],
+    "column_groups": [
+      {
+        "id": "trace-stack",
+        "panels": [
+          "a",
+          "b",
+          "c"
+        ]
+      }
+    ],
+    "boundary_groups": [],
+    "exemptions": []
+  },
+  "findings": []
+}

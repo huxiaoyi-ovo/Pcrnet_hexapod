@@ -17,6 +17,15 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 METHOD_ORDER = ["yonly", "geomw", "risk_only", "rule_override", "learnedw"]
+TABLE1_METHOD_ORDER = [
+    "yonly",
+    "geomw",
+    "risk_only",
+    "rule_override",
+    "additive_fusion",
+    "fixed_authority",
+    "learnedw",
+]
 MECHANISM_METHOD_ORDER = ["yonly", "geomw", "risk_only", "learnedw"]
 METHOD_LABELS = {
     "yonly": "Y-only",
@@ -24,6 +33,7 @@ METHOD_LABELS = {
     "risk_only": "Risk-only",
     "rule_override": "Rule-Override",
     "additive_fusion": "Additive-Fusion",
+    "fixed_authority": "Fixed-Authority",
     "velocity_search": "Velocity-Search",
     "learnedw": "Learned-w (PCR-Net)",
     "mono_ppo": "Mono-PPO",
@@ -34,6 +44,7 @@ SHORT_METHOD_LABELS = {
     "risk_only": "Risk-only",
     "rule_override": "Rule-Override",
     "additive_fusion": "Additive-Fusion",
+    "fixed_authority": "Fixed-Authority",
     "velocity_search": "Velocity-Search",
     "learnedw": "Learned-w",
     "mono_ppo": "Mono-PPO",
@@ -44,6 +55,7 @@ METHOD_STYLE = {
     "risk_only": {"marker": "^", "color": "#ff7f0e", "linewidth": 1.7},
     "rule_override": {"marker": "D", "color": "#2ca02c", "linewidth": 1.7},
     "additive_fusion": {"marker": "P", "color": "#9467bd", "linewidth": 1.7},
+    "fixed_authority": {"marker": "X", "color": "#A66B62", "linewidth": 1.7},
     "velocity_search": {"marker": "X", "color": "#8c564b", "linewidth": 1.7},
     "learnedw": {"marker": "*", "color": "#d62728", "linewidth": 2.0},
 }
@@ -266,6 +278,8 @@ def _infer_method(row: Dict[str, str]) -> str:
         return "velocity_search"
     if "additive_fusion" in text or "additive-fusion" in text:
         return "additive_fusion"
+    if "fixed_authority" in text or "fixed-authority" in text:
+        return "fixed_authority"
     if "risk_only" in text or "risk-only" in text:
         return "risk_only"
     if "rule_override" in text or "rule-override" in text:
@@ -282,7 +296,7 @@ def _infer_method(row: Dict[str, str]) -> str:
 
 
 def _method_sort(method: str) -> Tuple[int, str]:
-    order = ["yonly", "geomw", "risk_only", "rule_override", "additive_fusion", "velocity_search", "learnedw", "mono_ppo"]
+    order = ["yonly", "geomw", "risk_only", "rule_override", "additive_fusion", "fixed_authority", "velocity_search", "learnedw", "mono_ppo"]
     if method in order:
         return (order.index(method), method)
     return (len(order), method)
@@ -367,6 +381,74 @@ def _raw_rows_from_all_csv(paths: Sequence[str], methods: Sequence[str]) -> List
     return _latest_by_key(rows)
 
 
+def _raw_rows_from_fixed_authority_provenance(path: str) -> List[Dict[str, str]]:
+    """Validate the frozen Fixed-Authority contract and expose seed-level rows."""
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"Fixed-Authority provenance not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if payload.get("method") != "Fixed-Authority":
+        raise RuntimeError("Fixed-Authority provenance has the wrong method")
+    aggregation = payload.get("aggregation", {})
+    protocol = payload.get("protocol", {})
+    if set(aggregation.get("seeds", [])) != {1, 2, 3} or aggregation.get("episodes_per_seed") != 128:
+        raise RuntimeError("Fixed-Authority provenance must contain seeds 1,2,3 with 128 episodes each")
+    if (
+        protocol.get("task") != "s_pcr_line_avoid_basic"
+        or protocol.get("avoid_stage") != 4
+        or protocol.get("avoid_stage_frozen") is not True
+        or not math.isclose(_safe_float(protocol.get("fixed_y_const")), 0.5, abs_tol=1e-12)
+        or protocol.get("gate_policy_call_count") != 0
+    ):
+        raise RuntimeError("Fixed-Authority provenance does not match the frozen Stage-4 protocol")
+
+    metric_map = {
+        "task_success": "success_rate",
+        "row_progress": "progress_ratio_mean",
+        "collision": "episode_collision_rate",
+        "follow_mae_m": "follow_mae_m_mean",
+    }
+    rows: List[Dict[str, str]] = []
+    for raw in payload.get("per_seed", []):
+        speed = f"{_safe_float(raw.get('speed_mps')):.2f}"
+        seed = raw.get("seed")
+        if speed not in SPEEDS or seed not in {1, 2, 3}:
+            raise RuntimeError("Fixed-Authority provenance has an invalid speed or seed")
+        row = {
+            "source": f"{path}#{raw.get('remote_metrics', '')}",
+            "seed": str(seed),
+            "_speed": speed,
+            "_method": "fixed_authority",
+            "_seed": str(seed),
+        }
+        for source_key, target_key in metric_map.items():
+            value = _safe_float(raw.get(source_key))
+            if not math.isfinite(value):
+                raise RuntimeError(f"Fixed-Authority provenance has invalid {source_key}")
+            row[target_key] = str(value)
+        rows.append(row)
+
+    groups = defaultdict(list)
+    for row in rows:
+        groups[row["_speed"]].append(row)
+    if set(groups) != set(SPEEDS) or any({int(row["_seed"]) for row in group} != {1, 2, 3} for group in groups.values()):
+        raise RuntimeError("Fixed-Authority provenance must contain one result per seed at all three speeds")
+
+    declared = payload.get("aggregate", {})
+    for speed, group in groups.items():
+        expected = declared.get(speed, {})
+        for source_key, target_key in metric_map.items():
+            mean, std = _mean_std(_safe_float(row[target_key]) for row in group)
+            expected_metric = expected.get(source_key, {})
+            if not (
+                math.isclose(mean, _safe_float(expected_metric.get("mean")), abs_tol=1e-12)
+                and math.isclose(std, _safe_float(expected_metric.get("sample_sd")), abs_tol=1e-12)
+            ):
+                raise RuntimeError(f"Fixed-Authority provenance aggregate mismatch at {speed} m/s for {source_key}")
+    return rows
+
+
 def _aggregate_raw(
     rows: Sequence[Dict[str, str]],
     metrics: Sequence[Tuple[str, str]],
@@ -408,6 +490,7 @@ def _load_all_method_rows(args) -> List[Dict[str, str]]:
     rows.extend(_raw_rows_from_all_csv([args.rule_all_csv], methods=["rule_override"]))
     rows.extend(_raw_rows_from_all_csv([getattr(args, "additive_all_csv", "")], methods=["additive_fusion"]))
     rows.extend(_raw_rows_from_all_csv([getattr(args, "velocity_search_all_csv", "")], methods=["velocity_search"]))
+    rows.extend(_raw_rows_from_fixed_authority_provenance(args.fixed_authority_provenance))
     return rows
 
 
@@ -419,16 +502,14 @@ def _build_table1(args) -> List[Dict]:
         ("Collision", "episode_collision_rate"),
         ("Follow MAE [m]", "follow_mae_m_mean"),
     ]
-    table_methods = list(METHOD_ORDER)
-    extra_methods = [row.get("_method") or _infer_method(row) for row in rows]
-    if "additive_fusion" in extra_methods or "velocity_search" in extra_methods:
-        table_methods = ["yonly", "geomw", "risk_only", "rule_override"]
-        if "additive_fusion" in extra_methods:
-            table_methods.append("additive_fusion")
-        if "velocity_search" in extra_methods:
-            table_methods.append("velocity_search")
-        table_methods.append("learnedw")
+    table_methods = list(TABLE1_METHOD_ORDER)
     table = _aggregate_raw(rows, metrics, table_methods)
+    expected_pairs = {(speed, method) for speed in SPEEDS for method in table_methods}
+    observed_pairs = {(str(row.get("Speed")), str(row.get("method_key"))) for row in table}
+    if observed_pairs != expected_pairs:
+        missing = sorted(expected_pairs - observed_pairs)
+        extra = sorted(observed_pairs - expected_pairs)
+        raise RuntimeError(f"Table I method-speed coverage mismatch; missing={missing}, extra={extra}")
 
     best_by_speed: Dict[str, Dict[str, float]] = {}
     for speed in SPEEDS:
@@ -1059,6 +1140,7 @@ def _plot_fig3(args, table1: Sequence[Dict]) -> None:
         "risk_only": (8, -5),
         "rule_override": (8, -12),
         "additive_fusion": (8, 12),
+        "fixed_authority": (8, 12),
         "velocity_search": (8, 12),
         "learnedw": (12, 10),
     }
@@ -1144,6 +1226,7 @@ def _fig3_method_order(table1: Sequence[Dict]) -> List[str]:
         "risk_only",
         "rule_override",
         "additive_fusion",
+        "fixed_authority",
         "velocity_search",
         "learnedw",
     ]
@@ -1299,6 +1382,7 @@ def _plot_fig3b_scatter_sized(args, table1: Sequence[Dict]) -> None:
         "risk_only": (8, -5),
         "rule_override": (8, -12),
         "additive_fusion": (8, 12),
+        "fixed_authority": (8, 12),
         "velocity_search": (8, 12),
         "learnedw": (12, 10),
     }
@@ -2854,6 +2938,16 @@ def _build_appendix_a4(args) -> List[Dict]:
     return out
 
 
+def _fixed_authority_manifest_source_line(args) -> str:
+    """Return the provenance line shared by full and Table-I-only manifests."""
+    return (
+        "- fixed_authority_stage4_provenance: "
+        f"`{args.fixed_authority_provenance}` "
+        f"(mtime={_file_stamp(args.fixed_authority_provenance)}; "
+        "3 seeds x 128 episodes; fixed y=0.5; GatePolicy calls=0)\n"
+    )
+
+
 def _write_manifest(
     args,
     table1: Sequence[Dict],
@@ -2881,6 +2975,7 @@ def _write_manifest(
         "table1_main_performance_stage4.csv",
         "table1_main_performance_stage4.md",
         "table1_main_performance_stage4.tex",
+        "table1_main_performance_stage4_audit.csv",
         "table2_mechanism_ablation.csv",
         "table2_mechanism_ablation.md",
         "table2_mechanism_ablation.tex",
@@ -2962,6 +3057,7 @@ def _write_manifest(
             ("fig6_timeseries_root", args.fig6_timeseries_root),
         ]:
             f.write(f"- {label}: `{src}` (mtime={_file_stamp(src)})\n")
+        f.write(_fixed_authority_manifest_source_line(args))
         f.write("\nCheckpoint SHA256:\n\n")
         for label, src in [
             ("learnedw_ckpt", args.learnedw_ckpt),
@@ -3001,6 +3097,74 @@ def _write_manifest(
         f.write("- Table III: Mono-PPO has 1,029,447 params and is not capacity matched to Learned-w; treat it as a diagnostic probe.\n")
 
 
+def _sync_table1_only_manifest(args, table1: Sequence[Dict]) -> None:
+    """Update only Table-I-related manifest lines for the narrow regeneration path."""
+    path = os.path.join(args.output_dir, "MANIFEST.md")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"MANIFEST.md not found for --table1_only: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    for source_name in [
+        "fig3a_fixed_authority_stage4.csv",
+        "fig3a_fixed_authority_stage4_provenance.json",
+    ]:
+        text = re.sub(
+            rf"^- {re.escape(source_name)} \([^\n]* bytes\)\n",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
+    table_files = [
+        "table1_main_performance_stage4.csv",
+        "table1_main_performance_stage4.md",
+        "table1_main_performance_stage4.tex",
+        "table1_main_performance_stage4_audit.csv",
+    ]
+    for name in table_files:
+        file_path = os.path.join(args.output_dir, name)
+        if not os.path.isfile(file_path) or os.path.getsize(file_path) <= 0:
+            raise RuntimeError(f"Required Table-I artifact missing or empty: {file_path}")
+        line = f"- {name} ({os.path.getsize(file_path)} bytes)"
+        pattern = rf"^- {re.escape(name)} \([^\n]* bytes\)$"
+        if re.search(pattern, text, flags=re.MULTILINE):
+            text = re.sub(pattern, line, text, flags=re.MULTILINE)
+        else:
+            anchor = "- table1_main_performance_stage4.tex "
+            pos = text.find("\n", text.find(anchor))
+            if pos < 0:
+                raise RuntimeError("Could not locate the Table-I manifest block")
+            text = text[:pos + 1] + line + "\n" + text[pos + 1:]
+
+    provenance_line = _fixed_authority_manifest_source_line(args)
+    if "- fixed_authority_stage4_provenance:" in text:
+        text = re.sub(r"^- fixed_authority_stage4_provenance:.*$", provenance_line.rstrip("\n"), text, flags=re.MULTILINE)
+    else:
+        marker = "- additive_all_csv:"
+        pos = text.find("\n", text.find(marker))
+        if pos < 0:
+            raise RuntimeError("Could not locate the source manifest block")
+        text = text[:pos + 1] + provenance_line + text[pos + 1:]
+
+    method_count = len({str(row.get("method_key", "")) for row in table1 if row.get("method_key")})
+    text = re.sub(r"^- Table I audit rows: \d+$", f"- Table I audit rows: {len(table1)}", text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^- Table I: expected \d+ rows = 3 speeds x \d+ methods; Mono-PPO is intentionally excluded\.$",
+        f"- Table I: expected {len(table1)} rows = 3 speeds x {method_count} methods; Mono-PPO is intentionally excluded.",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r"^- Fig\.3\(b\): the selected scatter uses \d+ Table I methods at 0\.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes\.md\.$",
+        f"- Fig.3(b): the selected scatter uses {method_count} Table I methods at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.",
+        text,
+        flags=re.MULTILINE,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build final PCR-Net paper tables and figures.")
     parser.add_argument("--output_dir", default="agents/final_paper_outputs_v3")
@@ -3036,8 +3200,13 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--additive_all_csv",
-        default="",
-        help="Optional Additive-Fusion all-metrics CSV. Empty keeps the existing five-method paper table unchanged.",
+        default="agents/eval_data_additive_fusion_main/pcr_main_table/pcr_main_table_all_metrics_20260617_183936.csv",
+        help="All-metrics CSV for the frozen Additive-Fusion main-table baseline.",
+    )
+    parser.add_argument(
+        "--fixed_authority_provenance",
+        default="agents/final_paper_outputs_v3/fig3a_fixed_authority_stage4_provenance.json",
+        help="Validated seed-level Fixed-Authority Stage-4 provenance JSON for Table I.",
     )
     parser.add_argument(
         "--velocity_search_all_csv",
@@ -3063,6 +3232,11 @@ def build_argparser() -> argparse.ArgumentParser:
         "--heldout_table_only",
         action="store_true",
         help="Only build the held-out irregular-row table and notes.",
+    )
+    parser.add_argument(
+        "--table1_only",
+        action="store_true",
+        help="Only rebuild Table I and its narrowly related manifest entries.",
     )
     parser.add_argument(
         "--learnedw_diag_all_csv",
@@ -3181,6 +3355,10 @@ def main() -> None:
         print(f"Held-out irregular-row table written to: {args.output_dir}")
         return
     table1 = _build_table1(args)
+    if bool(getattr(args, "table1_only", False)):
+        _sync_table1_only_manifest(args, table1)
+        print(f"Table I written to: {args.output_dir}")
+        return
     table2 = _build_table2(args)
     table3 = _build_table3(args)
     _plot_fig3(args, table1)

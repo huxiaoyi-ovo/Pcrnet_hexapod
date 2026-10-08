@@ -1,0 +1,11 @@
+\begin{tabular}{lcccc}
+\toprule
+策略 & 预算（M） & 0.35 & 0.50 & 0.60 \\
+\midrule
+Adaptive & 24.576 & \ms{98.7}{0.9} & \ms{99.2}{0.8} & \ms{95.3}{2.8} \\
+Mono 2000 & 24.576 & \ms{0.0}{0.0} & \ms{0.0}{0.0} & \ms{0.0}{0.0} \\
+Mono 4000 & 49.152 & \ms{57.3}{6.7} & \ms{94.5}{0.0} & \ms{0.0}{0.0} \\
+Mono 5000 & 61.440 & \ms{0.0}{0.0} & \ms{93.0}{2.7} & \ms{1.3}{0.9} \\
+\bottomrule
+\end{tabular}
+\par\smallskip{\footnotesize Adaptive：12.288M 次 Avoid 交互＋12.288M 次门控交互（不计共用底层训练）；Mono 使用一个训练种子。数值为三个评测种子上的均值 $\pm$ 样本标准差；每一行 Mono 在各速度下使用同一检查点。}\par

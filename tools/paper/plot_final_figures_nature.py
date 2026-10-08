@@ -57,7 +57,7 @@ METHOD_ORDER = [
     "Learned-w",
 ]
 METHOD_STYLE = {
-    "Y-only": dict(color=GRAY, marker="o"),
+    "Y-only": dict(color=GRAY, marker="o", label=r"$\alpha$-only"),
     "Geom-w": dict(color=TEAL, marker="s"),
     "Risk-only": dict(color=WARM, marker="^"),
     "Rule-Override": dict(color=GREEN, marker="D"),
@@ -152,10 +152,13 @@ def line_key(
     color: str,
     linewidth: float,
     linestyle: str | tuple = "solid",
+    fontsize: float = 5.4,
+    line_length: float = 0.065,
+    text_offset: float = 0.082,
 ) -> None:
     """Draw a compact out-of-axes key with the exact plotted line style."""
     axis.plot(
-        [x, x + 0.065],
+        [x, x + line_length],
         [y, y],
         transform=axis.transAxes,
         color=color,
@@ -166,12 +169,12 @@ def line_key(
         zorder=8,
     )
     axis.text(
-        x + 0.082,
+        x + text_offset,
         y,
         label,
         transform=axis.transAxes,
         color=color,
-        fontsize=5.4,
+        fontsize=fontsize,
         ha="left",
         va="center",
         clip_on=False,
@@ -215,6 +218,7 @@ def write_manifest(
     sources: Iterable[Path],
     outputs: dict[str, str],
     notes: list[str],
+    minimum_nominal_font_pt: float = 5.4,
 ) -> None:
     source_rows = [
         {"path": str(source), "sha256": sha256(source)} for source in sources
@@ -234,7 +238,7 @@ def write_manifest(
             "backend": "Python/Matplotlib",
             "dpi": EXPORT_DPI,
             "editable_vector": True,
-            "minimum_nominal_font_pt": 5.4,
+            "minimum_nominal_font_pt": minimum_nominal_font_pt,
         },
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -375,7 +379,12 @@ def place_scatter_labels(axis: plt.Axes, points: list[dict[str, Any]]) -> None:
         placed_bboxes.append(bbox)
 
 
-def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path, qa_dir: Path) -> None:
+def plot_main_performance(
+    table_path: Path,
+    scatter_path: Path,
+    output_dir: Path,
+    qa_dir: Path,
+) -> None:
     table_rows = read_csv(table_path)
     scatter_rows = read_csv(scatter_path)
     by_method: dict[str, list[dict[str, str]]] = {name: [] for name in METHOD_ORDER}
@@ -384,16 +393,14 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
             by_method[row["Method"]].append(row)
 
     width = mm_to_in(FIG_WIDTH_MM)
-    fig = plt.figure(figsize=(width, 4.55))
-    axis_a = fig.add_axes([0.18, 0.59, 0.75, 0.31])
-    axis_b = fig.add_axes([0.18, 0.12, 0.75, 0.31])
+    fig = plt.figure(figsize=(width, 4.00))
+    # Both data rectangles retain their original 1.4105 in physical height.
+    axis_a = fig.add_axes([0.18, 0.55, 0.75, 0.352625])
+    axis_b = fig.add_axes([0.18, 0.10, 0.75, 0.352625])
     axes = [axis_a, axis_b]
     for axis in axes:
         style_axis(axis)
 
-    axis_a.axvspan(0.33, 0.515, color=PCR_LIGHT, alpha=0.45, zorder=-2)
-    axis_a.axvline(0.55, color=MUTED, linewidth=0.55, linestyle=(0, (2, 2)), zorder=1)
-    axis_a.text(0.60, 1.025, "above training range", color=MUTED, fontsize=5.4, ha="center", va="bottom")
     for method in METHOD_ORDER:
         rows = sorted(by_method[method], key=lambda row: float(row["Speed"]))
         if not rows:
@@ -417,7 +424,7 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
             capsize=1.8,
             elinewidth=0.7,
             alpha=1.0 if is_pcr else 0.78,
-            label="PCR-Net" if is_pcr else method,
+            label="Adaptive" if is_pcr else style.get("label", method),
             zorder=5 if is_pcr else 3,
         )
     axis_a.set_xlim(0.325, 0.625)
@@ -437,7 +444,8 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
         mode="expand",
         frameon=False,
         handlelength=1.7,
-        columnspacing=0.8,
+        handletextpad=0.35,
+        columnspacing=0.65,
         borderaxespad=0.0,
     )
 
@@ -466,7 +474,7 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
         scatter_points.append(
             {
                 "method": method,
-                "label": "PCR-Net" if method == "Learned-w" else method,
+                "label": "Adaptive" if method == "Learned-w" else style.get("label", method),
                 "color": style["color"],
                 "artist": artist,
             }
@@ -478,19 +486,31 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
     axis_b_upper = 1.39 if max_mae <= 1.39 else math.ceil((max_mae + 0.05) * 10.0) / 10.0
     axis_b.set_ylim(0.24, axis_b_upper)
     axis_b.set_xlabel("Collision rate")
-    axis_b.set_ylabel("Follow MAE (m)")
+    axis_b.set_ylabel("Follow-distance MAE (m)")
     axis_b.set_xticks([0.0, 0.25, 0.50, 0.75])
     axis_b.set_yticks([0.3, 0.8, 1.3] if axis_b_upper == 1.39 else [0.3, 0.8, 1.3, axis_b_upper])
     panel_label(axis_b, "b")
     place_scatter_labels(axis_b, scatter_points)
+    axis_b.text(
+        0.985,
+        0.985,
+        "Marker area\n∝ task success",
+        transform=axis_b.transAxes,
+        color=MUTED,
+        fontsize=5.2,
+        ha="right",
+        va="top",
+        zorder=8,
+    )
 
     qa_dir.mkdir(parents=True, exist_ok=True)
     fig.canvas.draw()
-    alignment_json = qa_dir / "final_main_performance_nature.alignment.json"
+    figure_name = "final_main_performance_nature"
+    alignment_json = qa_dir / f"{figure_name}.alignment.json"
     require_matplotlib_panel_alignment(
         fig,
         json_out=alignment_json,
-        overlay_svg=qa_dir / "final_main_performance_nature.alignment.svg",
+        overlay_svg=qa_dir / f"{figure_name}.alignment.svg",
         tolerance_pt=1.5,
         require_panel_labels=True,
         strict=True,
@@ -498,25 +518,26 @@ def plot_main_performance(table_path: Path, scatter_path: Path, output_dir: Path
         panel_ids=["a", "b"],
         column_groups=[{"id": "stack", "panels": ["a", "b"]}],
     )
-    prefix = output_dir / "final_main_performance_nature"
+    prefix = output_dir / figure_name
     outputs = save_outputs(fig, prefix)
     plt.close(fig)
     write_manifest(
         prefix.with_suffix(".json"),
-        claim="PCR-Net preserves task success as speed increases and occupies the strongest tested safety-tracking trade-off at 0.60 m/s.",
+        claim="Adaptive preserves task success as speed increases and occupies the strongest tested safety-tracking trade-off at 0.60 m/s.",
         archetype="Two-panel claim-escalating quantitative figure",
         sources=[table_path, scatter_path],
         outputs=outputs,
         notes=[
-            "Panel a shows mean +/- standard deviation from the frozen three-seed table.",
-            "Panel b applies one constant 0.30 display scale to all frozen marker-area values; ordering and encoding are unchanged.",
+            "Panel a shows mean +/- sample standard deviation across three evaluation seeds for every method.",
+            "Fixed-Authority uses fixed y=0.5 with zero GatePolicy calls under the frozen Stage-4 protocol.",
+            "Panel b text annotation states that marker area monotonically encodes task success at 0.60 m/s; all data markers retain one constant 0.30 display scale.",
+            "Caption-ready interpretation: lower collision rate and lower Follow MAE indicate better performance. Panel b uses clean variable-and-unit axis labels without directional glyphs or an in-plot better-direction annotation.",
             "Panel b direct labels are placed from the rendered marker and text bounds with a fixed 2.4 pt edge clearance.",
             (
                 "Fixed-Authority was plotted from the same-protocol scatter CSV."
                 if "Fixed-Authority" in scatter_by_method
                 else "No same-protocol Fixed-Authority row was present in the scatter CSV; no substitute value was plotted."
             ),
-            "The 0.60 m/s point is explicitly separated from the training-speed range.",
         ],
     )
 
@@ -582,7 +603,7 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
         for start, stop in spans:
             axis.axvspan(start, stop, color=palette["conflict"], alpha=0.68, linewidth=0, zorder=-1)
 
-    axis_a.plot(time_s, data["risk_F"], color=palette["risk"], linewidth=1.55, label="Follow-command risk ρF")
+    axis_a.plot(time_s, data["risk_F"], color=palette["risk"], linewidth=1.55, label=r"Follow-command risk $\rho_F$")
     axis_a.axhline(0.25, color=palette["risk"], linewidth=0.75, linestyle=(0, (2, 2)), alpha=0.72, zorder=1)
     axis_a.text(
         0.02,
@@ -598,11 +619,11 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
     axis_a.set_yticks([0.0, 0.25, 0.50, 0.75])
     axis_a.set_ylabel("Risk")
     panel_label(axis_a, "a", y=1.26)
-    axis_a.text(0.0, 1.26, "Follow-command risk ρF", transform=axis_a.transAxes, ha="left", va="bottom", color=INK, fontsize=7.0, fontweight="bold")
+    axis_a.text(0.0, 1.26, r"Follow-command risk $\rho_F$", transform=axis_a.transAxes, ha="left", va="bottom", color=INK, fontsize=7.2, fontweight="bold")
 
-    axis_b.plot(time_s, data["y"], color=palette["raw"], linewidth=0.95, linestyle=(0, (2, 1.4)), label="Raw y")
-    axis_b.plot(time_s, data["y_risk"], color=palette["risk_only"], linewidth=1.1, label="Risk-only y + Δyr")
-    axis_b.plot(time_s, data["y_eff"], color=palette["pcr"], linewidth=1.55, label="PCR yeff")
+    axis_b.plot(time_s, data["y"], color=palette["raw"], linewidth=0.95, linestyle=(0, (2, 1.4)), label=r"Base $\alpha$")
+    axis_b.plot(time_s, data["y_risk"], color=palette["risk_only"], linewidth=1.1, label=r"Risk-adjusted $\alpha+\Delta\alpha_r$")
+    axis_b.plot(time_s, data["y_eff"], color=palette["pcr"], linewidth=1.55, label=r"Final $\alpha_{\mathrm{eff}}$")
     axis_b.fill_between(
         time_s,
         data["y_risk"],
@@ -615,12 +636,12 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
     )
     axis_b.set_ylim(0.44, 0.75)
     axis_b.set_yticks([0.45, 0.55, 0.65, 0.75])
-    axis_b.set_ylabel("Follow weight")
+    axis_b.set_ylabel(r"Follow authority $\alpha$")
     panel_label(axis_b, "b", y=1.26)
     axis_b.text(0.0, 1.26, "Risk-conditioned arbitration", transform=axis_b.transAxes, ha="left", va="bottom", color=INK, fontsize=7.0, fontweight="bold")
-    line_key(axis_b, x=0.02, y=1.09, label="Raw y", color=palette["raw"], linewidth=0.95, linestyle=(0, (2, 1.4)))
-    line_key(axis_b, x=0.25, y=1.09, label="Risk-only y + Δyr", color=palette["risk_only"], linewidth=1.1)
-    line_key(axis_b, x=0.72, y=1.09, label="PCR yeff", color=palette["pcr"], linewidth=1.55)
+    line_key(axis_b, x=0.01, y=1.09, label=r"Base $\alpha$", color=palette["raw"], linewidth=0.95, linestyle=(0, (2, 1.4)), fontsize=7.2, line_length=0.035, text_offset=0.055)
+    line_key(axis_b, x=0.27, y=1.09, label=r"Risk-adjusted $\alpha+\Delta\alpha_r$", color=palette["risk_only"], linewidth=1.1, fontsize=7.2, line_length=0.035, text_offset=0.055)
+    line_key(axis_b, x=0.86, y=1.09, label=r"Final $\alpha_{\mathrm{eff}}$", color=palette["pcr"], linewidth=1.55, fontsize=7.2, line_length=0.035, text_offset=0.055)
 
     twin = axis_c.twinx()
     twin.spines["top"].set_visible(False)
@@ -632,21 +653,21 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
         data["cmd_safe_x_abs_delta_from_pre_conflict"],
         color=palette["pcr"],
         linewidth=1.5,
-        label="Lateral increase Δ|ux|",
+        label=r"Lateral increase $\Delta|u_x|$",
     )
-    twin.plot(time_s, data["cmd_safe_y"], color=palette["forward"], linewidth=1.1, linestyle=(0, (5, 1.6)), label="Forward uy")
+    twin.plot(time_s, data["cmd_safe_y"], color=palette["forward"], linewidth=1.1, linestyle=(0, (5, 1.6)), label=r"Forward $u_y$")
     axis_c.axhline(0.0, color=palette["grid"], linewidth=0.55, zorder=0)
     axis_c.set_ylim(-0.025, 0.105)
     axis_c.set_yticks([-0.02, 0.00, 0.05, 0.10])
     twin.set_ylim(0.30, 0.75)
     twin.set_yticks([0.30, 0.50, 0.70])
-    axis_c.set_ylabel("Δ|ux| (m/s)", color=palette["pcr"])
-    twin.set_ylabel("uy (m/s)", color=palette["forward"])
+    axis_c.set_ylabel(r"$\Delta|u_x|$ (m/s)", color=palette["pcr"], fontsize=7.2)
+    twin.set_ylabel(r"$u_y$ (m/s)", color=palette["forward"], fontsize=7.2)
     axis_c.set_xlabel("Time (s)")
     panel_label(axis_c, "c", y=1.26)
     axis_c.text(0.0, 1.26, "Executed motion", transform=axis_c.transAxes, ha="left", va="bottom", color=INK, fontsize=7.0, fontweight="bold")
-    line_key(axis_c, x=0.02, y=1.09, label="Lateral increase Δ|ux|", color=palette["pcr"], linewidth=1.5)
-    line_key(axis_c, x=0.64, y=1.09, label="Forward uy", color=palette["forward"], linewidth=1.1, linestyle=(0, (5, 1.6)))
+    line_key(axis_c, x=0.02, y=1.09, label=r"Lateral increase $\Delta|u_x|$", color=palette["pcr"], linewidth=1.5, fontsize=7.2, line_length=0.035, text_offset=0.055)
+    line_key(axis_c, x=0.90, y=1.09, label=r"Forward $u_y$", color=palette["forward"], linewidth=1.1, linestyle=(0, (5, 1.6)), fontsize=7.2, line_length=0.035, text_offset=0.055)
 
     axis_a.tick_params(labelbottom=False)
     axis_b.tick_params(labelbottom=False)
@@ -672,7 +693,7 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
     plt.close(fig)
     write_manifest(
         prefix.with_suffix(".json"),
-        claim="During real-robot conflict intervals, PCR-Net reduces the Follow weight, restores part of it through the learned correction, and increases lateral motion while preserving forward motion.",
+        claim="The real-robot trace decomposes Follow authority into the base gate output, analytic risk correction, and learned correction, alongside lateral and forward commands.",
         archetype="Three-stage aligned real-robot time-series figure",
         sources=[csv_path],
         outputs=outputs,
@@ -684,6 +705,7 @@ def plot_arbitration(csv_path: Path, output_dir: Path, qa_dir: Path) -> None:
             "Axis limits follow the observed data range with explicit headroom; no trace is clipped.",
             "No smoothing or resampling is applied.",
         ],
+        minimum_nominal_font_pt=5.04,
     )
 
 
@@ -980,7 +1002,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--main-scatter",
         type=Path,
-        default=ROOT / "agents/final_paper_outputs_v3/fig3b_scatter_sized_data_060.csv",
+        default=ROOT / "agents/final_paper_outputs_v3/fig3b_scatter_sized_data_060_with_fixed.csv",
     )
     parser.add_argument(
         "--arbitration-csv",
@@ -991,9 +1013,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa-dir", type=Path, default=ROOT / "tmp/figure_qa/final_nature_figures")
     parser.add_argument(
         "--figure",
-        choices=("all", "main"),
+        choices=("all", "main", "arbitration"),
         default="all",
-        help="Render only the requested final figure; use main to avoid rewriting other figure outputs.",
+        help="Render all figure alternatives, only main performance, or only the real-robot arbitration trace.",
     )
     return parser.parse_args()
 
@@ -1001,13 +1023,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     configure_style()
-    plot_main_performance(args.main_table, args.main_scatter, args.output_dir, args.qa_dir)
-    if args.figure == "main":
-        print(f"Wrote Nature-style main-performance figure to {args.output_dir}")
-        return
-    plot_arbitration(args.arbitration_csv, args.output_dir, args.qa_dir)
-    plot_system_architecture(args.output_dir)
-    print(f"Wrote Nature-style figure alternatives to {args.output_dir}")
+    if args.figure in ("all", "main"):
+        plot_main_performance(
+            args.main_table,
+            args.main_scatter,
+            args.output_dir,
+            args.qa_dir,
+        )
+    if args.figure in ("all", "arbitration"):
+        plot_arbitration(args.arbitration_csv, args.output_dir, args.qa_dir)
+    if args.figure == "all":
+        plot_system_architecture(args.output_dir)
+    print(f"Wrote Nature-style {args.figure} figure output to {args.output_dir}")
 
 
 if __name__ == "__main__":

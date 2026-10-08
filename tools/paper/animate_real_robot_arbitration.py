@@ -146,21 +146,21 @@ def build_animation(args: argparse.Namespace) -> None:
     line_front, = axes[0].plot([], [], color=TOKENS["front_risk"], lw=1.5, ls=":", label="Front risk")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
 
-    _setup_axis(axes[1], "(b) Arbitration response", "Weight", xlim)
+    _setup_axis(axes[1], "(b) Arbitration response", "Follow authority", xlim)
     axes[1].set_ylim(0.42, 0.78)
-    line_raw, = axes[1].plot([], [], color=TOKENS["raw_y"], lw=1.5, label="Raw y")
-    line_risk_y, = axes[1].plot([], [], color=TOKENS["risk_y"], lw=1.6, ls="--", label=r"Risk-only $y+\Delta y_r$")
-    line_eff, = axes[1].plot([], [], color=TOKENS["eff_y"], lw=2.0, label=r"Final $y_{eff}$")
+    line_raw, = axes[1].plot([], [], color=TOKENS["raw_y"], lw=1.5, label=r"Base $\alpha$")
+    line_risk_y, = axes[1].plot([], [], color=TOKENS["risk_y"], lw=1.6, ls="--", label=r"Risk-adjusted $\alpha+\Delta\alpha_r$")
+    line_eff, = axes[1].plot([], [], color=TOKENS["eff_y"], lw=2.0, label=r"Final $\alpha_{\mathrm{eff}}$")
     fill_w = [None]
     axes[1].legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
 
     _setup_axis(axes[2], "(c) Command modulation", "Command [m/s]", xlim)
-    axes[2].set_ylabel(r"$\Delta |v_x|$ [m/s]", fontsize=9)
+    axes[2].set_ylabel(r"$\Delta |u_x|$ [m/s]", fontsize=9)
     axes[2].set_ylim(
         min(-0.035, float(np.nanmin(lat)) - 0.01),
         max(0.11, float(np.nanmax(lat)) + 0.015),
     )
-    line_lat, = axes[2].plot([], [], color=TOKENS["lat"], lw=2.0, label=r"$\Delta |v_x|$")
+    line_lat, = axes[2].plot([], [], color=TOKENS["lat"], lw=2.0, label=r"$\Delta |u_x|$")
     axes[2].axhline(0.0, color=TOKENS["baseline"], lw=1.0, ls=":", label="baseline")
     forward_axis = axes[2].twinx()
     forward_axis.set_ylim(
@@ -170,8 +170,8 @@ def build_animation(args: argparse.Namespace) -> None:
     forward_axis.spines["top"].set_visible(False)
     forward_axis.spines["right"].set_color(TOKENS["baseline"])
     forward_axis.tick_params(colors=TOKENS["fwd"], labelsize=8)
-    forward_axis.set_ylabel(r"Forward $v_y$ [m/s]", color=TOKENS["fwd"], fontsize=9)
-    line_fwd, = forward_axis.plot([], [], color=TOKENS["fwd"], lw=1.7, ls="--", label=r"$v_y$")
+    forward_axis.set_ylabel(r"Forward $u_y$ [m/s]", color=TOKENS["fwd"], fontsize=9)
+    line_fwd, = forward_axis.plot([], [], color=TOKENS["fwd"], lw=1.7, ls="--", label=r"$u_y$")
     axes[2].set_xlabel("Time [s]", fontsize=9)
     handles_left, labels_left = axes[2].get_legend_handles_labels()
     handles_right, labels_right = forward_axis.get_legend_handles_labels()
@@ -233,7 +233,7 @@ def build_animation(args: argparse.Namespace) -> None:
             color=TOKENS["learned_fill"],
             alpha=0.55,
             linewidth=0,
-            label=r"$\Delta y_w$" if frame_idx == 0 else None,
+            label=r"$\Delta\alpha_w$" if frame_idx == 0 else None,
         )
         line_lat.set_data(tt, lat[:i])
         line_fwd.set_data(tt, fwd[:i])

@@ -1,41 +1,42 @@
 {
   "schema_version": 1,
-  "claim": "PCR-Net preserves task success as speed increases and occupies the strongest tested safety-tracking trade-off at 0.60 m/s.",
+  "claim": "Adaptive preserves task success as speed increases and occupies the strongest tested safety-tracking trade-off at 0.60 m/s.",
   "archetype": "Two-panel claim-escalating quantitative figure",
   "sources": [
     {
       "path": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/table1_main_performance_stage4.csv",
-      "sha256": "65472ff596dfbb3a4ff7fcb56983e7609e00f5c7544ccdfe9bf9fe0ceb605541"
+      "sha256": "baebaec9b3a8419ee260830f02d9ce61313aa714f25e80fd12e862714409cc9c"
     },
     {
-      "path": "agents/final_paper_outputs_v3/fig3b_scatter_sized_data_060_with_fixed.csv",
+      "path": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/fig3b_scatter_sized_data_060_with_fixed.csv",
       "sha256": "425945337e161cb862e339c4a1023774b7010e5a0198a1945739c12b5993f644"
     }
   ],
   "outputs": {
     "svg": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.svg",
-      "sha256": "d55bb3e1c9467cf68732da803b3ba24eee000626021911d0ad33757904bf50c7"
+      "path": "docs/figures/final_main_performance_nature.svg",
+      "sha256": "c9b35dab5da2a8aa33f5329910b15ab925c3e6de857687ea3be97027a46a2bc4"
     },
     "pdf": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.pdf",
-      "sha256": "ef22fd5cf70569a841a00001a44b52ef6fedf2c8def59c00d2dc5e79ce5cedbb"
+      "path": "docs/figures/final_main_performance_nature.pdf",
+      "sha256": "49a6494bafe0c026a7304fa057f76e85f73ce90569e12ccac05616d3310d5ea8"
     },
     "png": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.png",
-      "sha256": "832efba3d738198b585e41fdb7a8f084ae305aeda994053c96d437795c9eb43f"
+      "path": "docs/figures/final_main_performance_nature.png",
+      "sha256": "cc0a4fd6d32d48eb6d06e25f99647ae7d457092c1e3522a19fd87a0b39261aa4"
     },
     "tiff": {
-      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_main_performance_nature.tiff",
-      "sha256": "d4c77bdcce1228219a2a16266509d6903e502a7509bec2941cb16aab064a1b06"
+      "path": "docs/figures/final_main_performance_nature.tiff",
+      "sha256": "61de8d14cea5b992eb891892fc7ffcaa75403a643259f753e57506fd33fa5f18"
     }
   },
   "notes": [
-    "Panel a shows mean +/- standard deviation from the frozen three-seed table.",
-    "Panel b applies one constant 0.30 display scale to all frozen marker-area values; ordering and encoding are unchanged.",
+    "Panel a shows mean +/- sample standard deviation across three evaluation seeds for every method.",
+    "Fixed-Authority uses fixed y=0.5 with zero GatePolicy calls under the frozen Stage-4 protocol.",
+    "Panel b text annotation states that marker area monotonically encodes task success at 0.60 m/s; all data markers retain one constant 0.30 display scale.",
+    "Caption-ready interpretation: lower collision rate and lower Follow MAE indicate better performance. Panel b uses clean variable-and-unit axis labels without directional glyphs or an in-plot better-direction annotation.",
     "Panel b direct labels are placed from the rendered marker and text bounds with a fixed 2.4 pt edge clearance.",
-    "Fixed-Authority was plotted from the same-protocol scatter CSV.",
-    "The 0.60 m/s point is explicitly separated from the training-speed range."
+    "Fixed-Authority was plotted from the same-protocol scatter CSV."
   ],
   "rendering": {
     "backend": "Python/Matplotlib",

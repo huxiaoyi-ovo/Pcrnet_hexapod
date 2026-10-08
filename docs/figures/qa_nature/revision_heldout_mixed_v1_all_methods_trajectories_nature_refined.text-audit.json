@@ -1,0 +1,10 @@
+{
+  "pdf": "docs/figures/revision_heldout_mixed_v1_all_methods_trajectories_nature_refined.pdf",
+  "auditable": true,
+  "minimum_required_pt": 5.0,
+  "minimum_found_pt": 6.2,
+  "text_run_count": 29,
+  "below_minimum_count": 0,
+  "below_minimum": [],
+  "warnings": []
+}

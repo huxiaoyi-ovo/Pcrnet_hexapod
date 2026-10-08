@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "claim": "The real-robot trace decomposes Follow authority into the base gate output, analytic risk correction, and learned correction, alongside lateral and forward commands.",
+  "archetype": "Three-stage aligned real-robot time-series figure",
+  "sources": [
+    {
+      "path": "/home/artrc/Pcrnet_hexapod/agents/final_paper_outputs_v3/fig7_real_robot_arbitration_data.csv",
+      "sha256": "96a4bb700d3ae5aafa38064b617d2809b39dcd114c1125b763d3e1487b459874"
+    }
+  ],
+  "outputs": {
+    "svg": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.svg",
+      "sha256": "d9df3f1247c2da45d8ac1309b5ea831dcf17da8347078ad651b4fa1b47fd34c6"
+    },
+    "pdf": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.pdf",
+      "sha256": "d1123da3c237179a0497a839927d162fc3f667af4331db9a66ed47ef35a3b41e"
+    },
+    "png": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.png",
+      "sha256": "db30d4258dcf7f3ec3f9f82d27a1096a746069dc116dd4b7b7d5c7c9e70055f6"
+    },
+    "tiff": {
+      "path": "/home/artrc/Pcrnet_hexapod/docs/figures/final_real_robot_arbitration_nature.tiff",
+      "sha256": "c24f02771eb9531396c5a038a826a0af0458b40eee664a18709a81eea3b9aae6"
+    }
+  },
+  "notes": [
+    "Conflict intervals are computed directly from the frozen CSV.",
+    "Panel a shows the recorded Follow-command risk and its 0.25 high-risk threshold; the redundant front-risk overlay is omitted.",
+    "The lateral trace uses the CSV's pre-conflict-baseline-adjusted magnitude.",
+    "A color-blind-safe semantic palette is used consistently across all three panels.",
+    "Axis limits follow the observed data range with explicit headroom; no trace is clipped.",
+    "No smoothing or resampling is applied."
+  ],
+  "rendering": {
+    "backend": "Python/Matplotlib",
+    "dpi": 600,
+    "editable_vector": true,
+    "minimum_nominal_font_pt": 5.04
+  }
+}

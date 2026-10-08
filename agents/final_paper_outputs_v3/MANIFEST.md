@@ -14,9 +14,10 @@ Generated files:
 - fig6_trajectories_stage4.png (122434 bytes)
 - fig6_trajectories_stage4_sources.csv (1886 bytes)
 - fig6_trajectory_episode_candidates.csv (1238 bytes)
-- table1_main_performance_stage4.csv (1514 bytes)
-- table1_main_performance_stage4.md (1866 bytes)
-- table1_main_performance_stage4.tex (2113 bytes)
+- table1_main_performance_stage4.csv (1769 bytes)
+- table1_main_performance_stage4.md (2163 bytes)
+- table1_main_performance_stage4.tex (2431 bytes)
+- table1_main_performance_stage4_audit.csv (13592 bytes)
 - table2_mechanism_ablation.csv (338 bytes)
 - table2_mechanism_ablation.md (446 bytes)
 - table2_mechanism_ablation.tex (496 bytes)
@@ -51,7 +52,7 @@ Generated files:
 
 Row counts:
 
-- Table I audit rows: 18
+- Table I audit rows: 21
 - Table II rows: 4
 - Table III rows: 3
 - Table A5 rows: 18
@@ -66,6 +67,7 @@ Source files and paths:
 - rule_all_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_all_metrics_20260601_190358.csv` (mtime=2026-06-01 19:04:02)
 - rule_aggregate_csv: `agents/eval_data_rule_override_current/pcr_main_table/pcr_main_table_aggregate_20260601_190358.csv` (mtime=2026-06-01 19:04:06)
 - additive_all_csv: `agents/eval_data_additive_fusion_main/pcr_main_table/pcr_main_table_all_metrics_20260617_183936.csv` (mtime=2026-06-17 18:39:53)
+- fixed_authority_stage4_provenance: `agents/final_paper_outputs_v3/fig3a_fixed_authority_stage4_provenance.json` (mtime=2026-09-16 23:32:19; 3 seeds x 128 episodes; fixed y=0.5; GatePolicy calls=0)
 - velocity_search_all_csv: `` (mtime=missing)
 - heldout_layout_root: `agents/eval_data_heldout_irregular_rows` (mtime=2026-06-18 20:23:59)
 - heldout_layout_all_csv: `` (mtime=missing)
@@ -99,9 +101,9 @@ Fig.6 regeneration:
 
 Validation checklist:
 
-- Table I: expected 18 rows = 3 speeds x 6 methods; Mono-PPO is intentionally excluded.
+- Table I: expected 21 rows = 3 speeds x 7 methods; Mono-PPO is intentionally excluded.
 - Table I: Risk-only 0.60 success should be about 0.008 +/- 0.008.
-- Fig.3(b): the selected scatter uses 6 Table I methods at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.
+- Fig.3(b): the selected scatter uses 7 Table I methods at 0.60 m/s; marker-area encoding is recorded in fig3b_scatter_sized_notes.md.
 - Table II: speed is fixed by --mechanism_speed, default 0.60.
 - Table II: Risk-only note must say trained from scratch and no learned-w channel.
 - Table II: Params should separate Risk-only and Learned-w.
