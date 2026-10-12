@@ -2454,3 +2454,10 @@
 ## 2026-09-15 Strong Mono PPO 灾难更新排查
 
 - [x] Must: 保留旧 300 续训在 iteration 391–395 从稳定策略突发崩塌的全部证据，系统核对 rollout、GAE/bootstrap、Gaussian log-prob/KL、PPO clipping、Adam/自适应学习率、checkpoint 恢复和奖励生命周期；只修复能够用旧/新轨迹反证的训练正确性问题，不调奖励、观测、动作或课程门槛。结论：限制单轮自适应学习率变化，目标 KL 超限时停止剩余更新，单步 KL 超限时整轮回退；由干净提交从 0 重启正式 Seed 1。
+
+
+## 2026-10-12 Git 基线与返修分支收口
+
+- [x] Must: 保持 `main` 稳定基线（`97112c7ae6e112fdf18050a28664485a47fa1fb8`），将返修主线统一为 `revision`（`2b34bab8b908abd0ee98022444f3ffab733bbf6d`）；未将实验分支合入 `main`。
+- [x] Must: 将实验分支历史归档为六个轻量标签并验证 GitHub SHA：`avoid-clutter-local` → `12c21bd8`，`avoid-clutter-remote` → `38da8fc6`，`avoid-continue` → `f2268b29`，`reviewer-mono-affopt` → `2e320168`，`shared-affordance-base` → `951cfbba`，`track-b-canonical` → `46b293e3`；按需恢复：`git switch -c <name> archive/2026-10-12/<tag>`。
+- [x] Must: 在仓库外备份后清理两条已缺失 worktree 登记；两个原始 `/tmp` 路径都不存在，管理记录和 index 已归档且无锁定/暂存差异。备份：`/home/artrc/Pcrnet_hexapod_cleanup_backups/2026-10-12-branches-20261012T041022Z`。
