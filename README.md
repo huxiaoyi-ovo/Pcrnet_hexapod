@@ -148,10 +148,11 @@
 
 ### 🗂️ 文档结构（2026 架构优化）
 
-- 技术方案唯一基准：`技术方案/hexapod_RAL_complete_technical_spec_v7.md`、`技术方案/hexapod_RAL_integrated_final_v7.md`
+- 阶段技术背景：`技术方案/hexapod_RAL_complete_technical_spec_v7.md`、`技术方案/hexapod_RAL_integrated_final_v7.md`（后续有日期实验决策按适用范围优先）
+- 协作与按需规则：根目录 `AGENTS.md`；返修、实验、训练审计和交接专项见 `docs/agents/`
 - 执行与里程碑记录：`TODO_LOG.md`（仅重大改变/思路调整）
 - 调试知识：`DEBUG_SUMMARY_CN.md`
-- 会话交接：`CONTEXT_HANDOFF_SUMMARY.md`
+- 会话交接模板：`docs/agents/HANDOFF_TEMPLATE_CN.md`（交接记录按需生成）
 - 长期项目总览：`PROJECT_OVERVIEW_CN.md`
 - 文档分层索引：`docs/README.md`
 - 文档快速导航：`docs/NAVIGATION.md`
@@ -470,9 +471,9 @@ total_reward = Σ (weight_i × reward_i)
 ## 📖 详细文档
 
 ### 项目文档
-- [技术特点详解](overview.md) - 完整的技术架构和实现细节
-- [P1 修复报告](P1_FIX_REPORT.md) - 问题修复记录
-- [GEMINI 文档](GEMINI.md) - 额外技术说明
+- [项目总览](PROJECT_OVERVIEW_CN.md) - 项目范围与文档职责
+- [文档导航](docs/NAVIGATION.md) - 按任务查找当前规范和参考
+- [技术方案 V7](技术方案/hexapod_RAL_complete_technical_spec_v7.md) - 阶段性技术背景
 
 ### 配置文件
 所有环境配置位于 `legged_gym/envs/hex_v4/`：
