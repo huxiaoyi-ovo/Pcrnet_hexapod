@@ -27,19 +27,41 @@ TOKENS = {
     "highlight": "#F2C94C",
 }
 
+REQUIRED_COLUMNS = (
+    "time_s",
+    "risk_F",
+    "y",
+    "y_risk",
+    "y_eff",
+    "cmd_safe_x_abs_delta_from_pre_conflict",
+    "cmd_safe_y",
+)
+OPTIONAL_COLUMNS = ("front_distance_risk", "high_risk_conflict")
+
 
 def _read_csv(path: Path) -> dict[str, np.ndarray]:
-    with path.open(newline="") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise SystemExit(f"No rows in {path}")
+        missing = [key for key in REQUIRED_COLUMNS if key not in reader.fieldnames]
+        if missing:
+            raise SystemExit(f"{path}: missing columns: {', '.join(missing)}")
+        columns = REQUIRED_COLUMNS + tuple(
+            key for key in OPTIONAL_COLUMNS if key in reader.fieldnames
+        )
+        data = {key: [] for key in columns}
+        for row in reader:
+            for key in columns:
+                try:
+                    value = float(row[key])
+                except (TypeError, ValueError) as exc:
+                    raise SystemExit(
+                        f"{path}:{reader.line_num}: expected a numeric value for {key}"
+                    ) from exc
+                data[key].append(value)
+    if not data["time_s"]:
         raise SystemExit(f"No rows in {path}")
-    data: dict[str, list[float]] = {}
-    for row in rows:
-        for key, value in row.items():
-            try:
-                data.setdefault(key, []).append(float(value))
-            except (TypeError, ValueError):
-                pass
     return {key: np.asarray(value, dtype=float) for key, value in data.items()}
 
 
@@ -99,10 +121,8 @@ def build_animation(args: argparse.Namespace) -> None:
     raw_y = data["y"]
     y_risk = data["y_risk"]
     y_eff = data["y_eff"]
-    delta_w = data["delta_y_w"]
     lat = data["cmd_safe_x_abs_delta_from_pre_conflict"]
     fwd = data["cmd_safe_y"]
-    baseline = float(data["cmd_safe_x_abs_pre_conflict_baseline"][0])
     conflict = data.get("high_risk_conflict", np.zeros_like(t)) > 0.5
     key_idxs = []
     key_times: list[float] = []
