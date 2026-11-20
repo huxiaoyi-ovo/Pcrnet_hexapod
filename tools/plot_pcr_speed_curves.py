@@ -267,7 +267,13 @@ def parse_args():
         default=None,
     )
     parser.add_argument("--output_dir", default="agents/eval_data_seed23/pcr_main_table")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not Path(args.performance_csv).is_file():
+        parser.error(f"performance CSV not found: {args.performance_csv}")
+    for path in args.risk_csv or ():
+        if not Path(path).is_file():
+            parser.error(f"risk CSV not found: {path}")
+    return args
 
 
 def main():
