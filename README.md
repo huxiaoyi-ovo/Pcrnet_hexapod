@@ -246,16 +246,16 @@ python3 quick_check_camera.py
 
 ### 基础训练
 
-#### 训练平地环境
+#### 训练平地跟随
 
 ```bash
-python legged_gym/scripts/train.py --task=hex_ground
+python3 legged_gym/scripts/train.py --task=s_follow_basic
 ```
 
-#### 训练地形环境
+#### 训练柱障地形
 
 ```bash
-python legged_gym/scripts/train.py --task=hex_terrain --num_envs=4096
+python3 legged_gym/scripts/train.py --task=s_cylinder --num_envs=4096
 ```
 
 ### 高级训练选项
@@ -263,32 +263,33 @@ python legged_gym/scripts/train.py --task=hex_terrain --num_envs=4096
 #### 使用专家引导 (EGPO)
 
 ```bash
-python legged_gym/scripts/train.py \
-    --task=hex_terrain \
-    --run_name=egpo_experiment \
-    --expert_guided
+python3 legged_gym/scripts/train_highlevel.py \
+    --mode teacher --skill follow --task s_follow_basic \
+    --low_level_ckpt agents/fast_2000.pt --egpo
 ```
 
 #### 从检查点恢复训练
 
 ```bash
-python legged_gym/scripts/train.py \
-    --task=hex_terrain \
+python3 legged_gym/scripts/train.py \
+    --task=s_cylinder \
     --resume \
-    --load_run=logs/hex_terrain/YYYY-MM-DD_HH-MM-SS
+    --load_run=Nov20_10-30-00_my_run
 ```
+
+将 `--load_run` 替换为 `logs/s_cylinder/` 下实际存在的运行目录名。
 
 #### 调整环境数量（根据显存）
 
 ```bash
 # 8GB 显存
-python legged_gym/scripts/train.py --task=hex_terrain --num_envs=1024
+python3 legged_gym/scripts/train.py --task=s_cylinder --num_envs=1024
 
 # 16GB 显存
-python legged_gym/scripts/train.py --task=hex_terrain --num_envs=4096
+python3 legged_gym/scripts/train.py --task=s_cylinder --num_envs=4096
 
 # 24GB 显存
-python legged_gym/scripts/train.py --task=hex_terrain --num_envs=8192
+python3 legged_gym/scripts/train.py --task=s_cylinder --num_envs=8192
 ```
 
 ### 测试与可视化
@@ -296,18 +297,18 @@ python legged_gym/scripts/train.py --task=hex_terrain --num_envs=8192
 #### 测试训练好的策略
 
 ```bash
-python legged_gym/scripts/play.py \
-    --task=hex_terrain \
-    --load_run=logs/hex_terrain/YYYY-MM-DD_HH-MM-SS
+python3 legged_gym/scripts/play.py \
+    --task=s_cylinder --num_envs=1 \
+    --load_run=Nov20_10-30-00_my_run
 ```
 
-#### 录制视频
+#### 保存相机帧
 
 ```bash
-python legged_gym/scripts/play.py \
-    --task=hex_terrain \
-    --load_run=logs/hex_terrain/YYYY-MM-DD_HH-MM-SS \
-    --record_video
+python3 legged_gym/scripts/play.py \
+    --task=s_cylinder --num_envs=1 \
+    --load_run=Nov20_10-30-00_my_run \
+    --camera_mode=rgb --camera_save --camera_dir=outputs/pcr_play_frames
 ```
 
 ---
