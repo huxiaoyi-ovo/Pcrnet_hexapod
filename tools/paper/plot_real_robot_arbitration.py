@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_BAG = "/home/hxy/下载/pcr_real_20260618_154442.bag"
 DEFAULT_OUTPUT_DIR = "agents/final_paper_outputs_v3"
 DEFAULT_PREFIX = "fig7_real_robot_arbitration"
 
@@ -40,15 +39,14 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Plot real-robot PCR risk, arbitration, and command curves."
     )
-    parser.add_argument("--bag", default=DEFAULT_BAG)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bag", help="Read PCR debug records from a ROS1 bag.")
+    source.add_argument(
         "--data_csv",
-        default="",
         help="Use a previously exported selected-interval CSV instead of reading a bag.",
     )
-    parser.add_argument(
+    source.add_argument(
         "--bag_glob",
-        default="",
         help="Scan matching bags and select the clearest lateral-response event.",
     )
     parser.add_argument(
@@ -1476,7 +1474,7 @@ def sha256(path):
 
 
 def write_notes(
-    bag_path,
+    source_path,
     selected,
     selection_metrics,
     candidate_metrics,
@@ -1509,24 +1507,41 @@ def write_notes(
     lateral_increase_metric = float(selection_metrics.get("lateral_increase", np.nanmax(lateral_delta)))
     event_forward = float(selection_metrics.get("event_forward", np.nanmean(np.maximum(cmd_y, 0.0))))
     event_delta_y_w = float(selection_metrics.get("event_delta_y_w", np.nanmean(values(selected, "delta_y_w")[conflict]) if np.any(conflict) else np.nanmean(values(selected, "delta_y_w"))))
+    if args.data_csv is not None:
+        source_lines = ["- Selected-interval CSV: `{}`".format(source_path)]
+        time_reference = "the time origin recorded in the CSV"
+        selection_lines = [
+            "## CSV Replay",
+            "",
+            "- Replotted the interval supplied in the CSV.",
+            "- Interval score: `{:.4f}`.".format(selection_metrics["score"]),
+        ]
+    else:
+        source_lines = [
+            "- Bag: `{}`".format(source_path),
+            "- Debug topic: `{}`".format(args.debug_topic),
+        ]
+        time_reference = "bag debug start"
+        selection_lines = [
+            "## Deterministic Selection",
+            "",
+            "- Only continuous samples with valid target, valid depth, no safety stop, and `risk_blocked_map` were eligible.",
+            "- Fixed event requirements: current `pcr_real_20260618_*.bag`, risk peak >= 0.45, risk rise >= 0.25, post-event risk recovery >= 0.15, lateral increase >= 0.05 m/s, event forward command >= 0.15 m/s, moving fraction >= 0.80, and arbitration reconstruction error < 1e-5.",
+            "- Winning event score: `{:.4f}`.".format(selection_metrics["score"]),
+        ]
     lines = [
         "# Real-Robot PCR Arbitration Figure Notes",
         "",
         "## Source",
         "",
-        "- Bag: `{}`".format(bag_path),
-        "- SHA256: `{}`".format(sha256(bag_path)),
-        "- Debug topic: `{}`".format(args.debug_topic),
-        "- Selected interval: `{:.3f}--{:.3f} s` from bag debug start.".format(
-            selected_start_rel, selected_end_rel
+        *source_lines,
+        "- SHA256: `{}`".format(sha256(source_path)),
+        "- Selected interval: `{:.3f}--{:.3f} s` from {}.".format(
+            selected_start_rel, selected_end_rel, time_reference
         ),
         "- Selected samples: `{}` at approximately `10 Hz`.".format(len(selected)),
         "",
-        "## Deterministic Selection",
-        "",
-        "- Only continuous samples with valid target, valid depth, no safety stop, and `risk_blocked_map` were eligible.",
-        "- Fixed event requirements: current `pcr_real_20260618_*.bag`, risk peak >= 0.45, risk rise >= 0.25, post-event risk recovery >= 0.15, lateral increase >= 0.05 m/s, event forward command >= 0.15 m/s, moving fraction >= 0.80, and arbitration reconstruction error < 1e-5.",
-        "- Winning event score: `{:.4f}`.".format(selection_metrics["score"]),
+        *selection_lines,
         "- Risk pre/peak/post: `{:.4f} / {:.4f} / {:.4f}`.".format(
             pre_risk,
             event_peak_risk,
@@ -1630,7 +1645,7 @@ def main():
     audit_path = None
     summary_path = None
     gallery_paths = (None, None)
-    if args.data_csv:
+    if args.data_csv is not None:
         data_csv = Path(args.data_csv).expanduser().resolve()
         if not data_csv.is_file():
             raise SystemExit("Selected-interval CSV not found: {}".format(data_csv))
@@ -1643,13 +1658,13 @@ def main():
             args.session_start_stamp_s = selected[0].get("stamp_s", 0.0)
         metrics = score_candidate(selected)
         candidates = []
-        bag_path = data_csv
-    elif args.bag_glob:
+        source_path = data_csv
+    elif args.bag_glob is not None:
         (
             selected,
             metrics,
             candidates,
-            bag_path,
+            source_path,
             audit_path,
             summary_path,
             gallery_paths,
@@ -1658,10 +1673,10 @@ def main():
             selected[0]["stamp_s"] - selected[0]["session_relative_s"]
         )
     else:
-        bag_path = Path(args.bag).expanduser().resolve()
-        if not bag_path.is_file():
-            raise SystemExit("Bag not found: {}".format(bag_path))
-        rows = enrich_rows(load_debug_rows(bag_path, args.debug_topic), args)
+        source_path = Path(args.bag).expanduser().resolve()
+        if not source_path.is_file():
+            raise SystemExit("Bag not found: {}".format(source_path))
+        rows = enrich_rows(load_debug_rows(source_path, args.debug_topic), args)
         args.session_start_stamp_s = rows[0]["stamp_s"]
         for row in rows:
             row["session_relative_s"] = row["stamp_s"] - args.session_start_stamp_s
@@ -1672,9 +1687,11 @@ def main():
     horizontal_png_path, horizontal_pdf_path = plot_horizontal_figure(
         selected, output_dir, args.prefix
     )
-    csv_path = write_selected_csv(selected, output_dir, args.prefix)
+    csv_path = output_dir / (args.prefix + "_data.csv")
+    if csv_path.resolve() != source_path:
+        csv_path = write_selected_csv(selected, output_dir, args.prefix)
     notes_path = write_notes(
-        bag_path,
+        source_path,
         selected,
         metrics,
         candidates,
@@ -1685,7 +1702,8 @@ def main():
     )
 
     summary = {
-        "bag": str(bag_path),
+        "bag": None if args.data_csv is not None else str(source_path),
+        "data_csv": str(source_path) if args.data_csv is not None else None,
         "selected_start_rel_s": selected[0]["session_relative_s"],
         "selected_end_rel_s": selected[-1]["session_relative_s"],
         "selected_samples": len(selected),
