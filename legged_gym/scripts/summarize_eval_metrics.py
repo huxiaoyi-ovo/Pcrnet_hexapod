@@ -41,7 +41,10 @@ def _find_metrics_json(paths: List[str]) -> List[str]:
                 for f in files:
                     if f == "metrics.json":
                         out.append(os.path.join(root, f))
-    return sorted(set(out))
+    unique_paths = {}
+    for path in out:
+        unique_paths.setdefault(os.path.realpath(path), path)
+    return sorted(unique_paths.values())
 
 
 def _flatten(j: Dict, src_path: str) -> Dict:
