@@ -628,7 +628,7 @@ def _write_report(path: str, run_rows: Sequence[Dict], summary_rows: Sequence[Di
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit trajectory timeseries files for Fig.6.")
-    parser.add_argument("--root", action="append", default=["agents"], help="Root directory to scan; repeatable.")
+    parser.add_argument("--root", action="append", help="Root directory to scan; repeatable (default: agents).")
     parser.add_argument("--speed", default="0.60", help="Speed used for Fig.6 candidate ranking.")
     parser.add_argument("--output_dir", default="agents/fig6_trajectory_pool_audit")
     parser.add_argument("--per_method_limit", type=int, default=8)
@@ -639,7 +639,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    roots = [os.path.normpath(r) for r in args.root if str(r).strip()]
+    roots = [os.path.normpath(r) for r in (args.root or ["agents"]) if r.strip()]
     paths: List[str] = []
     for root in roots:
         paths.extend(glob.glob(os.path.join(root, "**", "timeseries.csv"), recursive=True))
