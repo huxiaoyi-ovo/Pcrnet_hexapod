@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from itertools import count
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -318,8 +319,16 @@ def draw_figure(args) -> Tuple[str, str]:
     out_dir = args.out_dir
     if bool(getattr(args, "auto_subdir", True)):
         tags = [_method_tag(method_key, metrics, label) for method_key, metrics, label in methods]
-        out_dir = os.path.join(args.out_dir, "_vs_".join(tags) + "_" + time.strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(out_dir, exist_ok=True)
+        base_dir = os.path.join(args.out_dir, "_vs_".join(tags) + "_" + time.strftime("%Y%m%d_%H%M%S"))
+        for attempt in count(1):
+            out_dir = base_dir if attempt == 1 else f"{base_dir}_{attempt}"
+            try:
+                os.makedirs(out_dir)
+            except FileExistsError:
+                continue
+            break
+    else:
+        os.makedirs(out_dir, exist_ok=True)
 
     for method_key, metrics, label in methods:
         style = METHOD_STYLE[method_key]
