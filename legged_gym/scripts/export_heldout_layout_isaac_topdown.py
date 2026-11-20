@@ -212,7 +212,7 @@ def _capture_seed(seed: int, args: argparse.Namespace) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="agents/final_paper_outputs_v3/heldout_layout_isaac_topdown")
-    parser.add_argument("--seeds", type=int, nargs="*", default=[7001, 7002, 7003, 7004])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[7001, 7002, 7003, 7004])
     parser.add_argument("--low_level_ckpt", type=str, default="agents/low_level_best.pt")
     parser.add_argument("--width", type=int, default=1400)
     parser.add_argument("--height", type=int, default=2400)
