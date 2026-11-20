@@ -200,51 +200,44 @@
 
 ### 安装步骤
 
-#### 1. 安装 Isaac Gym
+#### 1. 创建 Python 环境
+
+```bash
+conda create -n hexapod_rl_env python=3.8
+conda activate hexapod_rl_env
+```
+
+#### 2. 安装 Isaac Gym
 
 ```bash
 # 下载 Isaac Gym Preview 4
 # 访问：https://developer.nvidia.com/isaac-gym
 
-# 解压并安装
-cd isaacgym/python
-pip install -e .
+# 从解压目录的上一级运行
+python3 -m pip install -e ./isaacgym/python
 
 # 测试安装
-python examples/1080_balls_of_solitude.py
+python3 isaacgym/python/examples/1080_balls_of_solitude.py
 ```
 
-#### 2. 克隆项目
+#### 3. 克隆并安装项目
 
 ```bash
-git clone https://github.com/hxy-111-hxy/RL_hexapod_gym.git
-cd RL_hexapod_gym
+git clone https://github.com/huxiaoyi-ovo/Pcrnet_hexapod.git
+cd Pcrnet_hexapod
+python3 -m pip install -e .
 ```
 
-#### 3. 安装依赖
-
-```bash
-# 创建 Conda 环境
-conda create -n hexapod_rl_env python=3.8
-conda activate hexapod_rl_env
-
-# 安装项目
-pip install -e .
-
-# 安装 rsl_rl 库
-cd rsl_rl
-pip install -e .
-cd ..
-```
+仓库根目录的安装命令会同时安装 `legged_gym` 和仓库内的 `rsl_rl`。
 
 #### 4. 验证安装
 
 ```bash
-# 运行快速检查脚本
-bash run_quick_check.sh
+# 检查模块能否在当前环境导入
+python3 -c "import isaacgym; import torch; import legged_gym; import rsl_rl"
 
-# 或者手动运行
-python quick_check_camera.py
+# 在有 NVIDIA GPU 的机器上验证相机输出维度
+python3 quick_check_camera.py
 ```
 
 ---
@@ -617,8 +610,8 @@ init_noise_std = 1.0
 ## 📧 联系方式
 
 - **作者**: hxy-111-hxy
-- **项目主页**: [https://github.com/hxy-111-hxy/RL_hexapod_gym](https://github.com/hxy-111-hxy/RL_hexapod_gym)
-- **问题反馈**: [Issues](https://github.com/hxy-111-hxy/RL_hexapod_gym/issues)
+- **项目主页**: [Pcrnet_hexapod](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod)
+- **问题反馈**: [Issues](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod/issues)
 
 ---
 
