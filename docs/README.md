@@ -4,12 +4,12 @@
 
 ## 职责矩阵（Single Source of Truth）
 
-- `技术方案/hexapod_RAL_complete_technical_spec_v7.md`、`技术方案/hexapod_RAL_integrated_final_v7.md`：技术方案唯一基准（V7）。
-- `TODO_LOG.md`：执行与里程碑记录（仅重大改变/思路调整）。
-- `DEBUG_SUMMARY_CN.md`：稳定调试经验与排障口径。
-- `CONTEXT_HANDOFF_SUMMARY.md`：会话交接摘要模板与最新交接内容。
-- `PROJECT_OVERVIEW_CN.md`：项目长期背景、范围边界与文档导航。
-- `docs/NAVIGATION.md`：文档快速导航（当前规范 / 当前参考 / 历史参考）。
+- [技术方案/hexapod_RAL_complete_technical_spec_v7.md](../技术方案/hexapod_RAL_complete_technical_spec_v7.md)、[技术方案/hexapod_RAL_integrated_final_v7.md](../技术方案/hexapod_RAL_integrated_final_v7.md)：技术方案唯一基准（V7）。
+- [TODO_LOG.md](../TODO_LOG.md)：执行与里程碑记录（仅重大改变/思路调整）。
+- [DEBUG_SUMMARY_CN.md](../DEBUG_SUMMARY_CN.md)：稳定调试经验与排障口径。
+- [CONTEXT.md](../CONTEXT.md)：会话交接摘要。
+- [PROJECT_OVERVIEW_CN.md](../PROJECT_OVERVIEW_CN.md)：项目长期背景、范围边界与文档导航。
+- [docs/NAVIGATION.md](NAVIGATION.md)：文档快速导航（当前规范 / 当前参考 / 历史参考）。
 
 ## 目录分层
 
@@ -20,16 +20,15 @@
 
 ## 已归位文档（第二阶段）
 
-- `docs/specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md`
-- `docs/specs/PCR_W_MAINLINE_PLAN_CN.md`
-- `docs/specs/PCR_THEORY_DEFINITIONS_CN.md`
-- `docs/operations/训练指令.txt`
-- `docs/operations/PHASE_SWITCHING_GUIDE.md`
-- `docs/reference/RAL_PCR_TWO_WEEK_PLAN_CN.md`
-- `docs/reference/论文写作自查清单.pdf`
-- `docs/reference/参数一览表.md`
-- `docs/reference/ROBOT_SPECS.md`
-- `docs/archive/思路设计.md`
+- [docs/specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md](specs/PCR_RAL_DAY1_CLAIM_EVAL_PROTOCOL_CN.md)
+- [docs/specs/PCR_W_MAINLINE_PLAN_CN.md](specs/PCR_W_MAINLINE_PLAN_CN.md)
+- [docs/specs/PCR_THEORY_DEFINITIONS_CN.md](specs/PCR_THEORY_DEFINITIONS_CN.md)
+- [docs/operations/训练指令.txt](operations/训练指令.txt)
+- [docs/operations/PHASE_SWITCHING_GUIDE.md](operations/PHASE_SWITCHING_GUIDE.md)
+- [docs/reference/RAL_PCR_TWO_WEEK_PLAN_CN.md](reference/RAL_PCR_TWO_WEEK_PLAN_CN.md)
+- [docs/reference/参数一览表.md](reference/参数一览表.md)
+- [docs/reference/ROBOT_SPECS.md](reference/ROBOT_SPECS.md)
+- [docs/archive/思路设计.md](archive/思路设计.md)
 
 ## 当前迁移策略
 
