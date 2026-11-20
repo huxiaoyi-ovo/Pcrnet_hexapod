@@ -796,8 +796,15 @@ def _latest_heldout_all_csv(args) -> str:
     return matches[-1] if matches else ""
 
 
-def _build_table_heldout_irregular(args) -> List[Dict]:
+def _build_table_heldout_irregular(args, *, require_rows: bool = False) -> List[Dict]:
     source_csv = _latest_heldout_all_csv(args)
+    if require_rows and (not source_csv or not os.path.isfile(source_csv)):
+        if source_csv:
+            raise SystemExit(f"Held-out irregular-row CSV not found: {source_csv}")
+        raise SystemExit(
+            "No held-out irregular-row CSV found. Pass --heldout_layout_all_csv "
+            "or supply an evaluation root with --heldout_layout_root."
+        )
     methods = ["learnedw", "rule_override", "additive_fusion"]
     rows = _raw_rows_from_all_csv([source_csv], methods=methods) if source_csv else []
     rows = [
@@ -805,6 +812,8 @@ def _build_table_heldout_irregular(args) -> List[Dict]:
         if (row.get("_speed") or _infer_speed(row)) == "0.60"
         and str(row.get("eval_layout", "") or "").strip() == "heldout_irregular_rows"
     ]
+    if require_rows and not rows:
+        raise SystemExit(f"No usable 0.60 m/s held-out irregular rows in {source_csv}")
     metrics = [
         ("Task Success", "success_rate"),
         ("Row-progress", "progress_ratio_mean"),
@@ -3175,11 +3184,11 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_argparser().parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
     if bool(getattr(args, "heldout_table_only", False)):
-        _build_table_heldout_irregular(args)
+        _build_table_heldout_irregular(args, require_rows=True)
         print(f"Held-out irregular-row table written to: {args.output_dir}")
         return
+    os.makedirs(args.output_dir, exist_ok=True)
     table1 = _build_table1(args)
     table2 = _build_table2(args)
     table3 = _build_table3(args)
