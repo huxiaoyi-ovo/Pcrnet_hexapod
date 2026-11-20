@@ -9,13 +9,14 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 
-def _parse_crop(value: str | None):
-    if not value:
-        return None
-    parts = [int(v.strip()) for v in value.split(",")]
-    if len(parts) != 4:
-        raise argparse.ArgumentTypeError("crop must be left,top,right,bottom")
-    return tuple(parts)
+def _parse_crop(value: str):
+    try:
+        left, top, right, bottom = (int(part) for part in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("crop must be four integers: left,top,right,bottom") from exc
+    if left >= right or top >= bottom:
+        raise argparse.ArgumentTypeError("crop must have a positive width and height")
+    return left, top, right, bottom
 
 
 def _fit_crop(images, crop):
@@ -24,12 +25,15 @@ def _fit_crop(images, crop):
     if crop is None:
         return (0, 0, min_w, min_h)
     left, top, right, bottom = crop
-    return (
+    crop_box = (
         max(0, left),
         max(0, top),
         min(min_w, right),
         min(min_h, bottom),
     )
+    if crop_box[0] >= crop_box[2] or crop_box[1] >= crop_box[3]:
+        raise ValueError("crop does not intersect the common image area")
+    return crop_box
 
 
 def _motion_mask(base: Image.Image, image: Image.Image, threshold: int) -> Image.Image:
@@ -83,7 +87,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("images", nargs="+", help="ordered screenshots")
     parser.add_argument("--out", required=True, help="output png")
-    parser.add_argument("--crop", default=None, help="left,top,right,bottom")
+    parser.add_argument("--crop", type=_parse_crop, help="left,top,right,bottom")
     parser.add_argument("--alpha", type=float, default=0.42)
     parser.add_argument("--threshold", type=int, default=28)
     args = parser.parse_args()
@@ -93,13 +97,16 @@ def main() -> None:
     if missing:
         raise FileNotFoundError("missing images: " + ", ".join(missing))
 
-    crop_box = make_overlay(
-        paths,
-        Path(args.out),
-        _parse_crop(args.crop),
-        max(0.0, min(1.0, args.alpha)),
-        max(1, args.threshold),
-    )
+    try:
+        crop_box = make_overlay(
+            paths,
+            Path(args.out),
+            args.crop,
+            max(0.0, min(1.0, args.alpha)),
+            max(1, args.threshold),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"saved {args.out}")
     print(f"crop {crop_box}")
 
