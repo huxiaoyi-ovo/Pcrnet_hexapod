@@ -126,7 +126,7 @@ def draw_layout(seed: int, output_dir: Path, terrain_width: float, terrain_lengt
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="agents/final_paper_outputs_v3/heldout_layout_topdown")
-    parser.add_argument("--seeds", type=int, nargs="*", default=[7001, 7002, 7003, 7004, 7005, 7006])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[7001, 7002, 7003, 7004, 7005, 7006])
     parser.add_argument("--terrain_width", type=float, default=12.0)
     parser.add_argument("--terrain_length", type=float, default=28.0)
     args = parser.parse_args()
