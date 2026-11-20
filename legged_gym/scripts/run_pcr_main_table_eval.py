@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -165,7 +166,7 @@ def _speed_tag(speed: float) -> str:
 
 
 def _run(cmd: List[str], *, dry_run: bool, continue_on_error: bool) -> None:
-    print("[PCRMainTableEval] " + " ".join(cmd), flush=True)
+    print("[PCRMainTableEval] " + shlex.join(cmd), flush=True)
     if dry_run:
         return
     try:
