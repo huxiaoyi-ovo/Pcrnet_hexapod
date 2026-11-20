@@ -186,7 +186,9 @@ def main() -> None:
         for _topic, msg, stamp in bag.read_messages(topics=[args.debug_topic]):
             try:
                 payload = json.loads(msg.data)
-            except (AttributeError, TypeError, json.JSONDecodeError):
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
                 continue
             rows.append(debug_row(payload, stamp.to_sec()))
 
