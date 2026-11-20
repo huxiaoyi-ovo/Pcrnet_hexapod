@@ -109,7 +109,7 @@ def _read_metrics(csv_path: str) -> Tuple[Dict[str, List[float]], List[str]]:
         "edge_density": [],
     }
     cmds: List[str] = []
-    with open(csv_path, "r", encoding="ascii", newline="") as f:
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             cmd = row.get("cmd", "")
@@ -160,7 +160,7 @@ def _per_cmd_stats(csv_path: str) -> Dict[str, Dict[str, float]]:
     per_cmd_t: Dict[str, List[float]] = {}
     per_cmd_ty: Dict[str, List[float]] = {}
     per_cmd_e: Dict[str, List[float]] = {}
-    with open(csv_path, "r", encoding="ascii", newline="") as f:
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             cmd = row.get("cmd", "")
@@ -505,7 +505,7 @@ def main() -> int:
                     )
 
     if args.out:
-        with open(args.out, "w", encoding="ascii", newline="") as f:
+        with open(args.out, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(
                 [
