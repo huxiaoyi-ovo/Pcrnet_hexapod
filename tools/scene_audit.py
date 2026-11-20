@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -162,6 +163,13 @@ def _summarize(results: List[Dict]) -> Dict[str, Dict]:
     return summary
 
 
+def _write_json(path: str, data: Dict) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenes", type=str, default="s1_corridor_gate,s2_forest")
@@ -229,12 +237,10 @@ def main() -> int:
         golden: Dict[str, List[int]] = {scene: [] for scene in scenes}
         for scene_id in scenes:
             golden[scene_id] = seeds[: max(0, int(args.golden_count))]
-        with open(args.write_golden, "w", encoding="utf-8") as f:
-            json.dump(golden, f, indent=2, ensure_ascii=False)
+        _write_json(args.write_golden, golden)
 
     if args.out:
-        with open(args.out, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+        _write_json(args.out, report)
     else:
         print(json.dumps(report, indent=2, ensure_ascii=False))
 
