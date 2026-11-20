@@ -6,8 +6,8 @@
 
 ## 2) 方案基准（唯一）
 
-- `技术方案/hexapod_RAL_complete_technical_spec_v7.md`
-- `技术方案/hexapod_RAL_integrated_final_v7.md`
+- [技术方案/hexapod_RAL_complete_technical_spec_v7.md](技术方案/hexapod_RAL_complete_technical_spec_v7.md)
+- [技术方案/hexapod_RAL_integrated_final_v7.md](技术方案/hexapod_RAL_integrated_final_v7.md)
 
 ## 3) 工程边界
 
@@ -17,11 +17,11 @@
 
 ## 4) 文档职责矩阵
 
-- `TODO_LOG.md`：执行与里程碑（仅重大改变/思路调整）。
-- `DEBUG_SUMMARY_CN.md`：调试总结与稳定口径。
-- `CONTEXT_HANDOFF_SUMMARY.md`：会话交接摘要。
-- `docs/README.md`：文档结构总索引。
-- `docs/NAVIGATION.md`：快速导航（当前规范/当前参考/历史参考）。
+- [TODO_LOG.md](TODO_LOG.md)：执行与里程碑（仅重大改变/思路调整）。
+- [DEBUG_SUMMARY_CN.md](DEBUG_SUMMARY_CN.md)：调试总结与稳定口径。
+- [CONTEXT.md](CONTEXT.md)：会话交接摘要。
+- [docs/README.md](docs/README.md)：文档结构总索引。
+- [docs/NAVIGATION.md](docs/NAVIGATION.md)：快速导航（当前规范/当前参考/历史参考）。
 
 ## 5) 想法（仅在用户明确要求“记忆想法”时维护）
 
