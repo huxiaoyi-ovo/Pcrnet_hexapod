@@ -24,8 +24,10 @@ def generate_training_summary(log_dir, tags, output_path=None, title=None):
 
     scalar_tags = set(ea.Tags().get("scalars", []))
 
-    rows, cols = 3, 4
-    fig, axes = plt.subplots(rows, cols, figsize=(16, 9))
+    tags = tuple(tags)
+    cols = 4
+    rows = max(3, (len(tags) + cols - 1) // cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(16, 3 * rows))
     axes = axes.flatten()
 
     for idx, tag_item in enumerate(tags):
