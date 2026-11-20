@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -69,16 +70,24 @@ def arrow(draw: ImageDraw.ImageDraw, p0, p1, color, width=10):
 
 
 def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    scene_path = OUT_DIR / "simple_aac_recording0_full_overlap_moving_regions.png"
-    viewer_path = Path("/home/hxy/图片/snipaste/Snipaste_2026-06-18_15-15-14.png")
-    if not scene_path.exists():
-        raise FileNotFoundError(scene_path)
-    if not viewer_path.exists():
-        raise FileNotFoundError(viewer_path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scene",
+        type=Path,
+        default=OUT_DIR / "simple_aac_recording0_full_overlap_moving_regions.png",
+        help="Trajectory overlay screenshot.",
+    )
+    parser.add_argument("--viewer", type=Path, required=True, help="Viewer screenshot with depth and occupancy panels.")
+    parser.add_argument("--output-dir", type=Path, default=OUT_DIR, help="Directory for PNG, PDF and SVG outputs.")
+    args = parser.parse_args()
 
-    scene = Image.open(scene_path).convert("RGB")
-    viewer = Image.open(viewer_path).convert("RGB")
+    for option, path in (("--scene", args.scene), ("--viewer", args.viewer)):
+        if not path.is_file():
+            parser.error(f"{option} screenshot not found: {path}")
+    with Image.open(args.scene) as image:
+        scene = image.convert("RGB")
+    with Image.open(args.viewer) as image:
+        viewer = image.convert("RGB")
 
     W, H = 3600, 1650
     canvas = Image.new("RGB", (W, H), (245, 246, 248))
@@ -158,9 +167,10 @@ def main() -> None:
     d.text((ex0 + 70, ey1 - 62), "PCR changes only the high-level body command; locomotion remains fixed.", fill=(55, 60, 70), font=font(28, False))
 
     # Save outputs.
-    png_path = OUT_DIR / "fig1_teaser.png"
-    pdf_path = OUT_DIR / "fig1_teaser.pdf"
-    svg_path = OUT_DIR / "fig1_teaser.svg"
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    png_path = args.output_dir / "fig1_teaser.png"
+    pdf_path = args.output_dir / "fig1_teaser.pdf"
+    svg_path = args.output_dir / "fig1_teaser.svg"
     canvas.save(png_path)
     canvas.save(pdf_path, "PDF", resolution=300.0)
 
@@ -168,9 +178,9 @@ def main() -> None:
     import base64
     data = base64.b64encode(png_path.read_bytes()).decode("ascii")
     svg_path.write_text(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\\n'
-        f'  <image href="data:image/png;base64,{data}" width="{W}" height="{H}"/>\\n'
-        f'</svg>\\n',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\n'
+        f'  <image href="data:image/png;base64,{data}" width="{W}" height="{H}"/>\n'
+        f'</svg>\n',
         encoding="utf-8",
     )
     print(png_path)
