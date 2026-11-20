@@ -473,13 +473,7 @@ def main():
             j = json.load(f)
         rows.append(_flatten(j, p))
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    fieldnames = list(rows[0].keys())
-    with open(args.output, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
+    _write_csv(args.output, rows, list(rows[0]))
 
     print(f"Summary CSV written: {args.output}")
     print(f"Runs aggregated: {len(rows)}")
